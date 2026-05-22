@@ -35,7 +35,7 @@ jobs:
       # 下载并准备 OpenWrt SDK
       - name: Download and extract OpenWrt SDK
         run: |
-          SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-*.Linux-x86_64.tar.xz"
+          SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
           wget -q --show-progress $SDK_URL -O sdk.tar.xz
           mkdir sdk
           tar -xJf sdk.tar.xz -C sdk --strip-components=1
