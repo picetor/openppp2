@@ -1,0 +1,143 @@
+name: Build openppp2 for OpenWrt x86/64
+
+on:
+  workflow_dispatch:        # 允许手动触发
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04    # 使用 ubuntu 22.04，较新的 glibc 但交叉编译不受影响
+
+    env:
+      # OpenWrt 版本与架构（根据你的固件信息填写）
+      OPENWRT_VERSION: 23.05.6
+      TARGET: x86
+      SUBTARGET: "64"
+      # 依赖库版本（与 openppp2 官方编译脚本保持一致）
+      BOOST_VERSION: 1.84.0
+      BOOST_VERSION_: 1_84_0
+      OPENSSL_VERSION: 1.1.1w
+      JEMALLOC_VERSION: 5.3.0
+
+    steps:
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake wget xz-utils
+
+      - name: Checkout openppp2 source
+        uses: actions/checkout@v4
+
+      # 下载并准备 OpenWrt SDK
+      - name: Download and extract OpenWrt SDK
+        run: |
+          SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-*.Linux-x86_64.tar.xz"
+          wget -q --show-progress $SDK_URL -O sdk.tar.xz
+          mkdir sdk
+          tar -xJf sdk.tar.xz -C sdk --strip-components=1
+          echo "SDK_PATH=$(pwd)/sdk" >> $GITHUB_ENV
+
+      - name: Set up cross-compilation toolchain
+        run: |
+          echo "TOOLCHAIN_PATH=$(ls -d $SDK_PATH/staging_dir/toolchain-*/bin)" >> $GITHUB_ENV
+          echo "TARGET_LIBS=$SDK_PATH/staging_dir/target-x86_64_musl/usr/lib" >> $GITHUB_ENV
+          echo "TARGET_INCLUDE=$SDK_PATH/staging_dir/target-x86_64_musl/usr/include" >> $GITHUB_ENV
+          echo "STAGING_DIR=$SDK_PATH/staging_dir" >> $GITHUB_ENV
+          # 工具链前缀
+          echo "CROSS_PREFIX=x86_64-openwrt-linux-musl" >> $GITHUB_ENV
+          echo "CC=x86_64-openwrt-linux-musl-gcc" >> $GITHUB_ENV
+          echo "CXX=x86_64-openwrt-linux-musl-g++" >> $GITHUB_ENV
+          echo "AR=x86_64-openwrt-linux-musl-ar" >> $GITHUB_ENV
+          echo "RANLIB=x86_64-openwrt-linux-musl-ranlib" >> $GITHUB_ENV
+
+      # 创建第三方库安装目录（统一放置静态库）
+      - name: Prepare third-party install directory
+        run: |
+          mkdir -p ${{ github.workspace }}/3rdparty/lib
+          mkdir -p ${{ github.workspace }}/3rdparty/include
+          echo "THIRD_PARTY=${{ github.workspace }}/3rdparty" >> $GITHUB_ENV
+
+      # 1. 编译 OpenSSL（静态）
+      - name: Build OpenSSL
+        run: |
+          cd ${{ github.workspace }}
+          wget -q https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
+          tar xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          export PATH="${{ env.TOOLCHAIN_PATH }}:$PATH"
+          ./Configure linux-x86_64 no-shared no-asm \
+            --prefix=${{ env.THIRD_PARTY }} \
+            --openssldir=${{ env.THIRD_PARTY }} \
+            -static
+          make -j$(nproc)
+          make install_sw
+        env:
+          CC: ${{ env.CC }}
+          AR: ${{ env.AR }}
+          RANLIB: ${{ env.RANLIB }}
+
+      # 2. 编译 Jemalloc（静态）
+      - name: Build Jemalloc
+        run: |
+          cd ${{ github.workspace }}
+          wget -q https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2
+          tar xjf jemalloc-${JEMALLOC_VERSION}.tar.bz2
+          cd jemalloc-${JEMALLOC_VERSION}
+          export PATH="${{ env.TOOLCHAIN_PATH }}:$PATH"
+          ./autogen.sh --host=${{ env.CROSS_PREFIX }} \
+            --prefix=${{ env.THIRD_PARTY }} \
+            --enable-static --disable-shared
+          make -j$(nproc)
+          make install_include install_lib_static
+
+      # 3. 编译 Boost（只需要静态库，components：system, thread, filesystem, iostreams 等）
+      - name: Build Boost
+        run: |
+          cd ${{ github.workspace }}
+          wget -q https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_}.tar.gz
+          tar xzf boost_${BOOST_VERSION_}.tar.gz
+          cd boost_${BOOST_VERSION_}
+          export PATH="${{ env.TOOLCHAIN_PATH }}:$PATH"
+          echo "using gcc : openwrt : ${{ env.CXX }} ;" > user-config.jam
+          ./bootstrap.sh --prefix=${{ env.THIRD_PARTY }} \
+            --with-libraries=system,thread,filesystem,iostreams,program_options
+          ./b2 --build-dir=build \
+            toolset=gcc-openwrt \
+            target-os=linux \
+            link=static \
+            runtime-link=static \
+            threading=multi \
+            variant=release \
+            cxxflags="-std=c++17" \
+            --user-config=user-config.jam \
+            install -j$(nproc)
+        env:
+          CC: ${{ env.CC }}
+          CXX: ${{ env.CXX }}
+
+      # 4. 编译 openppp2
+      - name: Build openppp2
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${{ env.CC }} \
+            -DCMAKE_CXX_COMPILER=${{ env.CXX }} \
+            -DCMAKE_FIND_ROOT_PATH="${{ env.STAGING_DIR }}" \
+            -DTHIRD_PARTY_LIBRARY_DIR=${{ env.THIRD_PARTY }} \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
+            -D__MUSL__=ON
+          make -j$(nproc)
+          strip bin/ppp
+          file bin/ppp
+
+      # 上传产物
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-openwrt-x86_64
+          path: build/bin/ppp
