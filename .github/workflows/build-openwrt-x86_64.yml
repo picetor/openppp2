@@ -122,6 +122,7 @@ jobs:
       # 4. 编译 openppp2
       - name: Build openppp2
         run: |
+          export PATH="$TOOLCHAIN_PATH:$PATH" 
           mkdir build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
