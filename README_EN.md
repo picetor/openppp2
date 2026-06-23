@@ -187,7 +187,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 ```json
 {
     "client": {
-        "server": "wss://23.249.18.223:20443/tun",
+        "server": "wss://优选IP:20443/tun",
         "websocket": {
             "host": "your-domain.com",
             "sni": "your-domain.com"
@@ -210,7 +210,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 ```json
 {
     "client": {
-        "server": "wss://23.249.18.223:20443/tun",
+        "server": "wss://优选IP:20443/tun",
         "websocket": { "host": "your-domain.com", "sni": "your-domain.com" }
     }
 }
@@ -220,7 +220,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 ```json
 {
     "client": {
-        "server": "ws://23.249.18.223:20080/tun",
+        "server": "ws://优选IP:20080/tun",
         "websocket": { "host": "your-domain.com" }
     }
 }
@@ -298,22 +298,56 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 ```json
 {
     "client": {
-        "server": "ppp://your-server.com:20000/",
-        "ip": "10.0.0.2",
-        "netmask": "255.255.255.0",
-        "gateway": "10.0.0.1",
+        "guid": "{F4569208-BB45-4DEB-B115-0FEA1D91B85B}",
+        "server": "ppp://192.168.0.24:20000/",
+        "server-proxy": "http://user:pass@192.168.0.18:8080/",
+        "bandwidth": 10000,
         "log": "./ppp-client.log",
         "websocket": {
             "host": "",
             "sni": ""
         },
-        "dns": "8.8.8.8,1.1.1.1",
-        "dns-rules": "./dns-rules.txt",
-        "ip-rules": "./ip.txt",
-        "firewall-rules": "./firewall-rules.txt",
-        "bandwidth": 100000,
-        "reconnections": { "timeout": 5 },
-        "paper-airplane": { "tcp": true }
+        "reconnections": {
+            "timeout": 5
+        },
+        "paper-airplane": {
+            "tcp": true
+        },
+        "http-proxy": {
+            "bind": "192.168.0.24",
+            "port": 8080
+        },
+        "socks-proxy": {
+            "bind": "192.168.0.24",
+            "port": 1080,
+            "username": "test",
+            "password": "123456"
+        },
+        "mappings": [
+            {
+                "local-ip": "192.168.0.24",
+                "local-port": 80,
+                "protocol": "tcp",
+                "remote-ip": "::",
+                "remote-port": 10001
+            },
+            {
+                "local-ip": "192.168.0.24",
+                "local-port": 7000,
+                "protocol": "udp",
+                "remote-ip": "::",
+                "remote-port": 10002
+            }
+        ],
+        "routes": [
+            {
+                "name": "CMNET",
+                "nic": "eth1",
+                "ngw": "192.168.1.1",
+                "path": "./cmcc.txt",
+                "vbgp": "https://ispip.clang.cn/cmcc.txt"
+            }
+        ]
     }
 }
 ```
