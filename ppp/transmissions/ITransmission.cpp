@@ -1,0 +1,1250 @@
+#include <ppp/transmissions/ITransmission.h>
+
+// Cryptographic and I/O utilities.
+#include <ppp/cryptography/ssea.h>
+#include <ppp/io/Stream.h>
+#include <ppp/io/MemoryStream.h>
+#include <ppp/net/Socket.h>
+#include <ppp/net/IPEndPoint.h>
+#include <ppp/net/native/checksum.h>
+#include <ppp/auxiliary/StringAuxiliary.h>
+#include <ppp/threading/Thread.h>
+#include <ppp/threading/Executors.h>
+#include <ppp/threading/BufferswapAllocator.h>
+
+namespace ppp {
+    namespace transmissions {
+
+        // -----------------------------------------------------------------------------
+        // Local type aliases for code brevity.
+        // -----------------------------------------------------------------------------
+        typedef ITransmission::AppConfigurationPtr AppConfigurationPtr;
+        typedef ITransmission::CiphertextPtr CiphertextPtr;
+        typedef ppp::net::Socket Socket;
+        typedef ppp::threading::Thread Thread;
+        typedef ppp::cryptography::ssea ssea;
+        typedef ppp::io::Stream Stream;
+        typedef ppp::io::MemoryStream MemoryStream;
+        typedef ITransmission::YieldContext YieldContext;
+        typedef ppp::threading::BufferswapAllocator BufferswapAllocator;
+
+        // -----------------------------------------------------------------------------
+        // Header size constants used in packet obfuscation.
+        // -----------------------------------------------------------------------------
+        static constexpr int EVP_HEADER_TSS = 2;                  // Encrypted length field size (2 bytes)
+        static constexpr int EVP_HEADER_MSS = EVP_HEADER_TSS + 1; // 3 bytes: total header after first key byte
+        static constexpr int EVP_HEADER_XSS = EVP_HEADER_MSS + 1; // 4 bytes: simple header (random key + filler + swapped length)
+
+        // Forward declaration of the full packet read helper (used by ReadBinary).
+        static std::shared_ptr<Byte> Transmission_Packet_Read(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            const CiphertextPtr&                        EVP_transport,
+            int&                                        outlen,
+            ITransmission*                              transmission,
+            YieldContext&                               y,
+            bool                                        safest) noexcept;
+
+        // -----------------------------------------------------------------------------
+        // ITransmissionBridge – encapsulates all low‑level I/O and encryption logic.
+        // -----------------------------------------------------------------------------
+        class ITransmissionBridge final {
+        public:
+            // Read raw bytes (no decryption) – delegates to derived class.
+            static std::shared_ptr<Byte> ReadBytes(ITransmission* transmission, YieldContext& y, int length) noexcept {
+                return transmission->DoReadBytes(y, length);
+            }
+
+            // Read binary message, applying full packet decryption if ciphers present.
+            static std::shared_ptr<Byte> ReadBinary(ITransmission* transmission, YieldContext& y, int& outlen) noexcept {
+                bool safest = !transmission->handshaked_;      // Pre‑handshake: use safest mode.
+                CiphertextPtr EVP_protocol = transmission->protocol_;
+                CiphertextPtr EVP_transport = transmission->transport_;
+                const auto& allocator = transmission->BufferAllocator;
+
+                if (EVP_protocol && EVP_transport) {
+                    return Transmission_Packet_Read(transmission->configuration_, allocator,
+                        EVP_protocol, EVP_transport, outlen,
+                        transmission, y, safest);
+                }
+                else {
+                    // No ciphers – only header/payload obfuscation.
+                    return Transmission_Packet_Read(transmission->configuration_, allocator,
+                        NULLPTR, NULLPTR, outlen,
+                        transmission, y, safest);
+                }
+            }
+
+            // Encrypt binary data without base94 (used internally after handshake).
+            static std::shared_ptr<Byte> EncryptBinary(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept;
+
+            // Decrypt binary data without base94.
+            static std::shared_ptr<Byte> DecryptBinary(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept;
+
+            // High‑level encrypt: optionally applies base94 encoding.
+            static std::shared_ptr<Byte> Encrypt(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept {
+                std::shared_ptr<Byte> packet = EncryptBinary(transmission, data, datalen, outlen);
+                if (NULLPTR != packet) {
+                    AppConfigurationPtr& cfg = transmission->configuration_;
+                    // Base94 needed before handshake or when plaintext mode is forced.
+                    if (!transmission->handshaked_ || cfg->key.plaintext) {
+                        packet = base94_encode(transmission, cfg, transmission->BufferAllocator,
+                            packet.get(), outlen, cfg->key.kf, outlen);
+                    }
+                }
+
+                if (NULLPTR != packet) {
+                    return packet;
+                }
+                else {
+                    outlen = 0;
+                    return packet;   // NULLPTR
+                }
+            }
+
+            // High‑level decrypt: optionally strips base94 encoding.
+            static std::shared_ptr<Byte> Decrypt(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept {
+                std::shared_ptr<Byte> packet;
+                AppConfigurationPtr& cfg = transmission->configuration_;
+                if (!transmission->handshaked_ || cfg->key.plaintext) {
+                    // Base94 decode first, then binary decrypt.
+                    packet = base94_decode(cfg, transmission->BufferAllocator,
+                        data, datalen, cfg->key.kf, outlen);
+                    packet = DecryptBinary(transmission, packet.get(), outlen, outlen);
+                }
+                else {
+                    // Direct binary decryption (post‑handshake).
+                    packet = DecryptBinary(transmission, data, datalen, outlen);
+                }
+
+                if (NULLPTR != packet) {
+                    return packet;
+                }
+                else {
+                    outlen = 0;
+                    return packet;
+                }
+            }
+
+            // High‑level read: selects base94 or binary path based on handshake state.
+            static std::shared_ptr<Byte> Read(ITransmission* transmission, YieldContext& y, int& outlen) noexcept {
+                outlen = 0;
+                if (transmission->disposed_) {
+                    return NULLPTR;
+                }
+
+                std::shared_ptr<Byte> packet;
+                AppConfigurationPtr& cfg = transmission->configuration_;
+                if (!transmission->handshaked_ || cfg->key.plaintext) {
+                    packet = base94_decode(transmission, y, outlen);
+                    packet = DecryptBinary(transmission, packet.get(), outlen, outlen);
+                }
+                else {
+                    packet = ReadBinary(transmission, y, outlen);
+                }
+
+                if (NULLPTR != packet) {
+                    return packet;
+                }
+                else {
+                    outlen = 0;
+                    return NULLPTR;
+                }
+            }
+
+            // -------------------------------------------------------------------------
+            // Write overloads – coroutine‑aware and callback‑based.
+            // Optimization restrictions work around compiler bugs (must stay ≤ O1).
+            // -------------------------------------------------------------------------
+#if defined(_WIN32)
+#pragma optimize("", off)
+#pragma optimize("gsyb2", on) /* Enable optimizations similar to /O1 on Windows */
+// Windows-specific optimization pragmas to work around known compiler bugs with coroutine state in the Write function.
+#else
+// TRANSMISSIONO1 macro controls optimization; for GCC < 7.5, force O1 to avoid bugs; otherwise O0
+#if defined(__clang__)
+#pragma clang optimize off
+#else
+#pragma GCC push_options
+#if defined(TRANSMISSION_O1) || (__GNUC__ < 7) || (__GNUC__ == 7 && __GNUC_MINOR__ <= 5)
+#pragma GCC optimize("O1")
+#else
+#pragma GCC optimize("O0")
+#endif
+#endif
+#endif
+            static bool Write(ITransmission* transmission, YieldContext& y, const void* packet, int packet_length) noexcept {
+                using AsynchronousWriteCallback = ITransmission::AsynchronousWriteCallback;
+                if (transmission->disposed_) {
+                    return false;
+                }
+
+                YieldContext* co = y.GetPtr();
+                if (NULLPTR != co) {
+                    // Inside a coroutine: use the yielding version.
+                    return transmission->DoWriteYield<AsynchronousWriteCallback>(
+                        *co, packet, packet_length,
+                        [transmission](const void* p, int len, const AsynchronousWriteCallback& cb) noexcept {
+                            return ITransmissionBridge::Write(transmission, p, len, cb);
+                        });
+                }
+                else {
+                    // Not in a coroutine: direct callback‑based write.
+                    return ITransmissionBridge::Write(transmission, packet, packet_length,
+                        [transmission](bool ok) noexcept {
+                            if (!ok) {
+                                transmission->Dispose();
+                            }
+                        });
+                }
+            }
+#if defined(_WIN32)
+#pragma optimize("", on)
+#else
+#if defined(__clang__)
+#pragma clang optimize on
+#else
+#pragma GCC pop_options
+#endif
+#endif
+
+            // Low‑level write: encrypts the packet then calls WriteBytes on the transmission.
+            static bool Write(ITransmission* transmission, const void* packet, int packet_length, const ITransmission::AsynchronousWriteBytesCallback& cb) noexcept {
+                if (NULLPTR == packet || packet_length < 1) {
+                    return false;
+                }
+
+                if (NULLPTR == cb) {
+                    return false;
+                }
+
+                if (transmission->disposed_) {
+                    return false;
+                }
+
+                int messages_size = 0;
+                std::shared_ptr<Byte> messages = Encrypt(transmission, (Byte*)packet, packet_length, messages_size);
+                if (NULLPTR == messages) {
+                    return false;
+                }
+
+                return transmission->WriteBytes(messages, messages_size, cb);
+            }
+
+        private:
+            // -------------------------------------------------------------------------
+            // Base94 header encoding/decoding helpers.
+            // -------------------------------------------------------------------------
+            static ppp::string base94_encode_length(ITransmission* transmission, const AppConfigurationPtr& configuration, int length, int kf) noexcept {
+                const int MOD = configuration->Lcgmod(ITransmission::AppConfiguration::LCGMOD_TYPE_TRANSMISSION);
+                const int KF_MOD = abs(kf % MOD);
+
+                int N = (length + KF_MOD) % MOD;
+                ppp::string d = ssea::base94_decimal(N);
+
+                int dl = d.size();
+                if (dl < 1 || dl >= EVP_HEADER_XSS) {
+                    return ppp::string();   // invalid
+                }
+
+                // Header buffer: 4 bytes (simple) + 3 bytes (extended checksum).
+                Byte h[EVP_HEADER_XSS + EVP_HEADER_MSS] = { 0x20, 0x20, 0x20, 0x20, 0,0,0 };
+                Byte& k = h[0];            // random key byte
+                Byte& f = h[1];            // random filler byte
+
+                // Place base94 digits at the end of the 4‑byte area.
+                memcpy(h + (EVP_HEADER_XSS - dl), d.data(), dl);
+
+                k = RandomNext('\x20', '\x7e');
+                if (f == '\x20') {
+                    int v = k & '\x01';
+                    if (v != '\x00') {
+                        ++k;               // make key even
+                    }
+
+                    f = RandomNext('\x20', '\x7e');
+                }
+                else if ((k & '\x01') == '\x00') {
+                    if (++k > '\x7e') {
+                        k = '\x21';
+                    }
+                }
+
+                std::swap(h[2], h[3]);     // obfuscation swap
+                if (transmission->frame_tn_) {
+                    // Simple header (4 bytes) already in use.
+                    return ppp::string(reinterpret_cast<char*>(h), EVP_HEADER_XSS);
+                }
+                else {
+                    // Extended header: include 3‑byte checksum.
+                    int K = ppp::net::native::inet_chksum(h, EVP_HEADER_XSS) ^ length;
+                    N = (K + KF_MOD) % MOD;
+                    d = ssea::base94_decimal(N);
+                    if (d.size() != EVP_HEADER_MSS) {
+                        return ppp::string();
+                    }
+
+                    Byte* pbc = h + EVP_HEADER_XSS;
+                    transmission->frame_tn_ = true;   // switch to simple mode for future packets
+
+                    memcpy(pbc, d.data(), EVP_HEADER_MSS);
+                    ssea::shuffle_data((char*)pbc, EVP_HEADER_MSS, kf);
+
+                    return ppp::string(reinterpret_cast<char*>(h), sizeof(h));
+                }
+            }
+
+            static int base94_decode_length(const AppConfigurationPtr& configuration, Byte* data, int kf) noexcept {
+                const int MOD = configuration->Lcgmod(ITransmission::AppConfiguration::LCGMOD_TYPE_TRANSMISSION);
+                const int N = ssea::base94_decimal(data, EVP_HEADER_MSS);
+                const int KF_MOD = abs(kf % MOD);
+                return (N - KF_MOD + MOD) % MOD;   // reverse obfuscation
+            }
+
+            static void base94_decode_kf(Byte* h) noexcept {
+                Byte& k = h[0];
+                Byte& f = h[1];
+                if ((k & '\x01') == '\x00') {
+                    f = '\x20';
+                }
+
+                k = '\x20';
+                std::swap(h[2], h[3]);    // undo the swap
+            }
+
+            static std::shared_ptr<Byte> base94_encode(
+                ITransmission*                                          transmission,
+                const AppConfigurationPtr&                              configuration,
+                const std::shared_ptr<BufferswapAllocator>&             allocator,
+                Byte*                                                   data, 
+                int                                                     datalen, 
+                int                                                     kf, 
+                int&                                                    outlen) noexcept {
+
+                std::shared_ptr<Byte> payload = ssea::base94_encode(allocator, data, datalen, kf, outlen);
+                if (NULLPTR == payload) {
+                    return NULLPTR;
+                }
+
+                ppp::string k = base94_encode_length(transmission, configuration, outlen, kf);
+                if (k.size() < EVP_HEADER_XSS) {
+                    return NULLPTR;
+                }
+
+                int k_size = k.size();
+                int packet_length = outlen + k_size;
+                std::shared_ptr<Byte> packet = BufferswapAllocator::MakeByteArray(allocator, packet_length);
+                if (NULLPTR == packet) {
+                    return NULLPTR;
+                }
+
+                Byte* memory = packet.get();
+                memcpy(memory, k.data(), k_size);
+                memcpy(memory + k_size, payload.get(), outlen);
+
+                outlen = packet_length;
+                return packet;
+            }
+
+            static std::shared_ptr<Byte> base94_decode(
+                const AppConfigurationPtr&                              configuration,
+                const std::shared_ptr<BufferswapAllocator>&             allocator,
+                Byte*                                                   data, 
+                int                                                     datalen, 
+                int                                                     kf, 
+                int&                                                    outlen) noexcept {
+                    
+                outlen = 0;
+                if (NULLPTR == data || datalen < EVP_HEADER_XSS) {
+                    return NULLPTR;
+                }
+
+                base94_decode_kf(data);
+                
+                int payload_length = base94_decode_length(configuration, data + 1, kf);
+                if (payload_length < 1) {
+                    return NULLPTR;
+                }
+
+                if ((payload_length + EVP_HEADER_XSS) != datalen) {
+                    return NULLPTR;   // integrity check
+                }
+
+                Byte* payload = data + EVP_HEADER_XSS;
+                return ssea::base94_decode(allocator, payload, payload_length, kf, outlen);
+            }
+
+            static int base94_decode_length_rn(ITransmission* transmission, YieldContext& y) noexcept {
+                std::shared_ptr<Byte> packet = ReadBytes(transmission, y, EVP_HEADER_XSS);
+                if (NULLPTR == packet) {
+                    return -1;
+                }
+
+                Byte* data = packet.get();
+                AppConfigurationPtr& cfg = transmission->configuration_;
+                base94_decode_kf(data);
+
+                int len = base94_decode_length(cfg, data + 1, cfg->key.kf);
+                return len > 0 ? len : -1;
+            }
+
+            static int base94_decode_length_r1(ITransmission* transmission, YieldContext& y) noexcept {
+                std::shared_ptr<Byte> packet = ReadBytes(transmission, y, EVP_HEADER_XSS + EVP_HEADER_MSS);
+                if (NULLPTR == packet) {
+                    return -1;
+                }
+
+                Byte* data = packet.get();
+                int K = ppp::net::native::inet_chksum(data, EVP_HEADER_XSS);
+
+                AppConfigurationPtr& cfg = transmission->configuration_;
+                base94_decode_kf(data);
+
+                int payload_length = base94_decode_length(cfg, data + 1, cfg->key.kf);
+                if (payload_length < 1) {
+                    return -1;
+                }
+
+                Byte* pbc = data + EVP_HEADER_XSS;
+                ssea::unshuffle_data((char*)pbc, EVP_HEADER_MSS, cfg->key.kf);
+
+                int N = base94_decode_length(cfg, pbc, cfg->key.kf);
+                K = K ^ payload_length;
+                if (N != K) {
+                    return -1;   // checksum mismatch – tampering detected
+                }
+
+                transmission->frame_rn_ = true;   // switch to simple header for subsequent reads
+                return payload_length;
+            }
+
+            static int base94_decode_length(ITransmission* transmission, YieldContext& y) noexcept {
+                if (transmission->frame_rn_) {
+                    return base94_decode_length_rn(transmission, y);
+                }
+
+                return base94_decode_length_r1(transmission, y);
+            }
+
+            static std::shared_ptr<Byte> base94_decode(ITransmission* transmission, YieldContext& y, int& outlen) noexcept {
+                outlen = 0;
+                int payload_length = base94_decode_length(transmission, y);
+                if (payload_length < 1) {
+                    return NULLPTR;
+                }
+
+                std::shared_ptr<Byte> packet = ReadBytes(transmission, y, payload_length);
+                if (NULLPTR == packet) {
+                    return NULLPTR;
+                }
+
+                AppConfigurationPtr& cfg = transmission->configuration_;
+                return ssea::base94_decode(transmission->BufferAllocator,
+                    packet.get(), payload_length,
+                    cfg->key.kf, outlen);
+            }
+        };
+
+        // -----------------------------------------------------------------------------
+        // Packet encryption/decryption helpers.
+        // -----------------------------------------------------------------------------
+        static std::shared_ptr<Byte> Transmission_Header_Encrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            int                                         EVP_payload_length,
+            int&                                        EVP_header_length,
+            int&                                        EVP_header_kf) noexcept {
+
+            // Adjust length: 65536 → 65535 (avoid zero‑length packets).
+            if (--EVP_payload_length < 0) {
+                return NULLPTR;
+            }
+
+            // Header array: [seed_byte, high_byte, low_byte]
+            Byte EVP_payload_length_array[EVP_HEADER_MSS] = {
+                (Byte)(RandomNext(0x01, 0xff)),
+                (Byte)(EVP_payload_length >> 0x08),
+                (Byte)(EVP_payload_length & 0xff)
+            };
+
+            int EVP_header_datalen = sizeof(EVP_payload_length_array);
+            EVP_header_kf = APP->key.kf ^ *EVP_payload_length_array;
+
+            // Encrypt the length field using protocol cipher if available.
+            if (EVP_protocol) {
+                std::shared_ptr<Byte> EVP_header_length_buff = EVP_protocol->Encrypt(
+                    allocator, EVP_payload_length_array + 1, EVP_HEADER_TSS, EVP_header_length);
+                if (NULLPTR == EVP_header_length_buff || EVP_header_length != EVP_HEADER_TSS) {
+                    return NULLPTR;
+                }
+
+                memcpy(EVP_payload_length_array + 1, EVP_header_length_buff.get(), EVP_HEADER_TSS);
+            }
+
+            // XOR mask with per‑packet key.
+            for (int i = 1; i < EVP_HEADER_MSS; i++) {
+                EVP_payload_length_array[i] ^= EVP_header_kf;
+            }
+
+            EVP_header_length = sizeof(EVP_payload_length_array);
+            ssea::shuffle_data(reinterpret_cast<char*>(EVP_payload_length_array + 1), EVP_HEADER_TSS, EVP_header_kf);
+
+            std::shared_ptr<Byte> output;
+            return ssea::delta_encode(allocator, EVP_payload_length_array, EVP_header_datalen,
+                APP->key.kf, output) != EVP_header_length ? NULLPTR : output;
+        }
+
+        static int Transmission_Header_Decrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            Byte*                                       EVP_header_array,
+            int&                                        EVP_header_kf) noexcept {
+
+            std::shared_ptr<Byte> decoded;
+            if (ssea::delta_decode(allocator, EVP_header_array, EVP_HEADER_MSS,
+                APP->key.kf, decoded) != EVP_HEADER_MSS) {
+                return 0;
+            }
+
+            Byte* array = decoded.get();
+            EVP_header_kf = APP->key.kf ^ *array;
+
+            ssea::unshuffle_data(reinterpret_cast<char*>(array + 1), EVP_HEADER_TSS, EVP_header_kf);
+            for (int i = 1; i < EVP_HEADER_MSS; i++) {
+                array[i] ^= EVP_header_kf;
+            }
+
+            int len = 0;
+            if (EVP_protocol) {
+                std::shared_ptr<Byte> dec = EVP_protocol->Decrypt(allocator, array + 1, EVP_HEADER_TSS, len);
+                if (NULLPTR == dec || len != EVP_HEADER_TSS) {
+                    return 0;
+                }
+
+                memcpy(array + 1, dec.get(), EVP_HEADER_TSS);
+            }
+
+            len = array[1] << 0x08 | array[2];
+            return len + 1;   // add back the adjustment
+        }
+
+        static void Transmission_Payload_Encrypt_Partial(
+            const AppConfigurationPtr&                  APP,
+            int                                         kf,
+            Byte*                                       data,
+            int                                         datalen,
+            bool                                        safest) noexcept {
+
+            if (safest || APP->key.masked) {
+                ssea::masked_xor_random_next(data, data + datalen, kf);
+            }
+
+            if (safest || APP->key.shuffle_data) {
+                ssea::shuffle_data(reinterpret_cast<char*>(data), datalen, kf);
+            }
+        }
+
+        static std::shared_ptr<Byte> Transmission_Payload_Encrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            int                                         kf,
+            Byte*                                       data,
+            int                                         datalen,
+            int&                                        outlen,
+            bool                                        safest) noexcept {
+
+            outlen = datalen;
+            Transmission_Payload_Encrypt_Partial(APP, kf, data, datalen, safest);
+
+            std::shared_ptr<Byte> output;
+            if (safest || APP->key.delta_encode) {
+                return ssea::delta_encode(allocator, data, datalen, APP->key.kf, output) != datalen ? NULLPTR : output;
+            }
+            else {
+                output = BufferswapAllocator::MakeByteArray(allocator, datalen);
+                if (NULLPTR == output) {
+                    return NULLPTR;
+                }
+
+                memcpy(output.get(), data, datalen);
+                return output;
+            }
+        }
+
+        static void Transmission_Payload_Decrypt_Partial(
+            const AppConfigurationPtr&                  APP,
+            int                                         kf,
+            Byte*                                       data,
+            int                                         datalen,
+            bool                                        safest) noexcept {
+
+            if (safest || APP->key.shuffle_data) {
+                ssea::unshuffle_data(reinterpret_cast<char*>(data), datalen, kf);
+            }
+
+            if (safest || APP->key.masked) {
+                ssea::masked_xor_random_next(data, data + datalen, kf);
+            }
+        }
+
+        static std::shared_ptr<Byte> Transmission_Payload_Decrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            int                                         kf,
+            const std::shared_ptr<Byte>&                data,
+            int                                         datalen,
+            int&                                        outlen,
+            bool                                        safest) noexcept {
+
+            outlen = datalen;
+            if (safest || APP->key.delta_encode) {
+                std::shared_ptr<Byte> decoded;
+                if (ssea::delta_decode(allocator, data.get(), datalen, APP->key.kf, decoded) != datalen) {
+                    return NULLPTR;
+                }
+
+                Transmission_Payload_Decrypt_Partial(APP, kf, decoded.get(), datalen, safest);
+                return decoded;
+            }
+            else {
+                Transmission_Payload_Decrypt_Partial(APP, kf, data.get(), datalen, safest);
+                return data;
+            }
+        }
+
+        static std::shared_ptr<Byte> Transmission_Packet_Pack(
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const std::shared_ptr<Byte>&                EVP_header,
+            int                                         EVP_header_length,
+            const std::shared_ptr<Byte>&                EVP_payload,
+            int                                         EVP_payload_length,
+            int&                                        EVP_packet_length) noexcept {
+
+            EVP_packet_length = EVP_header_length + EVP_payload_length;
+
+            auto packet = BufferswapAllocator::MakeByteArray(allocator, EVP_packet_length);
+            if (NULLPTR == packet) {
+                return NULLPTR;
+            }
+
+            Byte* mem = packet.get();
+            memcpy(mem, EVP_header.get(), EVP_header_length);
+            memcpy(mem + EVP_header_length, EVP_payload.get(), EVP_payload_length);
+
+            return packet;
+        }
+
+        static std::shared_ptr<Byte> Transmission_Packet_Encrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            const CiphertextPtr&                        EVP_transport,
+            Byte*                                       data,
+            int                                         datalen,
+            int&                                        outlen,
+            bool                                        safest) noexcept {
+
+            int payload_len = 0, header_kf = 0, header_len = 0;
+            outlen = 0;
+
+            if (EVP_protocol && EVP_transport) {
+                // Layer 1: transport cipher.
+                auto payload = EVP_transport->Encrypt(allocator, data, datalen, payload_len);
+                if (NULLPTR == payload || payload_len != datalen) {
+                    return NULLPTR;
+                }
+
+                // Layer 2: header encryption (protocol cipher).
+                auto header = Transmission_Header_Encrypt(APP, allocator, EVP_protocol,
+                    payload_len, header_len, header_kf);
+                if (NULLPTR == header) {
+                    return NULLPTR;
+                }
+                
+                // Layer 3: payload obfuscation using header‑derived key.
+                payload = Transmission_Payload_Encrypt(APP, allocator, header_kf,
+                    payload.get(), datalen, payload_len, safest);
+                if (NULLPTR == payload) {
+                    return NULLPTR;
+                }
+
+                return Transmission_Packet_Pack(allocator, header, header_len,
+                    payload, payload_len, outlen);
+            }
+            else {
+                // No transport cipher – only header + payload obfuscation.
+                auto header = Transmission_Header_Encrypt(APP, allocator, EVP_protocol,
+                    datalen, header_len, header_kf);
+                if (NULLPTR == header) {
+                    return NULLPTR;
+                }
+
+                auto payload = Transmission_Payload_Encrypt(APP, allocator, header_kf,
+                    data, datalen, payload_len, safest);
+                if (NULLPTR == payload) {
+                    return NULLPTR;
+                }
+
+                return Transmission_Packet_Pack(allocator, header, header_len,
+                    payload, payload_len, outlen);
+            }
+        }
+
+        static std::shared_ptr<Byte> Transmission_Packet_Decrypt(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            const CiphertextPtr&                        EVP_transport,
+            Byte*                                       data,
+            int                                         datalen,
+            int&                                        outlen,
+            bool                                        safest) noexcept {
+
+            int header_kf = 0;
+            outlen = 0;
+
+            if (datalen <= EVP_HEADER_MSS) {
+                return NULLPTR;
+            }
+
+            int payload_len = Transmission_Header_Decrypt(APP, allocator, EVP_protocol, data, header_kf);
+            if (payload_len < 1) {
+                return NULLPTR;
+            }
+
+            int expected_len = payload_len + EVP_HEADER_MSS;
+            if (expected_len != datalen) {
+                return NULLPTR;   // size mismatch – possible truncation attack
+            }
+
+            auto payload = BufferswapAllocator::MakeByteArray(allocator, payload_len);
+            if (NULLPTR == payload) {
+                return NULLPTR;
+            }
+
+            memcpy(payload.get(), data + EVP_HEADER_MSS, payload_len);
+            payload = Transmission_Payload_Decrypt(APP, allocator, header_kf,
+                payload, payload_len, outlen, safest);
+            if (NULLPTR == payload) {
+                return NULLPTR;
+            }
+
+            if (EVP_protocol && EVP_transport) {
+                payload = EVP_transport->Decrypt(allocator, payload.get(), payload_len, outlen);
+                if (NULLPTR == payload || payload_len != outlen) {
+                    return NULLPTR;
+                }
+            }
+
+            return payload;
+        }
+
+        static std::shared_ptr<Byte> Transmission_Packet_Read(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            const CiphertextPtr&                        EVP_protocol,
+            const CiphertextPtr&                        EVP_transport,
+            int&                                        outlen,
+            ITransmission*                              transmission,
+            YieldContext&                               y,
+            bool                                        safest) noexcept {
+
+            int header_kf = 0;
+            outlen = 0;
+
+            auto header = ITransmissionBridge::ReadBytes(transmission, y, EVP_HEADER_MSS);
+            if (NULLPTR == header) {
+                return NULLPTR;
+            }
+
+            int payload_len = Transmission_Header_Decrypt(APP, allocator, EVP_protocol, header.get(), header_kf);
+            if (payload_len < 1) {
+                return NULLPTR;
+            }
+
+            auto payload = ITransmissionBridge::ReadBytes(transmission, y, payload_len);
+            if (NULLPTR == payload) {
+                return NULLPTR;
+            }
+
+            payload = Transmission_Payload_Decrypt(APP, allocator, header_kf,
+                payload, payload_len, outlen, safest);
+            if (NULLPTR == payload) {
+                return NULLPTR;
+            }
+
+            if (EVP_protocol && EVP_transport) {
+                payload = EVP_transport->Decrypt(allocator, payload.get(), payload_len, outlen);
+                if (NULLPTR == payload || payload_len != outlen) {
+                    return NULLPTR;
+                }
+            }
+
+            return payload;
+        }
+
+        // -----------------------------------------------------------------------------
+        // Handshake helpers.
+        // -----------------------------------------------------------------------------
+        static std::shared_ptr<Byte> Transmission_Handshake_Pack_SessionId(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<BufferswapAllocator>& allocator,
+            Int128                                      session_id,
+            int&                                        packet_length) noexcept {
+
+            Byte kfs[4];
+            packet_length = 0;
+
+            ppp::string id_str;
+            if (session_id) {
+                kfs[0] = RandomNext(0x00, 0x7f);   // MSB clear = real session
+                id_str = stl::to_string<ppp::string>(session_id);
+            }
+            else {
+                kfs[0] = RandomNext(0x80, 0xff);   // MSB set = dummy packet
+
+                int64_t v1 = (int64_t)RandomNext() << 32 | (int64_t)(uint32_t)RandomNext();
+                int64_t v2 = (int64_t)RandomNext() << 32 | (int64_t)(uint32_t)RandomNext();
+                id_str = stl::to_string<ppp::string>(MAKE_OWORD(v2, v1));
+            }
+
+            kfs[1] = RandomNext(0x01, 0xff);
+            kfs[2] = RandomNext(0x01, 0xff);
+            kfs[3] = RandomNext(0x01, 0xff);
+            id_str.append(1, RandomNext(0x20, 0x2F));   // separator
+
+            // Add random padding to resist traffic analysis.
+            int max = APP->key.kx % 0x100;
+            if (max > 0) {
+                int i = 0;
+                for (; i < max; i++) {
+                    id_str.append(1, RandomNext(0x20, 0x7e));
+                }
+
+                if (i == max) {
+                    id_str.append(1, '/');
+                }
+
+                int min = id_str.size() + sizeof(kfs);
+                if (min > max) {
+                    max = min;
+                }
+
+                int loops = RandomNext(1, max << 2);
+                for (int i = 0; i < loops; i++) {
+                    id_str.append(1, RandomNext(0x20, 0x7e));
+                }
+            }
+
+            Byte* raw = (Byte*)id_str.data();
+            packet_length = id_str.size();
+
+            int kf = APP->key.kf;
+            for (int i = 0; i < arraysizeof(kfs); i++) {
+                kf ^= kfs[i];
+                for (int j = 0; j < packet_length; j++) {
+                    raw[j] ^= kf;
+                }
+            }
+
+            auto msg = BufferswapAllocator::MakeByteArray(allocator, packet_length += sizeof(kfs));
+            if (NULLPTR == msg) {
+                return NULLPTR;
+            }
+
+            Byte* mem = msg.get();
+            memcpy(mem, kfs, sizeof(kfs));
+            memcpy(mem + sizeof(kfs), raw, id_str.size());
+            return msg;
+        }
+
+        static Int128 Transmission_Handshake_Unpack_SessionId(
+            const AppConfigurationPtr&                  APP,
+            const std::shared_ptr<Byte>&                packet_managed,
+            int                                         packet_length,
+            bool&                                       eagin) noexcept {
+
+            eagin = false;
+            if (NULLPTR == packet_managed || packet_length < 4) {
+                return 0;
+            }
+
+            Byte* p = packet_managed.get();
+            if (*p & 0x80) {
+                eagin = true;   // dummy packet – ignore
+                return 0;
+            }
+
+            Byte kfs[] = { p[0], p[1], p[2], p[3] };
+            p += sizeof(kfs);
+
+            packet_length -= sizeof(kfs);
+            if (packet_length < 1) {
+                return 0;
+            }
+
+            int kf = APP->key.kf;
+            for (int i = 0; i < arraysizeof(kfs); i++) {
+                kf ^= kfs[i];
+                for (int j = 0; j < packet_length; j++) {
+                    p[j] ^= kf;
+                }
+            }
+
+            return stl::to_number<Int128>(std::string_view(reinterpret_cast<char*>(p), packet_length), 10);
+        }
+
+        static bool Transmission_Handshake_SessionId(
+            const AppConfigurationPtr&                  APP,
+            ITransmission*                              transmission,
+            ITransmission::YieldContext&                y,
+            const Int128&                               session_id) noexcept {
+
+            int len = 0;
+            auto pkt = Transmission_Handshake_Pack_SessionId(APP, transmission->BufferAllocator, session_id, len);
+            if (NULLPTR == pkt) {
+                return false;
+            }
+
+            return ITransmissionBridge::Write(transmission, y, pkt.get(), len);
+        }
+
+        static Int128 Transmission_Handshake_SessionId(
+            const AppConfigurationPtr&                  APP,
+            ITransmission*                              transmission,
+            ITransmission::YieldContext&                y) noexcept {
+
+            bool eagin = false;
+            for (;;) {
+                int len = 0;
+                auto pkt = ITransmissionBridge::Read(transmission, y, len);
+                if (NULLPTR == pkt) {
+                    return 0;
+                }
+
+                Int128 sid = Transmission_Handshake_Unpack_SessionId(APP, pkt, len, eagin);
+                if (eagin) {
+                    continue;   // skip dummy packets
+                }
+
+                return sid;
+            }
+        }
+
+        bool Transmission_Handshake_Nop(
+            const AppConfigurationPtr&                  APP,
+            ITransmission*                              transmission,
+            ITransmission::YieldContext&                y) noexcept {
+
+            int kl = std::max<int>(0, 1 << APP->key.kl);
+            int kh = std::max<int>(0, 1 << APP->key.kh);
+
+            if (kl > kh) {
+                std::swap(kl, kh);
+            }
+
+            int rounds = (kl == kh) ? kl : RandomNext(kl, kh);
+            rounds = static_cast<int>(ceil(rounds / (double)(175 << 3)));
+
+            for (int i = 0; i < rounds; ++i) {
+                if (!Transmission_Handshake_SessionId(APP, transmission, y, 0)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // -----------------------------------------------------------------------------
+        // ITransmission implementation.
+        // -----------------------------------------------------------------------------
+        ITransmission::ITransmission(const ContextPtr& context, const StrandPtr& strand,
+            const AppConfigurationPtr& configuration) noexcept
+            : IAsynchronousWriteIoQueue(NULLPTR != configuration ? configuration->GetBufferAllocator() : NULLPTR)
+            , disposed_(0), frame_rn_(0), frame_tn_(0), handshaked_(0)
+            , context_(context), strand_(strand), configuration_(configuration) {
+
+            if (ppp::configurations::extensions::IsHaveCiphertext(configuration.get())) {
+                if (Ciphertext::Support(configuration->key.protocol) && Ciphertext::Support(configuration->key.transport)) {
+                    protocol_ = make_shared_object<Ciphertext>(configuration->key.protocol, configuration->key.protocol_key);
+                    transport_ = make_shared_object<Ciphertext>(configuration->key.transport, configuration->key.transport_key);
+                }
+            }
+        }
+
+        ITransmission::~ITransmission() noexcept {
+            Finalize();
+        }
+
+        void ITransmission::Finalize() noexcept {
+            DeadlineTimerPtr t = std::move(timeout_);
+            disposed_ = true;
+            handshaked_ = false;
+            QoS.reset();
+            Statistics.reset();
+            if (NULLPTR != t) {
+                Socket::Cancel(*t);
+            }
+        }
+
+        std::shared_ptr<Byte> ITransmission::Read(YieldContext& y, int& outlen) noexcept {
+            return ITransmissionBridge::Read(this, y, outlen);
+        }
+
+        bool ITransmission::Write(YieldContext& y, const void* packet, int packet_length) noexcept {
+            return ITransmissionBridge::Write(this, y, packet, packet_length);
+        }
+
+        bool ITransmission::Write(const void* packet, int packet_length, const AsynchronousWriteCallback& cb) noexcept {
+            return ITransmissionBridge::Write(this, packet, packet_length, cb);
+        }
+
+        std::shared_ptr<Byte> ITransmission::Encrypt(Byte* data, int datalen, int& outlen) noexcept {
+            outlen = 0;
+            if (datalen < 0 || (NULLPTR == data && datalen != 0)) {
+                outlen = ~0;
+                return NULLPTR;
+            }
+
+            if (datalen == 0) {
+                return NULLPTR;
+            }
+
+            return ITransmissionBridge::Encrypt(this, data, datalen, outlen);
+        }
+
+        std::shared_ptr<Byte> ITransmission::Decrypt(Byte* data, int datalen, int& outlen) noexcept {
+            outlen = 0;
+            if (datalen < 0 || (NULLPTR == data && datalen != 0)) {
+                outlen = ~0;
+                return NULLPTR;
+            }
+
+            if (datalen == 0) {
+                return NULLPTR;
+            }
+
+            return ITransmissionBridge::Decrypt(this, data, datalen, outlen);
+        }
+
+        void ITransmission::Dispose() noexcept {
+            auto self = shared_from_this();
+            auto ctx = GetContext();
+            auto st = GetStrand();
+            ppp::threading::Executors::Post(ctx, st,
+                [self, this, ctx, st]() noexcept {
+                    Finalize();
+                    IAsynchronousWriteIoQueue::Dispose();
+                });
+        }
+
+        Int128 ITransmission::InternalHandshakeClient(YieldContext& y, bool& mux) noexcept {
+            if (!Transmission_Handshake_Nop(configuration_, this, y)) {
+                return 0;
+            }
+
+            Int128 sid = Transmission_Handshake_SessionId(configuration_, this, y);
+            if (sid) {
+                Int128 ivv = ppp::auxiliary::StringAuxiliary::GuidStringToInt128(GuidGenerate());
+                if (!Transmission_Handshake_SessionId(configuration_, this, y, ivv)) {
+                    return 0;
+                }
+
+                Int128 nmux = Transmission_Handshake_SessionId(configuration_, this, y);
+                if (nmux) {
+                    handshaked_ = true;
+                    mux = (nmux & 1) != 0;
+
+                    if (NULLPTR != protocol_ && NULLPTR != transport_) {
+                        ppp::string ivv_str = stl::to_string<ppp::string>(ivv, 32);
+                        if (ivv > 0) {
+                            ivv_str = "+" + ivv_str;
+                        }
+
+                        if (ppp::configurations::extensions::IsHaveCiphertext(configuration_.get())) {
+                            protocol_ = make_shared_object<Ciphertext>(configuration_->key.protocol,
+                                configuration_->key.protocol_key + ivv_str);
+                            transport_ = make_shared_object<Ciphertext>(configuration_->key.transport,
+                                configuration_->key.transport_key + ivv_str);
+                        }
+                    }
+
+                    return sid;
+                }
+            }
+            return 0;
+        }
+
+        bool ITransmission::InternalHandshakeServer(YieldContext& y, const Int128& session_id, bool mux) noexcept {
+            if (!Transmission_Handshake_Nop(configuration_, this, y)) {
+                return false;
+            }
+
+            if (!Transmission_Handshake_SessionId(configuration_, this, y, session_id)) {
+                return false;
+            }
+            
+            Int128 nmux = (Int128)RandomNext() << 32 |
+                (Int128)RandomNext() << 64 |
+                (Int128)RandomNext() << 96 |
+                (Int128)RandomNext();
+            if (mux) {
+                while ((nmux & 1) == 0) ++nmux;
+            }
+            else {
+                while ((nmux & 1) != 0) ++nmux;
+            }
+
+            if (!Transmission_Handshake_SessionId(configuration_, this, y, nmux)) {
+                return false;
+            }
+
+            Int128 ivv = Transmission_Handshake_SessionId(configuration_, this, y);
+            if (ivv != 0) {
+                handshaked_ = true;
+                if (NULLPTR != protocol_ && NULLPTR != transport_) {
+                    ppp::string ivv_str = stl::to_string<ppp::string>(ivv, 32);
+                    if (ivv > 0) {
+                        ivv_str = "+" + ivv_str;
+                    }
+
+                    if (ppp::configurations::extensions::IsHaveCiphertext(configuration_.get())) {
+                        protocol_ = make_shared_object<Ciphertext>(configuration_->key.protocol,
+                            configuration_->key.protocol_key + ivv_str);
+                        transport_ = make_shared_object<Ciphertext>(configuration_->key.transport,
+                            configuration_->key.transport_key + ivv_str);
+                    }
+                }
+            }
+            return handshaked_;
+        }
+
+        void ITransmission::InternalHandshakeTimeoutClear() noexcept {
+            DeadlineTimerPtr t = std::move(timeout_);
+            if (NULLPTR != t) {
+                Socket::Cancel(*t);
+            }
+        }
+
+        bool ITransmission::InternalHandshakeTimeoutSet() noexcept {
+            if (disposed_) {
+                return false;
+            }
+
+            if (NULLPTR != timeout_) {
+                return false;
+            }
+
+            auto st = strand_;
+            auto ctx = context_;
+            if (NULLPTR == st && NULLPTR == ctx)  {
+                return false;
+            }
+
+            auto timer = st ? make_shared_object<DeadlineTimer>(*st) : make_shared_object<DeadlineTimer>(*ctx);
+            if (NULLPTR == timer) {
+                return false;
+            }
+
+            auto& cfg = configuration_->tcp.connect;
+            int64_t expire_ms = (int64_t)cfg.timeout * 1000;
+            if (cfg.nexcept > 0) {
+                expire_ms = RandomNext(expire_ms, expire_ms + (int64_t)cfg.nexcept * 1000);
+            }
+
+            auto self = shared_from_this();
+            timer->expires_from_now(boost::posix_time::milliseconds(expire_ms));
+
+            // FIXED: async_wait handler must return void.
+            timer->async_wait(
+                [self, this](boost::system::error_code ec) noexcept {
+                    if (ec == boost::system::errc::operation_canceled) {
+                        return;   // cancelled normally
+                    }
+
+                    auto ctx = context_;
+                    if (NULLPTR == ctx) {
+                        Dispose();
+                        return;
+                    }
+
+                    auto cfg = configuration_;
+                    if (NULLPTR == cfg) {
+                        Dispose();
+                        return;
+                    }
+
+                    auto st = strand_;
+                    // Spawn a coroutine to send final NOPs and dispose.
+                    YieldContext::Spawn(NULLPTR, *ctx, st.get(),
+                        [self, this, st, cfg](YieldContext& y) noexcept {
+                            Transmission_Handshake_Nop(cfg, this, y);
+                            Dispose();
+                        });
+                });
+
+            timeout_ = std::move(timer);
+            return true;
+        }
+
+        Int128 ITransmission::HandshakeClient(YieldContext& y, bool& mux) noexcept {
+            mux = false;
+            if (!InternalHandshakeTimeoutSet()) {
+                return 0;
+            }
+
+            Int128 sid = InternalHandshakeClient(y, mux);
+            InternalHandshakeTimeoutClear();
+            return sid;
+        }
+
+        bool ITransmission::HandshakeServer(YieldContext& y, const Int128& session_id, bool mux) noexcept {
+            if (session_id == 0) {
+                return false;
+            }
+
+            if (!InternalHandshakeTimeoutSet()) {
+                return false;
+            }
+            
+            bool ok = InternalHandshakeServer(y, session_id, mux);
+            InternalHandshakeTimeoutClear();
+            return ok;
+        }
+
+        // -----------------------------------------------------------------------------
+        // ITransmissionBridge binary encrypt/decrypt implementations.
+        // -----------------------------------------------------------------------------
+        std::shared_ptr<Byte> ITransmissionBridge::EncryptBinary(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept {
+            bool safest = !transmission->handshaked_;
+            auto& cfg = transmission->configuration_;
+            auto& alloc = transmission->BufferAllocator;
+            if (transmission->protocol_ && transmission->transport_) {
+                return Transmission_Packet_Encrypt(cfg, alloc, transmission->protocol_,
+                    transmission->transport_, data, datalen, outlen, safest);
+            }
+            else {
+                return Transmission_Packet_Encrypt(cfg, alloc, NULLPTR, NULLPTR,
+                    data, datalen, outlen, safest);
+            }
+        }
+
+        std::shared_ptr<Byte> ITransmissionBridge::DecryptBinary(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept {
+            bool safest = !transmission->handshaked_;
+            auto& cfg = transmission->configuration_;
+            auto& alloc = transmission->BufferAllocator;
+            if (transmission->protocol_ && transmission->transport_) {
+                return Transmission_Packet_Decrypt(cfg, alloc, transmission->protocol_,
+                    transmission->transport_, data, datalen, outlen, safest);
+            }
+            else {
+                return Transmission_Packet_Decrypt(cfg, alloc, NULLPTR, NULLPTR,
+                    data, datalen, outlen, safest);
+            }
+        }
+
+    } // namespace transmissions
+} // namespace ppp
