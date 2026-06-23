@@ -4,7 +4,7 @@
 
 <div align="right" style="margin-top:-40px;">
   <kbd>
-    <a href="README_en.md">English</a>
+    <a href="README_EN.md">English</a>
   </kbd>
   <kbd style="background:#0366d6;">
     <strong>简体中文</strong>

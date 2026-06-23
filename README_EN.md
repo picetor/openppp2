@@ -7,7 +7,7 @@ Next-generation secure network access technology providing high-performance virt
     <strong>English</strong>
   </kbd>
   <kbd>
-    <a href="README_CN.md">简体中文</a>
+    <a href="README.md">简体中文</a>
   </kbd>
 </div>
 
