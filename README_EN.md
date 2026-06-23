@@ -35,9 +35,6 @@ This `master` branch is a **modified fork** based on upstream [liulilittle/openp
 - [WebSocket Tunnel (WS)](#-websocket-tunnel-ws)
 - [WebSocket Secure Tunnel (WSS)](#-websocket-secure-tunnel-wss)
 - [Optimized IP + WSS Acceleration](#-optimized-ip--wss-acceleration)
-- [Server Configuration](#-server-configuration)
-- [Client Configuration](#-client-configuration)
-- [Quick Start](#-quick-start)
 - [Build Guide](#-build-guide)
 - [Appendix](#-appendix)
 
@@ -227,47 +224,14 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Download Pre-built Binary
-
-Download from [Releases](https://github.com/picetor/openppp2/releases) or the `builds/` directory.
-
-### 2. Prepare Configuration
-
-```bash
-# Download appsettings.json
-wget https://raw.githubusercontent.com/picetor/openppp2/master/appsettings.json
-
-# Edit configuration (refer to tunnel sections above)
-vim appsettings.json
-```
-
-### 3. Run Server
-
-```bash
-chmod +x ppp
-./ppp --server
-```
-
-### 4. Run Client
-
-```bash
-./ppp --client
-```
+## � Build Guide
 
 > For detailed routing configuration,旁路由 mode, and Windows platform guides, refer to the original documentation at [liulilittle/openppp2](https://github.com/liulilittle/openppp2).
 
----
+This project involves three build environment checklists for different code versions and build targets:
 
-## 🔨 Build Guide
-
-### Original Build Checklist [Original Code]
-
-For the complete build environment, third-party dependency building, GLIBC compatibility layer, CMake configuration and build steps of the original code, see:
-> 📄 **[`releases环境需求清单.md`](releases环境需求清单.md)** — Original release build environment checklist (debug logging disabled)
-
-### WSS Modified Checklist [Modified Code]
-
-For the build environment checklist of this `master` branch fork, adapted for fully static linking, GLIBC compatibility layer, conditional compilation, multi-variant builds, etc., see:
-> 📄 **[`WSS修改版环境需求.md`](WSS修改版环境需求.md)** — WSS modified build environment checklist (debug logging retained)
+| Checklist | Based On | Build Target | Debug Log |
+|-----------|----------|--------------|-----------|
+| 📄 [`环境需求.md`](环境需求.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Debug | Retained |
+| 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Releases | Disabled |
+| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | This repo [picetor/openppp2](https://github.com/picetor/openppp2) | This repo Releases | Retained |
