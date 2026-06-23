@@ -65,8 +65,12 @@ PPP is openppp2's native tunnel protocol, based on direct TCP connection for bes
 
 ```json
 {
+    "tcp": {
+        "listen": {
+            "port": 20000
+        }
+    },
     "server": {
-        "listen": { "ppp": 20000 },
         "ip": "10.0.0.1",
         "netmask": "255.255.255.0"
     }
@@ -95,12 +99,14 @@ WebSocket tunnel encapsulates PPP traffic in WebSocket protocol, recognizable an
 
 ```json
 {
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": {
+            "ws": 20080
+        }
+    },
     "server": {
-        "listen": { "ws": 20080 },
-        "websocket": {
-            "host": "your-domain.com",
-            "path": "/tun"
-        },
         "ip": "10.0.0.1",
         "netmask": "255.255.255.0"
     }
@@ -129,18 +135,20 @@ WSS = WebSocket over TLS, adding TLS encryption on top of WS for double-layer se
 
 ```json
 {
-    "server": {
-        "listen": { "wss": 20443 },
-        "websocket": {
-            "host": "your-domain.com",
-            "path": "/tun",
-            "ssl": {
-                "certificate-file": "your-domain.com.pem",
-                "certificate-key-file": "your-domain.com.key",
-                "certificate-key-password": "",
-                "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-            }
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": {
+            "wss": 20443
         },
+        "ssl": {
+            "certificate-file": "your-domain.com.pem",
+            "certificate-key-file": "your-domain.com.key",
+            "certificate-key-password": "",
+            "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+        }
+    },
+    "server": {
         "ip": "10.0.0.1",
         "netmask": "255.255.255.0"
     }
@@ -185,9 +193,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
         "websocket": {
             "host": "your-domain.com",
             "sni": "your-domain.com"
-        },
-        "ip": "10.0.0.2",
-        "netmask": "255.255.255.0"
+        }
     }
 }
 ```
@@ -239,25 +245,29 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 
 ```json
 {
-    "server": {
+    "tcp": {
         "listen": {
-            "ppp": 20000,
+            "port": 20000
+        }
+    },
+    "websocket": {
+        "host": "starrylink.net",
+        "path": "/tun",
+        "listen": {
             "ws": 20080,
             "wss": 20443
         },
+        "ssl": {
+            "certificate-file": "starrylink.net.pem",
+            "certificate-key-file": "starrylink.net.key",
+            "certificate-key-password": "test",
+            "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+        }
+    },
+    "server": {
         "ip": "10.0.0.1",
         "netmask": "255.255.255.0",
-        "log": "./ppp.log",
-        "websocket": {
-            "host": "starrylink.net",
-            "path": "/tun",
-            "ssl": {
-                "certificate-file": "starrylink.net.pem",
-                "certificate-key-file": "starrylink.net.key",
-                "certificate-key-password": "test",
-                "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-            }
-        }
+        "log": "./ppp.log"
     }
 }
 ```
