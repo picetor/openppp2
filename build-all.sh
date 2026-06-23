@@ -11,8 +11,8 @@ echo "Timestamp: $TS"
 
 # 1. 基础版 (已经编译好了)
 echo "=== [1/7] amd64 基础版 ==="
-cp bin/ppp "$RELEASE_DIR/ppp_linux_amd64_${TS}"
-file "$RELEASE_DIR/ppp_linux_amd64_${TS}"
+cp bin/ppp "$RELEASE_DIR/openppp2-linux-amd64_${TS}"
+file "$RELEASE_DIR/openppp2-linux-amd64_${TS}"
 
 # 2. 备份原始 CMakeLists.txt
 cp CMakeLists.txt CMakeLists.txt.backup
@@ -54,22 +54,22 @@ build_variant() {
 }
 
 # 3. simd
-build_variant "openppp2-linux-amd64-simd" "ppp_linux_amd64_simd"
+build_variant "openppp2-linux-amd64-simd" "openppp2-linux-amd64-simd"
 
 # 4. io-uring
-build_variant "openppp2-linux-amd64-io-uring" "ppp_linux_amd64_io_uring"
+build_variant "openppp2-linux-amd64-io-uring" "openppp2-linux-amd64-io-uring"
 
 # 5. io-uring-simd
-build_variant "openppp2-linux-amd64-io-uring-simd" "ppp_linux_amd64_io_uring_simd"
+build_variant "openppp2-linux-amd64-io-uring-simd" "openppp2-linux-amd64-io-uring-simd"
 
 # 6. tc-simd
-build_variant "openppp2-linux-amd64-tc-simd" "ppp_linux_amd64_tc_simd"
+build_variant "openppp2-linux-amd64-tc-simd" "openppp2-linux-amd64-tc-simd"
 
 # 7. tc-io-uring
-build_variant "openppp2-linux-amd64-tc-io-uring" "ppp_linux_amd64_tc_io_uring"
+build_variant "openppp2-linux-amd64-tc-io-uring" "openppp2-linux-amd64-tc-io-uring"
 
 # 8. tc-io-uring-simd
-build_variant "openppp2-linux-amd64-tc-io-uring-simd" "ppp_linux_amd64_tc_io_uring_simd"
+build_variant "openppp2-linux-amd64-tc-io-uring-simd" "openppp2-linux-amd64-tc-io-uring-simd"
 
 # 恢复并清理
 cp CMakeLists.txt.backup CMakeLists.txt

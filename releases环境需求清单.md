@@ -10,7 +10,7 @@
 > - CMakeLists.txt 条件编译支持（ENABLE_IO_URING / ENABLE_TC）
 > - 完全静态链接配置修复（-rdynamic -Wl,-Bstatic）
 > - GLIBC 兼容层（glibc_compat.h + main.cpp 包含）
-> - arm64 交叉编译 toolchain 文件
+> - aarch64 交叉编译 toolchain 文件
 > - 多变体编译步骤（基础版 / SIMD / io_uring / TC 及其组合）
 > - 产物命名与归档规则
 > - build-all.sh 多变体批量编译脚本
@@ -38,13 +38,13 @@
 | make | (随 cmake 安装) | 构建执行 |
 | musl-gcc | 12.3.0 (musl 1.2.2) | 备用 C 编译器（仅 C，无 C++） |
 
-### 1.3 交叉编译工具链（arm64）
+### 1.3 交叉编译工具链（aarch64）
 
 | 工具 | 版本 | 用途 |
 |------|------|------|
-| aarch64-linux-gnu-g++ | 12.3.0 (Deepin 12.3.0-17deepin8cross1) | arm64 C++ 交叉编译器 |
-| aarch64-linux-gnu-gcc | 12.3.0 | arm64 C 交叉编译器 |
-| binutils-aarch64-linux-gnu | 2.41-6deepin7 | arm64 GNU 二进制工具 |
+| aarch64-linux-gnu-g++ | 12.3.0 (Deepin 12.3.0-17deepin8cross1) | aarch64 C++ 交叉编译器 |
+| aarch64-linux-gnu-gcc | 12.3.0 | aarch64 C 交叉编译器 |
+| binutils-aarch64-linux-gnu | 2.41-6deepin7 | aarch64 GNU 二进制工具 |
 
 ### 1.4 系统依赖包
 
@@ -64,7 +64,7 @@ apt install -y \
 # musl 工具链（备用）
 apt install -y musl musl-dev musl-tools
 
-# arm64 交叉编译
+# aarch64 交叉编译
 apt install -y \
     g++-aarch64-linux-gnu \
     gcc-aarch64-linux-gnu \
@@ -82,11 +82,11 @@ apt install -y \
 | 库 | 版本 | 架构 | 安装路径 | 大小 |
 |----|------|------|----------|------|
 | Boost | 1.87.0 | amd64 | `/root/dev/boost/` | ~1.5MB (静态库) |
-| Boost | 1.87.0 | arm64 | `/root/dev/arm64/boost/` | ~1.5MB (静态库) |
+| Boost | 1.87.0 | aarch64 | `/root/dev/arm64/boost/` | ~1.5MB (静态库) |
 | OpenSSL | 3.0.15 | amd64 | `/root/dev/openssl/` | ~10MB (静态库) |
-| OpenSSL | 3.0.15 | arm64 | `/root/dev/arm64/openssl/` | ~10MB (静态库) |
+| OpenSSL | 3.0.15 | aarch64 | `/root/dev/arm64/openssl/` | ~10MB (静态库) |
 | jemalloc | 5.3.0 | amd64 | `/root/dev/jemalloc/` | ~40MB (静态库) |
-| jemalloc | 5.3.0 | arm64 | `/root/dev/arm64/jemalloc/` | ~40MB (静态库) |
+| jemalloc | 5.3.0 | aarch64 | `/root/dev/arm64/jemalloc/` | ~40MB (静态库) |
 | liburing | (最新) | amd64 | `/root/dev/liburing/` | ~172KB (静态库，可选) |
 | zstd | 1.5.6 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` | 系统包 |
 | zlib | 1.3.1 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` | 系统包 |
@@ -114,7 +114,7 @@ cd /root/dev/boost_1_87_0
     install --prefix=/root/dev/boost
 ```
 
-#### arm64 交叉编译
+#### aarch64 交叉编译
 ```bash
 cd /root/dev/arm64/boost_1_87_0
 echo "using gcc : arm : aarch64-linux-gnu-g++ ;" > tools/build/src/user-config.jam
@@ -142,7 +142,7 @@ make -j$(nproc)
 make install
 ```
 
-#### arm64 交叉编译
+#### aarch64 交叉编译
 ```bash
 cd /root/dev/arm64/openssl-3.0.15
 ./Configure linux-aarch64 no-shared no-asm -fPIC \
@@ -169,7 +169,7 @@ make -j$(nproc)
 make install
 ```
 
-#### arm64 交叉编译
+#### aarch64 交叉编译
 ```bash
 cd /root/dev/arm64/jemalloc-5.3.0
 ./configure --prefix=/root/dev/arm64/jemalloc --enable-static --disable-shared \
@@ -221,7 +221,7 @@ ELSE()
 ENDIF()
 ```
 
-> **关键修复**：`-rdynamic -Wl,-Bstatic` 必须追加在已有标志之后，否则 arm64 toolchain 预设的 `-L` 路径会被覆盖。
+> **关键修复**：`-rdynamic -Wl,-Bstatic` 必须追加在已有标志之后，否则 aarch64 toolchain 预设的 `-L` 路径会被覆盖。
 
 ### 4.2 第三方库路径
 
@@ -284,8 +284,8 @@ TARGET_LINK_LIBRARIES(${NAME}
 2. `-nodefaultlibs` 必须使用。
 3. `libm.a` 需软链接为 `libc.a`。
 4. Boost 1.87.0 统一使用 `io_context` 相关 API。
-5. `CMAKE_EXE_LINKER_FLAGS` 条件判断：当使用 arm64 toolchain 文件时，toolchain 中设置的标志会触发 `ELSE()` 分支，因此 toolchain 文件**必须**包含完整的 `-static -no-pie` 等标志。
-6. arm64 交叉编译时必须传入 `-DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64`。
+5. `CMAKE_EXE_LINKER_FLAGS` 条件判断：当使用 aarch64 toolchain 文件时，toolchain 中设置的标志会触发 `ELSE()` 分支，因此 toolchain 文件**必须**包含完整的 `-static -no-pie` 等标志。
+6. aarch64 交叉编译时必须传入 `-DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64`。
 7. `glibc_compat.h` 已包含在 `main.cpp` 中，CMakeLists.txt 同时链接 `${CMAKE_SOURCE_DIR}/libglibc_compat.a`。
 
 ---
@@ -391,9 +391,9 @@ ls -la builds/releases/6.23/
 4. 将产物复制到 `builds/releases/6.23/` 并附加时间戳
 5. 恢复原始 `CMakeLists.txt`
 
-### 5.4 交叉编译（arm64）
+### 5.4 交叉编译（aarch64）
 
-#### arm64 Toolchain 文件
+#### aarch64 Toolchain 文件
 
 创建 `/tmp/arm64-toolchain.cmake`：
 
@@ -414,7 +414,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -rdynamic 
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 ```
 
-#### arm64 基础版编译
+#### aarch64 基础版编译
 
 ```bash
 cd /root/build/openppp2
@@ -426,9 +426,9 @@ cmake .. \
 make -j$(nproc)
 ```
 
-#### arm64 变体编译
+#### aarch64 变体编译
 
-arm64 支持 4 种变体：
+aarch64 支持 4 种变体：
 
 | 变体 | CMake 选项 |
 |------|-----------|
@@ -438,7 +438,7 @@ arm64 支持 4 种变体：
 | TC+io_uring | `-DENABLE_TC=ON -DENABLE_IO_URING=ON -DNOT_HAVE_SIMD=ON` |
 
 ```bash
-# 示例：编译 arm64 io_uring 变体
+# 示例：编译 aarch64 io_uring 变体
 cd /root/build/openppp2
 rm -rf build-release-arm64-io-uring && mkdir build-release-arm64-io-uring && cd build-release-arm64-io-uring
 cmake .. \
@@ -456,7 +456,7 @@ mkdir -p /root/dev /root/build/openppp2
 # 1. 安装工具链与系统静态库
 # 2. 构建 Boost / OpenSSL / jemalloc 到 /root/dev
 # 3. 构建 /tmp/libglibc_compat.a 并复制到项目根目录
-# 4. 创建 arm64 toolchain 文件（如需交叉编译）
+# 4. 创建 aarch64 toolchain 文件（如需交叉编译）
 # 5. 配置并编译 openppp2（选择所需变体）
 ```
 
@@ -465,25 +465,24 @@ mkdir -p /root/dev /root/build/openppp2
 发布版产物命名格式：
 
 ```text
-{原始名称}_{架构}_{变体}_{YYYYMMDD}_{HHMM}
+openppp2-linux-{架构}{-变体}_{YYYYMMDD}_{HHMM}
 ```
 
 各字段说明：
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| 原始名称 | `ppp` | `ppp` |
-| 架构 | `amd64` / `arm64` | `linux_amd64` |
-| 变体 | 空(基础版) / `simd` / `io_uring` / `tc` / `tc_simd` / `tc_io_uring` / `io_uring_simd` / `tc_io_uring_simd` | `tc_io_uring_simd` |
+| 架构 | `amd64` / `aarch64` / `armv7l` / `mipsel` / `ppc64el` / `riscv64` / `s390x` | `amd64` |
+| 变体 | 空(基础版) / `-simd` / `-io-uring` / `-tc` / `-tc-simd` / `-tc-io-uring` / `-io-uring-simd` / `-tc-io-uring-simd` | `-tc-io-uring-simd` |
 | 日期 | `YYYYMMDD` | `20260623` |
 | 时间 | `HHMM` | `2228` |
 
 示例：
 
 ```text
-ppp_linux_amd64_20260623_2228          # amd64 基础版
-ppp_linux_amd64_simd_20260623_2228     # amd64 SIMD
-ppp_linux_arm64_tc_20260623_2228       # arm64 TC
+openppp2-linux-amd64_20260623_2228              # amd64 基础版
+openppp2-linux-amd64-simd_20260623_2228         # amd64 SIMD
+openppp2-linux-aarch64-tc_20260623_2228         # aarch64 TC
 ```
 
 ### 5.7 发布目录
@@ -492,18 +491,18 @@ ppp_linux_arm64_tc_20260623_2228       # arm64 TC
 
 ```text
 builds/releases/6.23/
-├── ppp_linux_amd64_20260623_2228
-├── ppp_linux_amd64_simd_20260623_2228
-├── ppp_linux_amd64_io_uring_20260623_2228
-├── ppp_linux_amd64_io_uring_simd_20260623_2228
-├── ppp_linux_amd64_tc_20260623_2228
-├── ppp_linux_amd64_tc_simd_20260623_2228
-├── ppp_linux_amd64_tc_io_uring_20260623_2228
-├── ppp_linux_amd64_tc_io_uring_simd_20260623_2228
-├── ppp_linux_arm64_20260623_2228
-├── ppp_linux_arm64_io_uring_20260623_2228
-├── ppp_linux_arm64_tc_20260623_2228
-└── ppp_linux_arm64_tc_io_uring_20260623_2228
+├── openppp2-linux-amd64_20260623_2228
+├── openppp2-linux-amd64-simd_20260623_2228
+├── openppp2-linux-amd64-io-uring_20260623_2228
+├── openppp2-linux-amd64-io-uring-simd_20260623_2228
+├── openppp2-linux-amd64-tc_20260623_2228
+├── openppp2-linux-amd64-tc-simd_20260623_2228
+├── openppp2-linux-amd64-tc-io-uring_20260623_2228
+├── openppp2-linux-amd64-tc-io-uring-simd_20260623_2228
+├── openppp2-linux-aarch64_20260623_2228
+├── openppp2-linux-aarch64-io-uring_20260623_2228
+├── openppp2-linux-aarch64-tc_20260623_2228
+└── openppp2-linux-aarch64-tc-io-uring_20260623_2228
 ```
 
 ---
@@ -568,8 +567,8 @@ openppp2-source/
 └── releases环境需求清单.md       # 本文件
 
 /root/dev/                      # amd64 第三方依赖
-/root/dev/arm64/                # arm64 第三方依赖（交叉编译时）
-/tmp/arm64-toolchain.cmake      # arm64 交叉编译 toolchain 文件
+/root/dev/arm64/                # aarch64 第三方依赖（交叉编译时）
+/tmp/arm64-toolchain.cmake      # aarch64 交叉编译 toolchain 文件
 ```
 
 如果是全新 Debian 机器，也可以不复制现成 `/root/dev/`，而是按本文第二章从源码重新构建三方依赖。
@@ -593,7 +592,7 @@ ls /root/dev/jemalloc/lib/libjemalloc.a
 | `libglibc_compat.a` | 新增（项目根目录） | 由 glibc_compat.h 编译的静态库，CMakeLists.txt 链接 |
 | `main.cpp` | 已修改 | 顶部添加 `#include <glibc_compat.h>` |
 | `CMakeLists.txt` | 已修改 | 条件编译变量、链接器标志修复、libglibc_compat.a 链接 |
-| `/tmp/arm64-toolchain.cmake` | 新增 | arm64 交叉编译 toolchain 配置 |
+| `/tmp/arm64-toolchain.cmake` | 新增 | aarch64 交叉编译 toolchain 配置 |
 
 ### 7.2 迁移后验证
 
@@ -610,7 +609,7 @@ grep "glibc_compat.h" main.cpp
 ls -la libglibc_compat.a
 # 期望输出：文件存在且非空
 
-# 4. 验证 arm64 toolchain 文件存在（如需交叉编译）
+# 4. 验证 aarch64 toolchain 文件存在（如需交叉编译）
 ls -la /tmp/arm64-toolchain.cmake
 ```
 
@@ -642,16 +641,16 @@ ls -la /tmp/arm64-toolchain.cmake
 
 解决：
 - 确保 CMakeLists.txt 使用 `IF(NOT CMAKE_EXE_LINKER_FLAGS)` 条件判断
-- arm64 toolchain 使用 `CMAKE_EXE_LINKER_FLAGS_INIT` 而非直接设置 `CMAKE_EXE_LINKER_FLAGS`
+- aarch64 toolchain 使用 `CMAKE_EXE_LINKER_FLAGS_INIT` 而非直接设置 `CMAKE_EXE_LINKER_FLAGS`
 - 验证：`readelf -h bin/ppp | grep Type` 应输出 `EXEC (Executable file)`
 
-### 8.5 arm64 编译时链接器找不到库
+### 8.5 aarch64 编译时链接器找不到库
 
 原因：`THIRD_PARTY_LIBRARY_DIR` 指向了 amd64 的 `/root/dev` 而非 `/root/dev/arm64`。
 
-解决：arm64 编译必须传入 `-DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64`。
+解决：aarch64 编译必须传入 `-DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64`。
 
-### 8.6 arm64 toolchain 编译测试失败
+### 8.6 aarch64 toolchain 编译测试失败
 
 原因：toolchain 中使用 `-nodefaultlibs` 导致 CMake 编译测试无法链接。
 
