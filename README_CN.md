@@ -11,6 +11,44 @@
   </kbd>
 </div>
 
+---
+
+## ⚠️ 本分支说明
+
+本仓库 `master` 分支为**修改版**，基于上游 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) 的 `main` 分支，主要改动如下：
+
+### 🔧 核心修改
+
+| 修改项 | 说明 |
+|--------|------|
+| **完全静态链接** | 所有变体均为 `statically linked, EXEC` 类型，不依赖系统动态库 |
+| **GLIBC 兼容层** | 新增 `glibc_compat.h` + `libglibc_compat.a`，解决旧系统 GLIBC 符号缺失问题 |
+| **条件编译** | `CMakeLists.txt` 支持 `ENABLE_IO_URING` / `ENABLE_TC` / `__SIMD__` 条件编译 |
+| **多变体构建** | `build-all.sh` 一键编译 12 个变体（amd64 × 8 + arm64 × 4） |
+| **appsettings.json** | 新增 `client.websocket.host` / `client.websocket.sni` 字段（见下方说明） |
+
+### 🌐 优选 IP 用法
+
+本修改版在客户端配置中新增了 WebSocket 独立 SNI 字段，配合优选 IP 工具使用效果更佳：
+
+```json
+"client": {
+    "server": "ws://优选IP:80/",
+    "websocket": {
+        "host": "your-domain.com",
+        "sni": "your-domain.com"
+    }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `server` | 填写优选 IP 地址，而非域名 |
+| `websocket.host` | WebSocket 握手时的 Host 头，填写真实域名 |
+| `websocket.sni` | TLS SNI 字段，填写真实域名（仅 WSS 需要） |
+
+> **原理**：连接优选 IP 的同时，通过 Host/SNI 欺骗使 CDN 将流量正确转发到你的服务器，实现加速效果。
+
 ## <img src="https://img.icons8.com/color/48/000000/features-list.png" width="30" height="30"> 核心技术特点
 
 <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
@@ -497,6 +535,29 @@ _LARGEFILE64_SOURCE
     ```
 4. 按标准 Linux 流程编译
 
+### ⚙️ appsettings.json 修改说明
+
+与原版相比，本修改版在 `appsettings.json` 中新增了以下字段：
+
+```json
+"client": {
+    // ... 其他配置保持不变
+    "websocket": {
+        "host": "",   // ⭐ 新增：WebSocket Host 头
+        "sni": ""     // ⭐ 新增：TLS SNI 字段
+    }
+}
+```
+
+| 字段路径 | 类型 | 默认值 | 说明 |
+|----------|------|--------|------|
+| `client.websocket.host` | string | `""` | WebSocket 握手时的 Host 头。配合优选 IP 使用时，填真实域名 |
+| `client.websocket.sni` | string | `""` | TLS SNI 扩展字段。配合优选 IP 使用 WSS 协议时，填真实域名 |
+
+> **使用场景**：当 `server` 填写优选 IP 地址时，通过 `websocket.host` 和 `websocket.sni` 传递真实域名，使 CDN 能正确路由流量。
+
+---
+
 ## 🚀 SIMD + AES_NI 优化实现
 ### 优化算法
 | 算法名称               | 实现文件路径                                                                                     |
@@ -651,6 +712,8 @@ _LARGEFILE64_SOURCE
 | server-proxy               | string | [http\|socks]://user:pass@192.168.0.18:8080/      | 连接服务器的代理地址         | `client`         |
 | bandwidth                  | int    | 10000                                    | 带宽限制(Kbp/s)               | `client`         |
 | reconnections.timeout      | int    | 5                                        | 重连等待时间(秒)             | `client`         |
+| websocket.host ⭐          | string | ""                                       | WebSocket Host 头（优选 IP 时填域名） | `client` |
+| websocket.sni ⭐           | string | ""                                       | TLS SNI 字段（WSS 优选 IP 时填域名）  | `client` |
 | paper-airplane.tcp         | bool   | true                                     | 启用纸飞机TCP加速            | `client`         |
 | http-proxy.bind            | string | 192.168.0.24                             | HTTP代理绑定地址             | `client`         |
 | http-proxy.port            | int    | 8080                                     | HTTP代理端口                 | `client`         |

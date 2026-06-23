@@ -11,6 +11,44 @@ Next-generation security network access technology, providing high-performance V
   </kbd>
 </div>
 
+---
+
+## ⚠️ About This Branch
+
+This `master` branch is a **modified fork** based on upstream [liulilittle/openppp2](https://github.com/liulilittle/openppp2) `main` branch. Key changes:
+
+### 🔧 Core Modifications
+
+| Change | Description |
+|--------|-------------|
+| **Fully Static Linking** | All variants are `statically linked, EXEC` — no system dynamic library dependencies |
+| **GLIBC Compatibility** | Added `glibc_compat.h` + `libglibc_compat.a` to resolve missing GLIBC symbols on older systems |
+| **Conditional Compilation** | `CMakeLists.txt` supports `ENABLE_IO_URING` / `ENABLE_TC` / `__SIMD__` flags |
+| **Multi-Variant Build** | `build-all.sh` builds 12 variants in one click (amd64 × 8 + arm64 × 4) |
+| **appsettings.json** | Added `client.websocket.host` / `client.websocket.sni` fields (see below) |
+
+### 🌐 Optimized IP Usage
+
+This fork adds independent WebSocket SNI fields for optimized IP usage:
+
+```json
+"client": {
+    "server": "ws://OptimizedIP:80/",
+    "websocket": {
+        "host": "your-domain.com",
+        "sni": "your-domain.com"
+    }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `server` | Set to the optimized IP address instead of domain name |
+| `websocket.host` | Host header for WebSocket handshake — set to your real domain |
+| `websocket.sni` | TLS SNI field — set to your real domain (WSS only) |
+
+> **How it works**: Connect to an optimized IP while using Host/SNI spoofing to make CDN route traffic correctly to your server, achieving acceleration.
+
 ## <img src="https://img.icons8.com/color/48/000000/features-list.png" width="30" height="30"> Core Technology Features
 
 <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
@@ -498,6 +536,27 @@ Ensure musl-libc supports 64-bit file functions
    ```
 4. Follow the standard Linux build process
 
+### ⚙️ appsettings.json Changes
+
+Compared to the original, this fork adds the following fields to `appsettings.json`:
+
+```json
+"client": {
+    // ... other settings unchanged
+    "websocket": {
+        "host": "",   // ⭐ New: WebSocket Host header
+        "sni": ""     // ⭐ New: TLS SNI field
+    }
+}
+```
+
+| Field Path | Type | Default | Description |
+|------------|------|---------|-------------|
+| `client.websocket.host` | string | `""` | WebSocket Host header. Set to real domain when using optimized IP |
+| `client.websocket.sni` | string | `""` | TLS SNI extension. Set to real domain when using WSS with optimized IP |
+
+> **Use case**: When `server` is set to an optimized IP address, use `websocket.host` and `websocket.sni` to pass the real domain name so CDN can route traffic correctly.
+
 ## 🚀 SIMD + AES_NI Optimization Implementation
 ### Optimization Algorithms
 | Algorithm Name             | Implementation File Path                                                                                  |
@@ -653,6 +712,8 @@ Ensure musl-libc supports 64-bit file functions
 | server-proxy                 | string | [http\|socks]://user:pass@192.168.0.18:8080/     | Proxy Address for Connecting to Server | `client`            |
 | bandwidth                    | int    | 10000                                    | Bandwidth Limit (Kbp/s)             | `client`               |
 | reconnections.timeout        | int    | 5                                        | Reconnection Wait Time (seconds)    | `client`               |
+| websocket.host ⭐            | string | ""                                       | WebSocket Host header (domain for optimized IP) | `client`    |
+| websocket.sni ⭐             | string | ""                                       | TLS SNI field (domain for WSS optimized IP)    | `client`    |
 | paper-airplane.tcp           | bool   | true                                     | Enable Paper Airplane TCP Acceleration | `client`            |
 | http-proxy.bind              | string | 192.168.0.24                              | HTTP Proxy Binding Address          | `client`               |
 | http-proxy.port              | int    | 8080                                     | HTTP Proxy Port                     | `client`               |
