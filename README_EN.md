@@ -78,9 +78,7 @@ PPP is openppp2's native tunnel protocol, based on direct TCP connection for bes
 ```json
 {
     "client": {
-        "server": "ppp://your-server.com:20000/",
-        "ip": "10.0.0.2",
-        "netmask": "255.255.255.0"
+        "server": "ppp://your-server.com:20000/"
     }
 }
 ```
@@ -114,9 +112,7 @@ WebSocket tunnel encapsulates PPP traffic in WebSocket protocol, recognizable an
 ```json
 {
     "client": {
-        "server": "ws://your-server.com:20080/tun",
-        "ip": "10.0.0.2",
-        "netmask": "255.255.255.0"
+        "server": "ws://your-domain.com:20080/tun"
     }
 }
 ```
@@ -156,9 +152,7 @@ WSS = WebSocket over TLS, adding TLS encryption on top of WS for double-layer se
 ```json
 {
     "client": {
-        "server": "wss://your-domain.com:20443/tun",
-        "ip": "10.0.0.2",
-        "netmask": "255.255.255.0"
+        "server": "wss://your-domain.com:20443/tun"
     }
 }
 ```
@@ -253,26 +247,15 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
         },
         "ip": "10.0.0.1",
         "netmask": "255.255.255.0",
-        "log": "./ppp-server.log",
+        "log": "./ppp.log",
         "websocket": {
-            "host": "your-domain.com",
+            "host": "starrylink.net",
             "path": "/tun",
             "ssl": {
-                "certificate-file": "your-domain.com.pem",
-                "certificate-key-file": "your-domain.com.key",
-                "certificate-key-password": "",
+                "certificate-file": "starrylink.net.pem",
+                "certificate-key-file": "starrylink.net.key",
+                "certificate-key-password": "test",
                 "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-            },
-            "verify-peer": false,
-            "http": {
-                "error": "Status Code: 404; Not Found",
-                "request": {
-                    "Cache-Control": "no-cache",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                },
-                "response": {
-                    "Server": "Kestrel"
-                }
             }
         }
     }
@@ -306,48 +289,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
         "websocket": {
             "host": "",
             "sni": ""
-        },
-        "reconnections": {
-            "timeout": 5
-        },
-        "paper-airplane": {
-            "tcp": true
-        },
-        "http-proxy": {
-            "bind": "192.168.0.24",
-            "port": 8080
-        },
-        "socks-proxy": {
-            "bind": "192.168.0.24",
-            "port": 1080,
-            "username": "test",
-            "password": "123456"
-        },
-        "mappings": [
-            {
-                "local-ip": "192.168.0.24",
-                "local-port": 80,
-                "protocol": "tcp",
-                "remote-ip": "::",
-                "remote-port": 10001
-            },
-            {
-                "local-ip": "192.168.0.24",
-                "local-port": 7000,
-                "protocol": "udp",
-                "remote-ip": "::",
-                "remote-port": 10002
-            }
-        ],
-        "routes": [
-            {
-                "name": "CMNET",
-                "nic": "eth1",
-                "ngw": "192.168.1.1",
-                "path": "./cmcc.txt",
-                "vbgp": "https://ispip.clang.cn/cmcc.txt"
-            }
-        ]
+        }
     }
 }
 ```
