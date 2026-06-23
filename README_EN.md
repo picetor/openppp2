@@ -399,72 +399,12 @@ chmod +x ppp
 
 ## 🔨 Build Guide
 
-### Linux Build
+### Original Build Checklist [Original Code]
 
-```bash
-# Install dependencies
-apt install -y g++ gcc cmake make binutils
+For the complete build environment, third-party dependency building, GLIBC compatibility layer, CMake configuration and build steps of the original code, see:
+> 📄 **[`releases环境需求清单.md`](releases环境需求清单.md)** — Original release build environment checklist (debug logging disabled)
 
-# Build
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+### WSS Modified Checklist [Modified Code]
 
-# Output at bin/ppp
-```
-
-### Multi-Variant Build
-
-```bash
-# Base (no SIMD)
-cmake .. -DNOT_HAVE_SIMD=ON
-
-# SIMD accelerated (default)
-cmake ..
-
-# io_uring
-cmake .. -DENABLE_IO_URING=ON -DNOT_HAVE_SIMD=ON
-
-# Full feature
-cmake .. -DENABLE_TC=ON -DENABLE_IO_URING=ON
-
-# Batch build all variants
-bash build-all.sh
-```
-
-> For detailed build environment and third-party library compilation, see [`环境需求.md`](环境需求.md).
-
----
-
-## 📖 Appendix
-
-### Configuration Parameters Quick Reference
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `server.listen.ppp` | int | 20000 | PPP listen port |
-| `server.listen.ws` | int | 20080 | WebSocket listen port |
-| `server.listen.wss` | int | 20443 | WebSocket TLS listen port |
-| `server.ip` | string | 10.0.0.1 | Virtual subnet IP |
-| `server.netmask` | string | 255.255.255.0 | Virtual subnet mask |
-| `server.log` | string | "" | Server log path |
-| `server.websocket.host` | string | "" | WebSocket default Host |
-| `server.websocket.path` | string | /tun | WebSocket path |
-| `client.server` | string | - | Server connection address |
-| `client.ip` | string | - | Client virtual IP |
-| `client.netmask` | string | 255.255.255.0 | Virtual subnet mask |
-| `client.gateway` | string | - | Virtual gateway |
-| `client.log` | string | "" | Client log path |
-| `client.websocket.host` ⭐ | string | "" | WebSocket Host header (optimized IP) |
-| `client.websocket.sni` ⭐ | string | "" | TLS SNI field (optimized IP) |
-| `client.dns` | string | 8.8.8.8 | DNS server |
-| `client.bandwidth` | int | 100000 | Bandwidth limit (Kbp/s) |
-| `client.paper-airplane.tcp` | bool | true | PaperAirplane TCP acceleration |
-
-> ⭐ Fields added in this fork.
-
-### Links
-
-- [Upstream Repository](https://github.com/liulilittle/openppp2)
-- [Build Environment Requirements](环境需求.md)
-- [Telegram Group](https://t.me/supersocksr_group)
+For the build environment checklist of this `master` branch fork, adapted for fully static linking, GLIBC compatibility layer, conditional compilation, multi-variant builds, etc., see:
+> 📄 **[`WSS修改版环境需求.md`](WSS修改版环境需求.md)** — WSS modified build environment checklist (debug logging retained)
