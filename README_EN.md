@@ -234,4 +234,4 @@ This project involves three build environment checklists for different code vers
 |-----------|----------|--------------|-----------|
 | 📄 [`环境需求.md`](环境需求.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Debug | Retained |
 | 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Releases | Disabled |
-| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | This repo [picetor/openppp2](https://github.com/picetor/openppp2) | This repo Releases | Retained |
+| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | This repo [picetor/openppp2](https://github.com/picetor/openppp2) | This repo Releases | Disabled |
