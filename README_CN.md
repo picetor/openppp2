@@ -4,7 +4,7 @@
 
 <div align="right" style="margin-top:-40px;">
   <kbd>
-    <a href="README.md">English</a>
+    <a href="README_en.md">English</a>
   </kbd>
   <kbd style="background:#0366d6;">
     <strong>简体中文</strong>
@@ -15,69 +15,425 @@
 
 ## ⚠️ 本分支说明
 
-本仓库 `master` 分支为**修改版**，基于上游 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) 的 `main` 分支，主要改动如下：
+本仓库 `master` 分支为**修改版**，基于上游 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) 的 `main` 分支。
 
-### 🔧 核心修改
+**核心修改：**
+- 完全静态链接，不依赖系统动态库
+- GLIBC 兼容层，支持旧系统运行
+- 条件编译（ENABLE_IO_URING / ENABLE_TC / __SIMD__）
+- 多变体一键构建（amd64 × 8 + arm64 × 4）
+- 新增 `client.websocket.host` / `client.websocket.sni` 优选 IP 支持
 
-| 修改项 | 说明 |
-|--------|------|
-| **完全静态链接** | 所有变体均为 `statically linked, EXEC` 类型，不依赖系统动态库 |
-| **GLIBC 兼容层** | 新增 `glibc_compat.h` + `libglibc_compat.a`，解决旧系统 GLIBC 符号缺失问题 |
-| **条件编译** | `CMakeLists.txt` 支持 `ENABLE_IO_URING` / `ENABLE_TC` / `__SIMD__` 条件编译 |
-| **多变体构建** | `build-all.sh` 一键编译 12 个变体（amd64 × 8 + arm64 × 4） |
-| **appsettings.json** | 新增 `client.websocket.host` / `client.websocket.sni` 字段（见下方说明） |
+> 详细编译环境与依赖清单请参见 [`环境需求.md`](环境需求.md)
 
-### 🌐 优选 IP 用法
+---
 
-本修改版在客户端配置中新增了 WebSocket 独立 SNI 字段，配合优选 IP 工具使用效果更佳：
+## 📋 目录
+
+- [隧道协议总览](#-隧道协议总览)
+- [PPP 原生隧道](#-ppp-原生隧道)
+- [WebSocket 隧道 (WS)](#-websocket-隧道-ws)
+- [WebSocket 安全隧道 (WSS)](#-websocket-安全隧道-wss)
+- [优选 IP + WSS 加速](#-优选-ip--wss-加速)
+- [服务端配置](#-服务端配置)
+- [客户端配置](#-客户端配置)
+- [快速开始](#-快速开始)
+- [编译指南](#-编译指南)
+- [附录](#-附录)
+
+---
+
+## 🚇 隧道协议总览
+
+openppp2 支持多种隧道协议，适用于不同场景：
+
+| 协议 | 传输层 | 加密 | CDN 友好 | 适用场景 |
+|------|--------|------|----------|----------|
+| **PPP** | TCP | AES 加密 | ❌ | 直连服务器，高性能 |
+| **WS** | TCP + WebSocket | AES 加密 | ✅ | CDN 转发，WebSocket 封包 |
+| **WSS** | TCP + TLS + WebSocket | TLS + AES 双重加密 | ✅ | CDN 转发，TLS 加密传输 |
+
+> 所有隧道均支持 MUX 多路复用、PaperAirplane TCP 加速、虚拟以太网层。
+
+---
+
+## 🔌 PPP 原生隧道
+
+PPP 协议是 openppp2 的原生隧道协议，基于 TCP 直连，性能最佳。
+
+### 服务端
 
 ```json
-"client": {
-    "server": "ws://优选IP:80/",
-    "websocket": {
-        "host": "your-domain.com",
-        "sni": "your-domain.com"
+{
+    "server": {
+        "listen": { "ppp": 20000 },
+        "ip": "10.0.0.1",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+### 客户端
+
+```json
+{
+    "client": {
+        "server": "ppp://your-server.com:20000/",
+        "ip": "10.0.0.2",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+> **适用场景**：服务器有公网 IP，无需 CDN 中转，追求极致性能。
+
+---
+
+## 🌐 WebSocket 隧道 (WS)
+
+WebSocket 隧道将 PPP 流量封装在 WebSocket 协议中，可被 CDN 识别和转发。
+
+### 服务端
+
+```json
+{
+    "server": {
+        "listen": { "ws": 20080 },
+        "websocket": {
+            "host": "your-domain.com",
+            "path": "/tun"
+        },
+        "ip": "10.0.0.1",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+### 客户端
+
+```json
+{
+    "client": {
+        "server": "ws://your-server.com:20080/tun",
+        "ip": "10.0.0.2",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+> **适用场景**：服务器通过 CDN 转发，无需 TLS 加密（WS 本身无加密，数据由 PPP 层 AES 加密）。
+
+---
+
+## 🔒 WebSocket 安全隧道 (WSS)
+
+WSS = WebSocket over TLS，在 WS 基础上增加 TLS 加密层，双重加密更安全，且 CDN 广泛支持。
+
+### 服务端
+
+```json
+{
+    "server": {
+        "listen": { "wss": 20443 },
+        "websocket": {
+            "host": "your-domain.com",
+            "path": "/tun",
+            "ssl": {
+                "certificate-file": "your-domain.com.pem",
+                "certificate-key-file": "your-domain.com.key",
+                "certificate-key-password": "",
+                "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+            }
+        },
+        "ip": "10.0.0.1",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+### 客户端
+
+```json
+{
+    "client": {
+        "server": "wss://your-domain.com:20443/tun",
+        "ip": "10.0.0.2",
+        "netmask": "255.255.255.0"
+    }
+}
+```
+
+> **适用场景**：需要 TLS 加密传输，通过 CDN 转发，兼顾安全与速度。
+
+---
+
+## ⚡ 优选 IP + WSS 加速
+
+> 这是本修改版的核心新增功能。通过 `client.websocket.host` 和 `client.websocket.sni` 字段，实现优选 IP 连接 + CDN 正确路由。
+
+### 原理
+
+```
+客户端 → 优选 IP (CDN 边缘节点) → CDN 内部路由 → 你的源服务器
+                │
+                ├─ Host 头: your-domain.com  (WebSocket 握手)
+                └─ SNI:    your-domain.com  (TLS 握手)
+```
+
+连接优选 IP 的同时，通过自定义 Host 和 SNI 字段，让 CDN 将流量正确转发到你的服务器。
+
+### 客户端配置
+
+```json
+{
+    "client": {
+        "server": "wss://23.249.18.223:20443/tun",
+        "websocket": {
+            "host": "your-domain.com",
+            "sni": "your-domain.com"
+        },
+        "ip": "10.0.0.2",
+        "netmask": "255.255.255.0"
     }
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `server` | 填写优选 IP 地址，而非域名 |
-| `websocket.host` | WebSocket 握手时的 Host 头，填写真实域名 |
-| `websocket.sni` | TLS SNI 字段，填写真实域名（仅 WSS 需要） |
+| `server` | 填写优选 IP 地址（而非域名） |
+| `websocket.host` | WebSocket Host 头，填写真实域名 |
+| `websocket.sni` | TLS SNI 字段，填写真实域名 |
 
-> **原理**：连接优选 IP 的同时，通过 Host/SNI 欺骗使 CDN 将流量正确转发到你的服务器，实现加速效果。
+### 场景示例
 
-## <img src="https://img.icons8.com/color/48/000000/features-list.png" width="30" height="30"> 核心技术特点
+**场景一：优选 IP + WSS（推荐）**
+```json
+{
+    "client": {
+        "server": "wss://23.249.18.223:20443/tun",
+        "websocket": { "host": "your-domain.com", "sni": "your-domain.com" }
+    }
+}
+```
 
-<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+**场景二：优选 IP + WS（无 TLS）**
+```json
+{
+    "client": {
+        "server": "ws://23.249.18.223:20080/tun",
+        "websocket": { "host": "your-domain.com" }
+    }
+}
+```
 
-<div>
+**场景三：域名直连（无需优选 IP）**
+```json
+{
+    "client": {
+        "server": "wss://your-domain.com:20443/tun",
+        "websocket": { "host": "", "sni": "" }
+    }
+}
+```
+> `host` 和 `sni` 为空时，行为与原版一致，使用 URL 中的主机名。
 
-- <img src="https://img.icons8.com/color/24/000000/processor.png" width="20" height="20"> **同步超线程IO技术**  
-- <img src="https://media.istockphoto.com/id/1469980757/vector/cloud-multi-threading-icon-in-vector-logotype.jpg?s=612x612&w=0&k=20&c=SgJXI9dkgy1l__U4m4H7Y2SJuCEJk53VpZvwxYqQqDg=" width="20" height="20"> **全协程+多线程架构**  
-- <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTIHdQXotRNOMUnypnmpRRAMGiTmgtnvmaEOw&s" width="20" height="20"> **支持可打印明文传输**  
-- <img src="https://img.ixintu.com/download/jpg/20201107/570f5ecbfba462cec0568a98693aa8cc_512_321.jpg!con" width="20" height="20"> **全双工/半双工隧道**  
-- <img src="https://img.icons8.com/color/24/000000/network.png" width="20" height="20"> **VPN虚拟子网**  
-- <img src="https://img.icons8.com/color/24/000000/port.png" width="20" height="20"> **端口映射到公网 P-NAT2**  
-- <img src="https://cdn-icons-png.flaticon.com/512/7349/7349720.png" width="20" height="20"> **正向代理支持**  
-- <img src="https://img.icons8.com/color/24/000000/firewall.png" width="20" height="20"> **虚拟防火墙**  
-- <img src="https://img.icons8.com/color/24/000000/route.png" width="20" height="20"> **虚拟BGP多线分流**  
-- <img src="https://img.icons8.com/color/24/000000/domain.png" width="20" height="20"> **域名查询分流**  
-- <img src="https://img.icons8.com/color/24/000000/router.png" width="20" height="20"> **天然支持软路由**  
-- <img src="https://img.icons8.com/color/24/000000/airplane-mode-on.png" width="20" height="20"> **PaperAirplane 分层技术**  
-</div>
+---
 
-<div>
+## 🖥️ 服务端配置
 
-- <img src="https://img.icons8.com/color/24/000000/network-card.png" width="20" height="20"> **双网络协议栈支持**  
-- <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTjxlVdSXIeMvmISIN0dupsU60ISjdSyxN7xw&s" width="20" height="20"> **广播支持（非单播）**  
-- <img src="https://www.shutterstock.com/image-vector/tunnel-sign-multi-series-style-260nw-2440158425.jpg" width="20" height="20"> **多种隧道协议支持**  
-- <img src="https://img.icons8.com/color/24/000000/merge.png" width="20" height="20"> **MUX多路复用**  
-- <img src="https://img.icons8.com/color/24/000000/dns.png" width="20" height="20"> **DNS缓存**  
-- <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSyLWW0UbSGujy4OkGa0oHvN1Ad1_YXmZGIgSHlpHz1K0-u6a_mYbw84I_aZJA8IzB-jLg&usqp=CAU" width="20" height="20"> **专用虚拟内存**  
-- <img src="https://cdn-icons-png.flaticon.com/512/10988/10988147.png" width="20" height="20"> **CDN转发支持**  
+### 完整服务端配置参考
+
+```json
+{
+    "server": {
+        "listen": {
+            "ppp": 20000,
+            "ws": 20080,
+            "wss": 20443
+        },
+        "ip": "10.0.0.1",
+        "netmask": "255.255.255.0",
+        "log": "./ppp-server.log",
+        "websocket": {
+            "host": "your-domain.com",
+            "path": "/tun",
+            "ssl": {
+                "certificate-file": "your-domain.com.pem",
+                "certificate-key-file": "your-domain.com.key",
+                "certificate-key-password": "",
+                "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+            },
+            "verify-peer": false,
+            "http": {
+                "error": "Status Code: 404; Not Found",
+                "request": {
+                    "Cache-Control": "no-cache",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                },
+                "response": {
+                    "Server": "Kestrel"
+                }
+            }
+        }
+    }
+}
+```
+
+### 服务端启动
+
+```bash
+# 启动服务端（默认读取 appsettings.json）
+./ppp --server
+
+# 指定配置文件
+./ppp --server --config /path/to/appsettings.json
+```
+
+---
+
+## 💻 客户端配置
+
+### 完整客户端配置参考
+
+```json
+{
+    "client": {
+        "server": "ppp://your-server.com:20000/",
+        "ip": "10.0.0.2",
+        "netmask": "255.255.255.0",
+        "gateway": "10.0.0.1",
+        "log": "./ppp-client.log",
+        "websocket": {
+            "host": "",
+            "sni": ""
+        },
+        "dns": "8.8.8.8,1.1.1.1",
+        "dns-rules": "./dns-rules.txt",
+        "ip-rules": "./ip.txt",
+        "firewall-rules": "./firewall-rules.txt",
+        "bandwidth": 100000,
+        "reconnections": { "timeout": 5 },
+        "paper-airplane": { "tcp": true }
+    }
+}
+```
+
+### 客户端启动
+
+```bash
+# 启动客户端
+./ppp --client
+
+# 指定配置文件
+./ppp --client --config /path/to/appsettings.json
+```
+
+---
+
+## 🚀 快速开始
+
+### 1. 下载预编译二进制
+
+从 [Releases](https://github.com/picetor/openppp2/releases) 或 `builds/` 目录下载对应架构的二进制文件。
+
+### 2. 准备配置文件
+
+```bash
+# 下载 appsettings.json
+wget https://raw.githubusercontent.com/picetor/openppp2/master/appsettings.json
+
+# 编辑配置（根据上方隧道章节修改）
+vim appsettings.json
+```
+
+### 3. 运行服务端
+
+```bash
+chmod +x ppp
+./ppp --server
+```
+
+### 4. 运行客户端
+
+```bash
+./ppp --client
+```
+
+> 详细的路由配置、旁路由模式、Windows 平台指南请参见原版文档或 [liulilittle/openppp2](https://github.com/liulilittle/openppp2)。
+
+---
+
+## 🔨 编译指南
+
+### Linux 编译
+
+```bash
+# 安装依赖
+apt install -y g++ gcc cmake make binutils
+
+# 编译
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+
+# 产物在 bin/ppp
+```
+
+### 多变体编译
+
+```bash
+# 基础版（无 SIMD）
+cmake .. -DNOT_HAVE_SIMD=ON
+
+# SIMD 加速版（默认）
+cmake ..
+
+# io_uring 版
+cmake .. -DENABLE_IO_URING=ON -DNOT_HAVE_SIMD=ON
+
+# 全功能版
+cmake .. -DENABLE_TC=ON -DENABLE_IO_URING=ON
+
+# 批量编译所有变体
+bash build-all.sh
+```
+
+> 详细编译环境与第三方依赖库编译请参见 [`环境需求.md`](环境需求.md)。
+
+---
+
+## 📖 附录
+
+### 配置参数速查
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server.listen.ppp` | int | 20000 | PPP 协议监听端口 |
+| `server.listen.ws` | int | 20080 | WebSocket 监听端口 |
+| `server.listen.wss` | int | 20443 | WebSocket TLS 监听端口 |
+| `server.ip` | string | 10.0.0.1 | 虚拟子网 IP |
+| `server.netmask` | string | 255.255.255.0 | 虚拟子网掩码 |
+| `server.log` | string | "" | 服务端日志路径 |
+| `server.websocket.host` | string | "" | WebSocket 默认 Host |
+| `server.websocket.path` | string | /tun | WebSocket 路径 |
+| `client.server` | string | - | 服务器连接地址 |
+| `client.ip` | string | - | 客户端虚拟 IP |
+| `client.netmask` | string | 255.255.255.0 | 虚拟子网掩码 |
+| `client.gateway` | string | - | 虚拟网关 |
+| `client.log` | string | "" | 客户端日志路径 |
+| `client.websocket.host` ⭐ | string | "" | WebSocket Host 头（优选 IP） |
+| `client.websocket.sni` ⭐ | string | "" | TLS SNI 字段（优选 IP） |
+| `client.dns` | string | 8.8.8.8 | DNS 服务器 |
+| `client.bandwidth` | int | 100000 | 带宽限制 (Kbp/s) |
+| `client.paper-airplane.tcp` | bool | true | PaperAirplane TCP 加速 |
+
+> ⭐ 标记为本修改版新增字段。
+
+### 相关链接
+
+- [上游原版仓库](https://github.com/liulilittle/openppp2)
+- [编译环境需求](环境需求.md)
+- [Telegram 群组](https://t.me/supersocksr_group)  
 - <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS8vZjAno4KJAxr9K97IzoIGQiJ1ajH9FQOyA&s" width="20" height="20"> **VPN Turbo**  
 - <img src="https://img.icons8.com/color/24/000000/fast-forward.png" width="20" height="20"> **TCP Fast Open**  
 - <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ2LHYDgAPNDQrrF-Es68XphlSUJ1XBbqKdpw&s" width="20" height="20"> **固定窗口大小设置**  
