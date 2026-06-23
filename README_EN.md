@@ -69,10 +69,6 @@ PPP is openppp2's native tunnel protocol, based on direct TCP connection for bes
         "listen": {
             "port": 20000
         }
-    },
-    "server": {
-        "ip": "10.0.0.1",
-        "netmask": "255.255.255.0"
     }
 }
 ```
@@ -105,10 +101,6 @@ WebSocket tunnel encapsulates PPP traffic in WebSocket protocol, recognizable an
         "listen": {
             "ws": 20080
         }
-    },
-    "server": {
-        "ip": "10.0.0.1",
-        "netmask": "255.255.255.0"
     }
 }
 ```
@@ -147,10 +139,6 @@ WSS = WebSocket over TLS, adding TLS encryption on top of WS for double-layer se
             "certificate-key-password": "",
             "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
         }
-    },
-    "server": {
-        "ip": "10.0.0.1",
-        "netmask": "255.255.255.0"
     }
 }
 ```
@@ -236,83 +224,6 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 }
 ```
 > When `host` and `sni` are empty, behavior is identical to the original version.
-
----
-
-## 🖥️ Server Configuration
-
-### Full Server Configuration Reference
-
-```json
-{
-    "tcp": {
-        "listen": {
-            "port": 20000
-        }
-    },
-    "websocket": {
-        "host": "starrylink.net",
-        "path": "/tun",
-        "listen": {
-            "ws": 20080,
-            "wss": 20443
-        },
-        "ssl": {
-            "certificate-file": "starrylink.net.pem",
-            "certificate-key-file": "starrylink.net.key",
-            "certificate-key-password": "test",
-            "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-        }
-    },
-    "server": {
-        "ip": "10.0.0.1",
-        "netmask": "255.255.255.0",
-        "log": "./ppp.log"
-    }
-}
-```
-
-### Start Server
-
-```bash
-# Start server (reads appsettings.json by default)
-./ppp --server
-
-# Specify config file
-./ppp --server --config /path/to/appsettings.json
-```
-
----
-
-## 💻 Client Configuration
-
-### Full Client Configuration Reference
-
-```json
-{
-    "client": {
-        "guid": "{F4569208-BB45-4DEB-B115-0FEA1D91B85B}",
-        "server": "ppp://192.168.0.24:20000/",
-        "server-proxy": "http://user:pass@192.168.0.18:8080/",
-        "bandwidth": 10000,
-        "log": "./ppp-client.log",
-        "websocket": {
-            "host": "",
-            "sni": ""
-        }
-    }
-}
-```
-
-### Start Client
-
-```bash
-# Start client
-./ppp --client
-
-# Specify config file
-./ppp --client --config /path/to/appsettings.json
-```
 
 ---
 
