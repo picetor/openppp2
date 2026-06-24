@@ -124,11 +124,27 @@ jobs:
             cmake .. -DCMAKE_BUILD_TYPE=Release -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
               -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
               -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
-              -DCMAKE_AR=aarch64-linux-gnu-ar -DCMAKE_RANLIB=aarch64-linux-gnu-ranlib
-            make -j$(nproc)
-            find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+              -DCMAKE_AR=/usr/bin/aarch64-linux-gnu-ar -DCMAKE_RANLIB=/usr/bin/aarch64-linux-gnu-ranlib \
+              -DCMAKE_C_ARCHIVE_CREATE="/usr/bin/aarch64-linux-gnu-ar cr <TARGET> <LINK_FLAGS> <OBJECTS>" \
+              -DCMAKE_C_ARCHIVE_FINISH="/usr/bin/aarch64-linux-gnu-ranlib <TARGET>"
+            make -j$(nproc) 2>&1
+            find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
             if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
-              find /tmp/zstd-src -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+              echo "cmake build failed, trying zstd's native Makefile..."
+              cd /tmp/zstd-src
+              make clean 2>/dev/null || true
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) lib lib-mt 2>&1 || \
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) libzstd.a 2>&1 || \
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) -C lib libzstd.a 2>&1
+              find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
+              if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
+                echo "ERROR: Failed to build libzstd.a"
+                ls -la /tmp/zstd-src/lib/
+                exit 1
+              fi
             fi
             echo "zstd built from source"
           fi
