@@ -231,10 +231,9 @@ Cloudflare添加域名开启小黄云代理，使用acme申请证书，SSL开启
 
 > 详细的路由配置、旁路由模式、Windows 平台指南请参见原版文档或 [liulilittle/openppp2](https://github.com/liulilittle/openppp2)。
 
-本项目涉及三份编译环境清单，分别对应不同的代码版本与构建目标：
+本项目涉及两份编译环境清单，均以 CI 工作流为准，构建目标为 Release（`-O3` 优化）：
 
-| 清单 | 基于代码 | 构建目标 | 调试日志 |
-|------|----------|----------|----------|
-| 📄 [`环境需求.md`](环境需求.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS 修改版 Debug(本项目Debug) | 保留 |
-| 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS 修改版 Releases(本项目 Releases) | 关闭 |
-| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | 本项目 [picetor/openppp2](https://github.com/picetor/openppp2) | 本项目 Releases | 关闭 |
+| 清单 | 基于代码 | 说明 |
+|------|----------|------|
+| 📄 [`环境需求.md`](环境需求.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | 含相比原版的修改附录 |
+| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | 本项目 [picetor/openppp2](https://github.com/picetor/openppp2) | 基于本仓库 master 分支 |
