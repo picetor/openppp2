@@ -138,7 +138,7 @@ jobs:
             $pkgInclude = Join-Path $_.FullName "include"
             if (Test-Path $pkgInclude) {
               Write-Output "  Copying headers from $($_.Name)..."
-              Copy-Item -Path "$pkgInclude\*" -Destination "$vcpkgInstalled\include\" -Recurse -Force
+              Copy-Item -Path "$pkgInclude\*" -Destination "$vcpkgInstalled\include\" -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
           # Also copy lib files
@@ -149,7 +149,7 @@ jobs:
             $pkgLib = Join-Path $_.FullName "lib"
             if (Test-Path $pkgLib) {
               Write-Output "  Copying libs from $($_.Name)..."
-              Copy-Item -Path "$pkgLib\*" -Destination "$vcpkgInstalled\lib\" -Recurse -Force
+              Copy-Item -Path "$pkgLib\*" -Destination "$vcpkgInstalled\lib\" -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
           Write-Output "=== Header/lib copy complete ==="
