@@ -236,5 +236,5 @@ Cloudflare添加域名开启小黄云代理，使用acme申请证书，SSL开启
 | 清单 | 基于代码 | 构建目标 | 调试日志 |
 |------|----------|----------|----------|
 | 📄 [`环境需求.md`](环境需求.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS 修改版 Debug(本项目Debug) | 保留 |
-| 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS 修改版 Releases（本项目 Releases） | 关闭 |
+| 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | 原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS 修改版 Releases(本项目 Releases) | 关闭 |
 | 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | 本项目 [picetor/openppp2](https://github.com/picetor/openppp2) | 本项目 Releases | 关闭 |
