@@ -6,16 +6,7 @@
 name: Build openppp2 (macOS)
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
-  workflow_dispatch:      # 手动触发
-    inputs:
-      build_macos:
-        description: 'Build macOS (arm64 + amd64)'
-        type: boolean
-        default: true
+  workflow_dispatch:      # 仅手动触发
 
 jobs:
   build-macos:
