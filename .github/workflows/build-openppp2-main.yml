@@ -1,0 +1,236 @@
+# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+# Description: Build openppp2 master branch (modified fork) - All variants.
+#              Builds 8 amd64 variants + 4 aarch64 variants using prebuilt 3rd-party libs.
+# Author     : picetor
+# Date-Time  : 2026/06/24
+
+name: Build openppp2 (Main - amd64 + macOS)
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:      # 手动触发
+    inputs:
+      build_amd64:
+        description: 'Build amd64 variants'
+        type: boolean
+        default: true
+      build_macos:
+        description: 'Build macOS (arm64 + amd64)'
+        type: boolean
+        default: true
+
+jobs:
+  # ============================================================
+  # Job 1: amd64 - 8 variants (parallel matrix build)
+  # ============================================================
+  build-amd64:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_amd64 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          # variant name        | SIMD? | IO_URING? | TC?
+          - name: base
+            simd: "OFF"
+            iouring: "OFF"
+            tc: "OFF"
+          - name: simd
+            simd: "ON"
+            iouring: "OFF"
+            tc: "OFF"
+          - name: io-uring
+            simd: "OFF"
+            iouring: "ON"
+            tc: "OFF"
+          - name: io-uring-simd
+            simd: "ON"
+            iouring: "ON"
+            tc: "OFF"
+          - name: tc-simd
+            simd: "ON"
+            iouring: "OFF"
+            tc: "ON"
+          - name: tc-io-uring
+            simd: "OFF"
+            iouring: "ON"
+            tc: "ON"
+          - name: tc-io-uring-simd
+            simd: "ON"
+            iouring: "ON"
+            tc: "ON"
+
+    runs-on: ubuntu-latest
+    env:
+      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake autoconf automake libtool \
+            zip unzip curl wget git python3 \
+            libssl-dev libzstd-dev \
+            liburing-dev libbpf-dev libelf-dev
+
+      - name: Download prebuilt 3rd-party libraries (amd64)
+        run: |
+          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
+          echo "3rd-party libraries downloaded to ${{ env.THIRD_PARTY_DIR }}"
+          ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: amd64 dir not found, trying root"
+          ls -la "${{ github.workspace }}/3rd/" || echo "WARNING: 3rd dir empty"
+
+      - name: Build variant ${{ matrix.variant.name }}
+        id: build
+        run: |
+          TS=$(date '+%Y%m%d_%H%M')
+          VARIANT="${{ matrix.variant.name }}"
+          SIMD="${{ matrix.variant.simd }}"
+          IOURING="${{ matrix.variant.iouring }}"
+          TC="${{ matrix.variant.tc }}"
+          THIRD_PARTY_DIR="${{ env.THIRD_PARTY_DIR }}"
+
+          echo "=== Building: ${VARIANT} ==="
+          echo "SIMD=${SIMD}, IO_URING=${IOURING}, TC=${TC}"
+          echo "THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
+
+          # Build CMake flags - use THIRD_PARTY_DIR directly (no /root/dev symlink needed)
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DTHIRD_PARTY_LIBRARY_DIR=${THIRD_PARTY_DIR}"
+
+          # SIMD: NOT_HAVE_SIMD=ON disables SIMD
+          if [ "${SIMD}" = "OFF" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
+          fi
+
+          # IO_URING
+          if [ "${IOURING}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_IO_URING=ON"
+          fi
+
+          # TC
+          if [ "${TC}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_TC=ON"
+          fi
+
+          # Build
+          rm -rf build && mkdir build && cd build
+          cmake .. ${CMAKE_FLAGS}
+          make -j$(nproc)
+
+          # Check binary
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Name output
+          SUFFIX=""
+          if [ "${VARIANT}" != "base" ]; then
+            SUFFIX="-${VARIANT}"
+          fi
+          ARTIFACT_NAME="openppp2-linux-amd64${SUFFIX}_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-linux-amd64-${{ matrix.variant.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 2: macOS - arm64 + amd64
+  # ============================================================
+  build-macos:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: arm64
+            arch: arm64
+            triple: darwin-arm64
+            repo: Liz-Nozomi/openppp2-macos-arm64-environment
+          - name: amd64
+            arch: x86_64
+            triple: darwin-amd64
+            repo: liulilittle/openppp2-macos-amd64-environment
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Download prebuilt 3rd-party libraries (macOS ${{ matrix.platform.name }})
+        run: |
+          git clone https://github.com/${{ matrix.platform.repo }}.git 3rd
+          echo "3rd-party libraries downloaded"
+          ls -la 3rd/ || echo "WARNING: 3rd dir empty"
+
+      - name: Build openppp2 (macOS ${{ matrix.platform.name }})
+        id: build
+        run: |
+          NCPU=$(sysctl -n hw.physicalcpu)
+          TS=$(date '+%Y%m%d_%H%M')
+          ARCH="${{ matrix.platform.arch }}"
+          TRIPLE="${{ matrix.platform.triple }}"
+
+          echo "=== Building macOS ${TRIPLE} ==="
+          echo "ncpu=${NCPU}"
+
+          # ARM64 doesn't support x86 AES/SSE SIMD instructions
+          SIMD_FLAG=""
+          if [ "${ARCH}" = "arm64" ]; then
+            SIMD_FLAG="-DNOT_HAVE_SIMD=ON"
+            echo "ARM64 detected: disabling SIMD (-maes -msse2 -mpclmul not supported)"
+          fi
+
+          # Build
+          rm -rf build && mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=${ARCH} \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DTHIRD_PARTY_LIBRARY_DIR=${GITHUB_WORKSPACE}/3rd \
+            ${SIMD_FLAG}
+          make -j ${NCPU}
+
+          # Check binary
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Name output
+          ARTIFACT_NAME="openppp2-${TRIPLE}_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
