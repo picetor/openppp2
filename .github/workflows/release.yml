@@ -1,0 +1,122 @@
+# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+# Description: Create a GitHub Release from build artifacts.
+# Author     : picetor
+# Date-Time  : 2026/06/24
+
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v6.24)'
+        required: true
+        type: string
+      build_amd64:
+        description: 'Include Linux amd64 builds'
+        type: boolean
+        default: true
+      build_aarch64:
+        description: 'Include Linux aarch64 builds'
+        type: boolean
+        default: true
+      build_windows:
+        description: 'Include Windows x64 builds'
+        type: boolean
+        default: true
+      build_macos:
+        description: 'Include macOS builds'
+        type: boolean
+        default: true
+
+jobs:
+  # First, trigger all build workflows and wait for them
+  # Since we can't directly depend on workflow_run across repos easily,
+  # we use separate download jobs per platform
+
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Download Linux amd64 artifacts
+        if: ${{ inputs.build_amd64 }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: build-openppp2-amd64.yml
+          branch: master
+          name: openppp2-linux-amd64-*
+          name_prefix: openppp2-linux-amd64-
+          path: dist/linux-amd64
+          skip_unpack: false
+
+      - name: Download Linux aarch64 artifacts
+        if: ${{ inputs.build_aarch64 }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: build-openppp2-aarch64.yml
+          branch: master
+          name: openppp2-linux-aarch64-*
+          name_prefix: openppp2-linux-aarch64-
+          path: dist/linux-aarch64
+          skip_unpack: false
+
+      - name: Download Windows artifacts
+        if: ${{ inputs.build_windows }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: build-openppp2-windows.yml
+          branch: master
+          name: openppp2-windows-x64
+          path: dist/windows
+          skip_unpack: false
+
+      - name: Download macOS artifacts
+        if: ${{ inputs.build_macos }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: build-openppp2-macos.yml
+          branch: master
+          name: openppp2-macos-*
+          name_prefix: openppp2-macos-
+          path: dist/macos
+          skip_unpack: false
+
+      - name: Organize release assets
+        run: |
+          echo "=== Release assets ==="
+          mkdir -p release-assets
+          find dist -name "*.zip" -exec cp -v {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: "openppp2 ${{ inputs.tag }}"
+          body: |
+            # openppp2 ${{ inputs.tag }}
+
+            ## 包含的构建
+
+            ${{ inputs.build_amd64 && '- Linux amd64 (7 variants: base, simd, io-uring, io-uring-simd, tc-simd, tc-io-uring, tc-io-uring-simd)' || '' }}
+            ${{ inputs.build_aarch64 && '- Linux aarch64 (4 variants: base, io-uring, tc, tc-io-uring)' || '' }}
+            ${{ inputs.build_windows && '- Windows x64' || '' }}
+            ${{ inputs.build_macos && '- macOS (arm64 + amd64)' || '' }}
+
+            ## 使用说明
+
+            请参阅 [README](https://github.com/picetor/openppp2) 获取详细使用说明。
+          files: release-assets/*
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -91,16 +91,30 @@ jobs:
           fi
 
           # Name output
-          ARTIFACT_NAME="openppp2-${TRIPLE}_${TS}"
+          ZIP_NAME="openppp2-${TRIPLE}"
+          ARTIFACT_NAME="${ZIP_NAME}_${TS}"
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
+          # Package into complete release zip
+          echo "=== Packaging ${ZIP_NAME}.zip ==="
+          PKG_DIR="${ZIP_NAME}"
+          mkdir -p "${PKG_DIR}"
+          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
+          cp "${GITHUB_WORKSPACE}/appsettings.json" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
+          cd "${PKG_DIR}" && zip -r "../${ZIP_NAME}.zip" . && cd ..
+          ls -la "${ZIP_NAME}.zip"
+
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}.zip" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
-          path: build/${{ env.ARTIFACT_NAME }}
+          path: build/${{ env.ZIP_NAME }}
           if-no-files-found: error
