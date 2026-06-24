@@ -49,12 +49,28 @@ jobs:
           repository: picetor/openppp2
           ref: master
 
+      - name: Restore vcpkg from cache
+        id: cache-vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/packages
+            ${{ github.workspace }}/vcpkg/downloads
+          # Cache key: invalidate when vcxproj deps change or vcpkg ports change
+          key: vcpkg-${{ hashFiles('ppp.vcxproj') }}
+          restore-keys: |
+            vcpkg-
+
       - name: Setup vcpkg
         run: |
-          cd ${{ github.workspace }}
-          git clone https://github.com/microsoft/vcpkg.git
-          cd vcpkg
-          .\bootstrap-vcpkg.bat
+          if (-not (Test-Path "${{ github.workspace }}/vcpkg/bootstrap-vcpkg.bat")) {
+            cd ${{ github.workspace }}
+            git clone https://github.com/microsoft/vcpkg.git
+            cd vcpkg
+            .\bootstrap-vcpkg.bat
+          } else {
+            Write-Output "vcpkg already exists, skipping clone"
+          }
           echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> $env:GITHUB_ENV
           echo "${{ github.workspace }}/vcpkg" | Out-File -FilePath $env:GITHUB_PATH -Append
 
