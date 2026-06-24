@@ -2592,6 +2592,13 @@ static int Run(const std::shared_ptr<PppApplication>& APP, int prepared_status, 
 // Program entry point
 int main(int argc, const char* argv[]) noexcept
 {
+#if defined(_WIN32)
+    // Set console code page to UTF-8 so that Unicode box-drawing characters
+    // (┌ ┐ │ └ ┘ etc.) and other UTF-8 text display correctly on Windows.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+
     // Configure real-time mode
     ppp::RT = ppp::ToBoolean(ppp::GetCommandArgument("--rt", argc, argv, "y").data());
     

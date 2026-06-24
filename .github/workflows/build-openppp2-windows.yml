@@ -1,5 +1,5 @@
 # Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
-# Description: Build openppp2 Windows (MSVC) - Debug workflow
+# Description: Build openppp2 Windows (MSVC) - Release workflow
 # Author     : picetor
 # Date-Time  : 2026/06/24
 
@@ -189,8 +189,49 @@ jobs:
 
           Write-Output "Found ppp.exe at: $exePath"
 
-          $ArtifactName = "openppp2-windows-x64_${TS}.exe"
-          Copy-Item $exePath $ArtifactName
+          # --- Create a release package with all needed files ---
+          $ReleaseDir = "openppp2-windows-x64_${TS}"
+          New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
+
+          # Copy executable
+          Copy-Item $exePath "$ReleaseDir\ppp.exe"
+
+          # Copy configuration files
+          Copy-Item appsettings.json "$ReleaseDir\appsettings.json"
+          Copy-Item cacert.pem "$ReleaseDir\cacert.pem"
+          Copy-Item firewall-rules.txt "$ReleaseDir\firewall-rules.txt"
+          Copy-Item dns-rules.txt "$ReleaseDir\dns-rules.txt"
+          Copy-Item ip.txt "$ReleaseDir\ip.txt"
+          Copy-Item cmcc.txt "$ReleaseDir\cmcc.txt"
+
+          # Copy Driver directory if it exists
+          if (Test-Path "Driver") {
+            Copy-Item -Path "Driver" -Destination "$ReleaseDir\Driver\" -Recurse -Force
+          }
+
+          # Copy placeholder certs
+          Copy-Item starrylink.net.key "$ReleaseDir\starrylink.net.key"
+          Copy-Item starrylink.net.pem "$ReleaseDir\starrylink.net.pem"
+
+          # Create a startup test script
+          # Note: ppp.exe now sets UTF-8 console encoding internally via SetConsoleOutputCP(CP_UTF8),
+          # so chcp 65001 is no longer required for correct text display.
+          $scriptContent = '@echo off
+echo Testing ppp.exe --help output...
+ppp.exe --help
+echo.
+echo Exit code: %ERRORLEVEL%
+pause'
+          $scriptContent | Out-File -FilePath "$ReleaseDir\test_help.bat" -Encoding ASCII
+
+          Write-Output "=== Release package contents ==="
+          Get-ChildItem -Path $ReleaseDir -Recurse | Select-Object Mode, Length, Name | Format-Table -AutoSize
+
+          # Create the artifact (zip the whole directory)
+          Compress-Archive -Path "$ReleaseDir\*" -DestinationPath "${ReleaseDir}.zip" -Force
+          $ArtifactName = "${ReleaseDir}.zip"
+
+          Write-Output "Created artifact: $ArtifactName"
 
           echo "ARTIFACT_NAME=$ArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
