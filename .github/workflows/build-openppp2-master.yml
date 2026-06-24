@@ -212,21 +212,37 @@ jobs:
           set -e
           ARM64_LIB_DIR="${{ env.THIRD_PARTY_DIR }}"
 
-          # Download arm64 deb packages from Ubuntu 22.04 (jammy) which has working arm64 repos
-          # to extract libzstd.a and libz.a for cross-compilation
-          echo "=== Downloading arm64 libzstd-dev from Ubuntu jammy ==="
-          curl -sL -o /tmp/libzstd-dev-arm64.deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.5+dfsg2-2build1/libzstd-dev_1.5.5+dfsg2-2build1_arm64.deb" || \
-            curl -sL -o /tmp/libzstd-dev-arm64.deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.4+dfsg2-5/libzstd-dev_1.5.4+dfsg2-5_arm64.deb" || \
-            echo "Trying latest version..."
-          if [ -f /tmp/libzstd-dev-arm64.deb ] && [ -s /tmp/libzstd-dev-arm64.deb ]; then
+          # Helper: download a deb and verify it's really a deb package.
+          # curl -sL may get an HTML error page with exit 0, so we check with dpkg-deb -I.
+          download_deb() {
+            local url="$1"
+            local out="$2"
+            echo "  Trying: $url"
+            curl -sL -o "$out" "$url" || return 1
+            if [ -f "$out" ] && [ -s "$out" ]; then
+              dpkg-deb -I "$out" >/dev/null 2>&1 && return 0
+            fi
+            return 1
+          }
+
+          # --- libzstd.a ---
+          echo "=== Downloading arm64 libzstd-dev ==="
+          ZSTD_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.5+dfsg2-2build1/libzstd-dev_1.5.5+dfsg2-2build1_arm64.deb" \
+            /tmp/libzstd-dev-arm64.deb && ZSTD_DEB=1 || true
+          if [ -z "$ZSTD_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.4+dfsg2-5/libzstd-dev_1.5.4+dfsg2-5_arm64.deb" \
+              /tmp/libzstd-dev-arm64.deb && ZSTD_DEB=1 || true
+          fi
+          if [ -n "$ZSTD_DEB" ]; then
+            echo "Extracting libzstd.a from deb..."
             mkdir -p /tmp/zstd-extract
             dpkg-deb -x /tmp/libzstd-dev-arm64.deb /tmp/zstd-extract
             find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
-            echo "WARNING: Could not download libzstd-dev arm64 deb, will build from source"
-            # Build zstd from source for arm64
+            echo "WARNING: deb download failed, building libzstd from source..."
             git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src
             cd /tmp/zstd-src
             CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
@@ -235,17 +251,24 @@ jobs:
             echo "zstd built from source"
           fi
 
-          echo "=== Downloading arm64 zlib1g-dev from Ubuntu jammy ==="
-          curl -sL -o /tmp/zlib1g-dev-arm64.deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.13-4_arm64.deb" || \
-            curl -sL -o /tmp/zlib1g-dev-arm64.deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.11.dfsg-2_arm64.deb"
-          if [ -f /tmp/zlib1g-dev-arm64.deb ] && [ -s /tmp/zlib1g-dev-arm64.deb ]; then
+          # --- libz.a ---
+          echo "=== Downloading arm64 zlib1g-dev ==="
+          ZLIB_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.13-4_arm64.deb" \
+            /tmp/zlib1g-dev-arm64.deb && ZLIB_DEB=1 || true
+          if [ -z "$ZLIB_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.11.dfsg-2_arm64.deb" \
+              /tmp/zlib1g-dev-arm64.deb && ZLIB_DEB=1 || true
+          fi
+          if [ -n "$ZLIB_DEB" ]; then
+            echo "Extracting libz.a from deb..."
             mkdir -p /tmp/zlib-extract
             dpkg-deb -x /tmp/zlib1g-dev-arm64.deb /tmp/zlib-extract
             find /tmp/zlib-extract -name "libz*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
-            echo "WARNING: Could not download zlib1g-dev arm64 deb, will build from source"
+            echo "WARNING: deb download failed, building zlib from source..."
             git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src
             cd /tmp/zlib-src
             CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
@@ -255,7 +278,7 @@ jobs:
             echo "zlib built from source"
           fi
 
-          # Build liburing for arm64 (needed for io_uring variant)
+          # --- liburing (needed for io_uring variant) ---
           echo "=== Building liburing for arm64 ==="
           git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src || \
           git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing-src
@@ -468,7 +491,10 @@ jobs:
 
       - name: Install vcpkg dependencies
         run: |
-          cd "${{ github.workspace }}\vcpkg"
+          # vcpkg/ is in .gitignore, so we need to bootstrap it manually
+          cd "${{ github.workspace }}"
+          git clone https://github.com/microsoft/vcpkg.git
+          cd vcpkg
           .\bootstrap-vcpkg.bat
           .\vcpkg install boost-system boost-coroutine boost-thread boost-context boost-regex boost-filesystem openssl jemalloc --triplet x64-windows-static
         shell: cmd
