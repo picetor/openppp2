@@ -304,6 +304,29 @@ namespace ppp {
                         }
                     }
                 }
+#elif defined(_WIN32)
+                // On Windows, use IP_UNICAST_IF to bind the socket to the physical NIC interface.
+                // This prevents routing loops when the TAP adapter becomes the default gateway.
+                if (!remoteIP.is_loopback()) {
+                    auto underlying_ni = switcher_->GetUnderlyingNetworkInterface();
+                    if (NULLPTR != underlying_ni && underlying_ni->Index > 0) {
+                        int if_index = underlying_ni->Index;
+                        if (remoteIP.is_v4()) {
+                            // IP_UNICAST_IF = 31 (IPPROTO_IP level)
+                            // The value is the interface index in network byte order (ULONG)
+                            ULONG index = htonl((ULONG)if_index);
+                            ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
+                        }
+#if defined(IPPROTO_IPV6)
+                        else {
+                            // IPV6_UNICAST_IF = 31 (IPPROTO_IPV6 level)
+                            // The value is the interface index directly (ULONG)
+                            ULONG index = (ULONG)if_index;
+                            ::setsockopt(socket->native_handle(), IPPROTO_IPV6, 31, (const char*)&index, sizeof(index));
+                        }
+#endif
+                    }
+                }
 #endif
 
                 bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y);
