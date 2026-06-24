@@ -79,7 +79,8 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake autoconf automake libtool \
             zip unzip curl wget git python3 \
-            libssl-dev libzstd-dev
+            libssl-dev libzstd-dev \
+            liburing-dev libbpf-dev libelf-dev
 
       - name: Download prebuilt 3rd-party libraries (amd64)
         run: |
@@ -215,8 +216,10 @@ jobs:
           SET(CMAKE_STRIP aarch64-linux-gnu-strip)
           SET(CMAKE_RANLIB aarch64-linux-gnu-ranlib)
 
-          # Static link flags for aarch64 (same as amd64)
-          SET(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -nodefaultlibs -rdynamic -Wl,-Bstatic")
+          # Static link flags for aarch64
+          # NOTE: -nodefaultlibs breaks CMake compiler detection for cross-compilers,
+          # so we omit it here. The actual build uses -static which is sufficient.
+          SET(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -rdynamic -Wl,-Bstatic")
 
           SET(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
           SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
