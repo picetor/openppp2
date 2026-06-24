@@ -23,7 +23,7 @@ on:
       build_windows:
         description: 'Include Windows x64 builds'
         type: boolean
-        default: true
+        default: false
       build_macos:
         description: 'Include macOS builds'
         type: boolean

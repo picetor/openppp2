@@ -200,28 +200,15 @@ jobs:
 
           Write-Output "Found ppp.exe at: $exePath"
 
-          # Package into complete release zip
-          $ZIP_NAME = "openppp2-windows-x64"
-          Write-Output "=== Packaging ${ZIP_NAME}.zip ==="
-          $PKG_DIR = "${{ github.workspace }}\${ZIP_NAME}"
-          New-Item -ItemType Directory -Force -Path $PKG_DIR | Out-Null
-          Copy-Item $exePath "$PKG_DIR\ppp.exe"
-          Copy-Item "${{ github.workspace }}\appsettings.json" "$PKG_DIR\"
-          Copy-Item "${{ github.workspace }}\dns-rules.txt" "$PKG_DIR\"
-          Copy-Item "${{ github.workspace }}\firewall-rules.txt" "$PKG_DIR\"
-          Copy-Item "${{ github.workspace }}\ip.txt" "$PKG_DIR\"
-          if (Test-Path "${{ github.workspace }}\Driver") {
-            Copy-Item -Recurse "${{ github.workspace }}\Driver" "$PKG_DIR\Driver"
-          }
-          Compress-Archive -Path "$PKG_DIR\*" -DestinationPath "${{ github.workspace }}\${ZIP_NAME}.zip" -Force
-          Write-Output "Created ${ZIP_NAME}.zip"
+          $ArtifactName = "openppp2-windows-x64_${TS}.exe"
+          Copy-Item $exePath $ArtifactName
 
-          echo "ZIP_NAME=${ZIP_NAME}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "ARTIFACT_NAME=$ArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: openppp2-windows-x64
-          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          path: ${{ github.workspace }}/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
