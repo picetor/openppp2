@@ -243,11 +243,23 @@ jobs:
             find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
             echo "WARNING: deb download failed, building libzstd from source..."
-            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src
+            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src || \
+            git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src
             cd /tmp/zstd-src
+            # Use cmake to build zstd for arm64
+            mkdir -p build && cd build
             CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-            make -j$(nproc) lib/libzstd.a CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar
-            cp lib/libzstd.a "${ARM64_LIB_DIR}/"
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
+              -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+              -DCMAKE_AR=aarch64-linux-gnu-ar -DCMAKE_RANLIB=aarch64-linux-gnu-ranlib
+            make -j$(nproc)
+            # libzstd.a may be in build/ or build/lib/
+            find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+            if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
+              # Try source dir
+              find /tmp/zstd-src -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+            fi
             echo "zstd built from source"
           fi
 
@@ -269,7 +281,8 @@ jobs:
             find /tmp/zlib-extract -name "libz*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
             echo "WARNING: deb download failed, building zlib from source..."
-            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src
+            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src || \
+            git clone --depth 1 https://github.com/madler/zlib.git /tmp/zlib-src
             cd /tmp/zlib-src
             CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
             ./configure --static --prefix=/tmp/zlib-install
@@ -495,7 +508,7 @@ jobs:
           cd "${{ github.workspace }}"
           git clone https://github.com/microsoft/vcpkg.git
           cd vcpkg
-          .\bootstrap-vcpkg.bat
+          .\bootstrap-vcpkg.bat -disableMetrics
           .\vcpkg install boost-system boost-coroutine boost-thread boost-context boost-regex boost-filesystem openssl jemalloc --triplet x64-windows-static
         shell: cmd
 
@@ -505,8 +518,23 @@ jobs:
           $TS = Get-Date -Format "yyyyMMdd_HHmm"
           echo "=== Building Windows x64 Release ==="
 
+          # Find MSBuild path using vswhere
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2>$null
+          if (-not $msbuild) {
+            # Fallback: try common paths
+            $msbuild = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\MSBuild\*\Bin\MSBuild.exe" | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $msbuild) {
+            # Try dotnet msbuild
+            $msbuild = "dotnet"
+            $msbuildArgs = @("msbuild")
+          } else {
+            $msbuildArgs = @()
+          }
+          Write-Output "Using MSBuild: $msbuild"
+
           # Restore NuGet packages and build
-          msbuild ppp.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m
+          & $msbuild @msbuildArgs ppp.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m
 
           # Check binary
           if (-not (Test-Path "x64\Release\ppp.exe")) {
