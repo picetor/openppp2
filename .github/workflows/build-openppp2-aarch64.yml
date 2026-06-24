@@ -127,7 +127,7 @@ jobs:
               -DCMAKE_AR=/usr/bin/aarch64-linux-gnu-ar -DCMAKE_RANLIB=/usr/bin/aarch64-linux-gnu-ranlib \
               -DCMAKE_C_ARCHIVE_CREATE="/usr/bin/aarch64-linux-gnu-ar cr <TARGET> <LINK_FLAGS> <OBJECTS>" \
               -DCMAKE_C_ARCHIVE_FINISH="/usr/bin/aarch64-linux-gnu-ranlib <TARGET>"
-            make -j$(nproc) 2>&1
+            make -j$(nproc) 2>&1 || true
             find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
             if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
               echo "cmake build failed, trying zstd's native Makefile..."
