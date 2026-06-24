@@ -14,23 +14,6 @@ on:
 
 jobs:
   build-windows:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - name: base
-            iouring: "OFF"
-            tc: "OFF"
-          - name: io-uring
-            iouring: "ON"
-            tc: "OFF"
-          - name: tc
-            iouring: "OFF"
-            tc: "ON"
-          - name: tc-io-uring
-            iouring: "ON"
-            tc: "ON"
-
     runs-on: windows-latest
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
@@ -111,29 +94,15 @@ jobs:
             exit 1
           }
 
-      - name: Build variant ${{ matrix.variant.name }}
+      - name: Build Windows
         id: build
         run: |
           $TS = Get-Date -Format "yyyyMMdd_HHmm"
-          $Variant = "${{ matrix.variant.name }}"
-          $Iouring = "${{ matrix.variant.iouring }}"
-          $Tc = "${{ matrix.variant.tc }}"
 
-          Write-Output "=== Building Windows: ${Variant} ==="
-          Write-Output "IO_URING=${Iouring}, TC=${Tc}"
-
-          # Set defines based on variant
-          $Defines = ""
-          if ($Iouring -eq "ON") {
-            $Defines = "$Defines /DENABLE_IO_URING"
-          }
-          if ($Tc -eq "ON") {
-            $Defines = "$Defines /DENABLE_TC"
-          }
+          Write-Output "=== Building Windows x64 ==="
 
           # Build with MSBuild
           msbuild ppp.sln /p:Configuration=Release /p:Platform=x64 `
-            /p:AdditionalOptions="$Defines" `
             /t:Clean;Build `
             /m
 
@@ -155,11 +124,7 @@ jobs:
 
           Write-Output "Found ppp.exe at: $exePath"
 
-          $Suffix = ""
-          if ($Variant -ne "base") {
-            $Suffix = "-${Variant}"
-          }
-          $ArtifactName = "openppp2-windows-x64${Suffix}_${TS}.exe"
+          $ArtifactName = "openppp2-windows-x64_${TS}.exe"
           Copy-Item $exePath $ArtifactName
 
           echo "ARTIFACT_NAME=$ArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -168,6 +133,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openppp2-windows-x64-${{ matrix.variant.name }}
+          name: openppp2-windows-x64
           path: ${{ github.workspace }}/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
