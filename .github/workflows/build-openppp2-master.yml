@@ -192,6 +192,13 @@ jobs:
             build-essential cmake autoconf automake libtool \
             zip unzip curl wget git python3 \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          # Add arm64 architecture and install cross-compiled libs
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libzstd-dev:arm64 zlib1g-dev:arm64 \
+            liburing-dev:arm64 libbpf-dev:arm64 libelf-dev:arm64 || \
+            echo "Warning: some arm64 libs not available via apt, will try alternative methods"
 
       - name: Download prebuilt 3rd-party libraries (aarch64)
         run: |
@@ -221,10 +228,13 @@ jobs:
           # so we omit it here. The actual build uses -static which is sufficient.
           SET(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -rdynamic -Wl,-Bstatic")
 
-          SET(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
+          SET(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu)
           SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
           SET(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
           SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+          # Explicitly set library directories for cross-compilation
+          LINK_DIRECTORIES(/usr/lib/aarch64-linux-gnu /usr/aarch64-linux-gnu/lib)
           TOOLCHAIN_EOF
           echo "Toolchain file created at /tmp/aarch64-toolchain.cmake"
 
