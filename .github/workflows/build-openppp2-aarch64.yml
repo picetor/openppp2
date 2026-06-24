@@ -214,11 +214,11 @@ jobs:
           echo "=== Downloading arm64 libbpf-dev ==="
           BPF_DEB=""
           download_deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libbpf/libbpf/libbpf-dev_1.2.0-1_arm64.deb" \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbpf/libbpf-dev_1.6.3-1ubuntu1_arm64.deb" \
             /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
           if [ -z "$BPF_DEB" ]; then
             download_deb \
-              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libbpf/libbpf/libbpf-dev_1.1.0-1_arm64.deb" \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbpf/libbpf-dev_1.5.0-2_arm64.deb" \
               /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
           fi
           if [ -n "$BPF_DEB" ]; then
@@ -233,11 +233,11 @@ jobs:
           echo "=== Downloading arm64 libelf-dev ==="
           ELF_DEB=""
           download_deb \
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.190-1_arm64.deb" \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.195-1_arm64.deb" \
             /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
           if [ -z "$ELF_DEB" ]; then
             download_deb \
-              "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.189-1_arm64.deb" \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.194-4_arm64.deb" \
               /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
           fi
           if [ -n "$ELF_DEB" ]; then
