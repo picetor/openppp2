@@ -113,6 +113,7 @@ WebSocket tunnel encapsulates PPP traffic in WebSocket protocol, recognizable an
 ```
 
 > **Use case**: Server behind CDN, no TLS needed (data encrypted by PPP layer AES).
+Add your domain to Cloudflare with proxy (orange cloud) enabled, then create an Origin Rule to route traffic back to port 20080.
 
 ---
 
@@ -151,6 +152,7 @@ WSS = WebSocket over TLS, adding TLS encryption on top of WS for double-layer se
 ```
 
 > **Use case**: TLS encrypted transport through CDN, balancing security and speed.
+Add your domain to Cloudflare with proxy (orange cloud) enabled, obtain a certificate via acme, set SSL to Full (Strict), configure the certificate, then create an Origin Rule to route traffic back to port 20443.
 
 ---
 
