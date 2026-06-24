@@ -243,8 +243,9 @@ jobs:
             find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
             echo "WARNING: deb download failed, building libzstd from source..."
-            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src || \
-            git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src
+            rm -rf /tmp/zstd-src
+            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src 2>/dev/null || \
+            (rm -rf /tmp/zstd-src && git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src)
             cd /tmp/zstd-src
             # Use cmake to build zstd for arm64
             mkdir -p build && cd build
@@ -281,8 +282,9 @@ jobs:
             find /tmp/zlib-extract -name "libz*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
             echo "WARNING: deb download failed, building zlib from source..."
-            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src || \
-            git clone --depth 1 https://github.com/madler/zlib.git /tmp/zlib-src
+            rm -rf /tmp/zlib-src
+            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src 2>/dev/null || \
+            (rm -rf /tmp/zlib-src && git clone --depth 1 https://github.com/madler/zlib.git /tmp/zlib-src)
             cd /tmp/zlib-src
             CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
             ./configure --static --prefix=/tmp/zlib-install
@@ -293,8 +295,9 @@ jobs:
 
           # --- liburing (needed for io_uring variant) ---
           echo "=== Building liburing for arm64 ==="
-          git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src || \
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing-src
+          rm -rf /tmp/liburing-src
+          git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src 2>/dev/null || \
+          (rm -rf /tmp/liburing-src && git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing-src)
           cd /tmp/liburing-src
           CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
           AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
@@ -511,6 +514,22 @@ jobs:
           .\bootstrap-vcpkg.bat -disableMetrics
           .\vcpkg install boost-system boost-coroutine boost-thread boost-context boost-regex boost-filesystem openssl jemalloc --triplet x64-windows-static
         shell: cmd
+
+      - name: Create cacert.pem for Windows build
+        run: |
+          # ppp.vcxproj references cacert.pem but only cacert.sha256 exists in repo
+          # Download from curl's CA bundle or create empty placeholder
+          $cacertPath = "${{ github.workspace }}\cacert.pem"
+          if (-not (Test-Path $cacertPath)) {
+            Write-Output "Downloading cacert.pem from curl.se..."
+            try {
+              Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile $cacertPath -UseBasicParsing -ErrorAction Stop
+              Write-Output "Downloaded cacert.pem ($((Get-Item $cacertPath).Length) bytes)"
+            } catch {
+              Write-Output "WARNING: Download failed, creating empty cacert.pem"
+              Set-Content -Path $cacertPath -Value ""
+            }
+          }
 
       - name: Build openppp2 (Windows x64)
         id: build
