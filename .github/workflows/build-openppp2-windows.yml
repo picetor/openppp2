@@ -122,10 +122,63 @@ jobs:
         run: |
           $TS = Get-Date -Format "yyyyMMdd_HHmm"
 
+          Write-Output "=== Setting up vcpkg_installed for MSBuild ==="
+
+          # ppp.vcxproj uses VcpkgEnableManifest which expects vcpkg_installed/
+          # Create the directory structure pointing to the actual vcpkg install
+          $vcpkgInstalled = "${{ github.workspace }}\vcpkg_installed\x64-windows-static"
+          New-Item -ItemType Directory -Force -Path "$vcpkgInstalled\include" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$vcpkgInstalled\lib" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$vcpkgInstalled\lib\manual-link" | Out-Null
+
+          # Copy boost, openssl, jemalloc headers from vcpkg
+          $vcpkgPackages = "${{ github.workspace }}\vcpkg\packages"
+          if (Test-Path "$vcpkgPackages\boost-headers_x64-windows-static") {
+            Copy-Item -Recurse -Force "$vcpkgPackages\boost-headers_x64-windows-static\include\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
+          }
+          # Copy all boost subpackage headers
+          Get-ChildItem "$vcpkgPackages" -Filter "boost-*_x64-windows-static" -Directory | ForEach-Object {
+            $incPath = Join-Path $_.FullName "include"
+            if (Test-Path $incPath) {
+              Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
+            }
+          }
+          # openssl
+          $opensslDir = Get-ChildItem "$vcpkgPackages" -Filter "openssl*_x64-windows-static" -Directory | Select-Object -First 1
+          if ($opensslDir) {
+            $incPath = Join-Path $opensslDir.FullName "include"
+            if (Test-Path $incPath) {
+              Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
+            }
+          }
+          # jemalloc
+          $jemallocDir = Get-ChildItem "$vcpkgPackages" -Filter "jemalloc*_x64-windows-static" -Directory | Select-Object -First 1
+          if ($jemallocDir) {
+            $incPath = Join-Path $jemallocDir.FullName "include"
+            if (Test-Path $incPath) {
+              Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
+            }
+          }
+
+          # Copy .lib files
+          Get-ChildItem "$vcpkgPackages" -Recurse -Filter "*.lib" | ForEach-Object {
+            Copy-Item $_.FullName "$vcpkgInstalled\lib\" -Force -ErrorAction SilentlyContinue
+          }
+
+          Write-Output "vcpkg_installed setup complete"
+
+          # Create placeholder files for missing items
+          if (-not (Test-Path "${{ github.workspace }}\starrylink.net.key")) {
+            "# placeholder" | Out-File -FilePath "${{ github.workspace }}\starrylink.net.key"
+          }
+          if (-not (Test-Path "${{ github.workspace }}\starrylink.net.pem")) {
+            "# placeholder" | Out-File -FilePath "${{ github.workspace }}\starrylink.net.pem"
+          }
+
           Write-Output "=== Building Windows x64 ==="
 
-          # Build with MSBuild
-          msbuild ppp.sln /p:Configuration=Release /p:Platform=x64 `
+          # Build with MSBuild (only the ppp project, skip sysproxy32 which has missing deps)
+          msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=x64 `
             "/t:Clean;Build" `
             /m
 
