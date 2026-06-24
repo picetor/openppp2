@@ -198,6 +198,15 @@ jobs:
           fi
           echo "liburing built for arm64"
 
+          # CMakeLists.txt LINK_DIRECTORIES only includes subdirs like openssl/, jemalloc/lib/
+          # Copy all .a files there so the linker can find them
+          echo "=== Copying libs to LINK_DIRECTORIES paths ==="
+          mkdir -p "${ARM64_LIB_DIR}/openssl" "${ARM64_LIB_DIR}/jemalloc/lib"
+          for lib in "${ARM64_LIB_DIR}"/*.a; do
+            [ -f "$lib" ] || continue
+            cp -v "$lib" "${ARM64_LIB_DIR}/openssl/"
+            cp -v "$lib" "${ARM64_LIB_DIR}/jemalloc/lib/"
+          done
           echo "=== Final arm64 libs ==="
           ls -la "${ARM64_LIB_DIR}/"/*.a 2>/dev/null || echo "No .a files found"
 
