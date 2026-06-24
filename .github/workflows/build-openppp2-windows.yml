@@ -216,12 +216,14 @@ jobs:
           # Create a startup test script
           # Note: ppp.exe now sets UTF-8 console encoding internally via SetConsoleOutputCP(CP_UTF8),
           # so chcp 65001 is no longer required for correct text display.
-          $scriptContent = '@echo off
+          $scriptContent = @"
+@echo off
 echo Testing ppp.exe --help output...
 ppp.exe --help
 echo.
 echo Exit code: %ERRORLEVEL%
-pause'
+pause
+"@
           $scriptContent | Out-File -FilePath "$ReleaseDir\test_help.bat" -Encoding ASCII
 
           Write-Output "=== Release package contents ==="
