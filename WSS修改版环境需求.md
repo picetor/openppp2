@@ -1,119 +1,117 @@
-# openppp2 WSS 修改版编译环境需求清单
+# openppp2 WSS 修改版编译环境需求清单（基于本项目代码 [picetor/openppp2] 的 master 分支）
 
-> 本文档适用于本仓库 `master` 分支（修改版）的编译环境复现。
-> 基于原版代码修改，适配完全静态链接、GLIBC 兼容层、条件编译、多变体构建等特性。
+> 本文档基于本仓库 `master` 分支（[picetor/openppp2](https://github.com/picetor/openppp2)），以 CI 为准。
+> 以 CI 工作流为准记录编译环境与构建步骤。
+> 构建目标：本项目 Releases，关闭调试日志。
 > 最后更新：2026-06-24
-> 适用范围：用于在其他 Linux 环境，优先 Debian / Deepin 系，复现功能一致、链接方式一致、命名规则一致的修改版产物。
-> 复现边界：本文档默认目标不是生成字节完全一致的二进制，而是生成行为一致、配置一致、静态链接一致的修改版二进制。
->
-> **本文档已包含以下修改内容：**
-> - CMakeLists.txt 条件编译支持（ENABLE_IO_URING / ENABLE_TC）
-> - 完全静态链接配置修复（-rdynamic -Wl,-Bstatic）
-> - GLIBC 兼容层（glibc_compat.h + main.cpp 包含）
-> - aarch64 交叉编译 toolchain 文件
-> - 多变体编译步骤（基础版 / SIMD / io_uring / TC 及其组合）
-> - 产物命名与归档规则
-> - build-all.sh 多变体批量编译脚本
-> - 新增 `client.websocket.host` / `client.websocket.sni` 优选 IP 支持
 
 ---
 
 ## 一、编译环境
 
-### 1.1 操作系统
+### 1.1 CI 工作流环境
+
+本项目以 GitHub Actions CI 为主要构建方式，各平台构建环境如下：
+
+| 平台 | CI 运行环境 | 编译器 | CMake | 构建系统 |
+|------|------------|--------|-------|---------|
+| Linux amd64 | `ubuntu-latest` | 系统 g++ (≥13) | 系统 cmake (≥3.28) | make |
+| Linux aarch64 | `ubuntu-latest` | `g++-aarch64-linux-gnu` (交叉编译) | 系统 cmake (≥3.28) | make |
+| Windows | `windows-latest` | MSVC (Visual Studio 2022) | 随 VS 自带 | MSBuild |
+| macOS arm64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make |
+| macOS amd64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make |
+
+### 1.2 本地编译环境（参考）
+
+以下为本地（Deepin 23 WSL2）开发环境，供参考：
 
 | 项目 | 值 |
 |------|-----|
 | 发行版 | Deepin 23 (beige) |
 | 内核 | WSL2 x86_64 (Linux 6.18.33.1-microsoft-standard-WSL2) |
 | GLIBC | 2.38 |
+| g++ | 12.3.0 |
+| cmake | 3.31.4 |
+| GNU ld | 2.41 |
 
-### 1.2 编译工具链
+### 1.3 系统依赖包
 
-| 工具 | 版本 | 用途 |
-|------|------|------|
-| g++ | 12.3.0 (Deepin 12.3.0-17deepin12) | C++ 编译器 |
-| gcc | 12.3.0 | C 编译器 |
-| cmake | 3.31.4 | 构建系统 |
-| GNU ld | 2.41 (binutils) | 链接器 |
-| make | (随 cmake 安装) | 构建执行 |
-| musl-gcc | 12.3.0 (musl 1.2.2) | 备用 C 编译器（仅 C，无 C++） |
-
-### 1.3 交叉编译工具链（aarch64）
-
-| 工具 | 版本 | 用途 |
-|------|------|------|
-| aarch64-linux-gnu-g++ | 12.3.0 (Deepin 12.3.0-17deepin8cross1) | aarch64 C++ 交叉编译器 |
-| aarch64-linux-gnu-gcc | 12.3.0 | aarch64 C 交叉编译器 |
-| binutils-aarch64-linux-gnu | 2.41-6deepin7 | aarch64 GNU 二进制工具 |
-
-### 1.4 系统依赖包
+#### Linux amd64（CI + 本地）
 
 ```bash
-# 基础编译工具
-apt install -y \
-    g++ gcc cmake make binutils \
-    autoconf automake libtool pkg-config \
-    curl wget git python3
-
-# 标准库开发文件
-apt install -y \
-    libc-dev libstdc++-12-dev \
-    libatomic1 libgcc-12-dev \
-    libssl-dev libzstd-dev
-
-# 运行时数据文件（可选，用于路由和防火墙规则）
-# ip.txt, cmcc.txt, dns-rules.txt, firewall-rules.txt 等文件位于项目根目录
-
-# musl 工具链（备用）
-apt install -y musl musl-dev musl-tools
-
-# aarch64 交叉编译
-apt install -y \
-    g++-aarch64-linux-gnu \
-    gcc-aarch64-linux-gnu \
-    binutils-aarch64-linux-gnu \
-    libgcc-12-dev-arm64-cross \
-    libatomic1-arm64-cross
+sudo apt-get install -y \
+    build-essential cmake autoconf automake libtool \
+    zip unzip curl wget git python3 \
+    libssl-dev libzstd-dev \
+    liburing-dev libbpf-dev libelf-dev
 ```
+
+#### Linux aarch64 交叉编译（CI + 本地）
+
+```bash
+sudo apt-get install -y \
+    build-essential cmake autoconf automake libtool \
+    zip unzip curl wget git python3 \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+```
+
+> aarch64 的 zstd/zlib/liburing/libbpf/libelf 在 CI 中通过 deb 包提取或源码编译获得：
+> - **zstd**：`1.5.5+dfsg2-2build1`（deb）或 `v1.5.6`（源码）
+> - **zlib**：`1.2.13-4`（deb）或 `v1.3.1`（源码）
+> - **liburing**：`liburing-2.8`（源码）
+> - **libbpf**：`1.6.3-1ubuntu1`（deb）
+> - **libelf**：`0.195-1`（deb）
+> 详见 CI 工作流 `.github/workflows/build-openppp2-aarch64.yml`。
 
 ---
 
 ## 二、第三方依赖库
 
-### 2.1 库总览
+### 2.1 库来源说明
 
-| 库 | 版本 | 架构 | 安装路径 | 大小 |
-|----|------|------|----------|------|
-| Boost | 1.87.0 | amd64 | `/root/dev/boost/` | ~1.5MB (静态库) |
-| Boost | 1.87.0 | aarch64 | `/root/dev/arm64/boost/` | ~1.5MB (静态库) |
-| OpenSSL | 3.0.15 | amd64 | `/root/dev/openssl/` | ~10MB (静态库) |
-| OpenSSL | 3.0.15 | aarch64 | `/root/dev/arm64/openssl/` | ~10MB (静态库) |
-| jemalloc | 5.3.0 | amd64 | `/root/dev/jemalloc/` | ~40MB (静态库) |
-| jemalloc | 5.3.0 | aarch64 | `/root/dev/arm64/jemalloc/` | ~40MB (静态库) |
-| liburing | (最新) | amd64 | `/root/dev/liburing/` | ~172KB (静态库，可选) |
-| zstd | 1.5.6 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` | 系统包 |
-| zlib | 1.3.1 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` | 系统包 |
+本项目在 CI 中使用预编译的第三方库，各平台来源如下：
 
-### 2.2 Boost 1.87.0 构建步骤
+| 平台 | 来源 | 仓库 |
+|------|------|------|
+| Linux amd64 | 预编译仓库 | `liulilittle/openppp2-ubuntu-3rd-environment` |
+| Linux aarch64 | 预编译仓库 + 运行时交叉编译 | `liulilittle/openppp2-ubuntu-3rd-environment` + 源码编译 zstd/zlib/liburing/libbpf/libelf |
+| Windows | vcpkg | `boost-asio/beast/json/program-options/system/thread` + `openssl` + `jemalloc` |
+| macOS arm64 | 预编译仓库 | `Liz-Nozomi/openppp2-macos-arm64-environment` |
+| macOS amd64 | 预编译仓库 | `liulilittle/openppp2-macos-amd64-environment` |
 
-#### 源码下载
+### 2.2 本地编译第三方库（参考）
+
+以下为本地手动编译第三方库的步骤，适用于本地开发环境复现。
+
+#### 库版本
+
+| 库 | 版本 | 架构 | 安装路径 |
+|----|------|------|----------|
+| Boost | 1.87.0 | amd64 | `/root/dev/boost/` |
+| Boost | 1.87.0 | aarch64 | `/root/dev/arm64/boost/` |
+| OpenSSL | 3.0.15 | amd64 | `/root/dev/openssl/` |
+| OpenSSL | 3.0.15 | aarch64 | `/root/dev/arm64/openssl/` |
+| jemalloc | 5.3.0 | amd64 | `/root/dev/jemalloc/` |
+| jemalloc | 5.3.0 | aarch64 | `/root/dev/arm64/jemalloc/` |
+| liburing | 2.8 | amd64 | `/root/dev/liburing/` |
+| zstd | 1.5.6 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` |
+| zlib | 1.3.1 | amd64 | 系统 `/usr/lib/x86_64-linux-gnu/` |
+
+#### Boost 1.87.0
+
 ```bash
+# 下载
 cd /root/dev
 wget https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2
 tar -xf boost_1_87_0.tar.bz2
-```
 
-#### amd64 编译
-```bash
+# amd64 编译
 cd /root/dev/boost_1_87_0
 ./bootstrap.sh --with-libraries=system,coroutine,thread,context,regex,filesystem,atomic
 ./b2 cxxflags="-fPIC" link=static variant=release threading=multi \
     install --prefix=/root/dev/boost
-```
 
-#### aarch64 交叉编译
-```bash
+# aarch64 交叉编译
 cd /root/dev/arm64/boost_1_87_0
 echo "using gcc : arm : aarch64-linux-gnu-g++ ;" > tools/build/src/user-config.jam
 ./bootstrap.sh --with-libraries=system,coroutine,thread,context,regex,filesystem,atomic
@@ -122,17 +120,15 @@ echo "using gcc : arm : aarch64-linux-gnu-g++ ;" > tools/build/src/user-config.j
     install --prefix=/root/dev/arm64/boost
 ```
 
-### 2.3 OpenSSL 3.0.15 构建步骤
+#### OpenSSL 3.0.15
 
-#### 源码下载
 ```bash
+# 下载
 cd /root/dev
 wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
 tar -xzf openssl-3.0.15.tar.gz
-```
 
-#### amd64 编译
-```bash
+# amd64 编译
 cd /root/dev/openssl-3.0.15
 ./Configure linux-x86_64 no-shared no-asm -fPIC \
     --prefix=/root/dev/openssl --openssldir=/root/dev/openssl
