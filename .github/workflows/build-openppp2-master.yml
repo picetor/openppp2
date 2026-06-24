@@ -1,0 +1,306 @@
+# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+# Description: Build openppp2 master branch (modified fork) - All variants.
+#              Builds 8 amd64 variants + 4 aarch64 variants using prebuilt 3rd-party libs.
+# Author     : picetor
+# Date-Time  : 2026/06/24
+
+name: Build openppp2 (Master Branch)
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:      # 手动触发
+    inputs:
+      build_amd64:
+        description: 'Build amd64 variants'
+        type: boolean
+        default: true
+      build_aarch64:
+        description: 'Build aarch64 variants'
+        type: boolean
+        default: true
+
+jobs:
+  # ============================================================
+  # Job 1: amd64 - 8 variants (parallel matrix build)
+  # ============================================================
+  build-amd64:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_amd64 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          # variant name        | SIMD? | IO_URING? | TC?
+          - name: base
+            simd: "OFF"
+            iouring: "OFF"
+            tc: "OFF"
+          - name: simd
+            simd: "ON"
+            iouring: "OFF"
+            tc: "OFF"
+          - name: io-uring
+            simd: "OFF"
+            iouring: "ON"
+            tc: "OFF"
+          - name: io-uring-simd
+            simd: "ON"
+            iouring: "ON"
+            tc: "OFF"
+          - name: tc-simd
+            simd: "ON"
+            iouring: "OFF"
+            tc: "ON"
+          - name: tc-io-uring
+            simd: "OFF"
+            iouring: "ON"
+            tc: "ON"
+          - name: tc-io-uring-simd
+            simd: "ON"
+            iouring: "ON"
+            tc: "ON"
+
+    runs-on: ubuntu-latest
+    env:
+      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: https://github.com/picetor/openppp2
+          ref: master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake autoconf automake libtool \
+            zip unzip curl wget git python3 \
+            libssl-dev libzstd-dev
+
+      - name: Download prebuilt 3rd-party libraries (amd64)
+        run: |
+          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
+          echo "3rd-party libraries downloaded to ${{ env.THIRD_PARTY_DIR }}"
+          ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: amd64 dir not found, trying root"
+          ls -la "${{ github.workspace }}/3rd/" || echo "WARNING: 3rd dir empty"
+
+      - name: Set up THIRD_PARTY_LIBRARY_DIR symlink
+        run: |
+          # The CMakeLists.txt expects /root/dev as default THIRD_PARTY_LIBRARY_DIR
+          # We override it via cmake -D flag, but also create symlink for safety
+          sudo mkdir -p /root
+          if [ -d "${{ env.THIRD_PARTY_DIR }}" ]; then
+            sudo ln -sf "${{ env.THIRD_PARTY_DIR }}" /root/dev
+          else
+            sudo ln -sf "${{ github.workspace }}/3rd" /root/dev
+          fi
+          echo "THIRD_PARTY_LIBRARY_DIR -> $(readlink -f /root/dev)"
+
+      - name: Build variant ${{ matrix.variant.name }}
+        id: build
+        run: |
+          TS=$(date '+%Y%m%d_%H%M')
+          VARIANT="${{ matrix.variant.name }}"
+          SIMD="${{ matrix.variant.simd }}"
+          IOURING="${{ matrix.variant.iouring }}"
+          TC="${{ matrix.variant.tc }}"
+
+          echo "=== Building: ${VARIANT} ==="
+          echo "SIMD=${SIMD}, IO_URING=${IOURING}, TC=${TC}"
+
+          # Build CMake flags
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
+
+          # SIMD: NOT_HAVE_SIMD=ON disables SIMD
+          if [ "${SIMD}" = "OFF" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
+          fi
+
+          # IO_URING
+          if [ "${IOURING}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_IO_URING=ON"
+          fi
+
+          # TC
+          if [ "${TC}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_TC=ON"
+          fi
+
+          # Build
+          rm -rf build && mkdir build && cd build
+          cmake .. ${CMAKE_FLAGS}
+          make -j$(nproc)
+
+          # Check binary
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Name output
+          SUFFIX=""
+          if [ "${VARIANT}" != "base" ]; then
+            SUFFIX="-${VARIANT}"
+          fi
+          ARTIFACT_NAME="openppp2-linux-amd64${SUFFIX}_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-linux-amd64-${{ matrix.variant.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 2: aarch64 - 4 variants (parallel matrix build, cross-compile)
+  # ============================================================
+  build-aarch64:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_aarch64 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: base
+            iouring: "OFF"
+            tc: "OFF"
+          - name: io-uring
+            iouring: "ON"
+            tc: "OFF"
+          - name: tc
+            iouring: "OFF"
+            tc: "ON"
+          - name: tc-io-uring
+            iouring: "ON"
+            tc: "ON"
+
+    runs-on: ubuntu-latest
+    env:
+      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/aarch64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: https://github.com/picetor/openppp2
+          ref: master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake autoconf automake libtool \
+            zip unzip curl wget git python3 \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Download prebuilt 3rd-party libraries (aarch64)
+        run: |
+          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
+          echo "3rd-party libraries downloaded"
+          ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: aarch64 dir not found"
+
+      - name: Set up THIRD_PARTY_LIBRARY_DIR symlink
+        run: |
+          sudo mkdir -p /root
+          if [ -d "${{ env.THIRD_PARTY_DIR }}" ]; then
+            sudo ln -sf "${{ env.THIRD_PARTY_DIR }}" /root/dev/arm64
+          else
+            # Fallback: use root of 3rd
+            sudo mkdir -p /root/dev
+            sudo ln -sf "${{ github.workspace }}/3rd" /root/dev/arm64
+          fi
+          echo "THIRD_PARTY_LIBRARY_DIR -> $(readlink -f /root/dev/arm64)"
+
+      - name: Create aarch64 toolchain file
+        run: |
+          cat > /tmp/aarch64-toolchain.cmake << 'TOOLCHAIN_EOF'
+          SET(CMAKE_SYSTEM_NAME Linux)
+          SET(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+          SET(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+          SET(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+
+          SET(CMAKE_LINKER aarch64-linux-gnu-ld)
+          SET(CMAKE_AR aarch64-linux-gnu-ar)
+          SET(CMAKE_NM aarch64-linux-gnu-nm)
+          SET(CMAKE_OBJCOPY aarch64-linux-gnu-objcopy)
+          SET(CMAKE_OBJDUMP aarch64-linux-gnu-objdump)
+          SET(CMAKE_STRIP aarch64-linux-gnu-strip)
+          SET(CMAKE_RANLIB aarch64-linux-gnu-ranlib)
+
+          # Static link flags for aarch64 (same as amd64)
+          SET(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -nodefaultlibs -rdynamic -Wl,-Bstatic")
+
+          SET(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          TOOLCHAIN_EOF
+          echo "Toolchain file created at /tmp/aarch64-toolchain.cmake"
+
+      - name: Build variant ${{ matrix.variant.name }}
+        id: build
+        run: |
+          TS=$(date '+%Y%m%d_%H%M')
+          VARIANT="${{ matrix.variant.name }}"
+          IOURING="${{ matrix.variant.iouring }}"
+          TC="${{ matrix.variant.tc }}"
+
+          echo "=== Building aarch64: ${VARIANT} ==="
+          echo "IO_URING=${IOURING}, TC=${TC}"
+
+          # aarch64 always disables SIMD (AES-NI is x86 only)
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64"
+
+          # IO_URING
+          if [ "${IOURING}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_IO_URING=ON"
+          fi
+
+          # TC
+          if [ "${TC}" = "ON" ]; then
+            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_TC=ON"
+          fi
+
+          # Build
+          rm -rf build && mkdir build && cd build
+          cmake .. ${CMAKE_FLAGS}
+          make -j$(nproc)
+
+          # Check binary
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Name output
+          SUFFIX=""
+          if [ "${VARIANT}" != "base" ]; then
+            SUFFIX="-${VARIANT}"
+          fi
+          ARTIFACT_NAME="openppp2-linux-aarch64${SUFFIX}_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-linux-aarch64-${{ matrix.variant.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
