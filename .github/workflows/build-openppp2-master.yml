@@ -200,19 +200,83 @@ jobs:
             build-essential cmake autoconf automake libtool \
             zip unzip curl wget git python3 \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          # Add arm64 architecture and install cross-compiled libs
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            libzstd-dev:arm64 zlib1g-dev:arm64 \
-            liburing-dev:arm64 libbpf-dev:arm64 libelf-dev:arm64 || \
-            echo "Warning: some arm64 libs not available via apt, will try alternative methods"
 
       - name: Download prebuilt 3rd-party libraries (aarch64)
         run: |
           git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
           echo "3rd-party libraries downloaded"
           ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: aarch64 dir not found"
+
+      - name: Build arm64 cross libs (zstd, zlib, liburing)
+        run: |
+          set -e
+          ARM64_LIB_DIR="${{ env.THIRD_PARTY_DIR }}"
+
+          # Download arm64 deb packages from Ubuntu 22.04 (jammy) which has working arm64 repos
+          # to extract libzstd.a and libz.a for cross-compilation
+          echo "=== Downloading arm64 libzstd-dev from Ubuntu jammy ==="
+          curl -sL -o /tmp/libzstd-dev-arm64.deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.5+dfsg2-2build1/libzstd-dev_1.5.5+dfsg2-2build1_arm64.deb" || \
+            curl -sL -o /tmp/libzstd-dev-arm64.deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.4+dfsg2-5/libzstd-dev_1.5.4+dfsg2-5_arm64.deb" || \
+            echo "Trying latest version..."
+          if [ -f /tmp/libzstd-dev-arm64.deb ] && [ -s /tmp/libzstd-dev-arm64.deb ]; then
+            mkdir -p /tmp/zstd-extract
+            dpkg-deb -x /tmp/libzstd-dev-arm64.deb /tmp/zstd-extract
+            find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: Could not download libzstd-dev arm64 deb, will build from source"
+            # Build zstd from source for arm64
+            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src
+            cd /tmp/zstd-src
+            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+            make -j$(nproc) lib/libzstd.a CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar
+            cp lib/libzstd.a "${ARM64_LIB_DIR}/"
+            echo "zstd built from source"
+          fi
+
+          echo "=== Downloading arm64 zlib1g-dev from Ubuntu jammy ==="
+          curl -sL -o /tmp/zlib1g-dev-arm64.deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.13-4_arm64.deb" || \
+            curl -sL -o /tmp/zlib1g-dev-arm64.deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.11.dfsg-2_arm64.deb"
+          if [ -f /tmp/zlib1g-dev-arm64.deb ] && [ -s /tmp/zlib1g-dev-arm64.deb ]; then
+            mkdir -p /tmp/zlib-extract
+            dpkg-deb -x /tmp/zlib1g-dev-arm64.deb /tmp/zlib-extract
+            find /tmp/zlib-extract -name "libz*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: Could not download zlib1g-dev arm64 deb, will build from source"
+            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src
+            cd /tmp/zlib-src
+            CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+            ./configure --static --prefix=/tmp/zlib-install
+            make -j$(nproc)
+            cp libz.a "${ARM64_LIB_DIR}/"
+            echo "zlib built from source"
+          fi
+
+          # Build liburing for arm64 (needed for io_uring variant)
+          echo "=== Building liburing for arm64 ==="
+          git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src || \
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing-src
+          cd /tmp/liburing-src
+          CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+          AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
+          ./configure --prefix=/tmp/liburing-install --libdir=/tmp/liburing-install/lib
+          make -j$(nproc)
+          make install
+          find /tmp/liburing-install -name "*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          # Also copy include dir
+          mkdir -p "${ARM64_LIB_DIR}/liburing/src/include"
+          cp -r /tmp/liburing-install/include/* "${ARM64_LIB_DIR}/liburing/src/include/" 2>/dev/null || true
+          if [ -d /tmp/liburing-src/src/include ]; then
+            mkdir -p "${ARM64_LIB_DIR}/liburing/src"
+            cp -r /tmp/liburing-src/src/include "${ARM64_LIB_DIR}/liburing/src/"
+          fi
+          echo "liburing built for arm64"
+
+          echo "=== Final arm64 libs ==="
+          ls -la "${ARM64_LIB_DIR}/"/*.a 2>/dev/null || echo "No .a files found"
 
       - name: Create aarch64 toolchain file
         run: |
@@ -349,13 +413,21 @@ jobs:
           echo "=== Building macOS ${TRIPLE} ==="
           echo "ncpu=${NCPU}"
 
+          # ARM64 doesn't support x86 AES/SSE SIMD instructions
+          SIMD_FLAG=""
+          if [ "${ARCH}" = "arm64" ]; then
+            SIMD_FLAG="-DNOT_HAVE_SIMD=ON"
+            echo "ARM64 detected: disabling SIMD (-maes -msse2 -mpclmul not supported)"
+          fi
+
           # Build
           rm -rf build && mkdir build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${ARCH} \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DTHIRD_PARTY_LIBRARY_DIR=${GITHUB_WORKSPACE}/3rd
+            -DTHIRD_PARTY_LIBRARY_DIR=${GITHUB_WORKSPACE}/3rd \
+            ${SIMD_FLAG}
           make -j ${NCPU}
 
           # Check binary
@@ -396,7 +468,7 @@ jobs:
 
       - name: Install vcpkg dependencies
         run: |
-          cd vcpkg
+          cd "${{ github.workspace }}\vcpkg"
           .\bootstrap-vcpkg.bat
           .\vcpkg install boost-system boost-coroutine boost-thread boost-context boost-regex boost-filesystem openssl jemalloc --triplet x64-windows-static
         shell: cmd
@@ -428,5 +500,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: openppp2-windows-amd64
-          path: build/${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
