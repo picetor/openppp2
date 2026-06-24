@@ -131,36 +131,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$vcpkgInstalled\lib" | Out-Null
           New-Item -ItemType Directory -Force -Path "$vcpkgInstalled\lib\manual-link" | Out-Null
 
-          # Copy boost, openssl, jemalloc headers from vcpkg
+          # Copy ALL headers and libs from vcpkg installed packages
           $vcpkgPackages = "${{ github.workspace }}\vcpkg\packages"
-          if (Test-Path "$vcpkgPackages\boost-headers_x64-windows-static") {
-            Copy-Item -Recurse -Force "$vcpkgPackages\boost-headers_x64-windows-static\include\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
-          }
-          # Copy all boost subpackage headers
-          Get-ChildItem "$vcpkgPackages" -Filter "boost-*_x64-windows-static" -Directory | ForEach-Object {
+          Get-ChildItem "$vcpkgPackages" -Directory | Where-Object { $_.Name -like "*_x64-windows-static" } | ForEach-Object {
             $incPath = Join-Path $_.FullName "include"
             if (Test-Path $incPath) {
+              Write-Output "  Copying headers from $($_.Name)..."
               Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
             }
-          }
-          # openssl
-          $opensslDir = Get-ChildItem "$vcpkgPackages" -Filter "openssl*_x64-windows-static" -Directory | Select-Object -First 1
-          if ($opensslDir) {
-            $incPath = Join-Path $opensslDir.FullName "include"
-            if (Test-Path $incPath) {
-              Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
+            $libPath = Join-Path $_.FullName "lib"
+            if (Test-Path $libPath) {
+              Copy-Item -Recurse -Force "$libPath\*" "$vcpkgInstalled\lib\" -ErrorAction SilentlyContinue
             }
           }
-          # jemalloc
-          $jemallocDir = Get-ChildItem "$vcpkgPackages" -Filter "jemalloc*_x64-windows-static" -Directory | Select-Object -First 1
-          if ($jemallocDir) {
-            $incPath = Join-Path $jemallocDir.FullName "include"
-            if (Test-Path $incPath) {
-              Copy-Item -Recurse -Force "$incPath\*" "$vcpkgInstalled\include\" -ErrorAction SilentlyContinue
-            }
-          }
-
-          # Copy .lib files
+          # Also copy any .lib files at package root level
           Get-ChildItem "$vcpkgPackages" -Recurse -Filter "*.lib" | ForEach-Object {
             Copy-Item $_.FullName "$vcpkgInstalled\lib\" -Force -ErrorAction SilentlyContinue
           }
