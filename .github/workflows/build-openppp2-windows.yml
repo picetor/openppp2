@@ -63,7 +63,7 @@ jobs:
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `
             boost-asio boost-beast boost-json boost-program-options boost-system boost-thread `
-            boost-lockfree boost-uuid boost-coroutine `
+            boost-lockfree boost-uuid boost-coroutine boost-filesystem boost-stacktrace `
             openssl jemalloc `
             --triplet x64-windows-static `
             --x-install-root=${{ github.workspace }}\..\vcpkg_installed
