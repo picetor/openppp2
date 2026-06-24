@@ -21,6 +21,14 @@ on:
         description: 'Build aarch64 variants'
         type: boolean
         default: true
+      build_macos:
+        description: 'Build macOS (arm64 + amd64)'
+        type: boolean
+        default: true
+      build_windows:
+        description: 'Build Windows (x64)'
+        type: boolean
+        default: true
 
 jobs:
   # ============================================================
@@ -294,5 +302,131 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: openppp2-linux-aarch64-${{ matrix.variant.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3: macOS - arm64 + amd64
+  # ============================================================
+  build-macos:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: arm64
+            arch: arm64
+            triple: darwin-arm64
+            repo: Liz-Nozomi/openppp2-macos-arm64-environment
+          - name: amd64
+            arch: x86_64
+            triple: darwin-amd64
+            repo: liulilittle/openppp2-macos-amd64-environment
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Download prebuilt 3rd-party libraries (macOS ${{ matrix.platform.name }})
+        run: |
+          git clone https://github.com/${{ matrix.platform.repo }}.git 3rd
+          echo "3rd-party libraries downloaded"
+          ls -la 3rd/ || echo "WARNING: 3rd dir empty"
+
+      - name: Build openppp2 (macOS ${{ matrix.platform.name }})
+        id: build
+        run: |
+          NCPU=$(sysctl -n hw.physicalcpu)
+          TS=$(date '+%Y%m%d_%H%M')
+          ARCH="${{ matrix.platform.arch }}"
+          TRIPLE="${{ matrix.platform.triple }}"
+
+          echo "=== Building macOS ${TRIPLE} ==="
+          echo "ncpu=${NCPU}"
+
+          # Build
+          rm -rf build && mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=${ARCH} \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DTHIRD_PARTY_LIBRARY_DIR=${GITHUB_WORKSPACE}/3rd
+          make -j ${NCPU}
+
+          # Check binary
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Name output
+          ARTIFACT_NAME="openppp2-${TRIPLE}_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}
+          path: build/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 4: Windows - x64 (MSBuild + vcpkg)
+  # ============================================================
+  build-windows:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_windows }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Install vcpkg dependencies
+        run: |
+          cd vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg install boost-system boost-coroutine boost-thread boost-context boost-regex boost-filesystem openssl jemalloc --triplet x64-windows-static
+        shell: cmd
+
+      - name: Build openppp2 (Windows x64)
+        id: build
+        run: |
+          $TS = Get-Date -Format "yyyyMMdd_HHmm"
+          echo "=== Building Windows x64 Release ==="
+
+          # Restore NuGet packages and build
+          msbuild ppp.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m
+
+          # Check binary
+          if (-not (Test-Path "x64\Release\ppp.exe")) {
+            Write-Error "ERROR: ppp.exe not found!"
+            Get-ChildItem -Recurse -Filter "ppp.exe" | Select-Object FullName
+            exit 1
+          }
+
+          # Name output
+          $ARTIFACT_NAME = "openppp2-windows-amd64_${TS}"
+          Copy-Item "x64\Release\ppp.exe" "${ARTIFACT_NAME}"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-windows-amd64
           path: build/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
