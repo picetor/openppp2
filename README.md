@@ -188,7 +188,7 @@ Cloudflare添加域名开启小黄云代理，使用acme申请证书，SSL开启
 
 | 字段 | 说明 |
 |------|------|
-| `server` | 填写优选 IP 地址（而非域名） |
+| `server` | 填写优选IP或优选域名，本WSS隧道改动的重点 |
 | `websocket.host` | WebSocket Host 头，填写真实域名 |
 | `websocket.sni` | TLS SNI 字段，填写真实域名 |
 

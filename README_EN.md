@@ -187,7 +187,7 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 
 | Field | Description |
 |-------|-------------|
-| `server` | Set to the optimized IP address (not domain) |
+| `server` | Fill in the optimized IP or domain name, the key change of this WSS tunnel |
 | `websocket.host` | WebSocket Host header, set to your real domain |
 | `websocket.sni` | TLS SNI field, set to your real domain |
 
