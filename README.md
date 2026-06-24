@@ -24,7 +24,7 @@
 - 多变体一键构建（amd64 × 8 + arm64 × 4）
 - 新增 `client.websocket.host` / `client.websocket.sni` 优选 IP 支持
 
-> 详细编译环境与依赖清单请参见 [`环境需求.md`](环境需求.md)
+> 详细编译环境与依赖清单请参见 `编译指南` 及 [`环境需求.md`](环境需求.md) 和 [`WSS修改版环境需求.md`](WSS修改版环境需求.md)
 
 ---
 
@@ -227,7 +227,7 @@ Cloudflare添加域名开启小黄云代理，使用acme申请证书，SSL开启
 
 ---
 
-## � 编译指南
+## 编译指南
 
 > 详细的路由配置、旁路由模式、Windows 平台指南请参见原版文档或 [liulilittle/openppp2](https://github.com/liulilittle/openppp2)。
 
