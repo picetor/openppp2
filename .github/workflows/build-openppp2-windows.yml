@@ -135,16 +135,8 @@ jobs:
           Write-Output "MSBuild: $msbuildPath"
           & $msbuildPath /version
 
-      - name: Build Windows
-        id: build
+      - name: Copy headers and libs to vcpkg_installed
         run: |
-          $TS = Get-Date -Format "yyyyMMdd_HHmm"
-
-          Write-Output "=== vcpkg_installed already populated by --x-install-root ==="
-
-          # NOTE: --x-install-root does NOT copy header-only boost headers to vcpkg_installed.
-          # Boost headers remain in vcpkg/packages/boost-xxx_x64-windows-static/include/.
-          # We must copy them manually so ppp.vcxproj's IncludePath can find them.
           Write-Output "=== Copying boost headers to vcpkg_installed ==="
           $vcpkgInstalled = "${{ github.workspace }}\..\vcpkg_installed\x64-windows-static"
           $vcpkgPackages = "${{ github.workspace }}\vcpkg\packages"
@@ -158,7 +150,6 @@ jobs:
               Copy-Item -Path "$pkgInclude\*" -Destination "$vcpkgInstalled\include\" -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
-          # Also copy lib files
           if (-not (Test-Path "$vcpkgInstalled\lib")) {
             New-Item -ItemType Directory -Path "$vcpkgInstalled\lib" -Force | Out-Null
           }
@@ -179,38 +170,77 @@ jobs:
             "# placeholder" | Out-File -FilePath "${{ github.workspace }}\starrylink.net.pem"
           }
 
-          Write-Output "=== Building Windows x64 ==="
-
-          # Build with MSBuild (only the ppp project, skip sysproxy32 which has missing deps)
+      - name: Build Release x64
+        id: build-release
+        run: |
+          Write-Output "=== Building Release x64 ==="
           msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=x64 `
             "/t:Clean;Build" `
             /p:VcpkgEnableManifest=false `
             /m
-
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "MSBuild failed with exit code $LASTEXITCODE"
+            Write-Error "Release build failed with exit code $LASTEXITCODE"
             exit 1
           }
 
-          # Find the built executable
-          $exePath = "x64\Release\ppp.exe"
-          if (-not (Test-Path $exePath)) {
-            $exePath = "Release\ppp.exe"
+      - name: Build Debug x64 (with PDB symbols)
+        id: build-debug
+        run: |
+          Write-Output "=== Building Debug x64 (with PDB) ==="
+          msbuild ppp.vcxproj /p:Configuration=Debug /p:Platform=x64 `
+            "/t:Build" `
+            /p:VcpkgEnableManifest=false `
+            /m
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Debug build failed with exit code $LASTEXITCODE"
+            exit 1
           }
-          if (-not (Test-Path $exePath)) {
-            Write-Error "ppp.exe not found!"
+
+      - name: Package artifacts
+        id: package
+        run: |
+          $TS = Get-Date -Format "yyyyMMdd_HHmm"
+
+          # Find Release executable
+          $releaseExe = "x64\Release\ppp.exe"
+          if (-not (Test-Path $releaseExe)) {
+            $releaseExe = "Release\ppp.exe"
+          }
+          if (-not (Test-Path $releaseExe)) {
+            Write-Error "Release ppp.exe not found!"
             Get-ChildItem -Recurse -Filter "ppp.exe" | Select-Object FullName
             exit 1
           }
+          Write-Output "Found Release ppp.exe at: $releaseExe"
 
-          Write-Output "Found ppp.exe at: $exePath"
+          # Find Debug executable and PDB
+          $debugExe = "x64\Debug\ppp.exe"
+          if (-not (Test-Path $debugExe)) {
+            $debugExe = "Debug\ppp.exe"
+          }
+          $debugPdb = $debugExe -replace '\.exe$', '.pdb'
+          if (Test-Path $debugExe) {
+            Write-Output "Found Debug ppp.exe at: $debugExe"
+          } else {
+            Write-Output "Warning: Debug ppp.exe not found, skipping debug symbols"
+            $debugExe = $null
+          }
 
-          # --- Create a release package with all needed files ---
+          # --- Create release package ---
           $ReleaseDir = "openppp2-windows-x64_${TS}"
           New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
 
-          # Copy executable
-          Copy-Item $exePath "$ReleaseDir\ppp.exe"
+          # Copy Release executable
+          Copy-Item $releaseExe "$ReleaseDir\ppp.exe"
+
+          # Copy Debug executable and PDB if available
+          if ($debugExe) {
+            Copy-Item $debugExe "$ReleaseDir\ppp.debug.exe"
+            if (Test-Path $debugPdb) {
+              Copy-Item $debugPdb "$ReleaseDir\ppp.pdb"
+              Write-Output "Copied PDB symbols: $debugPdb"
+            }
+          }
 
           # Copy configuration files
           Copy-Item appsettings.json "$ReleaseDir\appsettings.json"
@@ -230,8 +260,6 @@ jobs:
           Copy-Item starrylink.net.pem "$ReleaseDir\starrylink.net.pem"
 
           # Create a startup test script
-          # Note: ppp.exe now sets UTF-8 console encoding internally via SetConsoleOutputCP(CP_UTF8),
-          # so chcp 65001 is no longer required for correct text display.
           $lines = @(
             '@echo off',
             'echo Testing ppp.exe --help output...',
