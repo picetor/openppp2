@@ -24,7 +24,7 @@ This `master` branch is a **modified fork** based on upstream [liulilittle/openp
 - One-click multi-variant build (amd64 × 8 + arm64 × 4)
 - Added `client.websocket.host` / `client.websocket.sni` for optimized IP support
 
-> For detailed build environment and dependency清单, see [`环境需求.md`](环境需求.md)
+> For detailed build environment and dependency lists, see [`环境需求.md`](环境需求.md) and [`WSS修改版环境需求.md`](WSS修改版环境需求.md)
 
 ---
 
@@ -230,10 +230,9 @@ Connect to an optimized IP while using custom Host and SNI fields to make the CD
 
 > For detailed routing configuration,旁路由 mode, and Windows platform guides, refer to the original documentation at [liulilittle/openppp2](https://github.com/liulilittle/openppp2).
 
-This project involves three build environment checklists for different code versions and build targets:
+This project includes two build environment checklists, both aligned with CI workflows and targeting Release builds (`-O3` optimization):
 
-| Checklist | Based On | Build Target | Debug Log |
-|-----------|----------|--------------|-----------|
-| 📄 [`环境需求.md`](环境需求.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Debug (This repo Debug) | Retained |
-| 📄 [`releases环境需求清单.md`](releases环境需求清单.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | WSS Modified Releases (This repo Releases) | Disabled |
-| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | This repo [picetor/openppp2](https://github.com/picetor/openppp2) | This repo Releases | Disabled |
+| Checklist | Based On | Description |
+|-----------|----------|-------------|
+| 📄 [`环境需求.md`](环境需求.md) | Original [liulilittle/openppp2](https://github.com/liulilittle/openppp2) | Includes appendix of modifications from original |
+| 📄 [`WSS修改版环境需求.md`](WSS修改版环境需求.md) | This repo [picetor/openppp2](https://github.com/picetor/openppp2) | Based on this repo's master branch |
