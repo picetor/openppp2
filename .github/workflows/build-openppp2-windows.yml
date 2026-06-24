@@ -79,44 +79,43 @@ jobs:
       - name: Setup MSBuild path
         run: |
           # Try vswhere first (most reliable on GitHub Actions)
+          $msbuildPath = $null
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vswhere) {
             $msbuildPath = & $vswhere -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
             if ($msbuildPath) {
               Write-Output "Found MSBuild via vswhere: $msbuildPath"
-              $parent = Split-Path $msbuildPath -Parent
-              echo "$parent" | Out-File -FilePath $env:GITHUB_PATH -Append
             }
           }
-          # Also check standard locations
-          $msbuildExe = Get-Command "msbuild.exe" -ErrorAction SilentlyContinue
-          if (-not $msbuildExe) {
-            $paths = @(
-              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
-              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
-              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
-              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
-              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\MSBuild.exe",
-              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Community\MSBuild\Current\Bin\MSBuild.exe"
+          # Fallback: check standard locations
+          if (-not $msbuildPath) {
+            $searchDirs = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio",
+              "${env:ProgramFiles(x86)}\Microsoft Visual Studio"
             )
-            foreach ($p in $paths) {
-              if (Test-Path $p) {
-                Write-Output "Found MSBuild: $p"
-                $parent = Split-Path $p -Parent
-                echo "$parent" | Out-File -FilePath $env:GITHUB_PATH -Append
-                break
+            foreach ($dir in $searchDirs) {
+              if (Test-Path $dir) {
+                $found = Get-ChildItem -Path $dir -Recurse -Filter "MSBuild.exe" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match 'Bin\\MSBuild\.exe$' } |
+                  Select-Object -First 1 -ExpandProperty FullName
+                if ($found) {
+                  $msbuildPath = $found
+                  Write-Output "Found MSBuild via file search: $msbuildPath"
+                  break
+                }
               }
             }
           }
-          # Verify
-          $msbuildExe = Get-Command "msbuild.exe" -ErrorAction SilentlyContinue
-          if ($msbuildExe) {
-            Write-Output "MSBuild found: $($msbuildExe.Source)"
-            & $msbuildExe.Source /version
-          } else {
+          if (-not $msbuildPath) {
             Write-Error "MSBuild not found!"
             exit 1
           }
+          # Add to PATH for subsequent steps
+          $parent = Split-Path $msbuildPath -Parent
+          echo "$parent" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Verify using full path (Get-Command won't work in same step after GITHUB_PATH)
+          Write-Output "MSBuild: $msbuildPath"
+          & $msbuildPath /version
 
       - name: Build Windows
         id: build
