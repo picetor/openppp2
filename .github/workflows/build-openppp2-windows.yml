@@ -126,7 +126,7 @@ jobs:
 
           # Build with MSBuild
           msbuild ppp.sln /p:Configuration=Release /p:Platform=x64 `
-            /t:Clean;Build `
+            "/t:Clean;Build" `
             /m
 
           if ($LASTEXITCODE -ne 0) {
