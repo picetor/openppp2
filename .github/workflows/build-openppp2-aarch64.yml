@@ -198,6 +198,45 @@ jobs:
           fi
           echo "liburing built for arm64"
 
+          # --- libbpf.a + libelf.a (needed for TC variant) ---
+          echo "=== Downloading arm64 libbpf-dev ==="
+          BPF_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libbpf/libbpf/libbpf-dev_1.2.0-1_arm64.deb" \
+            /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
+          if [ -z "$BPF_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libbpf/libbpf/libbpf-dev_1.1.0-1_arm64.deb" \
+              /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
+          fi
+          if [ -n "$BPF_DEB" ]; then
+            echo "Extracting libbpf.a from deb..."
+            mkdir -p /tmp/bpf-extract
+            dpkg-deb -x /tmp/libbpf-dev-arm64.deb /tmp/bpf-extract
+            find /tmp/bpf-extract -name "libbpf*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: libbpf-dev deb download failed"
+          fi
+
+          echo "=== Downloading arm64 libelf-dev ==="
+          ELF_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.190-1_arm64.deb" \
+            /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
+          if [ -z "$ELF_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.189-1_arm64.deb" \
+              /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
+          fi
+          if [ -n "$ELF_DEB" ]; then
+            echo "Extracting libelf.a from deb..."
+            mkdir -p /tmp/elf-extract
+            dpkg-deb -x /tmp/libelf-dev-arm64.deb /tmp/elf-extract
+            find /tmp/elf-extract -name "libelf*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: libelf-dev deb download failed"
+          fi
+
           # CMakeLists.txt LINK_DIRECTORIES only includes subdirs like openssl/, jemalloc/lib/
           # Copy all .a files there so the linker can find them
           echo "=== Copying libs to LINK_DIRECTORIES paths ==="
