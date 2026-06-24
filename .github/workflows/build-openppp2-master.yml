@@ -88,18 +88,6 @@ jobs:
           ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: amd64 dir not found, trying root"
           ls -la "${{ github.workspace }}/3rd/" || echo "WARNING: 3rd dir empty"
 
-      - name: Set up THIRD_PARTY_LIBRARY_DIR symlink
-        run: |
-          # The CMakeLists.txt expects /root/dev as default THIRD_PARTY_LIBRARY_DIR
-          # We override it via cmake -D flag, but also create symlink for safety
-          sudo mkdir -p /root
-          if [ -d "${{ env.THIRD_PARTY_DIR }}" ]; then
-            sudo ln -sf "${{ env.THIRD_PARTY_DIR }}" /root/dev
-          else
-            sudo ln -sf "${{ github.workspace }}/3rd" /root/dev
-          fi
-          echo "THIRD_PARTY_LIBRARY_DIR -> $(readlink -f /root/dev)"
-
       - name: Build variant ${{ matrix.variant.name }}
         id: build
         run: |
@@ -108,12 +96,14 @@ jobs:
           SIMD="${{ matrix.variant.simd }}"
           IOURING="${{ matrix.variant.iouring }}"
           TC="${{ matrix.variant.tc }}"
+          THIRD_PARTY_DIR="${{ env.THIRD_PARTY_DIR }}"
 
           echo "=== Building: ${VARIANT} ==="
           echo "SIMD=${SIMD}, IO_URING=${IOURING}, TC=${TC}"
+          echo "THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 
-          # Build CMake flags
-          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
+          # Build CMake flags - use THIRD_PARTY_DIR directly (no /root/dev symlink needed)
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DTHIRD_PARTY_LIBRARY_DIR=${THIRD_PARTY_DIR}"
 
           # SIMD: NOT_HAVE_SIMD=ON disables SIMD
           if [ "${SIMD}" = "OFF" ]; then
@@ -208,18 +198,6 @@ jobs:
           echo "3rd-party libraries downloaded"
           ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: aarch64 dir not found"
 
-      - name: Set up THIRD_PARTY_LIBRARY_DIR symlink
-        run: |
-          sudo mkdir -p /root
-          if [ -d "${{ env.THIRD_PARTY_DIR }}" ]; then
-            sudo ln -sf "${{ env.THIRD_PARTY_DIR }}" /root/dev/arm64
-          else
-            # Fallback: use root of 3rd
-            sudo mkdir -p /root/dev
-            sudo ln -sf "${{ github.workspace }}/3rd" /root/dev/arm64
-          fi
-          echo "THIRD_PARTY_LIBRARY_DIR -> $(readlink -f /root/dev/arm64)"
-
       - name: Create aarch64 toolchain file
         run: |
           cat > /tmp/aarch64-toolchain.cmake << 'TOOLCHAIN_EOF'
@@ -257,12 +235,13 @@ jobs:
 
           echo "=== Building aarch64: ${VARIANT} ==="
           echo "IO_URING=${IOURING}, TC=${TC}"
+          echo "THIRD_PARTY_DIR=${{ env.THIRD_PARTY_DIR }}"
 
           # aarch64 always disables SIMD (AES-NI is x86 only)
           CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
           CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
           CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake"
-          CMAKE_FLAGS="${CMAKE_FLAGS} -DTHIRD_PARTY_LIBRARY_DIR=/root/dev/arm64"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DTHIRD_PARTY_LIBRARY_DIR=${{ env.THIRD_PARTY_DIR }}"
 
           # IO_URING
           if [ "${IOURING}" = "ON" ]; then
