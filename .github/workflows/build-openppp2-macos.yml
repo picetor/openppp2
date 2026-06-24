@@ -6,7 +6,23 @@
 name: Build openppp2 (macOS)
 
 on:
-  workflow_dispatch:      # 仅手动触发
+  push:
+    branches: [ master ]
+    paths:
+      - 'darwin/**'
+      - 'common/**'
+      - 'ppp/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-openppp2-macos.yml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'darwin/**'
+      - 'common/**'
+      - 'ppp/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-openppp2-macos.yml'
+  workflow_dispatch:      # 手动触发
 
 jobs:
   build-macos:
