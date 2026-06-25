@@ -118,3 +118,93 @@ jobs:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.ZIP_NAME }}
           if-no-files-found: error
+
+  build-macos-debug:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: arm64
+            arch: arm64
+            triple: darwin-arm64
+            repo: Liz-Nozomi/openppp2-macos-arm64-environment
+          - name: amd64
+            arch: x86_64
+            triple: darwin-amd64
+            repo: liulilittle/openppp2-macos-amd64-environment
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Download prebuilt 3rd-party libraries (macOS ${{ matrix.platform.name }})
+        run: |
+          git clone https://github.com/${{ matrix.platform.repo }}.git 3rd
+          echo "3rd-party libraries downloaded"
+          ls -la 3rd/ || echo "WARNING: 3rd dir empty"
+
+      - name: Build openppp2-${{ matrix.platform.triple }}-debug
+        id: build
+        run: |
+          NCPU=$(sysctl -n hw.physicalcpu)
+          TS=$(date '+%Y%m%d_%H%M')
+          ARCH="${{ matrix.platform.arch }}"
+          TRIPLE="${{ matrix.platform.triple }}"
+
+          echo "=== Building macOS ${TRIPLE} Debug (LOG_DEBUG) ==="
+          echo "ncpu=${NCPU}"
+
+          # ARM64 doesn't support x86 AES/SSE SIMD instructions
+          SIMD_FLAG=""
+          if [ "${ARCH}" = "arm64" ]; then
+            SIMD_FLAG="-DNOT_HAVE_SIMD=ON"
+            echo "ARM64 detected: disabling SIMD"
+          fi
+
+          # Build with Debug configuration (enables PPP_LOG_VERBOSE)
+          rm -rf build && mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_OSX_ARCHITECTURES=${ARCH} \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DTHIRD_PARTY_LIBRARY_DIR=${GITHUB_WORKSPACE}/3rd \
+            ${SIMD_FLAG}
+          make -j ${NCPU}
+
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          ARTIFACT_NAME="openppp2-${TRIPLE}-debug_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          # Package into zip
+          echo "=== Packaging openppp2-${TRIPLE}-debug.zip ==="
+          PKG_DIR="openppp2-${TRIPLE}-debug"
+          mkdir -p "${PKG_DIR}"
+          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
+          cp "${GITHUB_WORKSPACE}/appsettings.json" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
+          cd "${PKG_DIR}" && zip -r "../openppp2-${TRIPLE}-debug.zip" . && cd ..
+          ls -la "openppp2-${TRIPLE}-debug.zip"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload Debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}-debug
+          path: build/openppp2-${{ matrix.platform.triple }}-debug.zip
+          if-no-files-found: error

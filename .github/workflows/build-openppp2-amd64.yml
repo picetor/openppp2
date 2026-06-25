@@ -27,8 +27,8 @@ on:
     inputs:
       build_amd64:
         description: 'Build amd64 variants'
-        type: boolean
-        default: true
+        type: bquired: false
+        default: ''
 
 jobs:
   build-amd64:
@@ -169,4 +169,79 @@ jobs:
         with:
           name: openppp2-linux-amd64-${{ matrix.variant.name }}
           path: build/${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+  build-amd64-debug:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_amd64 }}
+    runs-on: ubuntu-latest
+    env:
+      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake autoconf automake libtool \
+            zip unzip curl wget git python3 \
+            libssl-dev libzstd-dev \
+            liburing-dev libbpf-dev libelf-dev
+
+      - name: Download prebuilt 3rd-party libraries (amd64)
+        run: |
+          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
+          echo "3rd-party libraries downloaded to ${{ env.THIRD_PARTY_DIR }}"
+
+      - name: Build openppp2-linux-amd64-debug
+        id: build
+        run: |
+          TS=$(date '+%Y%m%d_%H%M')
+          THIRD_PARTY_DIR="${{ env.THIRD_PARTY_DIR }}"
+
+          echo "=== Building Linux amd64 Debug (LOG_DEBUG) ==="
+
+          # Build with Debug configuration (enables PPP_LOG_VERBOSE)
+          rm -rf build && mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNOT_HAVE_SIMD=ON \
+            -DTHIRD_PARTY_LIBRARY_DIR=${THIRD_PARTY_DIR}
+          make -j$(nproc)
+
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          ARTIFACT_NAME="openppp2-linux-amd64-debug_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          # Package into zip
+          echo "=== Packaging openppp2-linux-amd64-debug.zip ==="
+          PKG_DIR="openppp2-linux-amd64-debug"
+          mkdir -p "${PKG_DIR}"
+          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
+          cp "${{ github.workspace }}/appsettings.json" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
+          cd "${PKG_DIR}" && zip -r "../openppp2-linux-amd64-debug.zip" . && cd ..
+          ls -la "openppp2-linux-amd64-debug.zip"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload Debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: openppp2-linux-amd64-debug
+          path: build/openppp2-linux-amd64-debug.zip
           if-no-files-found: error

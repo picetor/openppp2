@@ -483,34 +483,123 @@ openppp2-linux-aarch64-tc_20260624_2228         # aarch64 TC
 
 ## 六、修改版日志说明
 
-### 6.1 日志策略
+### 6.1 日志系统架构
 
-本修改版（master 分支）保留调试日志，便于问题定位和功能验证。
+本修改版（master 分支）包含两套日志系统：
 
-- 保留 `VirtualEthernetLogger` 写入的链路日志。
-- 保留客户端与服务端的 `Handshake`、`ModuleStart`、连接链路相关日志。
-- 保留 `fprintf(stdout, ...)`、`fprintf(stderr, ...)` 形式的调试输出。
-- 保留终端调试日志输出。
+| 系统 | 宏/类 | 编译条件 | 输出目标 | 用途 |
+|------|-------|---------|---------|------|
+| 链路日志 | `VirtualEthernetLogger` 类 | 始终编译 | `server.log` / `client.log` | VPN 事件（DNS、ARP、TCP 连接等） |
+| 详细调试日志 | `LOG_DEBUG` 宏 | `PPP_LOG_VERBOSE` | stdout / `--log-file` | 接口级调试（TAP、握手、加密等） |
 
-### 6.2 保留的日志范围
+### 6.2 链路日志（始终启用）
+
+保留 `VirtualEthernetLogger` 写入的链路日志，记录 VPN 事件。
 
 **客户端：**
 - `VEthernetExchanger::ConnectTransmission()` 握手结果日志
 - `VEthernetExchanger::Loopback()` 握手结果日志
 - 客户端默认日志文件中的模块启动与链路日志
-- 终端调试输出
 
 **服务端：**
 - `VirtualEthernetSwitcher::Open()` 模块启动日志
 - `VirtualEthernetSwitcher::Run()` 握手结果日志
 - 服务端默认日志文件中的链路日志
-- 终端调试输出
 
-### 6.3 日志输出目标
-
+**输出目标：**
 - 客户端写入默认日志文件，例如 `ppp-client.log`
 - 服务端写入默认日志文件，例如 `ppp.log`
-- 终端同时输出调试信息
+
+### 6.3 详细调试日志（LOG_DEBUG）
+
+#### 6.3.1 编译开关
+
+`LOG_DEBUG` 宏定义在 `ppp/stdafx.h` 中，由 `PPP_LOG_VERBOSE` 控制：
+
+```cpp
+#if defined(PPP_LOG_VERBOSE)
+#define LOG_DEBUG(...)     do { fprintf(stdout, "[%s][%s:%d] ", GetCurrentTimeString().data(), __FILE__, __LINE__), fprintf(stdout, __VA_ARGS__), fprintf(stdout, "\n"); } while (0)
+#else
+#define LOG_DEBUG(...)     ((void)0)
+#endif
+```
+
+#### 6.3.2 已添加 LOG_DEBUG 的模块
+
+| 文件 | 关键日志点 |
+|------|-----------|
+| `windows/ppp/tap/TapWindows.cpp` | TAP 设备创建、驱动打开、发送/接收数据包循环 |
+| `ppp/app/client/VEthernetNetworkSwitcher.cpp` | 客户端 Open() 各步骤（网卡、TAP、exchanger、HTTP/SOCKS 代理） |
+| `ppp/net/asio/vdns.cpp` | DNS 解析请求发送、响应接收、完成/超时、缓存命中 |
+| `ppp/transmissions/ITransmission.cpp` | 客户端/服务端握手、加密/解密 |
+| `ppp/transmissions/ITcpipTransmission.cpp` | TCP 读写字节 |
+| `ppp/transmissions/IWebsocketTransmission.cpp` | WebSocket/SSL 握手 |
+| `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` | MuxOrConnect、MuxOrAccept、Run、ForwardTransmissionToSocket |
+| `ppp/app/server/VirtualEthernetSwitcher.cpp` | 服务端监听器创建、接受连接、握手流程 |
+
+#### 6.3.3 `--log-file` 运行时重定向
+
+Fork 新增了 `--log-file <path>` 命令行参数，将 LOG_DEBUG 输出重定向到文件：
+
+- **全局变量**：`std::string LOG_FILE_PATH_`（`main.cpp`）
+- **解析位置**：`PreparedArgumentEnvironment()` 中解析
+- **重定向机制**：`main()` 中通过 `#if defined(PPP_LOG_VERBOSE)` 守卫，调用 `freopen(path, "a", stdout)`
+- **控制台保留**：`PrintEnvironmentInformation()` 使用 `fprintf(stderr, ...)` 输出面板信息
+- **仅 Debug 版本生效**：Release 版本忽略此参数
+
+使用示例：
+```bash
+./ppp --log-file /var/log/ppp-debug.log
+```
+
+#### 6.3.4 Debug 构建配置
+
+**CMakeLists.txt（Linux/macOS）：**
+```cmake
+IF(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DPPP_LOG_VERBOSE")
+ENDIF()
+```
+
+**ppp.vcxproj（Windows）：** Debug|x64 配置包含 `PPP_LOG_VERBOSE`。
+
+**Debug 构建变体：**
+
+**本地编译**使用 `builds/debug/` 目录下的 CMakeLists.txt 变体：
+
+| 变体 | 平台 | 架构 |
+|------|------|------|
+| `openppp2-linux-amd64` | Linux | amd64 |
+| `openppp2-linux-aarch64` | Linux | aarch64 |
+| `openppp2-darwin-amd64` | macOS | amd64 |
+| `openppp2-darwin-aarch64` | macOS | arm64 |
+
+所有 Debug 变体设置 `PLATFORM_DEBUG=TRUE` 和 `-DPPP_LOG_VERBOSE`。
+
+**CI 自动构建：** 每个平台的工作流在 Release 变体之外，额外增加一个基础版 Debug 构建：
+
+| CI 工作流 | Debug 产物名 |
+|-----------|-------------|
+| `build-openppp2-amd64.yml` | `openppp2-linux-amd64-debug` |
+| `build-openppp2-aarch64.yml` | `openppp2-linux-aarch64-debug` |
+| `build-openppp2-macos.yml` | `openppp2-darwin-arm64-debug` + `openppp2-darwin-amd64-debug` |
+| `build-openppp2-windows.yml` | `openppp2-windows-x64-debug` |
+
+#### 6.3.5 跨平台支持
+
+| 平台 | LOG_DEBUG | --log-file | 构建方式 |
+|------|-----------|------------|---------|
+| Linux amd64 | ✅ | ✅ | CMake + Make，Debug 配置 |
+| Linux aarch64 | ✅ | ✅ | CMake + 交叉编译，Debug 配置 |
+| macOS amd64 | ✅ | ✅ | CMake + Make，Debug 配置 |
+| macOS arm64 | ✅ | ✅ | CMake + Make，Debug 配置 |
+| Windows x64 | ✅ | ✅ | MSBuild + vcpkg，Debug 配置 |
+
+#### 6.3.6 日志输出格式
+
+```
+[2026-06-25 12:00:00.000][file.cpp:123] message
+```
 
 ---
 

@@ -355,3 +355,275 @@ jobs:
           name: openppp2-linux-aarch64-${{ matrix.variant.name }}
           path: build/${{ env.ZIP_NAME }}
           if-no-files-found: error
+
+  build-aarch64-debug:
+    runs-on: ubuntu-latest
+    env:
+      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/aarch64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          repository: picetor/openppp2
+          ref: master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake autoconf automake libtool \
+            zip unzip curl wget git python3 \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Download prebuilt 3rd-party libraries (aarch64)
+        run: |
+          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
+          echo "3rd-party libraries downloaded"
+          ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: aarch64 dir not found"
+
+      - name: Build arm64 cross libs (zstd, zlib, liburing)
+        run: |
+          set -e
+          ARM64_LIB_DIR="${{ env.THIRD_PARTY_DIR }}"
+
+          download_deb() {
+            local url="$1"
+            local out="$2"
+            echo "  Trying: $url"
+            curl -sL -o "$out" "$url" || return 1
+            if [ -f "$out" ] && [ -s "$out" ]; then
+              dpkg-deb -I "$out" >/dev/null 2>&1 && return 0
+            fi
+            return 1
+          }
+
+          # --- libzstd.a ---
+          echo "=== Downloading arm64 libzstd-dev ==="
+          ZSTD_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.5+dfsg2-2build1/libzstd-dev_1.5.5+dfsg2-2build1_arm64.deb" \
+            /tmp/libzstd-dev-arm64.deb && ZSTD_DEB=1 || true
+          if [ -z "$ZSTD_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libzstd/libzstd/1.5.4+dfsg2-5/libzstd-dev_1.5.4+dfsg2-5_arm64.deb" \
+              /tmp/libzstd-dev-arm64.deb && ZSTD_DEB=1 || true
+          fi
+          if [ -n "$ZSTD_DEB" ]; then
+            echo "Extracting libzstd.a from deb..."
+            mkdir -p /tmp/zstd-extract
+            dpkg-deb -x /tmp/libzstd-dev-arm64.deb /tmp/zstd-extract
+            find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: deb download failed, building libzstd from source..."
+            rm -rf /tmp/zstd-src
+            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1 || \
+            (rm -rf /tmp/zstd-src && git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1)
+            if [ -f /tmp/zstd-src/build/cmake/CMakeLists.txt ]; then
+              cd /tmp/zstd-src/build/cmake
+            else
+              cd /tmp/zstd-src
+            fi
+            mkdir -p build && cd build
+            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
+              -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+              -DCMAKE_AR=/usr/bin/aarch64-linux-gnu-ar -DCMAKE_RANLIB=/usr/bin/aarch64-linux-gnu-ranlib \
+              -DCMAKE_C_ARCHIVE_CREATE="/usr/bin/aarch64-linux-gnu-ar cr <TARGET> <LINK_FLAGS> <OBJECTS>" \
+              -DCMAKE_C_ARCHIVE_FINISH="/usr/bin/aarch64-linux-gnu-ranlib <TARGET>"
+            make -j$(nproc) 2>&1 || true
+            find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
+            if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
+              cd /tmp/zstd-src
+              make clean 2>/dev/null || true
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) lib lib-mt 2>&1 || \
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) libzstd.a 2>&1 || \
+              CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+              make -j$(nproc) -C lib libzstd.a 2>&1
+              find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
+              if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
+                echo "ERROR: Failed to build libzstd.a"
+                ls -la /tmp/zstd-src/lib/
+                exit 1
+              fi
+            fi
+            echo "zstd built from source"
+          fi
+
+          # --- libz.a ---
+          echo "=== Downloading arm64 zlib1g-dev ==="
+          ZLIB_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.13-4_arm64.deb" \
+            /tmp/zlib1g-dev-arm64.deb && ZLIB_DEB=1 || true
+          if [ -z "$ZLIB_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g-dev_1.2.11.dfsg-2_arm64.deb" \
+              /tmp/zlib1g-dev-arm64.deb && ZLIB_DEB=1 || true
+          fi
+          if [ -n "$ZLIB_DEB" ]; then
+            echo "Extracting libz.a from deb..."
+            mkdir -p /tmp/zlib-extract
+            dpkg-deb -x /tmp/zlib1g-dev-arm64.deb /tmp/zlib-extract
+            find /tmp/zlib-extract -name "libz*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: deb download failed, building zlib from source..."
+            rm -rf /tmp/zlib-src
+            git clone --depth 1 -b v1.3.1 https://github.com/madler/zlib.git /tmp/zlib-src 2>&1 || \
+            (rm -rf /tmp/zlib-src && git clone --depth 1 https://github.com/madler/zlib.git /tmp/zlib-src 2>&1)
+            cd /tmp/zlib-src
+            CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
+            ./configure --static --prefix=/tmp/zlib-install
+            make -j$(nproc)
+            cp libz.a "${ARM64_LIB_DIR}/"
+            echo "zlib built from source"
+          fi
+
+          # --- liburing ---
+          echo "=== Building liburing for arm64 ==="
+          rm -rf /tmp/liburing-src
+          git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src 2>&1 || \
+          (rm -rf /tmp/liburing-src && git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing-src 2>&1)
+          cd /tmp/liburing-src
+          CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+          AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
+          ./configure --prefix=/tmp/liburing-install --libdir=/tmp/liburing-install/lib
+          make -j$(nproc)
+          make install
+          find /tmp/liburing-install -name "*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          mkdir -p "${ARM64_LIB_DIR}/liburing/src/include"
+          cp -r /tmp/liburing-install/include/* "${ARM64_LIB_DIR}/liburing/src/include/" 2>/dev/null || true
+          if [ -d /tmp/liburing-src/src/include ]; then
+            mkdir -p "${ARM64_LIB_DIR}/liburing/src"
+            cp -r /tmp/liburing-src/src/include "${ARM64_LIB_DIR}/liburing/src/"
+          fi
+          echo "liburing built for arm64"
+
+          # --- libbpf.a + libelf.a ---
+          echo "=== Downloading arm64 libbpf-dev ==="
+          BPF_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbpf/libbpf-dev_1.6.3-1ubuntu1_arm64.deb" \
+            /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
+          if [ -z "$BPF_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbpf/libbpf-dev_1.5.0-2_arm64.deb" \
+              /tmp/libbpf-dev-arm64.deb && BPF_DEB=1 || true
+          fi
+          if [ -n "$BPF_DEB" ]; then
+            echo "Extracting libbpf.a from deb..."
+            mkdir -p /tmp/bpf-extract
+            dpkg-deb -x /tmp/libbpf-dev-arm64.deb /tmp/bpf-extract
+            find /tmp/bpf-extract -name "libbpf*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: libbpf-dev deb download failed"
+          fi
+
+          echo "=== Downloading arm64 libelf-dev ==="
+          ELF_DEB=""
+          download_deb \
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.195-1_arm64.deb" \
+            /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
+          if [ -z "$ELF_DEB" ]; then
+            download_deb \
+              "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf-dev_0.194-4_arm64.deb" \
+              /tmp/libelf-dev-arm64.deb && ELF_DEB=1 || true
+          fi
+          if [ -n "$ELF_DEB" ]; then
+            echo "Extracting libelf.a from deb..."
+            mkdir -p /tmp/elf-extract
+            dpkg-deb -x /tmp/libelf-dev-arm64.deb /tmp/elf-extract
+            find /tmp/elf-extract -name "libelf*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
+          else
+            echo "WARNING: libelf-dev deb download failed"
+          fi
+
+          # Copy libs to LINK_DIRECTORIES paths
+          echo "=== Copying libs to LINK_DIRECTORIES paths ==="
+          mkdir -p "${ARM64_LIB_DIR}/openssl" "${ARM64_LIB_DIR}/jemalloc/lib"
+          for lib in "${ARM64_LIB_DIR}"/*.a; do
+            [ -f "$lib" ] || continue
+            cp -v "$lib" "${ARM64_LIB_DIR}/openssl/"
+            cp -v "$lib" "${ARM64_LIB_DIR}/jemalloc/lib/"
+          done
+          echo "=== Final arm64 libs ==="
+          ls -la "${ARM64_LIB_DIR}/"/*.a 2>/dev/null || echo "No .a files found"
+
+      - name: Create aarch64 toolchain file
+        run: |
+          cat > /tmp/aarch64-toolchain.cmake << 'TOOLCHAIN_EOF'
+          SET(CMAKE_SYSTEM_NAME Linux)
+          SET(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+          SET(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+          SET(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+
+          SET(CMAKE_LINKER aarch64-linux-gnu-ld)
+          SET(CMAKE_AR aarch64-linux-gnu-ar)
+          SET(CMAKE_NM aarch64-linux-gnu-nm)
+          SET(CMAKE_OBJCOPY aarch64-linux-gnu-objcopy)
+          SET(CMAKE_OBJDUMP aarch64-linux-gnu-objdump)
+          SET(CMAKE_STRIP aarch64-linux-gnu-strip)
+          SET(CMAKE_RANLIB aarch64-linux-gnu-ranlib)
+
+          SET(CMAKE_EXE_LINKER_FLAGS_INIT "-static -no-pie -Wl,--gc-sections -s -rdynamic -Wl,-Bstatic")
+
+          SET(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+          LINK_DIRECTORIES(/usr/lib/aarch64-linux-gnu /usr/aarch64-linux-gnu/lib)
+          TOOLCHAIN_EOF
+          echo "Toolchain file created at /tmp/aarch64-toolchain.cmake"
+
+      - name: Build openppp2-linux-aarch64-debug
+        id: build
+        run: |
+          TS=$(date '+%Y%m%d_%H%M')
+
+          echo "=== Building Linux aarch64 Debug (LOG_DEBUG) ==="
+
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Debug"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake"
+          CMAKE_FLAGS="${CMAKE_FLAGS} -DTHIRD_PARTY_LIBRARY_DIR=${{ env.THIRD_PARTY_DIR }}"
+
+          rm -rf build && mkdir build && cd build
+          cmake .. ${CMAKE_FLAGS}
+          make -j$(nproc)
+
+          if [ ! -f "../bin/ppp" ]; then
+            echo "ERROR: bin/ppp not found!"
+            find .. -name ppp -type f 2>/dev/null
+            exit 1
+          fi
+
+          ARTIFACT_NAME="openppp2-linux-aarch64-debug_${TS}"
+          cp ../bin/ppp "${ARTIFACT_NAME}"
+          file "${ARTIFACT_NAME}"
+
+          # Package into zip
+          echo "=== Packaging openppp2-linux-aarch64-debug.zip ==="
+          PKG_DIR="openppp2-linux-aarch64-debug"
+          mkdir -p "${PKG_DIR}"
+          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
+          cp "${{ github.workspace }}/appsettings.json" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
+          cd "${PKG_DIR}" && zip -r "../openppp2-linux-aarch64-debug.zip" . && cd ..
+          ls -la "openppp2-linux-aarch64-debug.zip"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload Debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: openppp2-linux-aarch64-debug
+          path: build/openppp2-linux-aarch64-debug.zip
+          if-no-files-found: error
