@@ -230,8 +230,6 @@ namespace ppp
                 LOG_DEBUG("TapWindows::Create: invalid IP address");
                 return NULLPTR;
             }
-                return NULLPTR;
-            }
 
             IPEndPoint gwEP(ip, 0);
             if (IPEndPoint::IsInvalid(gwEP))
