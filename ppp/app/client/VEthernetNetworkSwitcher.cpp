@@ -996,6 +996,7 @@ namespace ppp {
             }
 
             bool VEthernetNetworkSwitcher::Open(const std::shared_ptr<ITap>& tap) noexcept {
+                LOG_DEBUG("VEthernetNetworkSwitcher::Open: starting");
 #if !defined(_ANDROID) && !defined(_IPHONE)
                 // Get and retrieve the current underlying Ethernet interface information!
 #if defined(_WIN32)
@@ -1012,6 +1013,7 @@ namespace ppp {
                     }
                 }
                 else {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: underlying network interface not found");
                     return false;
                 }
 
@@ -1021,8 +1023,10 @@ namespace ppp {
 #endif
                 // Construction of VEtherent virtual Ethernet switcher processing framework.
                 if (!VEthernet::Open(tap)) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: VEthernet::Open failed");
                     return false;
                 }
+                LOG_DEBUG("VEthernetNetworkSwitcher::Open: VEthernet::Open succeeded");
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
 #if defined(_WIN32)
@@ -1035,8 +1039,10 @@ namespace ppp {
 
                 // The vEthernet network switcher cannot be opened when the virtual network adapter device interface for the VPN startup link cannot be found!
                 if (NULLPTR == tun_ni_) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface not found");
                     return false;
                 }
+                LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
 #endif
 
                 // Open client-side logger
@@ -1055,6 +1061,7 @@ namespace ppp {
                 // Instantiate the local QoS throughput speed control module!
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS> qos = NewQoS();
                 if (NULLPTR == qos) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewQoS failed");
                     return false;
                 }
 
@@ -1076,37 +1083,46 @@ namespace ppp {
                 // Instantiate and open the internal virtual Ethernet switch that needs to be switcher to the remote.
                 std::shared_ptr<VEthernetExchanger> exchanger = NewExchanger();
                 if (NULLPTR == exchanger) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewExchanger failed");
                     return false;
                 }
                 elif(!exchanger->Open()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: exchanger->Open failed");
                     IDisposable::DisposeReferences(qos, exchanger);
                     return false;
                 }
+                LOG_DEBUG("VEthernetNetworkSwitcher::Open: exchanger opened");
 
                 // Enable the local HTTP PROXY server middleware to provide proxy services directly by the VPN.
                 VEthernetHttpProxySwitcherPtr http_proxy = NewHttpProxy(exchanger);
                 if (NULLPTR == http_proxy) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewHttpProxy failed");
                     return false;
                 }
                 elif(http_proxy->Open()) {
                     http_proxy_ = std::move(http_proxy);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy opened");
                 }
                 else {
                     http_proxy->Dispose();
                     http_proxy.reset();
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy not available (non-fatal)");
                 }
 
                 // Enable the local SOCKS PROXY server middleware to provide proxy services directly by the VPN.
                 VEthernetSocksProxySwitcherPtr socks_proxy = NewSocksProxy(exchanger);
                 if (NULLPTR == socks_proxy) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewSocksProxy failed");
                     return false;
                 }
                 elif(socks_proxy->Open()) {
                     socks_proxy_ = std::move(socks_proxy);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy opened");
                 }
                 else {
                     socks_proxy->Dispose();
                     socks_proxy.reset();
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy not available (non-fatal)");
                 }
 
                 // Mounts the various service objects created and opened by the current constructor.
@@ -1194,6 +1210,7 @@ namespace ppp {
                     ProtectDefaultRoute();
                 }
 #endif
+                LOG_DEBUG("VEthernetNetworkSwitcher::Open: completed successfully");
                 return true;
             }
 

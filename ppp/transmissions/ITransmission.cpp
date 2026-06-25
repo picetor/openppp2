@@ -1193,25 +1193,38 @@ namespace ppp {
         Int128 ITransmission::HandshakeClient(YieldContext& y, bool& mux) noexcept {
             mux = false;
             if (!InternalHandshakeTimeoutSet()) {
+                LOG_DEBUG("ITransmission::HandshakeClient: timeout set failed");
                 return 0;
             }
 
             Int128 sid = InternalHandshakeClient(y, mux);
             InternalHandshakeTimeoutClear();
+
+            if (sid) {
+                LOG_DEBUG("ITransmission::HandshakeClient: success, sid=%s, mux=%d", stl::to_string<ppp::string>(sid, 32).data(), mux);
+            }
+            else {
+                LOG_DEBUG("ITransmission::HandshakeClient: failed");
+            }
             return sid;
         }
 
         bool ITransmission::HandshakeServer(YieldContext& y, const Int128& session_id, bool mux) noexcept {
             if (session_id == 0) {
+                LOG_DEBUG("ITransmission::HandshakeServer: session_id is zero");
                 return false;
             }
 
             if (!InternalHandshakeTimeoutSet()) {
+                LOG_DEBUG("ITransmission::HandshakeServer: timeout set failed");
                 return false;
             }
             
             bool ok = InternalHandshakeServer(y, session_id, mux);
             InternalHandshakeTimeoutClear();
+
+            LOG_DEBUG("ITransmission::HandshakeServer: %s, session_id=%s, mux=%d",
+                ok ? "success" : "failed", stl::to_string<ppp::string>(session_id, 32).data(), mux);
             return ok;
         }
 
@@ -1222,28 +1235,38 @@ namespace ppp {
             bool safest = !transmission->handshaked_;
             auto& cfg = transmission->configuration_;
             auto& alloc = transmission->BufferAllocator;
+            std::shared_ptr<Byte> result;
             if (transmission->protocol_ && transmission->transport_) {
-                return Transmission_Packet_Encrypt(cfg, alloc, transmission->protocol_,
+                result = Transmission_Packet_Encrypt(cfg, alloc, transmission->protocol_,
                     transmission->transport_, data, datalen, outlen, safest);
             }
             else {
-                return Transmission_Packet_Encrypt(cfg, alloc, NULLPTR, NULLPTR,
+                result = Transmission_Packet_Encrypt(cfg, alloc, NULLPTR, NULLPTR,
                     data, datalen, outlen, safest);
             }
+            if (NULLPTR == result) {
+                LOG_DEBUG("ITransmission::EncryptBinary: failed, datalen=%d, handshaked=%d", datalen, transmission->handshaked_);
+            }
+            return result;
         }
 
         std::shared_ptr<Byte> ITransmissionBridge::DecryptBinary(ITransmission* transmission, Byte* data, int datalen, int& outlen) noexcept {
             bool safest = !transmission->handshaked_;
             auto& cfg = transmission->configuration_;
             auto& alloc = transmission->BufferAllocator;
+            std::shared_ptr<Byte> result;
             if (transmission->protocol_ && transmission->transport_) {
-                return Transmission_Packet_Decrypt(cfg, alloc, transmission->protocol_,
+                result = Transmission_Packet_Decrypt(cfg, alloc, transmission->protocol_,
                     transmission->transport_, data, datalen, outlen, safest);
             }
             else {
-                return Transmission_Packet_Decrypt(cfg, alloc, NULLPTR, NULLPTR,
+                result = Transmission_Packet_Decrypt(cfg, alloc, NULLPTR, NULLPTR,
                     data, datalen, outlen, safest);
             }
+            if (NULLPTR == result) {
+                LOG_DEBUG("ITransmission::DecryptBinary: failed, datalen=%d, handshaked=%d", datalen, transmission->handshaked_);
+            }
+            return result;
         }
 
     } // namespace transmissions

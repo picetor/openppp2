@@ -65,11 +65,16 @@ namespace ppp {
 
         std::shared_ptr<Byte> ITcpipTransmission::DoReadBytes(YieldContext& y, int length) noexcept {
             if (disposed_) {
+                LOG_DEBUG("ITcpipTransmission::DoReadBytes: disposed, length=%d", length);
                 return NULLPTR;
             }
 
             auto self = shared_from_this();
-            return ITransmissionQoS::DoReadBytes(y, length, self, *this, this->QoS);
+            auto result = ITransmissionQoS::DoReadBytes(y, length, self, *this, this->QoS);
+            if (NULLPTR == result) {
+                LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d", length);
+            }
+            return result;
         }
 
         bool ITcpipTransmission::ShiftToScheduler() noexcept {
@@ -133,10 +138,12 @@ namespace ppp {
         bool ITcpipTransmission::DoWriteBytes(std::shared_ptr<Byte> packet, int offset, int packet_length, const AsynchronousWriteBytesCallback& cb) noexcept {
             std::shared_ptr<boost::asio::ip::tcp::socket> socket = socket_;
             if (!socket || !socket->is_open()) {
+                LOG_DEBUG("ITcpipTransmission::DoWriteBytes: socket invalid, packet_length=%d", packet_length);
                 return false;
             }
 
             if (disposed_) {
+                LOG_DEBUG("ITcpipTransmission::DoWriteBytes: disposed, packet_length=%d", packet_length);
                 return false;
             }
 
@@ -155,6 +162,7 @@ namespace ppp {
                             }
                         }
                         else {
+                            LOG_DEBUG("ITcpipTransmission::DoWriteBytes: async_write failed, ec=%s, packet_length=%d", ec.message().data(), packet_length);
                             Dispose();
                         }
 

@@ -146,19 +146,23 @@ namespace ppp {
                 typedef VirtualEthernetLinklayer::ERROR_CODES ERROR_CODES;
 
                 if (NULLPTR == transmission) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: transmission is null");
                     return false;
                 }
 
                 if (disposed_) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: disposed");
                     return false;
                 }
 
                 if (connected_) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: already connected");
                     return false;
                 }
 
                 if (!mux_or_connect) {
                     if (!socket_) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: socket is null for connect mode");
                         return false;
                     }
                 }
@@ -167,6 +171,7 @@ namespace ppp {
 
                 auto connector = make_shared_object<STATIC_VIRTUAL_ETHERNET_TCPIP_CONNECTOR_NEST>(this, configuration_, context_, id_);
                 if (NULLPTR == connector) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: failed to create connector");
                     return false;
                 }
                 else {
@@ -179,6 +184,8 @@ namespace ppp {
                     }
 
                     if (!connector_dook) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: connector operation failed, mux_or_connect=%d, host=%s, port=%d",
+                            mux_or_connect, host.data(), port);
                         return false;
                     }
                 }
@@ -186,29 +193,36 @@ namespace ppp {
                 int packet_size = 0;
                 std::shared_ptr<Byte> packet = transmission->Read(y, packet_size);
                 if (NULLPTR == packet || packet_size < 1) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: read failed after connector, mux_or_connect=%d", mux_or_connect);
                     return false;
                 }
 
                 if (!connector->PacketInput(transmission, packet.get(), packet_size, y)) {
+                    LOG_DEBUG("VETcpip::MuxOrConnect: PacketInput failed");
                     return false;
                 }
 
                 if (mux_or_connect) {
                     if (!connector->MuxON) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: MuxON flag not set");
                         return false;
                     }
 
                     if (connector->Vlan != vlan || connector->Sequence != seq || connector->Acknowledge != ack) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: mux params mismatch, vlan=%u/%u, seq=%u/%u, ack=%u/%u",
+                            connector->Vlan, vlan, connector->Sequence, seq, connector->Acknowledge, ack);
                         return false;
                     }
                 }
                 else {
                     if (!connector->ConnectOK) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: ConnectOK not set");
                         return false;
                     }
 
                     ERROR_CODES err = (ERROR_CODES)connector->ErrorCode;
                     if (err != ERROR_CODES::ERRORS_SUCCESS) {
+                        LOG_DEBUG("VETcpip::MuxOrConnect: connect error=%d", (int)err);
                         return false;
                     }
                 }
@@ -216,6 +230,8 @@ namespace ppp {
                 connected_ = true;
                 transmission_ = transmission;
 
+                LOG_DEBUG("VETcpip::MuxOrConnect: success, mux_or_connect=%d, host=%s, port=%d",
+                    mux_or_connect, host.data(), port);
                 Update();
                 return true;
             }
@@ -251,18 +267,22 @@ namespace ppp {
                 typedef VirtualEthernetLinklayer::ERROR_CODES ERROR_CODES;
 
                 if (NULLPTR == transmission) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: transmission is null");
                     return false;
                 }
 
                 if (disposed_) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: disposed");
                     return false;
                 }
 
                 if (connected_) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: already connected");
                     return false;
                 }
 
                 if (!socket_) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: socket is null");
                     return false;
                 }
 
@@ -271,21 +291,25 @@ namespace ppp {
                 int packet_size = -1;
                 std::shared_ptr<Byte> packet = transmission->Read(y, packet_size);
                 if (NULLPTR == packet || packet_size < 1) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: read failed");
                     return false;
                 }
 
                 auto connector = make_shared_object<STATIC_VIRTUAL_ETHERNET_TCPIP_CONNECTOR_NEST>(this, configuration_, context_, id_);
                 if (NULLPTR == connector) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: failed to create connector");
                     return false;
                 }
 
                 if (!connector->PacketInput(transmission, packet.get(), packet_size, y)) {
+                    LOG_DEBUG("VETcpip::MuxOrAccept: PacketInput failed");
                     return false;
                 }
 
                 if (mux_or_connect) {
                 LABEL_MUXON:
                     if (!connector->MuxON) {
+                        LOG_DEBUG("VETcpip::MuxOrAccept: MuxON not set");
                         return false;
                     }
 
@@ -295,8 +319,12 @@ namespace ppp {
 
                     bool ok = accept_mux_ac(connector->Vlan, connector->Sequence, connector->Acknowledge);
                     if (!ok) {
+                        LOG_DEBUG("VETcpip::MuxOrAccept: accept_mux_ac callback failed");
                         return false;
                     }
+
+                    LOG_DEBUG("VETcpip::MuxOrAccept: mux accept success, vlan=%u, seq=%u, ack=%u",
+                        connector->Vlan, connector->Sequence, connector->Acknowledge);
                 }
                 else {
                     boost::asio::ip::tcp::endpoint& destinationEP = connector->Destination;
@@ -362,6 +390,9 @@ namespace ppp {
                     connected_ = true;
                     transmission_ = transmission;
                     Update();
+
+                    LOG_DEBUG("VETcpip::MuxOrAccept: connect accept success, host=%s, port=%d",
+                        connector->Host.data(), connector->Destination.port());
                 }
 
                 return true;
@@ -411,10 +442,12 @@ namespace ppp {
 
             bool VirtualEthernetTcpipConnection::Run(YieldContext& y) noexcept {
                 if (!ReceiveTransmissionToSocket()) {
+                    LOG_DEBUG("VETcpip::Run: ReceiveTransmissionToSocket failed");
                     return false;
                 }
 
                 Update();
+                LOG_DEBUG("VETcpip::Run: starting ForwardTransmissionToSocket");
                 return ForwardTransmissionToSocket(y);
             }
 
@@ -518,10 +551,12 @@ namespace ppp {
 
             bool VirtualEthernetTcpipConnection::ForwardTransmissionToSocket(YieldContext& y) noexcept {
                 if (!connected_) {
+                    LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: not connected");
                     return false;
                 }
 
                 if (disposed_) {
+                    LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: disposed");
                     return false;
                 }
 
@@ -529,12 +564,14 @@ namespace ppp {
                 while (!disposed_) {
                     ITransmissionPtr transmission = transmission_;
                     if (NULLPTR == transmission) {
+                        LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: transmission is null");
                         break;
                     }
 
                     int packet_length = 0;
                     std::shared_ptr<Byte> packet = transmission->Read(y, packet_length);
                     if (NULLPTR == packet || packet_length < 1) {
+                        LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: read returned empty, packet_length=%d", packet_length);
                         break;
                     }
 
@@ -546,10 +583,12 @@ namespace ppp {
                         Update();
                     }
                     else {
+                        LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: async_write failed");
                         break;
                     }
                 }
 
+                LOG_DEBUG("VETcpip::ForwardTransmissionToSocket: exiting, any=%d, disposed=%d", any, disposed_);
                 Dispose();
                 return any;
             }

@@ -54,13 +54,19 @@ namespace ppp {
             ppp::string host = std::move(this->Host);
             ppp::string path = std::move(this->Path);
 
+            bool ok;
             if (host.size() > 0 && path.size() > 0) {
-                return socket->Run(handshake_type, host, path, y);
+                ok = socket->Run(handshake_type, host, path, y);
             }
             else {
                 auto& cfg = configuration->websocket;
-                return socket->Run(handshake_type, cfg.host, cfg.path, y);
+                ok = socket->Run(handshake_type, cfg.host, cfg.path, y);
             }
+
+            LOG_DEBUG("IWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
+                ok ? "success" : "failed", host.data(), path.data(),
+                handshake_type == HandshakeType::HandshakeTypeClient ? "client" : "server");
+            return ok;
         }
 
         bool IWebsocketTransmission::Decorator(boost::beast::websocket::request_type& req) noexcept {
@@ -97,10 +103,11 @@ namespace ppp {
             auto& cfg = configuration->websocket;
             auto& client_cfg = configuration->client.websocket;
 
+            bool ok;
             if (host.size() > 0 && path.size() > 0) {
                 ppp::string ws_host = client_cfg.host.size() > 0 ? client_cfg.host : host;
                 ppp::string sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
-                return socket->Run(handshake_type,
+                ok = socket->Run(handshake_type,
                     ws_host,
                     sni,
                     path,
@@ -115,7 +122,7 @@ namespace ppp {
             else {
                 ppp::string ws_host = client_cfg.host.size() > 0 ? client_cfg.host : cfg.host;
                 ppp::string sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
-                return socket->Run(handshake_type,
+                ok = socket->Run(handshake_type,
                     ws_host,
                     sni,
                     cfg.path,
@@ -127,6 +134,11 @@ namespace ppp {
                     cfg.ssl.ciphersuites,
                     y);
             }
+
+            LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
+                ok ? "success" : "failed", host.data(), path.data(),
+                handshake_type == HandshakeType::HandshakeTypeClient ? "client" : "server");
+            return ok;
         }
 
         bool ISslWebsocketTransmission::Decorator(boost::beast::websocket::request_type& req) noexcept {

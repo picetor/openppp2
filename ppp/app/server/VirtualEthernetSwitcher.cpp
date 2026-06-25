@@ -61,6 +61,7 @@ namespace ppp {
             bool VirtualEthernetSwitcher::Run() noexcept {
                 SynchronizedObjectScope scope(syncobj_);
                 if (disposed_) {
+                    LOG_DEBUG("VESwitcher::Run: disposed");
                     return false;
                 }
 
@@ -75,21 +76,26 @@ namespace ppp {
                     bool bok = Socket::AcceptLoopbackAsync(acceptor, 
                         [self, this, acceptor, categories](const Socket::AsioContext& context, const Socket::AsioTcpSocket& socket) noexcept {
                             if (!Socket::AdjustDefaultSocketOptional(*socket, configuration_->tcp.turbo)) {
+                                LOG_DEBUG("VESwitcher::Run: AdjustDefaultSocketOptional failed for category %d", categories);
                                 return false;
                             }
 
                             ppp::net::Socket::SetWindowSizeIfNotZero(socket->native_handle(), configuration_->tcp.cwnd, configuration_->tcp.rwnd);
-                            return !disposed_ && Accept(context, socket, categories);
+                            bool accepted = !disposed_ && Accept(context, socket, categories);
+                            LOG_DEBUG("VESwitcher::Run: accept callback, category=%d, accepted=%d", categories, accepted);
+                            return accepted;
                         });
 
                     if (bok) {
                         bany = true;
                     }
                     else {
+                        LOG_DEBUG("VESwitcher::Run: AcceptLoopbackAsync failed for category %d", categories);
                         Socket::Closesocket(acceptor);
                         acceptors_[categories] = NULLPTR;
                     }
                 }
+                LOG_DEBUG("VESwitcher::Run: %s, %d categories active", bany ? "success" : "failed", bany);
                 return bany;
             }
 
@@ -99,12 +105,14 @@ namespace ppp {
 
             int VirtualEthernetSwitcher::Run(const ContextPtr& context, const ITransmissionPtr& transmission, YieldContext& y) noexcept {
                 if (disposed_) {
+                    LOG_DEBUG("VESwitcher::Run(transmission): disposed");
                     return STATUS_ERROR;
                 }
         
                 bool mux = false;
                 Int128 session_id = transmission->HandshakeClient(y, mux);
                 if (session_id == 0) {
+                    LOG_DEBUG("VESwitcher::Run(transmission): HandshakeClient failed");
                     // Log handshake failure
                     VirtualEthernetLoggerPtr logger = GetLogger();
                     if (NULLPTR != logger) {
@@ -113,6 +121,8 @@ namespace ppp {
                     return STATUS_ERROR;
                 }
 
+                LOG_DEBUG("VESwitcher::Run(transmission): HandshakeClient success, session_id=%s, mux=%d",
+                    stl::to_string<ppp::string>(session_id, 32).data(), mux);
                 // Log handshake success
                 {
                     VirtualEthernetLoggerPtr logger = GetLogger();
@@ -122,22 +132,27 @@ namespace ppp {
                 }
 
                 if (!mux) {
+                    LOG_DEBUG("VESwitcher::Run(transmission): non-mux mode, calling Connect");
                     return Connect(transmission, session_id, y);
                 }
 
                 VirtualEthernetManagedServerPtr managed_server = managed_server_;
                 if (NULLPTR == managed_server) {
+                    LOG_DEBUG("VESwitcher::Run(transmission): no managed server, calling Establish directly");
                     return Establish(transmission, session_id, NULLPTR, y) ? STATUS_RUNING : STATUS_ERROR;
                 }
                 
                 VirtualEthernetExchanger* exchanger = GetExchanger(session_id).get(); 
                 if (NULLPTR != exchanger) {
+                    LOG_DEBUG("VESwitcher::Run(transmission): exchanger found, calling Establish");
                     return Establish(transmission, session_id, NULLPTR, y) ? STATUS_RUNING : STATUS_ERROR;
                 }
 
+                LOG_DEBUG("VESwitcher::Run(transmission): authenticating to managed server");
                 auto self = shared_from_this();
                 return managed_server->AuthenticationToManagedServer(session_id,
                     [self, this, transmission, session_id, context](bool ok, VirtualEthernetManagedServer::VirtualEthernetInformationPtr& i) noexcept {
+                        LOG_DEBUG("VESwitcher::Run(transmission): AuthenticationToManagedServer returned ok=%d", ok);
                         auto allocator = transmission->BufferAllocator;
                         if (ok) {
                             ok = YieldContext::Spawn(allocator.get(), *context,
@@ -436,6 +451,7 @@ namespace ppp {
 
             bool VirtualEthernetSwitcher::CreateAllAcceptors() noexcept {
                 if (disposed_) {
+                    LOG_DEBUG("VESwitcher::CreateAllAcceptors: disposed");
                     return false;
                 }
 
@@ -443,6 +459,7 @@ namespace ppp {
                 for (int i = NetworkAcceptorCategories_Min; i < NetworkAcceptorCategories_Max; i++) {
                     std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor = acceptors_[i];
                     if (NULLPTR != acceptor) {
+                        LOG_DEBUG("VESwitcher::CreateAllAcceptors: acceptor %d already exists", i);
                         return false;
                     }
 
@@ -466,6 +483,7 @@ namespace ppp {
 
                     std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor = make_shared_object<boost::asio::ip::tcp::acceptor>(*context_);
                     if (NULLPTR == acceptor) {
+                        LOG_DEBUG("VESwitcher::CreateAllAcceptors: failed to create acceptor for port %d", port);
                         return false;
                     }
 
@@ -474,14 +492,17 @@ namespace ppp {
                             Socket::SetWindowSizeIfNotZero(acceptor->native_handle(), cfg.cwnd, cfg.rwnd);
                             bany |= true;
                             acceptors_[i] = std::move(acceptor);
+                            LOG_DEBUG("VESwitcher::CreateAllAcceptors: acceptor %d listening on port %d", i, port);
                             break;
                         }
                         elif(!Socket::Closesocket(*acceptor)) {
+                            LOG_DEBUG("VESwitcher::CreateAllAcceptors: failed to close acceptor for port %d", port);
                             return false;
                         }
                     }
                 }
                 
+                LOG_DEBUG("VESwitcher::CreateAllAcceptors: %s, %d acceptors created", bany ? "success" : "failed", bany);
                 return bany;
             }
 

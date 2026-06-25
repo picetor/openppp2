@@ -335,6 +335,8 @@ namespace ppp {
                             return;
                         }
                         else {
+                            LOG_DEBUG("vdns::finish: hostname=%s, is_timeout=%d, a_received=%d, aaaa_received=%d, total_addrs=%zu",
+                                hostname.data(), is_timeout, a_state.received, aaaa_state.received, addresses.size());
                             // Stop the merge timer if it is still pending.
                             SynchronizedObjectScope lock(merge_timer_mutex);
                             if (NULLPTR != merge_timer) {
@@ -379,6 +381,7 @@ namespace ppp {
 
                         // Verify that the response matches the expected hostname (case-insensitive)
                         if (DNS_ProcessAResponseAddresses(const_cast<Byte*>(data), static_cast<int>(len), new_addrs, ack, hostname.data())) {
+                            LOG_DEBUG("vdns::on_response: hostname=%s, ack=%u, new_addrs=%zu", hostname.data(), ack, new_addrs.size());
                             // Merge the newly received addresses.
                             for (const auto& addr : new_addrs) {
                                 try {
@@ -395,6 +398,9 @@ namespace ppp {
                             else if (ack == aaaa_state.id) {
                                 aaaa_state.received = true;
                             }
+                        }
+                        else {
+                            LOG_DEBUG("vdns::on_response: failed to parse response for hostname=%s, len=%zu", hostname.data(), len);
                         }
 
                         // Determine whether both expected responses have been received.
@@ -497,8 +503,12 @@ namespace ppp {
                     // -------------------------------------------------------------------------
                     bool send_requests(const ppp::vector<boost::asio::ip::udp::endpoint>& destinations, int timeout_ms) noexcept {
                         if (NULLPTR == socket) {
+                            LOG_DEBUG("vdns::send_requests: socket is null for hostname=%s", hostname.data());
                             return false;
                         }
+
+                        LOG_DEBUG("vdns::send_requests: resolving hostname=%s, destinations=%zu, timeout=%dms",
+                            hostname.data(), destinations.size(), timeout_ms);
 
                         internal& c = internal::c();
                         bool any_sent = false;
@@ -550,8 +560,10 @@ namespace ppp {
                         }
 
                         if (!any_sent) {
+                            LOG_DEBUG("vdns::send_requests: no requests sent for hostname=%s", hostname.data());
                             return false;
                         }
+                        LOG_DEBUG("vdns::send_requests: requests sent for hostname=%s", hostname.data());
 
                         // Set the overall timeout for this request.
                         std::weak_ptr<DNS_RequestContext> weak_self = weak_from_this();
@@ -725,10 +737,12 @@ namespace ppp {
                     ppp::string hostname_str;
                     NamespaceRecordNodePtr node;
                     if (!DNS_ResolveFromCache(hostname, hostname_str, node)) {
+                        LOG_DEBUG("vdns::ResolveAsync: DNS_ResolveFromCache failed for hostname=%s", hostname ? hostname : "(null)");
                         return false;
                     }
 
                     if (NULLPTR != node) {
+                        LOG_DEBUG("vdns::ResolveAsync: cache hit for hostname=%s", hostname_str.data());
                         // Cache hit – return immediately via post.
                         boost::asio::post(context,
                             [node, cb]() noexcept {
@@ -743,6 +757,7 @@ namespace ppp {
                     boost::system::error_code ec;
                     boost::asio::ip::address addr = StringToAddress(hostname_str, ec);
                     if (!ec) {
+                        LOG_DEBUG("vdns::ResolveAsync: hostname=%s is a literal IP address", hostname_str.data());
                         boost::asio::post(context,
                             [addr, cb]() noexcept {
                                 ppp::unordered_set<boost::asio::ip::address> addrs = { addr };
@@ -751,6 +766,7 @@ namespace ppp {
                         return true;
                     }
 
+                    LOG_DEBUG("vdns::ResolveAsync: performing network resolution for hostname=%s", hostname_str.data());
                     // Perform network resolution.
                     int timeout_ms = (timeout > 0) ? timeout : PPP_RESOLVE_DNS_TIMEOUT;
                     return DNS_SendToARequestAsync(context, hostname_str, timeout_ms, destinations,
