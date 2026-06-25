@@ -58,7 +58,20 @@ jobs:
           echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> $env:GITHUB_ENV
           echo "${{ github.workspace }}/vcpkg" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      - name: Cache vcpkg packages
+        id: cache-vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/packages
+            ${{ github.workspace }}/vcpkg/downloads
+            ${{ github.workspace }}/../vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('ppp.vcxproj') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
       - name: Install dependencies via vcpkg
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         run: |
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `
