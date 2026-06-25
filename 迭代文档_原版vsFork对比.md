@@ -385,6 +385,55 @@ Fork 完全保留了原版的 7 个构建变体：
 
 两版结构相同，JNI 接口层代码一致。
 
+### 7.6 日志系统增强（Fork 独有）
+
+Fork 新增了 **运行时详细日志（Runtime Verbose Logging）** 机制，用于诊断网络连接问题：
+
+#### 7.6.1 编译开关控制
+
+在 `ppp/stdafx.h` 中新增 `PPP_LOG_VERBOSE` 编译开关：
+
+```cpp
+#if defined(PPP_LOG_VERBOSE)
+#define LOG_DEBUG(...)     do { fprintf(stdout, "[%s][%s:%d] ", GetCurrentTimeString().data(), __FILE__, __LINE__), fprintf(stdout, __VA_ARGS__), fprintf(stdout, "\n"); } while (0)
+#else
+#define LOG_DEBUG(...)     ((void)0)
+#endif
+```
+
+- `LOG_INFO` / `LOG_ERROR` / `LOG_WARN` — 始终编译，Release 和 Debug 配置都有
+- `LOG_DEBUG` — **只有定义了 `PPP_LOG_VERBOSE` 才编译**，默认关闭，零性能开销
+
+#### 7.6.2 已添加 LOG_DEBUG 的模块
+
+| 文件 | 关键日志点 |
+|------|-----------|
+| `windows/ppp/tap/TapWindows.cpp` | TAP 设备创建、驱动打开、发送/接收数据包循环 |
+| `ppp/app/client/VEthernetNetworkSwitcher.cpp` | 客户端 Open() 各步骤（网卡、TAP、exchanger、HTTP/SOCKS 代理） |
+| `ppp/net/asio/vdns.cpp` | DNS 解析请求发送、响应接收、完成/超时、缓存命中 |
+| `ppp/transmissions/ITransmission.cpp` | 客户端/服务端握手、加密/解密 |
+| `ppp/transmissions/ITcpipTransmission.cpp` | TCP 读写字节 |
+| `ppp/transmissions/IWebsocketTransmission.cpp` | WebSocket/SSL 握手 |
+| `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` | MuxOrConnect、MuxOrAccept、Run、ForwardTransmissionToSocket |
+| `ppp/app/server/VirtualEthernetSwitcher.cpp` | 服务端监听器创建、接受连接、握手流程 |
+
+#### 7.6.3 使用方法
+
+在 `ppp.vcxproj` 的 `PreprocessorDefinitions` 中添加 `PPP_LOG_VERBOSE`，或在编译命令行加 `/DPPP_LOG_VERBOSE`。运行后 LOG_DEBUG 输出到 stdout（控制台），格式：
+
+```
+[2026-06-25 12:00:00.000][file.cpp:123] message
+```
+
+#### 7.6.4 设计意图
+
+原版没有任何运行时详细日志机制，排查网络问题只能靠 `printf` 临时加日志。Fork 的日志系统设计目标：
+
+- **按需开启**：编译开关控制，Release 版本也可开启
+- **全路径覆盖**：从 TAP 设备 → DNS 解析 → 握手 → 加密 → 数据转发，覆盖完整数据流
+- **低侵入**：LOG_DEBUG 默认编译为空，不影响性能
+- **诊断导向**：专门为"Windows 版本连不上网"这类问题设计，每个日志点都包含关键上下文（hostname、端口、状态码等）
+
 ---
 
 ## 8. 文档差异
@@ -448,6 +497,7 @@ Fork 在 `builds/` 目录下新增了：
 | 6 | **新增文档** | 环境需求、Release 清单等中文文档 |
 | 7 | **证书动态获取** | cacert.pem 从 curl.se 实时下载，确保证书最新 |
 | 8 | **vcpkg 集成** | Windows 使用 vcpkg 管理第三方依赖，替代手动编译 |
+| 9 | **运行时详细日志系统** | 新增 `PPP_LOG_VERBOSE` 编译开关控制 LOG_DEBUG，覆盖 TAP 设备、DNS 解析、握手、加密、数据转发等全路径，用于诊断网络连接问题 |
 
 ### 10.2 原版保留的特性
 
