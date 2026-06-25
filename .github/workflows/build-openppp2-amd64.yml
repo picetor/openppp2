@@ -13,7 +13,6 @@ on:
         description: 'Build amd64 variants'
         type: boolean
         default: false
-        default: false
 
 jobs:
   build-amd64:
