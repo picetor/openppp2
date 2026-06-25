@@ -304,6 +304,7 @@ private:
 
 // Global variables
 static std::shared_ptr<PppApplication>              DEFAULT_;                            // Application instance
+static ppp::string                                   LOG_FILE_PATH_;                      // Log file path from --log-file argument
 static struct {
     using BypassSet = NetworkInterface::BypassSet;
 
@@ -1014,8 +1015,8 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         console_window_buff_size_ = ppp::Malign(console_window_content_size, 1 << 6);
     }
 
-    // Output to console
-    fprintf(stdout, "%s", console_window_content.data());
+    // Output to console (use stderr to keep console display when stdout is redirected to log file)
+    fprintf(stderr, "%s", console_window_content.data());
     return true;
 }
 
@@ -1279,6 +1280,13 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     // Configure socket flash TOS
     Socket::SetDefaultFlashTypeOfService(ppp::ToBoolean(ppp::GetCommandArgument("--tun-flash", argc, argv).data()));
     
+    // Parse log file path from command line
+    LOG_FILE_PATH_ = ppp::GetCommandArgument("--log-file", argc, argv);
+    if (LOG_FILE_PATH_.size() > 0)
+    {
+        LOG_FILE_PATH_ = File::GetFullPath(File::RewritePath(LOG_FILE_PATH_.data()).data());
+    }
+
     // Show help if requested
     if (ppp::IsInputHelpCommand(argc, argv))
     {
@@ -1423,6 +1431,11 @@ void PppApplication::PrintHelpInformation() noexcept
         col_option_width, "--auto-restart=<seconds>", 
         col_description_width, "Auto restart interval", 
         col_default_width, "0 (disabled)");
+    
+    printf("│ %-*s │ %-*s │ %-*s │\n", 
+        col_option_width, "--log-file=<path>", 
+        col_description_width, "LOG_DEBUG output file (Debug builds only)", 
+        col_default_width, "console only");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--link-restart=<count>", 
@@ -2613,6 +2626,20 @@ int main(int argc, const char* argv[]) noexcept
 
     // Prepare environment and run
     int prepared_status = APP->PreparedArgumentEnvironment(argc, argv);
+
+    // Redirect stdout to log file if specified (only meaningful with PPP_LOG_VERBOSE)
+#if defined(PPP_LOG_VERBOSE)
+    if (LOG_FILE_PATH_.size() > 0)
+    {
+        FILE* log_file = freopen(LOG_FILE_PATH_.data(), "a", stdout);
+        if (NULLPTR != log_file)
+        {
+            setvbuf(log_file, NULLPTR, _IONBF, 0);
+            fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
+        }
+    }
+#endif
+
     int result_code = Executors::Run(APP->GetBufferAllocator(), 
         [APP, prepared_status](int argc, const char* argv[]) noexcept -> int
         {
