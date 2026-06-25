@@ -163,41 +163,84 @@ jobs:
             "# placeholder" | Out-File -FilePath "${{ github.workspace }}\starrylink.net.pem"
           }
 
-          Write-Output "=== Building Windows x64 ==="
+          Write-Output "=== Building Windows x64 (Release) ==="
 
-          # Build with MSBuild (only the ppp project, skip sysproxy32 which has missing deps)
+          # Build Release
           msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=x64 `
             "/t:Clean;Build" `
             /p:VcpkgEnableManifest=false `
             /m
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "MSBuild failed with exit code $LASTEXITCODE"
+            Write-Error "MSBuild Release failed with exit code $LASTEXITCODE"
             exit 1
           }
 
-          # Find the built executable
-          $exePath = "x64\Release\ppp.exe"
-          if (-not (Test-Path $exePath)) {
-            $exePath = "Release\ppp.exe"
+          # Find the Release executable
+          $releaseExe = "x64\Release\ppp.exe"
+          if (-not (Test-Path $releaseExe)) {
+            $releaseExe = "Release\ppp.exe"
           }
-          if (-not (Test-Path $exePath)) {
-            Write-Error "ppp.exe not found!"
+          if (-not (Test-Path $releaseExe)) {
+            Write-Error "Release ppp.exe not found!"
             Get-ChildItem -Recurse -Filter "ppp.exe" | Select-Object FullName
             exit 1
           }
 
-          Write-Output "Found ppp.exe at: $exePath"
+          Write-Output "Found Release ppp.exe at: $releaseExe"
+          $ReleaseArtifactName = "openppp2-windows-x64_${TS}.exe"
+          Copy-Item $releaseExe $ReleaseArtifactName
 
-          $ArtifactName = "openppp2-windows-x64_${TS}.exe"
-          Copy-Item $exePath $ArtifactName
+          Write-Output "=== Building Windows x64 (Debug) ==="
 
-          echo "ARTIFACT_NAME=$ArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Build Debug
+          msbuild ppp.vcxproj /p:Configuration=Debug /p:Platform=x64 `
+            /p:VcpkgEnableManifest=false `
+            /m
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "MSBuild Debug failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          # Find the Debug executable and PDB
+          $debugExe = "x64\Debug\ppp.exe"
+          if (-not (Test-Path $debugExe)) {
+            $debugExe = "Debug\ppp.exe"
+          }
+          if (-not (Test-Path $debugExe)) {
+            Write-Error "Debug ppp.exe not found!"
+            Get-ChildItem -Recurse -Filter "ppp.exe" | Select-Object FullName
+            exit 1
+          }
+
+          Write-Output "Found Debug ppp.exe at: $debugExe"
+          $DebugArtifactName = "openppp2-windows-x64-debug_${TS}.exe"
+          Copy-Item $debugExe $DebugArtifactName
+
+          # Also copy PDB if exists
+          $debugPdb = "x64\Debug\ppp.pdb"
+          if (Test-Path $debugPdb) {
+            $PdbArtifactName = "openppp2-windows-x64-debug_${TS}.pdb"
+            Copy-Item $debugPdb $PdbArtifactName
+            Write-Output "Found PDB at: $debugPdb"
+          }
+
+          echo "ARTIFACT_NAME=$ReleaseArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Upload artifact
+      - name: Upload Release artifact
         uses: actions/upload-artifact@v7
         with:
           name: openppp2-windows-x64
           path: ${{ github.workspace }}/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
+
+      - name: Upload Debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: openppp2-windows-x64-debug
+          path: |
+            ${{ github.workspace }}/openppp2-windows-x64-debug_*.exe
+            ${{ github.workspace }}/openppp2-windows-x64-debug_*.pdb
+          if-no-files-found: warn
