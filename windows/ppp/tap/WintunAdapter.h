@@ -33,6 +33,9 @@
 typedef struct _WINTUN_ADAPTER*         WINTUN_ADAPTER_HANDLE;
 typedef struct _WINTUN_SESSION*         WINTUN_SESSION_HANDLE;
 
+// Wintun maximum IP packet size (as defined by wintun.h)
+static constexpr uint32_t               WINTUN_MAX_IP_PACKET_SIZE = 0xFFFF;
+
 // -------------------- WintunAdapter class --------------------
 class WintunAdapter : public std::enable_shared_from_this<WintunAdapter> {
 public:

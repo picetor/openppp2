@@ -255,7 +255,7 @@ bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len) noexcept {
     // At this point the packet is considered "in flight".
     // The stop flag is not set, so we can proceed safely.
     bool success = false;
-    if (len > 0 && len <= static_cast<uint32_t>(ppp::tap::ITap::Mtu)) {
+    if (len > 0 && len <= WINTUN_MAX_IP_PACKET_SIZE) {
         BYTE* buf = WintunAllocateSendPacket(session_handle_, len);
         if (buf) {
             memcpy(buf, data, len);
