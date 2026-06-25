@@ -27,8 +27,8 @@ on:
     inputs:
       build_amd64:
         description: 'Build amd64 variants'
-        type: bquired: false
-        default: ''
+        type: boolean
+        default: false
 
 jobs:
   build-amd64:
