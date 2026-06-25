@@ -896,7 +896,7 @@ extern "C" {
 #endif
 #else
 #if defined(_WIN32)
-#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(stdout, "[%s][" ## TAG ## "](%s:%d): " ## FORMAT ## "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(stdout, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, __VA_ARGS__)
 #else   
 #define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(stdout, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, __VA_ARGS__)
 #endif
