@@ -6,23 +6,7 @@
 name: Build openppp2 (Windows)
 
 on:
-  push:
-    branches: [ master ]
-    paths:
-      - 'windows/**'
-      - 'sln/**'
-      - 'vcpkg/**'
-      - 'Driver/**'
-      - 'common/**'
-      - 'ppp/**'
-      - 'main.cpp'
-      - 'CMakeLists.txt'
-      - 'ppp.sln'
-      - 'ppp.vcxproj'
-      - 'ppp.vcxproj.filters'
-      - '.github/workflows/build-openppp2-windows.yml'
-  pull_request:
-    branches: [ master ]
+  workflow_dispatch:      # 仅手动触发
     paths:
       - 'windows/**'
       - 'sln/**'
