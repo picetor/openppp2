@@ -65,8 +65,7 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg/packages
             ${{ github.workspace }}/vcpkg/downloads
-            ${{ github.workspace }}/../vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('ppp.vcxproj') }}
+          key: vcpkg-${{ runner.os }}-boost1.91-openssl3-jemalloc
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
