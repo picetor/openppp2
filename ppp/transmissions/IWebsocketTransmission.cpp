@@ -65,7 +65,7 @@ namespace ppp {
 
             LOG_DEBUG("IWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
                 ok ? "success" : "failed", host.data(), path.data(),
-                handshake_type == HandshakeType_Client ? "client" : "server");
+                handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
 
@@ -137,7 +137,7 @@ namespace ppp {
 
             LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
                 ok ? "success" : "failed", host.data(), path.data(),
-                handshake_type == HandshakeType_Client ? "client" : "server");
+                handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
 
