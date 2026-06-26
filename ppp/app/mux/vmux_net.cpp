@@ -39,6 +39,9 @@ namespace vmux {
     }
 
     void vmux_net::finalize() noexcept {
+        LOG_DEBUG("vmux_net::finalize: disposing mux, established=%d, linklayers=%zu, skts=%zu",
+            base_.established_, rx_links_.size(), skts_.size());
+
         vmux_linklayer_vector rx_links;
         tx_packet_ssqueue tx_queue;
         rx_packet_ssqueue rx_queue;
@@ -66,6 +69,7 @@ namespace vmux {
             break;
         }
 
+        LOG_DEBUG("vmux_net::finalize: closing %zu skts, %zu linklayers", skts.size(), rx_links.size());
         for (const std::pair<uint32_t, vmux_skt_ptr>& kv : skts) {
             const vmux_skt_ptr& skt = kv.second;
             skt->close(); // There is no need to send any data because the underlying link will be interrupted.
@@ -162,6 +166,7 @@ namespace vmux {
     
     bool vmux_net::underlyin_sent(const vmux_linklayer_ptr& linklayer, const std::shared_ptr<Byte>& packet, int packet_length, const PostInternalAsynchronousCallback& posted_ac) noexcept {
         if (NULLPTR == packet || packet_length < sizeof(vmux_hdr)) {
+            LOG_DEBUG("vmux_net::underlyin_sent: invalid packet, length=%d", packet_length);
             return false;
         }
         
@@ -171,11 +176,13 @@ namespace vmux {
 
         VirtualEthernetTcpipConnectionPtr& connection = linklayer->connection;
         if (!connection->IsLinked()) {
+            LOG_DEBUG("vmux_net::underlyin_sent: connection not linked");
             return false;
         }
 
         ITransmissionPtr transmission = connection->GetTransmission();
         if (NULLPTR == transmission) {
+            LOG_DEBUG("vmux_net::underlyin_sent: no transmission");
             return false;
         }
 
@@ -234,6 +241,7 @@ namespace vmux {
                         }
 
                         if (is_port_aging) {
+                            LOG_DEBUG("vmux_net::update: releasing idle skt connection_id=%u, delta=%llu ms", kv.first, (unsigned long long)delta_time);
                             release_skts.emplace_back(skt);
                         }
                     }
@@ -241,11 +249,16 @@ namespace vmux {
 
                 uint64_t max_mux_inactive_timeout = ((uint64_t)AppConfiguration->mux.inactive.timeout) * 1000ULL;
                 uint64_t max_mux_connect_timeout = ((uint64_t)AppConfiguration->mux.connect.timeout) * 1000ULL;
+                uint64_t delta_mux = now - status_.last_;
+                uint64_t mux_timeout = base_.established_ ? max_mux_inactive_timeout : max_mux_connect_timeout;
 
-                if ((now - status_.last_) >= (base_.established_ ? max_mux_inactive_timeout : max_mux_connect_timeout)) {
+                if (delta_mux >= mux_timeout) {
+                    LOG_DEBUG("vmux_net::update: mux timeout, delta=%llu ms, timeout=%llu ms, established=%d",
+                        (unsigned long long)delta_mux, (unsigned long long)mux_timeout, base_.established_);
                     close_exec();
                 }
                 elif(base_.established_ && (now - status_.last_heartbeat_) >= status_.heartbeat_timeout_) {
+                    LOG_DEBUG("vmux_net::update: sending keepalive heartbeat");
                     if (post(cmd_keep_alived, NULLPTR, 0, ftt_random_aid(1, INT32_MAX))) {
                         status_.last_heartbeat_ = now;
                         switch_to_next_heartbeat_timeout();
@@ -358,6 +371,7 @@ namespace vmux {
             packet_input_read(connection_id, NULLPTR, 0, now);
         }
         elif(cmd == cmd_syn) {
+            LOG_DEBUG("vmux_net::packet_input: cmd_syn connection_id=%u", connection_id);
             std::shared_ptr<vmux_skt> sk;
             bool successed = process_rx_connecting(sk, connection_id, (char*)buffer, buffer_size);
 
@@ -366,6 +380,7 @@ namespace vmux {
                     sk->active(now);
                 }
                 else {
+                    LOG_DEBUG("vmux_net::packet_input: cmd_syn process_rx_connecting failed, connection_id=%u", connection_id);
                     sk->close();
                 }
             }
@@ -383,8 +398,12 @@ namespace vmux {
                     skt->active(now);
                 }
                 else {
+                    LOG_DEBUG("vmux_net::packet_input: cmd_syn_ok failed, connection_id=%u", connection_id);
                     skt->close();
                 }
+            }
+            else {
+                LOG_DEBUG("vmux_net::packet_input: cmd_syn_ok no skt, connection_id=%u", connection_id);
             }
         }
         elif(cmd == cmd_acceleration) {
@@ -407,6 +426,7 @@ namespace vmux {
             active(now);
         }
         else {
+            LOG_DEBUG("vmux_net::packet_input: unknown cmd=%d", (int)cmd);
             return false;
         }
 
@@ -569,29 +589,35 @@ namespace vmux {
 
     bool vmux_net::add_linklayer(const VirtualEthernetTcpipConnectionPtr& connection, vmux_linklayer_ptr& linklayer, const vmux_native_add_linklayer_after_success_before_callback& cb) noexcept {
         if (NULLPTR == connection) {
+            LOG_DEBUG("vmux_net::add_linklayer: null connection");
             return false;
         }
 
         SynchronizationObjectScope __SCOPE__(syncobj_);
         if (base_.disposed_) {
+            LOG_DEBUG("vmux_net::add_linklayer: disposed");
             return false;
         }
 
         if (!connection->IsLinked()) {
+            LOG_DEBUG("vmux_net::add_linklayer: connection not linked");
             return false;
         }
 
         if (rx_links_.size() >= status_.max_connections) {
+            LOG_DEBUG("vmux_net::add_linklayer: max connections reached (%zu >= %u)", rx_links_.size(), status_.max_connections);
             return false;
         }
 
         linklayer = ppp::make_shared_object<vmux_linklayer>();
         if (NULLPTR == linklayer) {
+            LOG_DEBUG("vmux_net::add_linklayer: failed to allocate linklayer");
             return false;
         }
 
         std::shared_ptr<Byte> buffer = make_byte_array(max_buffers_size);
         if (NULLPTR == buffer) {
+            LOG_DEBUG("vmux_net::add_linklayer: failed to allocate buffer");
             return false;
         }
 
@@ -601,6 +627,7 @@ namespace vmux {
 
         bool unlimited = rx_links_.size() < status_.max_connections;
         if (unlimited) {
+            LOG_DEBUG("vmux_net::add_linklayer: added linklayer (%zu/%u), waiting for more", rx_links_.size(), status_.max_connections);
             if (NULLPTR != cb && !cb()) {
                 return false;
             }
@@ -611,6 +638,7 @@ namespace vmux {
             return false;
         }
 
+        LOG_DEBUG("vmux_net::add_linklayer: all %u linklayers ready, starting handshake", status_.max_connections);
         uint64_t now = now_tick();
         active(now);
 
@@ -628,14 +656,20 @@ namespace vmux {
 
             auto process =
                 [self, this, linklayer, connection_id, connection_context, connection_strand](ppp::coroutines::YieldContext& y) noexcept {
+                    LOG_DEBUG("vmux_net::add_linklayer: starting handshake for connection_id=%u", connection_id);
                     if (handshake(linklayer, connection_id, y)) {
+                        LOG_DEBUG("vmux_net::add_linklayer: handshake ok, starting forwarding for connection_id=%u", connection_id);
                         forwarding(linklayer, y);
+                    }
+                    else {
+                        LOG_DEBUG("vmux_net::add_linklayer: handshake failed for connection_id=%u", connection_id);
                     }
 
                     close_exec();
                 };
 
             if (!ppp::coroutines::YieldContext::Spawn(BufferAllocator.get(), *connection_context, connection_strand.get(), process)) {
+                LOG_DEBUG("vmux_net::add_linklayer: failed to spawn handshake coroutine for connection_id=%u", connection_id);
                 return false;
             }
 
@@ -647,16 +681,19 @@ namespace vmux {
 
     bool vmux_net::handshake(const vmux_linklayer_ptr& linklayer, uint16_t connection_id, ppp::coroutines::YieldContext& y) noexcept {
         if (base_.disposed_) {
+            LOG_DEBUG("vmux_net::handshake: disposed");
             return false;
         }
 
         VirtualEthernetTcpipConnectionPtr& linklayer_socket = linklayer->connection;
         if (!linklayer_socket->IsLinked()) {
+            LOG_DEBUG("vmux_net::handshake: connection not linked, connection_id=%u", connection_id);
             return false;
         }
 
         ITransmissionPtr linklayer_transmission = linklayer_socket->GetTransmission();
         if (NULLPTR == linklayer_transmission) {
+            LOG_DEBUG("vmux_net::handshake: no transmission, connection_id=%u", connection_id);
             return false;
         }
 
@@ -675,13 +712,16 @@ namespace vmux {
             packet.receive_id = htons(connection_id);
 
             if (!linklayer_transmission->Write(y, &packet, sizeof(vmux_linlayer_add_ack_packet))) {
+                LOG_DEBUG("vmux_net::handshake: write failed (server), connection_id=%u", connection_id);
                 return false;
             }
+            LOG_DEBUG("vmux_net::handshake: sent ack (server), connection_id=%u", connection_id);
         }
         else {
             int buffer_size = 0;
             std::shared_ptr<Byte> packet_memory = linklayer_transmission->Read(y, buffer_size);
             if (NULLPTR == packet_memory || buffer_size < sizeof(vmux_linlayer_add_ack_packet)) {
+                LOG_DEBUG("vmux_net::handshake: read failed (client), buffer_size=%d", buffer_size);
                 return false;
             }
 
@@ -689,11 +729,13 @@ namespace vmux {
             uint32_t receive_id = ntohs(packet->receive_id);
 
             if (receive_id == 0 && receive_id <= rx_links_.size()) {
+                LOG_DEBUG("vmux_net::handshake: invalid receive_id=%u", receive_id);
                 return false;
             }
 
             SynchronizationObjectScope __SCOPE__(syncobj_);
             status_.opened_connections++;
+            LOG_DEBUG("vmux_net::handshake: received ack (client), receive_id=%u, opened=%u", receive_id, status_.opened_connections.load());
         }
 
         linklayer_established();
@@ -711,6 +753,10 @@ namespace vmux {
 
             active(now);
             switch_to_next_heartbeat_timeout();
+
+            if (base_.established_) {
+                LOG_DEBUG("vmux_net::linklayer_established: mux established, max_connections=%u", status_.max_connections.load());
+            }
         }
     }
 

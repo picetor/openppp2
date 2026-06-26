@@ -98,16 +98,22 @@ namespace ppp {
             protected:
                 virtual std::shared_ptr<Byte>                               DoReadBytes(YieldContext& y, int length) noexcept {
                     if (disposed_) {
+                        LOG_DEBUG("WebSocket::DoReadBytes: disposed");
                         return NULLPTR;
                     }
 
                     auto self = shared_from_this();
-                    return ITransmissionQoS::DoReadBytes(y, length, self, *this, this->QoS);
+                    std::shared_ptr<Byte> result = ITransmissionQoS::DoReadBytes(y, length, self, *this, this->QoS);
+                    if (NULLPTR == result) {
+                        LOG_DEBUG("WebSocket::DoReadBytes: read failed, length=%d", length);
+                    }
+                    return result;
                 }
                 virtual bool                                                DoWriteBytes(std::shared_ptr<Byte> packet, int offset, int packet_length, const AsynchronousWriteBytesCallback& cb) noexcept {
                     using AsynchronousWriteCallback = typename IWebsocket::AsynchronousWriteCallback;
 
                     if (disposed_) {
+                        LOG_DEBUG("WebSocket::DoWriteBytes: disposed");
                         return false;
                     }
 
@@ -123,6 +129,7 @@ namespace ppp {
                                     }
                                 }
                                 else {
+                                    LOG_DEBUG("WebSocket::DoWriteBytes: async write failed, length=%d", packet_length);
                                     Dispose();
                                 }
 
@@ -133,12 +140,14 @@ namespace ppp {
 
                         bool ok = socket->Write(packet.get(), offset, packet_length, complete_do_write_async_callback);
                         if (!ok) {
+                            LOG_DEBUG("WebSocket::DoWriteBytes: socket->Write failed, length=%d", packet_length);
                             Dispose();
                         }
 
                         return ok;
                     }
                     else {
+                        LOG_DEBUG("WebSocket::DoWriteBytes: socket is null");
                         return false;
                     }
                 }

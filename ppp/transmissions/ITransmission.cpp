@@ -131,6 +131,7 @@ namespace ppp {
             static std::shared_ptr<Byte> Read(ITransmission* transmission, YieldContext& y, int& outlen) noexcept {
                 outlen = 0;
                 if (transmission->disposed_) {
+                    LOG_DEBUG("ITransmission::Read: disposed");
                     return NULLPTR;
                 }
 
@@ -138,13 +139,26 @@ namespace ppp {
                 AppConfigurationPtr& cfg = transmission->configuration_;
                 if (!transmission->handshaked_ || cfg->key.plaintext) {
                     packet = base94_decode(transmission, y, outlen);
+                    if (NULLPTR == packet) {
+                        LOG_DEBUG("ITransmission::Read: base94_decode failed, handshaked=%d", transmission->handshaked_);
+                        return NULLPTR;
+                    }
                     packet = DecryptBinary(transmission, packet.get(), outlen, outlen);
+                    if (NULLPTR == packet) {
+                        LOG_DEBUG("ITransmission::Read: DecryptBinary after base94 failed, outlen=%d", outlen);
+                        return NULLPTR;
+                    }
                 }
                 else {
                     packet = ReadBinary(transmission, y, outlen);
+                    if (NULLPTR == packet) {
+                        LOG_DEBUG("ITransmission::Read: ReadBinary failed, outlen=%d", outlen);
+                        return NULLPTR;
+                    }
                 }
 
                 if (NULLPTR != packet) {
+                    LOG_DEBUG("ITransmission::Read: success, outlen=%d, handshaked=%d", outlen, transmission->handshaked_);
                     return packet;
                 }
                 else {
@@ -212,23 +226,29 @@ namespace ppp {
             // Low‑level write: encrypts the packet then calls WriteBytes on the transmission.
             static bool Write(ITransmission* transmission, const void* packet, int packet_length, const ITransmission::AsynchronousWriteBytesCallback& cb) noexcept {
                 if (NULLPTR == packet || packet_length < 1) {
+                    LOG_DEBUG("ITransmission::Write: invalid packet, length=%d", packet_length);
                     return false;
                 }
 
                 if (NULLPTR == cb) {
+                    LOG_DEBUG("ITransmission::Write: null callback");
                     return false;
                 }
 
                 if (transmission->disposed_) {
+                    LOG_DEBUG("ITransmission::Write: disposed");
                     return false;
                 }
 
                 int messages_size = 0;
                 std::shared_ptr<Byte> messages = Encrypt(transmission, (Byte*)packet, packet_length, messages_size);
                 if (NULLPTR == messages) {
+                    LOG_DEBUG("ITransmission::Write: Encrypt failed, packet_length=%d", packet_length);
                     return false;
                 }
 
+                LOG_DEBUG("ITransmission::Write: encrypt ok, packet_length=%d, messages_size=%d, handshaked=%d",
+                    packet_length, messages_size, transmission->handshaked_);
                 return transmission->WriteBytes(messages, messages_size, cb);
             }
 

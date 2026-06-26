@@ -422,6 +422,7 @@ namespace ppp {
             // ---------------------------------------------------------------------
             bool VirtualEthernetLinklayer::Run(const ITransmissionPtr& transmission, YieldContext& y) noexcept {
                 if (NULLPTR == transmission) {
+                    LOG_DEBUG("VirtualEthernetLinklayer::Run: null transmission");
                     return false;
                 }
 
@@ -429,20 +430,25 @@ namespace ppp {
                 last_ = Executors::GetTickCount();          // reset activity timer
                 next_ka_ = 0;                               // reset keep‑alive scheduler
 
+                LOG_DEBUG("VirtualEthernetLinklayer::Run: entering data loop");
                 for (;;) {
                     int packet_length = 0;
                     std::shared_ptr<Byte> packet = transmission->Read(y, packet_length);
                     if (NULLPTR == packet || packet_length < 1) {
+                        LOG_DEBUG("VirtualEthernetLinklayer::Run: read failed or end of stream, packet=%p, length=%d",
+                            (void*)packet.get(), packet_length);
                         break;                              // no more data or read error
                     }
 
                     if (!PacketInput(transmission, packet.get(), packet_length, y)) {
+                        LOG_DEBUG("VirtualEthernetLinklayer::Run: PacketInput failed, length=%d", packet_length);
                         break;                              // packet processing failed -> exit
                     } else {
                         ok = true;
                         last_ = Executors::GetTickCount();  // update last activity on success
                     }
                 }
+                LOG_DEBUG("VirtualEthernetLinklayer::Run: exiting data loop, ok=%d", ok);
                 return ok;
             }
 
@@ -482,6 +488,8 @@ namespace ppp {
                 PacketAction packet_action = static_cast<PacketAction>(*p);
                 ++p;
                 --packet_length;
+
+                LOG_DEBUG("VirtualEthernetLinklayer::PacketInput: action=%d, length=%d", (int)packet_action, packet_length);
 
                 // ---------- dispatch based on action ----------
                 if (packet_action == PacketAction_PSH) {                // TCP data push
@@ -757,6 +765,8 @@ namespace ppp {
 
                 uint64_t deadline = last_ + static_cast<uint64_t>(max_timeout_ms + EXTRA_FAULT_TOLERANT_TIME);
                 if (now >= deadline) {
+                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: idle timeout, now=%llu, deadline=%llu, last=%llu",
+                        (unsigned long long)now, (unsigned long long)deadline, (unsigned long long)last_);
                     return false;   // idle timeout exceeded -> dead connection
                 }
 
@@ -779,9 +789,11 @@ namespace ppp {
                     packet[i] = static_cast<Byte>(RandomNext(0x20, 0x7E)); // printable range
                 }
 
+                LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: sending keepalive, size=%d, max_timeout_ms=%d", packet_size, max_timeout_ms);
                 YieldContext& y_null = nullof<YieldContext>();   // dummy yield context for synchronous send
                 if (!global::PACKET_Push(PacketAction_KEEPALIVED, transmission, packet, packet_size, 
                                          y_null /* no coroutine context */)) {
+                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: PACKET_Push failed");
                     return false;   // failed to send keep‑alive
                 }
 

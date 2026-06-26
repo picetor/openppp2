@@ -274,21 +274,28 @@ namespace ppp {
                 ProtocolType protocol_type = ProtocolType::ProtocolType_PPP;
 
                 if (!GetRemoteEndPoint(y.GetPtr(), hostname, address, path, port, protocol_type, server, remoteEP)) {
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: GetRemoteEndPoint failed");
                     return NULLPTR;
                 }
 
                 boost::asio::ip::address remoteIP = remoteEP.address();
                 if (IPEndPoint::IsInvalid(remoteIP)) {
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: invalid remote IP");
                     return NULLPTR;
                 }
 
                 int remotePort = remoteEP.port();
                 if (remotePort <= IPEndPoint::MinPort || remotePort > IPEndPoint::MaxPort) {
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: invalid remote port=%d", remotePort);
                     return NULLPTR;
                 }
 
+                LOG_DEBUG("VEthernetExchanger::OpenTransmission: connecting to %s:%d, protocol=%d, hostname=%s, path=%s",
+                    address.data(), remotePort, (int)protocol_type, hostname.data(), path.data());
+
                 std::shared_ptr<boost::asio::ip::tcp::socket> socket = NewAsynchronousSocket(context, strand, remoteEP.protocol(), y);
                 if (!socket) {
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: NewAsynchronousSocket failed");
                     return NULLPTR;
                 }
 
@@ -300,6 +307,7 @@ namespace ppp {
                     auto protector_network = switcher_->GetProtectorNetwork(); 
                     if (NULLPTR != protector_network) {
                         if (!protector_network->Protect(socket->native_handle(), y)) {
+                            LOG_DEBUG("VEthernetExchanger::OpenTransmission: Protect failed (Linux)");
                             return NULLPTR;
                         }
                     }
@@ -311,29 +319,41 @@ namespace ppp {
                     auto underlying_ni = switcher_->GetUnderlyingNetworkInterface();
                     if (NULLPTR != underlying_ni && underlying_ni->Index > 0) {
                         int if_index = underlying_ni->Index;
+                        LOG_DEBUG("VEthernetExchanger::OpenTransmission: binding to NIC if_index=%d", if_index);
                         if (remoteIP.is_v4()) {
                             // IP_UNICAST_IF = 31 (IPPROTO_IP level)
                             // The value is the interface index in network byte order (ULONG)
                             ULONG index = htonl((ULONG)if_index);
-                            ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
+                            int rc = ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
+                            if (rc < 0) {
+                                LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v4) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
+                            }
                         }
 #if defined(IPPROTO_IPV6)
                         else {
                             // IPV6_UNICAST_IF = 31 (IPPROTO_IPV6 level)
                             // The value is the interface index directly (ULONG)
                             ULONG index = (ULONG)if_index;
-                            ::setsockopt(socket->native_handle(), IPPROTO_IPV6, 31, (const char*)&index, sizeof(index));
+                            int rc = ::setsockopt(socket->native_handle(), IPPROTO_IPV6, 31, (const char*)&index, sizeof(index));
+                            if (rc < 0) {
+                                LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v6) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
+                            }
                         }
 #endif
+                    }
+                    else {
+                        LOG_DEBUG("VEthernetExchanger::OpenTransmission: underlying NIC not found, Index=%d", underlying_ni ? underlying_ni->Index : -1);
                     }
                 }
 #endif
 
                 bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y);
                 if (!ok) {
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: async_connect to %s:%d failed", address.data(), remotePort);
                     return NULLPTR;
                 }
 
+                LOG_DEBUG("VEthernetExchanger::OpenTransmission: connected to %s:%d, creating transmission", address.data(), remotePort);
                 return NewTransmission(context, strand, socket, protocol_type, hostname, path);
             }
 
@@ -399,6 +419,7 @@ namespace ppp {
                     return true;
                 }
 
+                LOG_DEBUG("VEthernetExchanger::DoKeepAlived: keepalive timeout, disposing transmission");
                 IDisposable::Dispose(transmission);
                 return false;
             }
@@ -476,8 +497,10 @@ namespace ppp {
                 bool run_once = false;
                 while (!disposed_) {
                     ExchangeToConnectingState(); {
+                        LOG_DEBUG("VEthernetExchanger::Loopback: connecting to server...");
                         ITransmissionPtr transmission = OpenTransmission(context, y);
                         if (transmission) {
+                            LOG_DEBUG("VEthernetExchanger::Loopback: TCP connected, starting handshake...");
                             bool handshake_ok = transmission->HandshakeServer(y, GetId(), true);
                             {
                                 auto logger = switcher_->GetLogger();
@@ -485,7 +508,9 @@ namespace ppp {
                                     logger->Handshake(GetId(), transmission, "", "", "", handshake_ok);
                                 }
                             }
+                            LOG_DEBUG("VEthernetExchanger::Loopback: handshake %s", handshake_ok ? "success" : "failed");
                             if (handshake_ok && EchoLanToRemoteExchanger(transmission, y) > -1) {
+                                LOG_DEBUG("VEthernetExchanger::Loopback: link established, entering data loop");
                                 ExchangeToEstablishState(); {
                                     transmission_ = transmission; {
                                         RegisterAllMappingPorts();
@@ -498,13 +523,21 @@ namespace ppp {
                                     }
                                     transmission_.reset();
                                 }
+                                LOG_DEBUG("VEthernetExchanger::Loopback: data loop exited, reconnecting...");
+                            }
+                            else {
+                                LOG_DEBUG("VEthernetExchanger::Loopback: handshake or LAN exchange failed");
                             }
 
                             transmission->Dispose();
                         }
+                        else {
+                            LOG_DEBUG("VEthernetExchanger::Loopback: OpenTransmission failed");
+                        }
                     } ExchangeToReconnectingState();
 
                     int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
+                    LOG_DEBUG("VEthernetExchanger::Loopback: waiting %lld ms before reconnection attempt #%d", reconnection_timeout, reconnection_count_.load());
                     Sleep(reconnection_timeout, context, y);
                 }
                 return run_once;
@@ -533,6 +566,7 @@ namespace ppp {
                         successes = true;
 
                         if (mux->Vlan != mux_vlan_) {
+                            LOG_DEBUG("VEthernetExchanger::DoMuxEvents: VLAN mismatch, mux_vlan=%u, expected=%u, closing", mux->Vlan, mux_vlan_);
                             mux->close_exec();
                         }
                         elif(!mux->update()) {
@@ -540,7 +574,10 @@ namespace ppp {
                             uint64_t mux_last = mux->get_last();
 
                             uint64_t now = mux->now_tick();
+                            LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux update failed, last=%llu, now=%llu, timeout=%lld",
+                                (unsigned long long)mux_last, (unsigned long long)now, (long long)reconnection_timeout);
                             if (now >= (mux_last + (uint64_t)reconnection_timeout)) {
+                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux reconnection timeout reached, resetting mux");
                                 mux_.reset();
                                 breaking = false;
                             }
@@ -591,6 +628,7 @@ namespace ppp {
                         }
                     }
 
+                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: creating new mux, vlan=%u, max_connections=%u", mux->Vlan, max_connections);
                     std::shared_ptr<VirtualEthernetLinklayer> self = shared_from_this();
                     mux_ = mux;
 
@@ -603,13 +641,18 @@ namespace ppp {
                             }
 
                             if (!ok) {
+                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: DoMux failed, closing mux");
                                 mux->close_exec();
+                            }
+                            else {
+                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: DoMux succeeded");
                             }
                         });
                     break;
                 }
 
                 if (!successes) {
+                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: no mux active, cleaning up");
                     std::shared_ptr<vmux::vmux_net> mux = std::move(mux_);
                     if (NULLPTR != mux) {
                         mux->close_exec();
@@ -664,6 +707,7 @@ namespace ppp {
                         const uint32_t& tx_seq = mux->get_tx_seq();
                         const uint32_t& rx_ack = mux->get_rx_ack();
                         if (!mux->ftt(vmux::vmux_net::ftt_random_aid(1, INT32_MAX), vmux::vmux_net::ftt_random_aid(1, INT32_MAX))) {
+                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ftt failed");
                             mux->close_exec();
                             return false;
                         }
@@ -671,6 +715,7 @@ namespace ppp {
                         auto context = mux->get_context();
                         auto strand = mux->get_strand();
                         
+                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: connecting %d linklayers, vlan=%u", max_connections, mux->Vlan);
                         for (int i = 0; i < max_connections; i++) {
                             if (disposed_ || mux != mux_) {
                                 bok_connections = -1;
@@ -678,11 +723,13 @@ namespace ppp {
                             }
 
                             if (mux->is_established()) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux already established at connection %d/%d", i, max_connections);
                                 return true;
                             }
 
                             ITransmissionPtr transmission = ConnectTransmission(context, strand, y);
                             if (NULLPTR == transmission) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d", i, max_connections);
                                 break;
                             }
 
@@ -691,11 +738,13 @@ namespace ppp {
                                 make_shared_object<VirtualEthernetTcpipConnection>(
                                     mux->AppConfiguration, context, strand, GetId(), default_socket);
                             if (NULLPTR == connection) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: failed to create connection at %d/%d", i, max_connections);
                                 break;
                             }
 
                             // In this lightweight and simple vmux circuit switch, seq and ack are delivered by the client, and the server and client are opposite.
                             if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectMux failed at %d/%d", i, max_connections);
                                 break;
                             }
 
@@ -707,16 +756,20 @@ namespace ppp {
                                 });
 
                             if (!bok) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: add_linklayer failed at %d/%d", i, max_connections);
                                 break;
                             }
 
                             bok_connections++;
+                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d connected", bok_connections, max_connections);
                         }
 
                         if (bok_connections >= max_connections) {
+                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: all %d linklayers connected successfully", max_connections);
                             return true;
                         }
 
+                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only %d/%d connected, closing mux", bok_connections, max_connections);
                         mux->close_exec();
                         return false;
                     });
@@ -1139,6 +1192,8 @@ namespace ppp {
 
                 UInt64 next = sekap_last_ + SEND_ECHO_KEEP_ALIVE_PACKET_MMX_TIMEOUT;
                 if (now >= next) {
+                    LOG_DEBUG("VEthernetExchanger::SendEchoKeepAlivePacket: echo timeout (%llu ms since last), disposing transmission",
+                        (unsigned long long)(now - sekap_last_));
                     ITransmissionPtr transmission = transmission_;
                     if (transmission) {
                         transmission->Dispose();

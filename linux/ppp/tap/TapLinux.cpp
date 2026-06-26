@@ -786,11 +786,13 @@ namespace ppp {
             // Linux virtual nics can directly write to the kernel ::write function,
             // Can reduce a memory allocation and replication, improve throughput efficiency.
             if (NULLPTR == packet || packet_size < 1) {
+                LOG_DEBUG("TapLinux::Output: invalid packet, size=%d", packet_size);
                 return false;
             }
 
             int disposed = disposed_.load();
             if (disposed != FALSE) {
+                LOG_DEBUG("TapLinux::Output: disposed");
                 return false;
             }
 
@@ -804,6 +806,9 @@ namespace ppp {
             }
 
             ssize_t bytes_transferred = ::write(tun, (void*)packet, (size_t)packet_size);
+            if (bytes_transferred < 0) {
+                LOG_DEBUG("TapLinux::Output: write failed, tun=%d, size=%d, errno=%d", tun, packet_size, errno);
+            }
             return bytes_transferred > -1;
         }
 
@@ -858,6 +863,7 @@ namespace ppp {
 
             bool opened = sd->is_open();
             if (!opened) {
+                LOG_DEBUG("TapLinux::Ssmt: stream not open");
                 return false;
             }
 
@@ -872,6 +878,9 @@ namespace ppp {
                             *tun = fd;
                             OnInput(e);
                             *tun = -1;
+                        }
+                        else if (ec) {
+                            LOG_DEBUG("TapLinux::Ssmt: read error, ec=%d, len=%d", ec.value(), len);
                         }
 
                         Ssmt(context, fd, buffer, sd);
