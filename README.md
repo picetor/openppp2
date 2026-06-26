@@ -160,6 +160,7 @@ Cloudflare添加域名开启小黄云代理，使用acme申请证书，SSL开启
 ## ⚡ 优选 IP + WSS 加速
 
 > 这是本修改版的核心新增功能。通过 `client.websocket.host` 和 `client.websocket.sni` 字段，实现优选 IP 连接 + CDN 正确路由。
+> `client.websocket.host` 同时适用于 WS 和 WSS 两种隧道。
 
 ### 原理
 

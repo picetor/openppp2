@@ -159,6 +159,7 @@ Add your domain to Cloudflare with proxy (orange cloud) enabled, obtain a certif
 ## ⚡ Optimized IP + WSS Acceleration
 
 > This is the core new feature of this fork. The `client.websocket.host` and `client.websocket.sni` fields enable optimized IP connections with correct CDN routing.
+> `client.websocket.host` works for both WS and WSS tunnels.
 
 ### How It Works
 

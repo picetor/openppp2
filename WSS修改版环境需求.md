@@ -535,7 +535,7 @@ openppp2-linux-aarch64-tc_20260624_2228         # aarch64 TC
 | `ppp/net/asio/vdns.cpp` | 10 | DNS 解析请求发送、响应接收、完成/超时、缓存命中 |
 | `ppp/transmissions/ITransmission.cpp` | 16 | 客户端/服务端握手、加密/解密 |
 | `ppp/transmissions/ITcpipTransmission.cpp` | 5 | TCP 读写字节 |
-| `ppp/transmissions/IWebsocketTransmission.cpp` | 2 | WebSocket/SSL 握手 |
+| `ppp/transmissions/IWebsocketTransmission.cpp` | 2 | WebSocket/SSL 握手；SSL 版日志含 `entry_ip`/`host`/`sni`/`path`/`type` |
 | `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` | 28 | MuxOrConnect、MuxOrAccept、Run、ForwardTransmissionToSocket |
 | `ppp/app/server/VirtualEthernetSwitcher.cpp` | 16 | 服务端监听器创建、接受连接、握手流程 |
 | `linux/ppp/tap/TapLinux.cpp` | 5 | Linux TUN/TAP 设备数据包发送、流读取错误 |
@@ -652,6 +652,7 @@ ls /root/dev/jemalloc/lib/libjemalloc.a
 | `libglibc_compat.a` | 新增（项目根目录） | 由 glibc_compat.h 编译的静态库，CMakeLists.txt 链接 |
 | `main.cpp` | 已修改 | 顶部添加 `#include <glibc_compat.h>` |
 | `CMakeLists.txt` | 已修改 | 条件编译变量、链接器标志修复、libglibc_compat.a 链接 |
+| `IWebsocketTransmission.cpp` | 已修改 | WS/WSS 握手统一支持 `client.websocket.host/sni`；日志改为打印实际使用的 ws_host/sni |
 | `appsettings.json` | 已修改 | 新增 `client.websocket.host` / `client.websocket.sni` 字段 |
 | `/tmp/arm64-toolchain.cmake` | 新增 | aarch64 交叉编译 toolchain 配置 |
 

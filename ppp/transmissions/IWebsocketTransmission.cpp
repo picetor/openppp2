@@ -71,8 +71,8 @@ namespace ppp {
                 ok = socket->Run(handshake_type, ws_host, ws_path, y);
             }
 
-            LOG_DEBUG("IWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
-                ok ? "success" : "failed", ws_host.data(), ws_path.data(),
+            LOG_DEBUG("IWebsocketTransmission::HandshakeWebsocket: %s, entry_ip=%s, host=%s, path=%s, type=%s",
+                ok ? "success" : "failed", host.data(), ws_host.data(), ws_path.data(),
                 handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
@@ -148,8 +148,8 @@ namespace ppp {
                     y);
             }
 
-            LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, host=%s, sni=%s, path=%s, type=%s",
-                ok ? "success" : "failed", ws_host.data(), sni.data(), ws_path.data(),
+            LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, entry_ip=%s, host=%s, sni=%s, path=%s, type=%s",
+                ok ? "success" : "failed", host.data(), ws_host.data(), sni.data(), ws_path.data(),
                 handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
