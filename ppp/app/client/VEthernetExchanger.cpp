@@ -537,7 +537,7 @@ namespace ppp {
                     } ExchangeToReconnectingState();
 
                     int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
-                    LOG_DEBUG("VEthernetExchanger::Loopback: waiting %lld ms before reconnection attempt #%d", reconnection_timeout, reconnection_count_.load());
+                    LOG_DEBUG("VEthernetExchanger::Loopback: waiting %lld ms before reconnection attempt #%d", reconnection_timeout, (int)reconnection_count_);
                     Sleep(reconnection_timeout, context, y);
                 }
                 return run_once;
