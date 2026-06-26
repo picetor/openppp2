@@ -6,7 +6,15 @@
 name: Build openppp2 (Linux amd64 Debug)
 
 on:
-  workflow_dispatch:      # 仅手动触发
+  push:
+    branches: [ master ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.hpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-openppp2-amd64-debug.yml'
+  workflow_dispatch:
 
 jobs:
   build-amd64-debug:

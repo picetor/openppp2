@@ -6,7 +6,15 @@
 name: Build openppp2 (macOS Debug)
 
 on:
-  workflow_dispatch:      # 仅手动触发
+  push:
+    branches: [ master ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.hpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-openppp2-macos-debug.yml'
+  workflow_dispatch:
 
 jobs:
   build-macos-debug:

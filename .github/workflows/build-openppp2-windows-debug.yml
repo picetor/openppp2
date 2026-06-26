@@ -6,7 +6,15 @@
 name: Build openppp2 (Windows Debug)
 
 on:
-  workflow_dispatch:      # 仅手动触发
+  push:
+    branches: [ master ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.hpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-openppp2-windows-debug.yml'
+  workflow_dispatch:
 
 jobs:
   build-windows-debug:
