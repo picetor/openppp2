@@ -735,7 +735,7 @@ namespace vmux {
 
             SynchronizationObjectScope __SCOPE__(syncobj_);
             status_.opened_connections++;
-            LOG_DEBUG("vmux_net::handshake: received ack (client), receive_id=%u, opened=%u", receive_id, status_.opened_connections.load());
+            LOG_DEBUG("vmux_net::handshake: received ack (client), receive_id=%u, opened=%u", receive_id, (unsigned)status_.opened_connections);
         }
 
         linklayer_established();
@@ -755,7 +755,7 @@ namespace vmux {
             switch_to_next_heartbeat_timeout();
 
             if (base_.established_) {
-                LOG_DEBUG("vmux_net::linklayer_established: mux established, max_connections=%u", status_.max_connections.load());
+                LOG_DEBUG("vmux_net::linklayer_established: mux established, max_connections=%u", (unsigned)status_.max_connections);
             }
         }
     }
