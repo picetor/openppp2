@@ -3,7 +3,7 @@
 > 本文档基于本仓库 `master` 分支（[picetor/openppp2](https://github.com/picetor/openppp2)），以 CI 为准。
 > 以 CI 工作流为准记录编译环境与构建步骤。
 > 构建目标：本项目 Releases，关闭调试日志。
-> 最后更新：2026-06-24
+> 最后更新：2026-06-26
 
 ---
 
@@ -13,13 +13,13 @@
 
 本项目以 GitHub Actions CI 为主要构建方式，各平台构建环境如下：
 
-| 平台 | CI 运行环境 | 编译器 | CMake | 构建系统 | 对应工作流文件 |
-|------|------------|--------|-------|---------|---------------|
-| Linux amd64 | `ubuntu-latest` | 系统 g++ (≥13) | 系统 cmake (≥3.28) | make | `.github/workflows/build-openppp2-amd64.yml` |
-| Linux aarch64 | `ubuntu-latest` | `g++-aarch64-linux-gnu` (交叉编译) | 系统 cmake (≥3.28) | make | `.github/workflows/build-openppp2-aarch64.yml` |
-| Windows | `windows-latest` | MSVC (Visual Studio 2022) | 随 VS 自带 | MSBuild | `.github/workflows/build-openppp2-windows.yml` |
-| macOS arm64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make | `.github/workflows/build-openppp2-macos.yml` |
-| macOS amd64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make | `.github/workflows/build-openppp2-macos.yml` |
+| 平台 | CI 运行环境 | 编译器 | CMake | 构建系统 | Release 工作流 | Debug 工作流 |
+|------|------------|--------|-------|---------|---------------|-------------|
+| Linux amd64 | `ubuntu-latest` | 系统 g++ (≥13) | 系统 cmake (≥3.28) | make | `.github/workflows/build-openppp2-amd64.yml` | `.github/workflows/build-openppp2-amd64-debug.yml` |
+| Linux aarch64 | `ubuntu-latest` | `g++-aarch64-linux-gnu` (交叉编译) | 系统 cmake (≥3.28) | make | `.github/workflows/build-openppp2-aarch64.yml` | `.github/workflows/build-openppp2-aarch64-debug.yml` |
+| Windows | `windows-latest` | MSVC (Visual Studio 2022) | 随 VS 自带 | MSBuild | `.github/workflows/build-openppp2-windows.yml` | `.github/workflows/build-openppp2-windows-debug.yml` |
+| macOS arm64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make | `.github/workflows/build-openppp2-macos.yml` | `.github/workflows/build-openppp2-macos-debug.yml` |
+| macOS amd64 | `macos-latest` | Apple Clang (随 Xcode) | 系统 cmake | make | `.github/workflows/build-openppp2-macos.yml` | `.github/workflows/build-openppp2-macos-debug.yml` |
 
 ### 1.2 本地编译环境（参考）
 
@@ -526,16 +526,21 @@ openppp2-linux-aarch64-tc_20260624_2228         # aarch64 TC
 
 #### 6.3.2 已添加 LOG_DEBUG 的模块
 
-| 文件 | 关键日志点 |
-|------|-----------|
-| `windows/ppp/tap/TapWindows.cpp` | TAP 设备创建、驱动打开、发送/接收数据包循环 |
-| `ppp/app/client/VEthernetNetworkSwitcher.cpp` | 客户端 Open() 各步骤（网卡、TAP、exchanger、HTTP/SOCKS 代理） |
-| `ppp/net/asio/vdns.cpp` | DNS 解析请求发送、响应接收、完成/超时、缓存命中 |
-| `ppp/transmissions/ITransmission.cpp` | 客户端/服务端握手、加密/解密 |
-| `ppp/transmissions/ITcpipTransmission.cpp` | TCP 读写字节 |
-| `ppp/transmissions/IWebsocketTransmission.cpp` | WebSocket/SSL 握手 |
-| `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` | MuxOrConnect、MuxOrAccept、Run、ForwardTransmissionToSocket |
-| `ppp/app/server/VirtualEthernetSwitcher.cpp` | 服务端监听器创建、接受连接、握手流程 |
+| 文件 | LOG_DEBUG 调用数 | 关键日志点 |
+|------|----------------|-----------|
+| `windows/ppp/tap/TapWindows.cpp` | 18 | TAP 设备创建、驱动打开、发送/接收数据包循环 |
+| `ppp/app/client/VEthernetExchanger.cpp` | 39 | 连接过程、重连循环、MUX 事件、Echo 保活 |
+| `ppp/app/mux/vmux_net.cpp` | 30 | mux 销毁、底层发送、空闲释放、心跳、握手 |
+| `ppp/app/client/VEthernetNetworkSwitcher.cpp` | 16 | 客户端 Open() 各步骤（网卡、TAP、exchanger、HTTP/SOCKS 代理） |
+| `ppp/net/asio/vdns.cpp` | 10 | DNS 解析请求发送、响应接收、完成/超时、缓存命中 |
+| `ppp/transmissions/ITransmission.cpp` | 16 | 客户端/服务端握手、加密/解密 |
+| `ppp/transmissions/ITcpipTransmission.cpp` | 5 | TCP 读写字节 |
+| `ppp/transmissions/IWebsocketTransmission.cpp` | 2 | WebSocket/SSL 握手 |
+| `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` | 28 | MuxOrConnect、MuxOrAccept、Run、ForwardTransmissionToSocket |
+| `ppp/app/server/VirtualEthernetSwitcher.cpp` | 16 | 服务端监听器创建、接受连接、握手流程 |
+| `linux/ppp/tap/TapLinux.cpp` | 5 | Linux TUN/TAP 设备数据包发送、流读取错误 |
+| `ppp/transmissions/templates/WebSocket.h` | 6 | WebSocket 读写字节（已销毁、读取失败、写入失败） |
+| `ppp/app/protocol/VirtualEthernetLinklayer.cpp` | 9 | 链路层数据循环、PacketInput、保活超时 |
 
 #### 6.3.3 `--log-file` 运行时重定向
 
@@ -576,14 +581,16 @@ ENDIF()
 
 所有 Debug 变体设置 `PLATFORM_DEBUG=TRUE` 和 `-DPPP_LOG_VERBOSE`。
 
-**CI 自动构建：** 每个平台的工作流在 Release 变体之外，额外增加一个基础版 Debug 构建：
+**CI 自动构建：** Debug 与 Release 工作流已分离为独立文件，各自独立触发和运行：
 
-| CI 工作流 | Debug 产物名 |
-|-----------|-------------|
-| `build-openppp2-amd64.yml` | `openppp2-linux-amd64-debug` |
-| `build-openppp2-aarch64.yml` | `openppp2-linux-aarch64-debug` |
-| `build-openppp2-macos.yml` | `openppp2-darwin-arm64-debug` + `openppp2-darwin-amd64-debug` |
-| `build-openppp2-windows.yml` | `openppp2-windows-x64-debug` |
+| CI 工作流 | Debug 产物名 | 触发方式 |
+|-----------|-------------|---------|
+| `build-openppp2-amd64-debug.yml` | `openppp2-linux-amd64-debug` | `push` 到 master（代码变更自动触发）+ `workflow_dispatch` |
+| `build-openppp2-aarch64-debug.yml` | `openppp2-linux-aarch64-debug` | `push` 到 master（代码变更自动触发）+ `workflow_dispatch` |
+| `build-openppp2-macos-debug.yml` | `openppp2-darwin-arm64-debug` + `openppp2-darwin-amd64-debug` | `push` 到 master（代码变更自动触发）+ `workflow_dispatch` |
+| `build-openppp2-windows-debug.yml` | `openppp2-windows-x64-debug` | `push` 到 master（代码变更自动触发）+ `workflow_dispatch` |
+
+> **注意**：Release 工作流仅支持 `workflow_dispatch` 手动触发，Debug 工作流额外支持 `push` 自动触发，方便开发调试。
 
 #### 6.3.5 跨平台支持
 
@@ -594,6 +601,8 @@ ENDIF()
 | macOS amd64 | ✅ | ✅ | CMake + Make，Debug 配置 |
 | macOS arm64 | ✅ | ✅ | CMake + Make，Debug 配置 |
 | Windows x64 | ✅ | ✅ | MSBuild + vcpkg，Debug 配置 |
+| Linux TAP (amd64) | ✅ | ✅ | CMake + Make，Debug 配置（`linux/ppp/tap/TapLinux.cpp`） |
+| Linux TAP (aarch64) | ✅ | ✅ | CMake + 交叉编译，Debug 配置（`linux/ppp/tap/TapLinux.cpp`） |
 
 #### 6.3.6 日志输出格式
 
@@ -734,3 +743,114 @@ readelf -h bin/ppp | grep Type
 ```bash
 objdump -T bin/ppp 2>/dev/null | grep GLIBC || echo "无动态 GLIBC 引用"
 ```
+
+---
+
+## 附录：相比原版 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) 的完整修改清单
+
+### A.1 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `glibc_compat.h` | GLIBC 兼容层，提供 `__isoc23_*` 符号委派 |
+| `libglibc_compat.a` | 预编译的 GLIBC 兼容静态库 |
+| `build-all.sh` | 多变体批量编译脚本 |
+| `build-openppp2-by-builds.sh` | 变体构建脚本（遍历 builds/ 目录配置批量编译） |
+| `cacert.sha256` | CA 证书 SHA256 校验文件 |
+| `README_EN.md` | 英文 README |
+| `builds/debug/` | Debug 预编译二进制目录（4 个变体） |
+| `builds/6.22/` | 版本 6.22 构建产物目录 |
+| `builds/6.23/` | 版本 6.23 构建产物目录 |
+| `builds/存档/` | 历史构建配置存档 |
+| `builds/releases/` | Release 输出目录 |
+| `.github/workflows/build-openppp2-amd64.yml` | Linux amd64 Release CI（7 变体矩阵构建） |
+| `.github/workflows/build-openppp2-aarch64.yml` | Linux aarch64 Release CI（4 变体交叉编译） |
+| `.github/workflows/build-openppp2-macos.yml` | macOS Release CI（arm64 + amd64 双架构） |
+| `.github/workflows/build-openppp2-windows.yml` | Windows Release CI（MSVC + vcpkg） |
+| `.github/workflows/build-openppp2-amd64-debug.yml` | Linux amd64 Debug CI |
+| `.github/workflows/build-openppp2-aarch64-debug.yml` | Linux aarch64 Debug CI |
+| `.github/workflows/build-openppp2-macos-debug.yml` | macOS Debug CI |
+| `.github/workflows/build-openppp2-windows-debug.yml` | Windows Debug CI |
+| `.github/workflows/release.yml` | Release 工作流（手动触发聚合发布） |
+| `环境需求.md` | 本文档 |
+| `releases环境需求清单.md` | 发布版环境需求清单 |
+| `WSS修改版环境需求.md` | WSS 修改版环境需求 |
+
+### A.2 删除文件
+
+| 文件 | 说明 |
+|------|------|
+| `README_CN.md` | 中文 README 合并到 `README.md` |
+| `cacert.pem` | 改为 CI 中动态下载 |
+| `starrylink.net.key` / `starrylink.net.pem` | 改为 CI 中创建占位文件 |
+| `.github/workflows/build-openppp2-for-android-using-ubuntu-latest-cross.yml` | 移除 Android CI |
+| `.github/workflows/build-openppp2-for-darwin-using-macos-latest.yml` | 替换为新的 macOS CI |
+| `.github/workflows/build-openppp2-for-linux-using-ubuntu-latest.yml` | 替换为 amd64 + aarch64 两个 CI |
+| `.github/workflows/build-openppp2-for-linux-using-ubuntu-latest-cross.yml` | 替换为 aarch64 专用 CI |
+
+### A.3 核心修改
+
+#### CMakeLists.txt
+
+| 修改项 | 原版 | 修改版 |
+|--------|------|--------|
+| SIMD 控制 | 硬编码 `SET(__SIMD__ FALSE)` | 通过 `NOT_HAVE_SIMD` CMake 变量控制 |
+| 链接器标志 | `-static-libstdc++ -rdynamic -Wl,-Bstatic` | `-static -no-pie -Wl,--gc-sections -s -nodefaultlibs -rdynamic -Wl,-Bstatic` |
+| 条件编译 | 无 | 新增 `ENABLE_IO_URING` / `ENABLE_TC` 选项 |
+| IO_URING | 注释掉 | 条件化支持 |
+| TC (Traffic Control) | 无 | 新增 `libbpf.a` + `libelf.a` 链接 |
+| zstd 链接 | 无 | 新增 `libzstd.a` |
+| GLIBC 兼容 | 无 | 新增 `libglibc_compat.a` 链接 |
+| main.cpp 位置 | 在 `GLOB_RECURSE` 中 | 在 `ADD_EXECUTABLE` 中单独列出 |
+| THIRD_PARTY_LIBRARY_DIR | 硬编码 `/root/dev` | 可通过 CMake 变量覆盖 |
+| Debug 配置 | 无 | 新增 `CMAKE_CXX_FLAGS_DEBUG` 包含 `-DPPP_LOG_VERBOSE` |
+
+#### main.cpp
+
+| 修改项 | 原版 | 修改版 |
+|--------|------|--------|
+| 第一行 | `#include <ppp/...>` | `#include <glibc_compat.h>`（新增 GLIBC 兼容层） |
+| `PrintEnvironmentInformation` 输出 | `fprintf(stdout, ...)` | `fprintf(stderr, ...)`（输出到控制台面板） |
+| `--log-file` 参数 | 无 | 新增，在 `PPP_LOG_VERBOSE` 守卫下通过 `freopen` 重定向 stdout 到文件 |
+| `LOG_FILE_PATH_` 全局变量 | 无 | 新增，存储日志文件路径 |
+
+#### ppp/stdafx.h
+
+| 修改项 | 原版 | 修改版 |
+|--------|------|--------|
+| `LOG_DEBUG` 宏 | 始终编译 | 改为 `#if defined(PPP_LOG_VERBOSE)` 条件编译 |
+| `PPP_LOG_VERBOSE` 开关 | 无 | 新增，控制 LOG_DEBUG 是否编译 |
+
+#### ppp.vcxproj
+
+| 修改项 | 原版 | 修改版 |
+|--------|------|--------|
+| vcpkg 路径 | 无 | 新增 `vcpkg_installed` 包含路径和库路径 |
+| Debug 配置 | 无 | 新增 Debug|x64 配置，含 `PPP_LOG_VERBOSE` |
+| Release 配置 | 无 | 新增 Release|x64 配置 |
+
+#### CI/CD 工作流
+
+| 修改项 | 原版 | 修改版 |
+|--------|------|--------|
+| 触发分支 | `main` | `master` |
+| CI 数量 | 4 个 | 9 个（4 Release + 4 Debug + 1 Release 打包） |
+| Linux amd64 | 在 CI 中编译 boost/jemalloc/openssl（单变体） | 使用预编译 3rd-party 库，7 变体矩阵 |
+| 交叉编译 | 7 架构单次构建 | 拆分为 aarch64（4 变体）+ amd64（7 变体） |
+| Windows | 无 | 新增 MSVC + vcpkg 构建 |
+| Android | 有（NDK 交叉编译） | 删除 |
+| Release | 无 | 新增手动触发聚合发布 |
+| Debug/Release 分离 | 无 | Debug 与 Release 工作流拆分为独立文件 |
+| actions 版本 | `checkout@v2`, `upload-artifact@v4` | `checkout@v7`, `upload-artifact@v7` |
+
+### A.4 功能新增
+
+- **`client.websocket.host` / `client.websocket.sni`**：优选 IP + WSS 加速，支持连接优选 IP 的同时通过自定义 Host 和 SNI 字段让 CDN 正确路由。
+- **完全静态链接**：产物不依赖系统动态库，可在旧 GLIBC 系统上运行。
+- **GLIBC 兼容层**：解决 OpenSSL 3.0.15 在 GLIBC 2.38+ 编译后引用 `__isoc23_*` 符号的问题。
+- **多变体构建**：amd64 7 种变体，aarch64 4 种变体。
+- **Debug/Release 工作流分离**：Debug 配置自动定义 `PPP_LOG_VERBOSE` 启用 LOG_DEBUG 日志。
+- **`--log-file` 运行时日志重定向**：Debug 版本支持将 LOG_DEBUG 输出重定向到文件。
+- **`fprintf(stderr, ...)` 控制台面板输出**：`PrintEnvironmentInformation` 改为输出到 stderr。
+- **Windows MSVC + vcpkg 构建支持**：新增 `ppp.vcxproj` 的 Debug/Release 配置。
+- **`builds/` 版本目录体系**：新增 `builds/debug/`、`builds/6.22/`、`builds/6.23/`、`builds/存档/`、`builds/releases/` 目录。
