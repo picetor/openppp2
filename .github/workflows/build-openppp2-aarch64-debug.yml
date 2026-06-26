@@ -1,32 +1,15 @@
 # Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
-# Description: Build openppp2 aarch64 (cross-compile) - Debug workflow
+# Description: Build openppp2 aarch64 Debug (LOG_DEBUG) - standalone workflow
 # Author     : picetor
-# Date-Time  : 2026/06/24
+# Date-Time  : 2026/06/26
 
-name: Build openppp2 (Linux aarch64)
+name: Build openppp2 (Linux aarch64 Debug)
 
 on:
   workflow_dispatch:      # 仅手动触发
 
 jobs:
-  build-aarch64:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - name: base
-            iouring: "OFF"
-            tc: "OFF"
-          - name: io-uring
-            iouring: "ON"
-            tc: "OFF"
-          - name: tc
-            iouring: "OFF"
-            tc: "ON"
-          - name: tc-io-uring
-            iouring: "ON"
-            tc: "ON"
-
+  build-aarch64-debug:
     runs-on: ubuntu-latest
     env:
       THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/aarch64
@@ -57,7 +40,6 @@ jobs:
           set -e
           ARM64_LIB_DIR="${{ env.THIRD_PARTY_DIR }}"
 
-          # Helper: download a deb and verify it's really a deb package.
           download_deb() {
             local url="$1"
             local out="$2"
@@ -87,34 +69,14 @@ jobs:
             find /tmp/zstd-extract -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \;
           else
             echo "WARNING: deb download failed, building libzstd from source..."
-            # Debug: show what's happening with git clone
-            echo "=== DEBUG: Testing git clone methods ==="
-            echo "Method 1: git clone --depth 1 -b v1.5.6"
             rm -rf /tmp/zstd-src
-            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1 || echo "Method 1 failed"
-            if [ -d /tmp/zstd-src ] && [ -f /tmp/zstd-src/CMakeLists.txt ]; then
-              echo "Method 1 succeeded"
-            else
-              echo "Method 1 failed or CMakeLists.txt not found"
-              echo "Method 2: git clone --depth 1 (default branch)"
-              rm -rf /tmp/zstd-src
-              git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1
-            fi
-            if [ ! -f /tmp/zstd-src/CMakeLists.txt ]; then
-              echo "CMakeLists.txt not at root, checking build/cmake/..."
-              if [ -f /tmp/zstd-src/build/cmake/CMakeLists.txt ]; then
-                echo "Found CMakeLists.txt in build/cmake/ - using that as source"
-                # zstd's CMakeLists.txt is in build/cmake/ subdirectory
-                cd /tmp/zstd-src/build/cmake
-              else
-                echo "ERROR: CMakeLists.txt not found anywhere!"
-                ls -la /tmp/zstd-src/
-                exit 1
-              fi
+            git clone --depth 1 -b v1.5.6 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1 || \
+            (rm -rf /tmp/zstd-src && git clone --depth 1 https://github.com/facebook/zstd.git /tmp/zstd-src 2>&1)
+            if [ -f /tmp/zstd-src/build/cmake/CMakeLists.txt ]; then
+              cd /tmp/zstd-src/build/cmake
             else
               cd /tmp/zstd-src
             fi
-            # Use cmake to build zstd for arm64
             mkdir -p build && cd build
             CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
             cmake .. -DCMAKE_BUILD_TYPE=Release -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
@@ -126,7 +88,6 @@ jobs:
             make -j$(nproc) 2>&1 || true
             find . -name "libzstd*.a" -exec cp -v {} "${ARM64_LIB_DIR}/" \; 2>/dev/null || true
             if [ ! -f "${ARM64_LIB_DIR}/libzstd.a" ]; then
-              echo "cmake build failed, trying zstd's native Makefile..."
               cd /tmp/zstd-src
               make clean 2>/dev/null || true
               CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar \
@@ -174,7 +135,7 @@ jobs:
             echo "zlib built from source"
           fi
 
-          # --- liburing (needed for io_uring variant) ---
+          # --- liburing ---
           echo "=== Building liburing for arm64 ==="
           rm -rf /tmp/liburing-src
           git clone --depth 1 -b liburing-2.8 https://github.com/axboe/liburing.git /tmp/liburing-src 2>&1 || \
@@ -194,7 +155,7 @@ jobs:
           fi
           echo "liburing built for arm64"
 
-          # --- libbpf.a + libelf.a (needed for TC variant) ---
+          # --- libbpf.a + libelf.a ---
           echo "=== Downloading arm64 libbpf-dev ==="
           BPF_DEB=""
           download_deb \
@@ -233,8 +194,7 @@ jobs:
             echo "WARNING: libelf-dev deb download failed"
           fi
 
-          # CMakeLists.txt LINK_DIRECTORIES only includes subdirs like openssl/, jemalloc/lib/
-          # Copy all .a files there so the linker can find them
+          # Copy libs to LINK_DIRECTORIES paths
           echo "=== Copying libs to LINK_DIRECTORIES paths ==="
           mkdir -p "${ARM64_LIB_DIR}/openssl" "${ARM64_LIB_DIR}/jemalloc/lib"
           for lib in "${ARM64_LIB_DIR}"/*.a; do
@@ -273,30 +233,17 @@ jobs:
           TOOLCHAIN_EOF
           echo "Toolchain file created at /tmp/aarch64-toolchain.cmake"
 
-      - name: Build variant ${{ matrix.variant.name }}
+      - name: Build openppp2-linux-aarch64-debug
         id: build
         run: |
           TS=$(date '+%Y%m%d_%H%M')
-          VARIANT="${{ matrix.variant.name }}"
-          IOURING="${{ matrix.variant.iouring }}"
-          TC="${{ matrix.variant.tc }}"
 
-          echo "=== Building aarch64: ${VARIANT} ==="
-          echo "IO_URING=${IOURING}, TC=${TC}"
-          echo "THIRD_PARTY_DIR=${{ env.THIRD_PARTY_DIR }}"
+          echo "=== Building Linux aarch64 Debug (LOG_DEBUG) ==="
 
-          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
+          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Debug"
           CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
           CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake"
           CMAKE_FLAGS="${CMAKE_FLAGS} -DTHIRD_PARTY_LIBRARY_DIR=${{ env.THIRD_PARTY_DIR }}"
-
-          if [ "${IOURING}" = "ON" ]; then
-            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_IO_URING=ON"
-          fi
-
-          if [ "${TC}" = "ON" ]; then
-            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_TC=ON"
-          fi
 
           rm -rf build && mkdir build && cd build
           cmake .. ${CMAKE_FLAGS}
@@ -308,36 +255,28 @@ jobs:
             exit 1
           fi
 
-          SUFFIX=""
-          if [ "${VARIANT}" != "base" ]; then
-            SUFFIX="-${VARIANT}"
-          fi
-          ZIP_NAME="openppp2-linux-aarch64${SUFFIX}"
-          ARTIFACT_NAME="${ZIP_NAME}_${TS}"
+          ARTIFACT_NAME="openppp2-linux-aarch64-debug_${TS}"
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
-          # Package into complete release zip
-          echo "=== Packaging ${ZIP_NAME}.zip ==="
-          PKG_DIR="${ZIP_NAME}"
+          # Package into zip
+          echo "=== Packaging openppp2-linux-aarch64-debug.zip ==="
+          PKG_DIR="openppp2-linux-aarch64-debug"
           mkdir -p "${PKG_DIR}"
           cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
           cp "${{ github.workspace }}/appsettings.json" "${PKG_DIR}/"
           cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
-          cd "${PKG_DIR}" && zip -r "../${ZIP_NAME}.zip" . && cd ..
-          ls -la "${ZIP_NAME}.zip"
+          cd "${PKG_DIR}" && zip -r "../openppp2-linux-aarch64-debug.zip" . && cd ..
+          ls -la "openppp2-linux-aarch64-debug.zip"
 
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
-          echo "ZIP_NAME=${ZIP_NAME}.zip" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Upload artifact
+      - name: Upload Debug artifact
         uses: actions/upload-artifact@v7
         with:
-          name: openppp2-linux-aarch64-${{ matrix.variant.name }}
-          path: build/${{ env.ZIP_NAME }}
+          name: openppp2-linux-aarch64-debug
+          path: build/openppp2-linux-aarch64-debug.zip
           if-no-files-found: error
-
-  # Debug build moved to build-openppp2-aarch64-debug.yml
