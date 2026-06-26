@@ -54,17 +54,25 @@ namespace ppp {
             ppp::string host = std::move(this->Host);
             ppp::string path = std::move(this->Path);
 
+            auto& client_cfg = configuration->client.websocket;
+
+            ppp::string ws_host;
+            ppp::string ws_path;
             bool ok;
             if (host.size() > 0 && path.size() > 0) {
-                ok = socket->Run(handshake_type, host, path, y);
+                ws_host = client_cfg.host.size() > 0 ? client_cfg.host : host;
+                ws_path = path;
+                ok = socket->Run(handshake_type, ws_host, ws_path, y);
             }
             else {
                 auto& cfg = configuration->websocket;
-                ok = socket->Run(handshake_type, cfg.host, cfg.path, y);
+                ws_host = client_cfg.host.size() > 0 ? client_cfg.host : cfg.host;
+                ws_path = cfg.path;
+                ok = socket->Run(handshake_type, ws_host, ws_path, y);
             }
 
             LOG_DEBUG("IWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
-                ok ? "success" : "failed", host.data(), path.data(),
+                ok ? "success" : "failed", ws_host.data(), ws_path.data(),
                 handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
@@ -103,14 +111,18 @@ namespace ppp {
             auto& cfg = configuration->websocket;
             auto& client_cfg = configuration->client.websocket;
 
+            ppp::string ws_host;
+            ppp::string sni;
+            ppp::string ws_path;
             bool ok;
             if (host.size() > 0 && path.size() > 0) {
-                ppp::string ws_host = client_cfg.host.size() > 0 ? client_cfg.host : host;
-                ppp::string sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
+                ws_host = client_cfg.host.size() > 0 ? client_cfg.host : host;
+                sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
+                ws_path = path;
                 ok = socket->Run(handshake_type,
                     ws_host,
                     sni,
-                    path,
+                    ws_path,
                     cfg.ssl.verify_peer,
                     cfg.ssl.certificate_file,
                     cfg.ssl.certificate_key_file,
@@ -120,12 +132,13 @@ namespace ppp {
                     y);
             }
             else {
-                ppp::string ws_host = client_cfg.host.size() > 0 ? client_cfg.host : cfg.host;
-                ppp::string sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
+                ws_host = client_cfg.host.size() > 0 ? client_cfg.host : cfg.host;
+                sni = client_cfg.sni.size() > 0 ? client_cfg.sni : ws_host;
+                ws_path = cfg.path;
                 ok = socket->Run(handshake_type,
                     ws_host,
                     sni,
-                    cfg.path,
+                    ws_path,
                     cfg.ssl.verify_peer,
                     cfg.ssl.certificate_file,
                     cfg.ssl.certificate_key_file,
@@ -135,8 +148,8 @@ namespace ppp {
                     y);
             }
 
-            LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, host=%s, path=%s, type=%s",
-                ok ? "success" : "failed", host.data(), path.data(),
+            LOG_DEBUG("ISslWebsocketTransmission::HandshakeWebsocket: %s, host=%s, sni=%s, path=%s, type=%s",
+                ok ? "success" : "failed", ws_host.data(), sni.data(), ws_path.data(),
                 handshake_type == ppp::net::asio::websocket::HandshakeType_Client ? "client" : "server");
             return ok;
         }
