@@ -172,8 +172,21 @@ jobs:
           }
 
           Write-Output "Found Release ppp.exe at: $releaseExe"
-          $ReleaseArtifactName = "openppp2-windows-x64_${TS}.exe"
-          Copy-Item $releaseExe $ReleaseArtifactName
+
+          # Create package directory with all supporting files (like Linux release)
+          $PackageDir = "openppp2-windows-x64_${TS}"
+          New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
+
+          Copy-Item $releaseExe "$PackageDir\ppp.exe"
+          Copy-Item "${{ github.workspace }}\appsettings.json" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\dns-rules.txt" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\firewall-rules.txt" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\ip.txt" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\cacert.pem" "$PackageDir\"
+
+          Compress-Archive -Path "$PackageDir\*" -DestinationPath "${PackageDir}.zip" -Force
+
+          $ReleaseArtifactName = "${PackageDir}.zip"
 
           echo "ARTIFACT_NAME=$ReleaseArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
