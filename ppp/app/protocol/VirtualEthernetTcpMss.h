@@ -2,253 +2,224 @@
 
 /**
  * @file VirtualEthernetTcpMss.h
- * @brief TCP MSS clamping utilities for virtual Ethernet tunnel (IPv6).
- *
- * Clamps the TCP MSS option in IPv6 SYN packets to prevent
- * IP fragmentation inside the tunnel fabric.
+ * @brief Helpers for computing and clamping TCP MSS in tunneled IPv4/IPv6 packets.
+ * @author OPENPPP2 Team (original Miaocchi fork)
+ * @license GPL-3.0
  */
 
 #include <ppp/stdafx.h>
 #include <ppp/net/native/ip.h>
+#include <ppp/net/native/tcp.h>
+#include <ppp/net/native/checksum.h>
+#include <ppp/app/server/VirtualEthernetIPv6.h>
 #include <ppp/ipv6/IPv6Packet.h>
+#include <ppp/tap/ITap.h>
+
+#include <algorithm>
 
 namespace ppp {
     namespace app {
         namespace protocol {
-            /**
-             * @brief Tunnel encapsulation overhead in bytes.
-             *
-             * This constant represents the per-packet overhead introduced by
-             * the tunnel fabric (VirtualEthernet header + encryption + framing).
-             * It is subtracted from the path MTU to compute the effective
-             * TCP MSS for tunneled connections.
-             *
-             * A conservative default of 52 bytes covers:
-             *   - VirtualEthernet header (12-16 bytes)
-             *   - Encryption/MAC overhead (32-40 bytes)
-             *   - Padding/alignment (4-8 bytes)
-             */
-            static constexpr int            kVEthernetTunnelOverhead        = 52;
+            /** @brief Minimum TCP MSS value for IPv4 (RFC 879). */
+            static constexpr int            kTcpMssIPv4Min              = 1200;
+            /** @brief Maximum TCP MSS value for IPv4 (MTU - IPv4 header - TCP header). */
+            static constexpr int            kTcpMssIPv4Max              = 1460;
+            /** @brief Minimum TCP MSS value for IPv6. */
+            static constexpr int            kTcpMssIPv6Min              = 1220;
+            /** @brief Maximum TCP MSS value for IPv6 (MTU - IPv6 header - TCP header). */
+            static constexpr int            kTcpMssIPv6Max              = 1440;
+            /** @brief Virtual ethernet tunnel encapsulation overhead in bytes. */
+            static constexpr int            kVEthernetTunnelOverhead    = 80;
 
             /**
-             * @brief Computes a dynamic TCP MSS value suitable for tunnel transport.
-             *
-             * The MSS is computed as:
-             *   MSS = path_mtu - IPv6_header_fixed(40) - tunnel_overhead
-             *
-             * @param jumbo  When true, use jumbo frame MTU (9000); otherwise standard MTU (1500).
-             * @param overhead  Per-packet tunnel encapsulation overhead in bytes.
-             * @return  Clamped MSS value, never less than 536 (RFC 879 minimum).
+             * @brief Computes a dynamic TCP MSS value from tunnel overhead.
+             * @param ipv4 True to use IPv4 header sizing and clamp range; false for IPv6.
+             * @param tunnel_overhead Extra encapsulation overhead in bytes.
+             * @return A bounded MSS value suitable for SYN option clamping.
              */
-            static inline int ComputeDynamicTcpMss(bool jumbo, int overhead) noexcept {
-                /* Standard Ethernet MTU; jumbo frames use 9000. */
-                int mtu = jumbo ? 9000 : ppp::net::native::ip_hdr::MTU;
+            static inline unsigned short ComputeDynamicTcpMss(bool ipv4, int tunnel_overhead) noexcept {
+                int base_mtu = ppp::tap::ITap::Mtu;
+                tunnel_overhead = (std::max<int>(0, tunnel_overhead));
 
-                /* Fixed IPv6 header is 40 bytes (RFC 8200). */
-                static constexpr int IPv6_HEADER_SIZE = 40;
+                /** @brief IP header size: 20 bytes for IPv4 (ip_hdr::IP_HLEN), 40 bytes for IPv6 (IPv6_HEADER_MIN_SIZE). */
+                int ip_header = ipv4 ? ppp::net::native::ip_hdr::IP_HLEN : ppp::ipv6::IPv6_HEADER_MIN_SIZE;
+                /** @brief TCP header minimum size without options (tcp_hdr::TCP_HLEN = 20 bytes). */
+                int tcp_header = ppp::net::native::tcp_hdr::TCP_HLEN;
+                int mss = base_mtu - tunnel_overhead - ip_header - tcp_header;
 
-                int mss = mtu - IPv6_HEADER_SIZE - (std::max)(0, overhead);
-
-                /* Clamp to the minimum allowable MSS (RFC 879). */
-                return (std::max)(536, mss);
+                if (ipv4) {
+                    mss = std::max<int>(kTcpMssIPv4Min, std::min<int>(kTcpMssIPv4Max, mss));
+                }
+                else {
+                    mss = std::max<int>(kTcpMssIPv6Min, std::min<int>(kTcpMssIPv6Max, mss));
+                }
+                return (unsigned short)mss;
             }
 
             /**
-             * @brief IPv6 Next Header values used for extension header traversal.
+             * @brief Clamps the MSS option in an IPv4 TCP SYN packet.
+             * @param packet Raw packet buffer containing an IPv4 packet.
+             * @param packet_length Packet length in bytes.
+             * @param mss_value Maximum MSS value allowed after clamping.
+             * @return True if MSS is changed and checksums are updated; otherwise false.
              */
-            namespace IPv6ExtensionHeaders {
-                static constexpr Byte HopByHop       = 0;
-                static constexpr Byte Routing        = 43;
-                static constexpr Byte Fragment       = 44;
-                static constexpr Byte DestinationOpt = 60;
-                static constexpr Byte Authentication = 51;  ///< AH — Authentication Header.
-                static constexpr Byte Encapsulating  = 50;  ///< ESP — Encapsulating Security Payload.
-                static constexpr Byte NoNext         = 59;
-                static constexpr Byte TCP            = 6;
-            }
-
-            /**
-             * @brief Clamps the TCP MSS option in an IPv6 TCP SYN packet.
-             *
-             * Parses the IPv6 header, skips extension headers, locates the
-             * TCP header, and modifies the MSS option (kind=2) if present.
-             * The checksum is NOT updated by this function; the caller must
-             * recompute if needed.
-             *
-             * @param packet        Raw IPv6 packet buffer.
-             * @param packet_length Length of the packet buffer in bytes.
-             * @param mss           The MSS value to clamp to.
-             */
-            static inline void ClampTcpMssIPv6(Byte* packet, int packet_length, int mss) noexcept {
-                /* Minimum: IPv6 header (40) + TCP header (20). */
-                if (NULLPTR == packet || packet_length < 60) {
-                    return;
+            static inline bool ClampTcpMssIPv4(Byte* packet, int packet_length, unsigned short mss_value) noexcept {
+                if (NULLPTR == packet || packet_length < (int)sizeof(ppp::net::native::ip_hdr)) {
+                    return false;
                 }
 
-                /* 
-                 * Parse fixed IPv6 header.
-                 * Layout (RFC 8200):
-                 *   Byte 0:   Version (4 bits) | Traffic Class (8 bits)
-                 *   Byte 1:   Traffic Class (4 bits) | Flow Label (4 bits)
-                 *   Bytes 2-3: Flow Label (16 bits)
-                 *   Bytes 4-5: Payload Length
-                 *   Byte 6:   Next Header
-                 *   Byte 7:   Hop Limit
-                 *   Bytes 8-23: Source Address (128 bits)
-                 *   Bytes 24-39: Destination Address (128 bits)
+                int ip_length = packet_length;
+                ppp::net::native::ip_hdr* iphdr = ppp::net::native::ip_hdr::Parse(packet, ip_length);
+                if (NULLPTR == iphdr || ((iphdr->v_hl & 0x0f) << 2) < ppp::net::native::ip_hdr::IP_HLEN || iphdr->proto != ppp::net::native::ip_hdr::IP_PROTO_TCP) {
+                    return false;
+                }
+
+                int ip_header_length = (iphdr->v_hl & 0x0f) << 2;
+                int tcp_length = ip_length - ip_header_length;
+                if (tcp_length < ppp::net::native::tcp_hdr::TCP_HLEN) {
+                    return false;
+                }
+
+                ppp::net::native::tcp_hdr* tcphdr = reinterpret_cast<ppp::net::native::tcp_hdr*>(packet + ip_header_length);
+                int tcp_header_length = ppp::net::native::tcp_hdr::TCPH_HDRLEN_BYTES(tcphdr);
+                if (tcp_header_length <= ppp::net::native::tcp_hdr::TCP_HLEN || tcp_header_length > tcp_length) {
+                    return false;
+                }
+
+                if ((ppp::net::native::tcp_hdr::TCPH_FLAGS(tcphdr) & ppp::net::native::tcp_hdr::TCP_SYN) == 0) {
+                    return false;
+                }
+
+                Byte* options = reinterpret_cast<Byte*>(tcphdr) + ppp::net::native::tcp_hdr::TCP_HLEN;
+                int options_length = tcp_header_length - ppp::net::native::tcp_hdr::TCP_HLEN;
+                bool changed = false;
+
+                /**
+                 * @brief Walks TCP options until EOL, malformed entry, or MSS option.
                  */
-                int offset = 40; /* Fixed IPv6 header size. */
-                Byte next_header = packet[6];
-
-                /* Traverse IPv6 extension headers until we find TCP or hit a non-extensible header. */
-                while (offset < packet_length) {
-                    if (next_header == IPv6ExtensionHeaders::TCP) {
-                        break; /* Found TCP header at 'offset'. */
-                    }
-
-                    if (next_header == IPv6ExtensionHeaders::HopByHop ||
-                        next_header == IPv6ExtensionHeaders::Routing ||
-                        next_header == IPv6ExtensionHeaders::DestinationOpt ||
-                        next_header == IPv6ExtensionHeaders::Authentication) {
-                        /* 
-                         * These extension headers share the same TLV format:
-                         *   Byte 0: Next Header
-                         *   Byte 1: Header Extension Length (in 8-octet units, excluding the first 8 octets)
-                         * So total size = (HeaderExtLen + 1) * 8
-                         */
-                        if (offset + 2 > packet_length) {
-                            return; /* Truncated. */
-                        }
-                        Byte ext_len_byte = packet[offset + 1];
-                        int ext_hdr_len = (ext_len_byte + 1) * 8;
-                        next_header = packet[offset]; /* Read next header before advancing. */
-                        offset += ext_hdr_len;
-                        continue;
-                    }
-
-                    if (next_header == IPv6ExtensionHeaders::Fragment) {
-                        /* Fragment header is 8 bytes total. */
-                        if (offset + 8 > packet_length) {
-                            return; /* Truncated. */
-                        }
-                        next_header = packet[offset]; /* Byte 0: Next Header. */
-                        offset += 8;
-                        continue;
-                    }
-
-                    if (next_header == IPv6ExtensionHeaders::Encapsulating) {
-                        /* ESP header has no Next Header field we can parse generically. Stop here. */
-                        return;
-                    }
-
-                    /* Unknown or NoNext — cannot proceed. */
-                    return;
-                }
-
-                /* 'offset' now points to the TCP header (if next_header==TCP). */
-                if (next_header != IPv6ExtensionHeaders::TCP) {
-                    return; /* Not a TCP packet. */
-                }
-
-                /* Ensure we have at least the full TCP header (20 bytes). */
-                if (offset + 20 > packet_length) {
-                    return; /* Truncated TCP header. */
-                }
-
-                /*
-                 * TCP header layout:
-                 *   Byte 0:  Source Port (high)
-                 *   Byte 1:  Source Port (low)
-                 *   Byte 2:  Destination Port (high)
-                 *   Byte 3:  Destination Port (low)
-                 *   Byte 4:  Sequence Number (4 bytes)
-                 *   Byte 8:  Acknowledgment Number (4 bytes)
-                 *   Byte 12: Data Offset (4 bits) | Reserved (4 bits)
-                 *   Byte 13: Flags (8 bits)
-                 *      Bit 0 (0x01): FIN
-                 *      Bit 1 (0x02): SYN
-                 *      Bit 2 (0x04): RST
-                 *      Bit 3 (0x08): PSH
-                 *      Bit 4 (0x10): ACK
-                 *      Bit 5 (0x20): URG
-                 *      ...
-                 *   Bytes 14-15: Window Size
-                 */
-                Byte data_offset_byte = packet[offset + 12];
-                int tcp_header_len = (data_offset_byte >> 4) * 4; /* Data offset in 32-bit words. */
-                if (tcp_header_len < 20 || offset + tcp_header_len > packet_length) {
-                    return; /* Invalid or truncated TCP header. */
-                }
-
-                /* Check SYN flag (bit 1 at byte 13). */
-                Byte flags = packet[offset + 13];
-                if ((flags & 0x02) == 0) {
-                    return; /* Not a SYN segment — MSS option only appears in SYNs. */
-                }
-
-                /* 
-                 * Scan TCP options for MSS option (kind=2).
-                 * TCP option format:
-                 *   kind=0: End of Options List
-                 *   kind=1: NOP (No-Operation)
-                 *   kind=2: MSS (length=4, value=2 bytes)
-                 *   kind>1: kind + length + payload
-                 */
-                int options_offset = offset + 20; /* Start of TCP options (after fixed 20-byte header). */
-                int options_end = offset + tcp_header_len;
-
-                while (options_offset + 1 <= options_end) {
-                    Byte kind = packet[options_offset];
-
+                for (int i = 0; i < options_length;) {
+                    Byte kind = options[i];
                     if (kind == 0) {
-                        break; /* End of Options List. */
+                        break;
                     }
-
                     if (kind == 1) {
-                        options_offset += 1; /* NOP — single byte. */
+                        i++;
                         continue;
                     }
+                    if (i + 1 >= options_length) {
+                        break;
+                    }
 
-                    if (kind == 2) {
-                        /* MSS option: kind(1) + length(1) + value(2) = 4 bytes total. */
-                        if (options_offset + 4 > options_end) {
-                            break; /* Truncated MSS option. */
+                    Byte length = options[i + 1];
+                    if (length < 2 || i + length > options_length) {
+                        break;
+                    }
+
+                    if (kind == 2 && length == 4) {
+                        unsigned short* mss = reinterpret_cast<unsigned short*>(options + i + 2);
+                        unsigned short current = ntohs(*mss);
+                        if (current > mss_value) {
+                            *mss = htons(mss_value);
+                            changed = true;
                         }
-
-                        Byte option_len = packet[options_offset + 1];
-                        if (option_len != 4) {
-                            options_offset += option_len;
-                            continue; /* Malformed MSS option, skip. */
-                        }
-
-                        /* Read current MSS value (big-endian). */
-                        unsigned short current_mss =
-                            (static_cast<unsigned short>(packet[options_offset + 2]) << 8) |
-                            (static_cast<unsigned short>(packet[options_offset + 3]));
-
-                        /* Clamp MSS to our computed value. */
-                        unsigned short clamped_mss = static_cast<unsigned short>(
-                            (std::min)(static_cast<int>(current_mss), mss));
-
-                        /* Write clamped MSS back (big-endian). */
-                        packet[options_offset + 2] = static_cast<Byte>((clamped_mss >> 8) & 0xFF);
-                        packet[options_offset + 3] = static_cast<Byte>(clamped_mss & 0xFF);
-
-                        return; /* MSS option processed. */
+                        break;
                     }
 
-                    /* Generic option with length byte. */
-                    if (options_offset + 2 > options_end) {
-                        break; /* Truncated option header. */
-                    }
-
-                    Byte option_len = packet[options_offset + 1];
-                    if (option_len < 2) {
-                        break; /* Invalid option length. */
-                    }
-
-                    options_offset += option_len;
+                    i += length;
                 }
+
+                if (!changed) {
+                    return false;
+                }
+
+                iphdr->chksum = 0;
+                iphdr->chksum = ppp::net::native::inet_chksum(iphdr, ip_header_length);
+                tcphdr->chksum = 0;
+                tcphdr->chksum = ppp::net::native::inet_chksum_pseudo(reinterpret_cast<unsigned char*>(tcphdr), IPPROTO_TCP, tcp_length, iphdr->src, iphdr->dest);
+                return true;
+            }
+
+            /**
+             * @brief Clamps the MSS option in an IPv6 TCP SYN packet.
+             * @param packet Raw packet buffer containing an IPv6 packet.
+             * @param packet_length Packet length in bytes.
+             * @param mss_value Maximum MSS value allowed after clamping.
+             * @return True if MSS is changed and TCP checksum is updated; otherwise false.
+             */
+            static inline bool ClampTcpMssIPv6(Byte* packet, int packet_length, unsigned short mss_value) noexcept {
+                /** @brief Minimum IPv6 packet size: 40-byte fixed header + 20-byte TCP header minimum. */
+                if (NULLPTR == packet || packet_length < ppp::ipv6::IPv6_HEADER_MIN_SIZE + ppp::net::native::tcp_hdr::TCP_HLEN) {
+                    return false;
+                }
+
+                ppp::app::server::VirtualEthernetIPv6MinimalHeader* ipv6 = reinterpret_cast<ppp::app::server::VirtualEthernetIPv6MinimalHeader*>(packet);
+                if ((ipv6->VersionTrafficClass >> 4) != 6 || ipv6->NextHeader != IPPROTO_TCP) {
+                    return false;
+                }
+
+                boost::asio::ip::address_v6 source;
+                boost::asio::ip::address_v6 destination;
+                if (!ppp::app::server::ParseVirtualEthernetIPv6Header(packet, packet_length, source, destination)) {
+                    return false;
+                }
+
+                /** @brief IPv6 fixed header size (40 bytes per RFC 8200). */
+                ppp::net::native::tcp_hdr* tcphdr = reinterpret_cast<ppp::net::native::tcp_hdr*>(packet + ppp::ipv6::IPv6_HEADER_MIN_SIZE);
+                int tcp_length = packet_length - ppp::ipv6::IPv6_HEADER_MIN_SIZE;
+                int tcp_header_length = ppp::net::native::tcp_hdr::TCPH_HDRLEN_BYTES(tcphdr);
+                if (tcp_header_length <= ppp::net::native::tcp_hdr::TCP_HLEN || tcp_header_length > tcp_length) {
+                    return false;
+                }
+
+                if ((ppp::net::native::tcp_hdr::TCPH_FLAGS(tcphdr) & ppp::net::native::tcp_hdr::TCP_SYN) == 0) {
+                    return false;
+                }
+
+                Byte* options = reinterpret_cast<Byte*>(tcphdr) + ppp::net::native::tcp_hdr::TCP_HLEN;
+                int options_length = tcp_header_length - ppp::net::native::tcp_hdr::TCP_HLEN;
+                bool changed = false;
+
+                /**
+                 * @brief Walks TCP options until EOL, malformed entry, or MSS option.
+                 */
+                for (int i = 0; i < options_length;) {
+                    Byte kind = options[i];
+                    if (kind == 0) {
+                        break;
+                    }
+                    if (kind == 1) {
+                        i++;
+                        continue;
+                    }
+                    if (i + 1 >= options_length) {
+                        break;
+                    }
+
+                    Byte length = options[i + 1];
+                    if (length < 2 || i + length > options_length) {
+                        break;
+                    }
+
+                    if (kind == 2 && length == 4) {
+                        unsigned short* mss = reinterpret_cast<unsigned short*>(options + i + 2);
+                        unsigned short current = ntohs(*mss);
+                        if (current > mss_value) {
+                            *mss = htons(mss_value);
+                            changed = true;
+                        }
+                        break;
+                    }
+
+                    i += length;
+                }
+
+                if (!changed) {
+                    return false;
+                }
+
+                tcphdr->chksum = 0;
+                tcphdr->chksum = ppp::app::server::VirtualEthernetIPv6PseudoChecksum(reinterpret_cast<unsigned char*>(tcphdr), tcp_length, source, destination, IPPROTO_TCP);
+                return true;
             }
         }
     }

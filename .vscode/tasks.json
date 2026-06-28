@@ -42,6 +42,11 @@
 			"label": "git-commit-push4",
 			"type": "shell",
 			"command": "cd D:\\github\\openppp2; git add -A; git commit -m fix-ipv6-headers; git push origin master"
+		},
+		{
+			"label": "git-cleanup",
+			"type": "shell",
+			"command": "cd D:\\github\\openppp2; git rm push_fix.bat push_fix.ps1; git commit -m cleanup; git push origin master"
 		}
 	],
 	"version": "2.0.0"
