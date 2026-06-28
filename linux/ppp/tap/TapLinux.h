@@ -7,6 +7,10 @@
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/native/rib.h>
 
+#include <linux/netlink.h>
+#include <linux/neighbour.h>
+#include <linux/rtnetlink.h>
+
 namespace ppp
 {
     namespace tap
@@ -50,6 +54,16 @@ namespace ppp
             static bool                                                             GetDefaultGateway(char* ifrName, UInt32* address) noexcept;
             static bool                                                             GetDefaultGateway(UInt32* address, const ppp::function<bool(const char*, uint32_t ip, uint32_t gw, uint32_t mask, int metric)>& predicate) noexcept;
             static void                                                             CompatibleRoute(bool compatible) noexcept;
+            static bool                                                             SetIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept;
+            static bool                                                             DeleteIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept;
+            static bool                                                             SetMtu(const ppp::string& ifrName, int mtu) noexcept;
+            static bool                                                             AddRoute6(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length, const ppp::string& gw) noexcept;
+            static bool                                                             DeleteRoute6(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length, const ppp::string& gw) noexcept;
+            static bool                                                             EnableIPv6NeighborProxy(const ppp::string& ifrName) noexcept;
+            static bool                                                             QueryIPv6NeighborProxy(const ppp::string& ifrName, bool& enabled) noexcept;
+            static bool                                                             DisableIPv6NeighborProxy(const ppp::string& ifrName) noexcept;
+            static bool                                                             AddIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
+            static bool                                                             DeleteIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
             static bool                                                             SetIPAddress(
                 const ppp::string&                                                  ifrName,
                 const ppp::string&                                                  addressIP,

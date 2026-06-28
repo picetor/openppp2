@@ -4,8 +4,11 @@
 #include <ppp/app/protocol/VirtualEthernetLogger.h>
 #include <ppp/app/protocol/VirtualEthernetMappingPort.h>
 #include <ppp/app/protocol/VirtualEthernetPacket.h>
+#include <ppp/app/protocol/VirtualEthernetInformation.h>
 #include <ppp/app/server/VirtualEthernetSwitcher.h>
+#include <ppp/app/server/VirtualEthernetIPv6.h>
 #include <ppp/app/mux/vmux_net.h>
+#include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/Firewall.h>
@@ -33,6 +36,7 @@ namespace ppp {
 
             public:
                 typedef ppp::app::protocol::VirtualEthernetInformation                      VirtualEthernetInformation;
+                typedef ppp::app::protocol::VirtualEthernetInformationExtensions            VirtualEthernetInformationExtensions;
                 typedef std::shared_ptr<VirtualEthernetSwitcher>                            VirtualEthernetSwitcherPtr;
                 typedef std::shared_ptr<VirtualEthernetDatagramPort>                        VirtualEthernetDatagramPortPtr;
                 typedef std::shared_ptr<VirtualEthernetManagedServer>                       VirtualEthernetManagedServerPtr;
@@ -80,11 +84,15 @@ namespace ppp {
                 VirtualEthernetManagedServerPtr                                             GetManagedServer() noexcept { return managed_server_; }
                 ITransmissionStatisticsPtr                                                  GetStatistics() noexcept    { return statistics_; }
                 std::shared_ptr<vmux::vmux_net>                                             GetMux() noexcept           { return mux_; }
+                int                                                                         GetPreferredTunFd() noexcept;
+                void                                                                        SetPreferredTunFd(int fd) noexcept;
+                bool                                                                        ForwardIPv6PacketToDestination(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept;
 
             protected:  
                 virtual bool                                                                OnLan(const ITransmissionPtr& transmission, uint32_t ip, uint32_t mask, YieldContext& y) noexcept override;
                 virtual bool                                                                OnNat(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept override;
                 virtual bool                                                                OnInformation(const ITransmissionPtr& transmission, const VirtualEthernetInformation& information, YieldContext& y) noexcept override;
+                virtual bool                                                                OnInformation(const ITransmissionPtr& transmission, const ppp::app::protocol::InformationEnvelope& information, YieldContext& y) noexcept override;
                 virtual bool                                                                OnPush(const ITransmissionPtr& transmission, int connection_id, Byte* packet, int packet_length, YieldContext& y) noexcept override;
                 virtual bool                                                                OnConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept override;
                 virtual bool                                                                OnConnectOK(const ITransmissionPtr& transmission, int connection_id, Byte error_code, YieldContext& y) noexcept override;
@@ -94,7 +102,7 @@ namespace ppp {
                 virtual bool                                                                OnSendTo(const ITransmissionPtr& transmission, const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length, YieldContext& y) noexcept override;
                 virtual bool                                                                OnStatic(const ITransmissionPtr& transmission, YieldContext& y) noexcept override;
                 virtual bool                                                                OnStatic(const ITransmissionPtr& transmission, Int128 fsid, int session_id, int remote_port, YieldContext& y) noexcept override;
-                virtual bool                                                                OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, YieldContext& y) noexcept override;
+                virtual bool                                                                OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept override;
 
             protected:  
                 virtual FirewallPtr                                                         GetFirewall() noexcept override;
@@ -171,6 +179,7 @@ namespace ppp {
 
             private:    
                 bool                                                                        disposed_ = false;
+                int                                                                         preferred_tun_fd_ = -1;
                 uint32_t                                                                    address_  = 0;
                 VirtualEthernetSwitcherPtr                                                  switcher_;
                 std::shared_ptr<Byte>                                                       buffer_;

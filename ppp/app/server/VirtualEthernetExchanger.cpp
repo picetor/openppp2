@@ -366,7 +366,7 @@ namespace ppp {
                 return false; // Immediate return false and forcefully close the connection due to a suspected malicious attack on the server.
             }
 
-            bool VirtualEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, YieldContext& y) noexcept {
+            bool VirtualEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
                 bool err = true;
                 for (;;) {
                     if (disposed_) {
@@ -436,6 +436,8 @@ namespace ppp {
                     ForwardNatPacketToDestination(packet, packet_length, y);
                 }
 
+                // IPv6 fallback
+                ForwardIPv6PacketToDestination(transmission, packet, packet_length, y);
                 return true;
             }
 
@@ -1523,6 +1525,43 @@ namespace ppp {
                         }
                     });
                 return true;
+            }
+
+            int VirtualEthernetExchanger::GetPreferredTunFd() noexcept {
+                return preferred_tun_fd_;
+            }
+
+            void VirtualEthernetExchanger::SetPreferredTunFd(int fd) noexcept {
+                preferred_tun_fd_ = fd;
+            }
+
+            bool VirtualEthernetExchanger::OnInformation(const ITransmissionPtr& transmission, const ppp::app::protocol::InformationEnvelope& information, YieldContext& y) noexcept {
+                return false;
+            }
+
+            bool VirtualEthernetExchanger::ForwardIPv6PacketToDestination(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
+                if (disposed_) {
+                    return false;
+                }
+                if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
+                    return false;
+                }
+
+                ppp::ipv6::PacketHeader* ipv6 = reinterpret_cast<ppp::ipv6::PacketHeader*>(packet);
+                if (!ppp::ipv6::TryParsePacket(*ipv6, packet_length)) {
+                    return false;
+                }
+
+                auto switcher = switcher_;
+                if (NULLPTR == switcher) {
+                    return false;
+                }
+
+                if (!switcher->IsIPv6ServerEnabled()) {
+                    return false;
+                }
+
+                return switcher->SendIPv6TransitPacket(ipv6, packet_length);
             }
         }
     }
