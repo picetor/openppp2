@@ -44,6 +44,9 @@ namespace ppp
         public:
             static ppp::vector<ppp::string>                                     ExecuteShellCommandLines(const ppp::string& command) noexcept;
             static ppp::vector<ppp::string>                                     ExecuteShellCommandLines(const ppp::string& command, const ppp::function<bool(const ppp::string&)>& predicate) noexcept;
+
+        public:
+            static bool                                                         MergeDnsAddresses(const ppp::vector<boost::asio::ip::address>& new_addrs, const ppp::vector<boost::asio::ip::address>& current_addrs) noexcept;
         };
     }
 }

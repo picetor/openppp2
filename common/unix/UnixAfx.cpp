@@ -560,5 +560,31 @@ namespace ppp {
             ::pclose(fp);
             return lines;
         }
+
+        bool UnixAfx::MergeDnsAddresses(const ppp::vector<boost::asio::ip::address>& new_addrs, const ppp::vector<boost::asio::ip::address>& current_addrs) noexcept {
+            ppp::vector<boost::asio::ip::address> merged;
+            merged.reserve(new_addrs.size() + current_addrs.size());
+
+            // Add new addresses first (they take priority)
+            for (const auto& addr : new_addrs) {
+                merged.emplace_back(addr);
+            }
+
+            // Add current addresses that are not already in the new list
+            for (const auto& addr : current_addrs) {
+                bool found = false;
+                for (const auto& new_addr : new_addrs) {
+                    if (addr == new_addr) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    merged.emplace_back(addr);
+                }
+            }
+
+            return SetDnsAddresses(merged);
+        }
     }
 }
