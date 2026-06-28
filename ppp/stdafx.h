@@ -1621,6 +1621,12 @@ namespace ppp {
 
     bool                                                                    MoveConsoleCursorPositionToPreviousLine(int line) noexcept;
 
+    template <typename... Args>
+    inline void                                                             ConsoleFormat(const char* fmt, Args&&... args) noexcept {
+        ::fprintf(stdout, fmt, std::forward<Args>(args)...);
+        ::fflush(stdout);
+    }
+
     bool                                                                    IsUserAnAdministrator() noexcept;
 
     const char*                                                             GetSystemCode() noexcept;
