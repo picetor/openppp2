@@ -512,5 +512,53 @@ namespace ppp {
             return lseek(fd, offset, whence);
 #endif
         }
+
+        ppp::vector<ppp::string> UnixAfx::ExecuteShellCommandLines(const ppp::string& command) noexcept {
+            return ExecuteShellCommandLines(command, nullptr);
+        }
+
+        ppp::vector<ppp::string> UnixAfx::ExecuteShellCommandLines(const ppp::string& command, const ppp::function<bool(const ppp::string&)>& predicate) noexcept {
+            ppp::vector<ppp::string> lines;
+            if (command.empty()) {
+                return lines;
+            }
+
+            FILE* fp = ::popen(command.c_str(), "r");
+            if (NULLPTR == fp) {
+                return lines;
+            }
+
+            constexpr int BUFFER_SIZE = 4096;
+            char buffer[BUFFER_SIZE];
+            ppp::string line;
+            while (::fgets(buffer, sizeof(buffer), fp) != NULLPTR) {
+                line.append(buffer);
+                // Process complete lines (those ending with newline)
+                std::size_t pos = 0;
+                while ((pos = line.find('\n')) != ppp::string::npos) {
+                    ppp::string segment = line.substr(0, pos);
+                    if (!segment.empty() && segment.back() == '\r') {
+                        segment.pop_back();
+                    }
+                    if (NULLPTR == predicate || predicate(segment)) {
+                        lines.emplace_back(std::move(segment));
+                    }
+                    line.erase(0, pos + 1);
+                }
+            }
+
+            // Handle remaining partial line (no trailing newline)
+            if (!line.empty()) {
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                if (NULLPTR == predicate || predicate(line)) {
+                    lines.emplace_back(std::move(line));
+                }
+            }
+
+            ::pclose(fp);
+            return lines;
+        }
     }
 }

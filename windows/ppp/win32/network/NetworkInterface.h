@@ -27,23 +27,23 @@ namespace ppp
 
             typedef struct
             {
-                ppp::string                                     Driver;                 // Çý¶¯
+                ppp::string                                     Driver;                 // ï¿½ï¿½ï¿½ï¿½
                 ppp::string                                     Guid;                   // GUID
-                ppp::string                                     MacAddress;             // MACµØÖ·
-                int                                             Index;                  // Ë÷Òý
-                int                                             InterfaceIndex;         // Íø¿¨Ë÷Òý
-                ppp::vector<ppp::string>                        IPSubnet;               // ×ÓÍø    
-                ppp::vector<ppp::string>                        DnsAddresses;           // DNS·þÎñÆ÷
-                ppp::vector<ppp::string>                        IPAddresses;            // IPµØÖ·
-                ppp::vector<ppp::string>                        DefaultIPGateway;       // Ä¬ÈÏÍø¹Ø·þÎñÆ÷
-                bool                                            DhcpEnabled;            // ÆôÓÃDHCP
-                int                                             Metric;                 // Ô¾µã
-                bool                                            IPEnabled;              // IPÆôÓÃ
-                ppp::string                                     ConnectionId;           // Á´½ÓID
-                ppp::string                                     ScopeId;                // ÓòID
-                ppp::string                                     Caption;                // ±êÌâ
-                ppp::string                                     Description;            // ÃèÊöÐÅÏ¢
-                OperationalStatus                               Status;                 // ²Ù×÷×´Ì¬
+                ppp::string                                     MacAddress;             // MACï¿½ï¿½Ö·
+                int                                             Index;                  // ï¿½ï¿½ï¿½ï¿½
+                int                                             InterfaceIndex;         // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+                ppp::vector<ppp::string>                        IPSubnet;               // ï¿½ï¿½ï¿½ï¿½    
+                ppp::vector<ppp::string>                        DnsAddresses;           // DNSï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+                ppp::vector<ppp::string>                        IPAddresses;            // IPï¿½ï¿½Ö·
+                ppp::vector<ppp::string>                        DefaultIPGateway;       // Ä¬ï¿½ï¿½ï¿½ï¿½ï¿½Ø·ï¿½ï¿½ï¿½ï¿½ï¿½
+                bool                                            DhcpEnabled;            // ï¿½ï¿½ï¿½ï¿½DHCP
+                int                                             Metric;                 // Ô¾ï¿½ï¿½
+                bool                                            IPEnabled;              // IPï¿½ï¿½ï¿½ï¿½
+                ppp::string                                     ConnectionId;           // ï¿½ï¿½ï¿½ï¿½ID
+                ppp::string                                     ScopeId;                // ï¿½ï¿½ID
+                ppp::string                                     Caption;                // ï¿½ï¿½ï¿½ï¿½
+                ppp::string                                     Description;            // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
+                OperationalStatus                               Status;                 // ï¿½ï¿½ï¿½ï¿½×´Ì¬
             } NetworkInterface;
 
             typedef struct
@@ -106,6 +106,16 @@ namespace ppp
             int                                                 GetNetworkInterfaceIndexByDefaultRoute() noexcept;
             AdapterInterfacePtr                                 GetUnderlyingNetworkInterface(const ppp::string& id) noexcept;
             std::pair<AdapterInterfacePtr, NetworkInterfacePtr> GetUnderlyingNetowrkInterface2(const ppp::string& id, const ppp::string& nic) noexcept;
+
+            /* IPv6 network configuration functions */
+            bool                                                SetIPv6DefaultRoute(int interface_index, int metric) noexcept;
+            bool                                                SetIPv6DefaultGateway(int interface_index, const ppp::string& gateway, int metric) noexcept;
+            bool                                                SetIPv6Address(int interface_index, const ppp::string& address, int prefix_length) noexcept;
+            bool                                                AddIPv6Route(int interface_index, const ppp::string& prefix, int prefix_length, const ppp::string& gateway, int metric) noexcept;
+            bool                                                DeleteIPv6DefaultGateway(int interface_index, const ppp::string& gateway) noexcept;
+            bool                                                DeleteIPv6Route(int interface_index, const ppp::string& prefix, int prefix_length, const ppp::string& gateway) noexcept;
+            bool                                                DeleteIPv6Address(int interface_index, const ppp::string& address) noexcept;
+            bool                                                SetDnsAddressesV6(int interface_index, const ppp::vector<ppp::string>& servers) noexcept;
         }
     }
 }

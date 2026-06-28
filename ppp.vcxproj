@@ -382,6 +382,7 @@
     <ClCompile Include="ppp\tap\ITap.cpp" />
     <ClCompile Include="windows\ppp\tap\WintunAdapter.cpp" />
     <ClCompile Include="windows\ppp\win32\network\NetworkInterface.cpp" />
+    <ClCompile Include="windows\ppp\win32\network\Win32NetworkIPv6.cpp" />
     <ClCompile Include="windows\ppp\win32\network\Win32Firewall.cpp" />
     <ClCompile Include="windows\ppp\win32\network\Win32NetworkRouter.cpp" />
     <ClCompile Include="windows\ppp\win32\Win32Event.cpp" />

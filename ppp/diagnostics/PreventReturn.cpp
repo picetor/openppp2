@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#if defined(_LINUX)
+#if !defined(_WIN32)
 #include <sys/file.h>
 #endif
 #endif
