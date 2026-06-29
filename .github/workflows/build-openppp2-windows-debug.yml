@@ -7,7 +7,7 @@ name: Build openppp2 (Windows Debug)
 
 on:
   push:
-    branches: [ master ]
+    branches: [ inet6 ]
     paths:
       - '**.cpp'
       - '**.h'
