@@ -637,7 +637,7 @@ namespace ppp {
                             bool ok = false;
                             if (!disposed_) {
                                 uint16_t max_connections = mux->get_max_connections();
-                                ok = DoMux(vnet_transmission, mux->Vlan, max_connections, (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0, y);
+                                ok = DoMux(vnet_transmission, mux->Vlan, max_connections, (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0, 0, y);
                             }
 
                             if (!ok) {
@@ -886,7 +886,7 @@ namespace ppp {
                 }
             }
 
-            bool VEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, YieldContext& y) noexcept {
+            bool VEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
                 std::shared_ptr<vmux::vmux_net> mux = mux_;
                 if (NULLPTR != mux) {
                     bool successed = false;

@@ -421,10 +421,10 @@ namespace ppp {
                         mux->close_exec();
                     }
 
-                    DoMux(transmission, 0, 0, false, y);
+                    DoMux(transmission, 0, 0, false, 0, y);
                 }
                 else {
-                    DoMux(transmission, vlan, max_connections, acceleration, y);
+                    DoMux(transmission, vlan, max_connections, acceleration, 0, y);
                 }
 
                 return true;

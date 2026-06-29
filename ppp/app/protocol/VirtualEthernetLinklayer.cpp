@@ -463,6 +463,7 @@ namespace ppp {
                 uint16_t    vlan;               // VLAN ID (network order)
                 uint16_t    max_connections;    // max concurrent connections (network order)
                 Byte        acceleration;       // acceleration flag (0/1)
+                Byte        ordering_caps;      // ordering capabilities (bitmask)
             } VirtualEthernetLinklayer_MUX_IL;
 
             // MUXON acknowledgment structure (includes action byte)
@@ -720,7 +721,7 @@ namespace ppp {
                     if (packet_length >= MUX_IL_REFT) {
                         VirtualEthernetLinklayer_MUX_IL* pil = reinterpret_cast<VirtualEthernetLinklayer_MUX_IL*>(p - 1);
                         return OnMux(transmission, ntohs(pil->vlan), ntohs(pil->max_connections), 
-                                     pil->acceleration != 0, y);
+                                     pil->acceleration != 0, pil->ordering_caps, y);
                     } else {
                         return packet_length == 0;
                     }
@@ -975,7 +976,7 @@ namespace ppp {
             // ---------------------------------------------------------------------
             // Send MUX setup request.
             // ---------------------------------------------------------------------
-            bool VirtualEthernetLinklayer::DoMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, YieldContext& y) noexcept 
+            bool VirtualEthernetLinklayer::DoMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept 
             {
                 MemoryStream ms;
                 VirtualEthernetLinklayer_MUX_IL data;
@@ -983,6 +984,7 @@ namespace ppp {
                 data.vlan             = htons(vlan);
                 data.max_connections  = htons(max_connections);
                 data.acceleration     = acceleration ? 1 : 0;
+                data.ordering_caps    = ordering_caps;
 
                 if (ms.Write(&data, 0, sizeof(data))) {
                     std::shared_ptr<Byte> buffer = ms.GetBuffer();
