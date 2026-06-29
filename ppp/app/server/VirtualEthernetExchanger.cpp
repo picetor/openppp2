@@ -1548,7 +1548,9 @@ namespace ppp {
                 }
 
                 ppp::ipv6::PacketHeader* ipv6 = reinterpret_cast<ppp::ipv6::PacketHeader*>(packet);
-                if (!ppp::ipv6::TryParsePacket(*ipv6, packet_length)) {
+                boost::asio::ip::address_v6 source;
+                boost::asio::ip::address_v6 destination;
+                if (!ppp::ipv6::TryParsePacket(packet, packet_length, source, destination)) {
                     return false;
                 }
 
