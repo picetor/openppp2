@@ -10,6 +10,13 @@ namespace ppp {
         namespace protocol {
             class VirtualEthernetLogger : public std::enable_shared_from_this<VirtualEthernetLogger> {
             public:
+                enum class PacketDirection {
+                    ServerToUplink,
+                    ServerToClient,
+                    UplinkToServer,
+                };
+
+            public:
                 VirtualEthernetLogger(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& log_path) noexcept;
                 virtual ~VirtualEthernetLogger() noexcept;
 
@@ -48,6 +55,8 @@ namespace ppp {
                 bool                                                            Info(const ppp::string& message) noexcept;
                 bool                                                            Warn(const ppp::string& message) noexcept;
                 bool                                                            Error(const ppp::string& message) noexcept;
+                bool                                                            Mismatch(const std::shared_ptr<ppp::transmissions::ITransmission>& transmission, const ppp::string& message) noexcept;
+                bool                                                            Packet(Int128 guid, Byte* packet, int packet_length, PacketDirection direction) noexcept;
                 
             public:
                 bool                                                            Write(const void* s, int length, const ppp::function<void(bool)>& cb) noexcept;

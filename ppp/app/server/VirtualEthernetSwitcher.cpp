@@ -2977,8 +2977,7 @@ namespace ppp {
                         context,
                         strand,
                         socket,
-                        configuration_,
-                        ppp::transmissions::TcpTransmissionRole::Server);
+                        configuration_);
                 }
                 elif(categories == NetworkAcceptorCategories_WebSocket) {
                     transmission = NewWebsocketTransmission<ppp::transmissions::IWebsocketTransmission>(context, socket);

@@ -393,6 +393,32 @@ namespace ppp {
 
                 return this->Write(log.data(), log.size(), NULLPTR);
             }
+
+            bool VirtualEthernetLogger::Mismatch(const std::shared_ptr<ppp::transmissions::ITransmission>& transmission, const ppp::string& message) noexcept {
+                ppp::string log = LOGGER_NOW() + " ";
+                log += "MISMATCH SOURCE:";
+                log += GetRemoteEndPoint(transmission) + " ";
+                log += message;
+                log += "\r\n";
+
+                return this->Write(log.data(), log.size(), NULLPTR);
+            }
+
+            bool VirtualEthernetLogger::Packet(Int128 guid, Byte* packet, int packet_length, PacketDirection direction) noexcept {
+                const char* direction_str =
+                    direction == PacketDirection::ServerToUplink ? "SERVER->UPLINK" :
+                    direction == PacketDirection::ServerToClient ? "SERVER->CLIENT" : "UPLINK->SERVER";
+
+                ppp::string log = LOGGER_NOW() + " ";
+                log += LOGGER_GUID(guid) + " ";
+                log += "PACKET ";
+                log += direction_str;
+                log += " LENGTH:";
+                log += stl::to_string<ppp::string>(packet_length);
+                log += "\r\n";
+
+                return this->Write(log.data(), log.size(), NULLPTR);
+            }
         }
     }
 }
