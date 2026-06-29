@@ -1646,7 +1646,7 @@ namespace ppp {
                                         : ngw6_addr.to_v6();
 
                                     // Read and parse the IPv6 CIDR file
-                                    ppp::string text = ppp::io::File::ReadAllText(path);
+                                    ppp::string text = ppp::io::File::ReadAllText(path.c_str());
                                     if (text.empty()) {
                                         continue;
                                     }
@@ -1760,7 +1760,7 @@ namespace ppp {
                     if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
                         // Look up the interface from nics6_ using the ngw6 string, fall back to underlying NIC name
                         ppp::string mapped_nic;
-                        if (Dictionary::TryGetValue(nics6_, ngw6_str, mapped_nic) && !mapped_nic.empty()) {
+                        if (Dictionary::TryGetValue(nics6_, ppp::string(ngw6_str.c_str()), mapped_nic) && !mapped_nic.empty()) {
                             ifname6 = mapped_nic;
                         }
                         else {
