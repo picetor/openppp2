@@ -47,6 +47,34 @@ namespace ppp
                 RouteEntriesTable                                       routes;
             };
 
+            // RouteEntry6: IPv6 route entry storing addresses as boost::asio::ip::address
+            typedef struct
+            {
+                boost::asio::ip::address                                   Destination;
+                int                                                        Prefix;
+                boost::asio::ip::address                                   NextHop;
+            }                                                              RouteEntry6;
+
+            typedef ppp::vector<RouteEntry6>                               RouteEntries6;
+
+            // RIB6 for IPv6 route-level splitting
+            // No FIB needed — OS routing table handles v6 longest-prefix-match
+            class RouteInformationTable6
+            {
+            public:
+                bool                                                       AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw) noexcept;
+                bool                                                       AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw) noexcept;
+                bool                                                       AddAllRoutesByIPList(const ppp::string& path, const boost::asio::ip::address& gw) noexcept;
+                bool                                                       IsAvailable() noexcept { return routes.begin() != routes.end(); }
+
+            public:
+                RouteEntries6&                                             GetAllRoutes() noexcept { return routes; }
+                void                                                       Clear() noexcept { routes.clear(); }
+
+            private:
+                RouteEntries6                                              routes;
+            };
+
             // FIB
             class ForwardInformationTable
             {

@@ -391,7 +391,6 @@
     <ClCompile Include="windows\ppp\win32\Win32PerformanceCounter.cpp" />
     <ClCompile Include="windows\ppp\win32\Win32RegistryKey.cpp" />
     <ClCompile Include="windows\ppp\win32\Win32Variant.cpp" />
-    <ClCompile Include="ppp\app\client\GeoRuleGenerator.cpp" />
     <ClCompile Include="ppp\app\server\IPv4LeasePool.cpp" />
     <ClCompile Include="ppp\diagnostics\Error.cpp" />
     <ClCompile Include="ppp\diagnostics\ErrorHandler.cpp" />
@@ -592,7 +591,6 @@
     <ClInclude Include="common\lwip\my\arch\epstruct.h" />
     <ClInclude Include="common\lwip\my\lwipopts.h" />
     <ClInclude Include="ppp\app\client\dns\Rule.h" />
-    <ClInclude Include="ppp\app\client\GeoRuleGenerator.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetHttpProxyConnection.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetHttpProxySwitcher.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetLocalProxyConnection.h" />

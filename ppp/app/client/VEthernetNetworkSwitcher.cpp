@@ -1149,6 +1149,7 @@ namespace ppp {
                 // Load all IPList route table configuration files that need to be loaded.
                 if (auto underlying_ni = underlying_ni_; NULLPTR != underlying_ni) {
                     LoadAllIPListWithFilePaths(underlying_ni->GatewayServer);
+                    LoadAllIPListWithFilePaths6(underlying_ni->GatewayServer);
 
                     // Add VPN remote server to IPList bypass route table iplist.
                     if (!AddRemoteEndPointToIPList(underlying_ni->GatewayServer)) {
@@ -1319,6 +1320,9 @@ namespace ppp {
                     }
                 }
 #endif
+                // Add IPv6 bypass routes to the operating system.
+                AddIPv6Route();
+
                 // Configure the DNS servers used by the virtual network adapter to route to the operating system.
                 AddRouteWithDnsServers();
             }
@@ -1508,6 +1512,87 @@ namespace ppp {
                 return true;
             }
 
+            bool VEthernetNetworkSwitcher::AddLoadIPList6(
+                const ppp::string&                                              path, 
+#if defined(_LINUX) 
+                const ppp::string&                                              nic,
+#endif  
+                const boost::asio::ip::address&                                 gw6,
+                const ppp::string&                                              url) noexcept {
+
+                using File = ppp::io::File;
+
+                if (path.empty()) {
+                    return false;
+                }
+
+                ppp::string fullpath = File::RewritePath(path.data());
+                if (fullpath.empty()) {
+                    return false;
+                }
+
+                fullpath = File::GetFullPath(path.data());
+                if (fullpath.empty()) {
+                    return false;
+                }
+
+                bool vbgp_url = ppp::net::http::HttpClient::VerifyUri(url, NULLPTR, NULLPTR, NULLPTR, NULLPTR);
+                if (!vbgp_url && !File::Exists(fullpath.data())) {
+                    return false;
+                }
+
+                boost::asio::ip::address ngw6 = boost::asio::ip::address_v6::any();
+                if (
+#if defined(_LINUX) 
+                    !nic.empty() && 
+#endif
+                    gw6.is_v6() && !IPEndPoint::IsInvalid(gw6)) {
+                    ngw6 = gw6;
+                }
+
+                LoadIPv6ListFileVectorPtr ribs6 = ribs6_;
+                if (NULLPTR == ribs6) {
+                    ribs6 = make_shared_object<LoadIPv6ListFileVector>();
+                    ribs6_ = ribs6;
+                }
+
+                if (NULLPTR == ribs6) {
+                    return false;
+                }
+                else {
+                    auto tail = std::find_if(ribs6->begin(), ribs6->end(),
+                        [&fullpath](const std::pair<ppp::string, boost::asio::ip::address>& i) noexcept {
+                            return i.first == fullpath;
+                        });
+                    if (tail != ribs6->end()) {
+                        return false;
+                    }
+                }
+
+                if (vbgp_url) {
+                    RouteIPListTablePtr vbgp = vbgp_;
+                    if (NULLPTR == vbgp)  {
+                        vbgp = make_shared_object<RouteIPListTable>();
+                        if (NULLPTR == vbgp) {
+                            return false;
+                        }
+
+                        vbgp_ = vbgp;
+                    }
+
+                    vbgp->emplace(std::make_pair(fullpath, url));
+                }
+
+#if defined(_LINUX) 
+                if (!ngw6.is_unspecified()) {
+                    nics6_.emplace(std::make_pair(ngw6.to_string(), nic));
+                }
+#endif
+                
+                ribs6->emplace_back(std::make_pair(fullpath, ngw6));
+                return true;
+            }
+
             bool VEthernetNetworkSwitcher::LoadAllIPListWithFilePaths(const boost::asio::ip::address& gw) noexcept {
                 rib_ = NULLPTR;
                 fib_ = NULLPTR;
@@ -1540,6 +1625,156 @@ namespace ppp {
                 // A value filled once can only be used once and then reset.
                 ribs_.reset();
                 return any;
+            }
+
+            bool VEthernetNetworkSwitcher::LoadAllIPListWithFilePaths6(const boost::asio::ip::address& gw6) noexcept {
+                rib6_ = NULLPTR;
+
+                bool any = false;
+                if (gw6.is_v6()) {
+                    boost::asio::ip::address_v6 next_hop6 = gw6.to_v6();
+                    if (!IPEndPoint::IsInvalid(boost::asio::ip::address(next_hop6))) {
+                        if (LoadIPv6ListFileVectorPtr ribs6 = std::move(ribs6_); NULLPTR != ribs6) {
+                            IPv6RouteTablePtr rib6 = make_shared_object<IPv6RouteTable>();
+                            if (NULLPTR != rib6) {
+                                for (auto&& kv : *ribs6) {
+                                    const ppp::string& path = kv.first;
+                                    const boost::asio::ip::address& ngw6_addr = kv.second;
+
+                                    boost::asio::ip::address_v6 ngw6 = ngw6_addr.is_unspecified()
+                                        ? next_hop6
+                                        : ngw6_addr.to_v6();
+
+                                    // Read and parse the IPv6 CIDR file
+                                    ppp::string text = ppp::io::File::ReadAllText(path);
+                                    if (text.empty()) {
+                                        continue;
+                                    }
+
+                                    // Tokenize by newlines
+                                    ppp::vector<ppp::string> lines;
+                                    ppp::Tokenize<ppp::string>(text, lines, "\r\n");
+                                    if (lines.empty()) {
+                                        ppp::Tokenize<ppp::string>(text, lines, "\n");
+                                    }
+
+                                    for (const ppp::string& line : lines) {
+                                        ppp::string cidr = ppp::LTrim(ppp::RTrim(line));
+                                        if (cidr.empty()) {
+                                            continue;
+                                        }
+
+                                        // Skip comments
+                                        if (cidr[0] == '#' || cidr[0] == ';') {
+                                            continue;
+                                        }
+
+                                        std::string host;
+                                        int prefix = -1;
+
+                                        std::size_t i = cidr.find('/');
+                                        if (i == ppp::string::npos) {
+                                            host = cidr;
+                                        }
+                                        else {
+                                            if (i == 0) {
+                                                continue;
+                                            }
+
+                                            host = cidr.substr(0, i);
+                                            prefix = atoi(cidr.data() + (i + 1));
+                                        }
+
+                                        boost::system::error_code ec;
+                                        boost::asio::ip::address ip = ppp::StringToAddress(host, ec);
+                                        if (ec) {
+                                            continue;
+                                        }
+
+                                        if (!ip.is_v6()) {
+                                            continue;
+                                        }
+
+                                        if (prefix < 0) {
+                                            prefix = 128;
+                                        }
+                                        elif (prefix > 128) {
+                                            continue;
+                                        }
+
+                                        IPv6RouteEntry entry;
+                                        entry.Network = ip.to_v6();
+                                        entry.Prefix = prefix;
+                                        entry.NextHop = ngw6;
+                                        rib6->emplace_back(entry);
+                                        any = true;
+                                    }
+                                }
+
+                                if (any) {
+                                    rib6_ = rib6;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ribs6_.reset();
+                return any;
+            }
+
+            void VEthernetNetworkSwitcher::AddIPv6Route() noexcept {
+                if (IPv6RouteTablePtr rib6 = rib6_; NULLPTR == rib6) {
+                    return;
+                }
+
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                for (const IPv6RouteEntry& entry : *rib6_) {
+                    // Skip adding routes via the unspecified address (::) — keep those going through the TUN
+                    if (entry.NextHop.is_unspecified()) {
+                        continue;
+                    }
+
+                    std::string cidr = entry.Network.to_string() + "/" + std::to_string(entry.Prefix);
+                    std::string ngw6_str = entry.NextHop.to_string();
+
+#if defined(_WIN32)
+                    // Windows: use netsh interface ipv6 add route
+                    ppp::string ifname6;
+                    if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                        ifname6 = underlying_ni->Name;
+                    }
+                    std::string cmd = "netsh interface ipv6 add route " + cidr;
+                    if (!ifname6.empty()) {
+                        cmd += " \"" + ifname6 + "\"";
+                    }
+                    cmd += " " + ngw6_str;
+                    system(cmd.c_str());
+#elif defined(_MACOS)
+                    // macOS: use route -n add -inet6
+                    std::string cmd = "route -n add -inet6 " + cidr + " " + ngw6_str;
+                    system(cmd.c_str());
+#else
+                    // Linux: use ip -6 route add via with dev
+                    ppp::string ifname6;
+                    if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                        // Look up the interface from nics6_ using the ngw6 string, fall back to underlying NIC name
+                        ppp::string mapped_nic;
+                        if (Dictionary::TryGetValue(nics6_, ngw6_str, mapped_nic) && !mapped_nic.empty()) {
+                            ifname6 = mapped_nic;
+                        }
+                        else {
+                            ifname6 = underlying_ni->Name;
+                        }
+                    }
+                    std::string cmd = "ip -6 route add " + cidr + " via " + ngw6_str;
+                    if (!ifname6.empty()) {
+                        cmd += " dev " + ifname6;
+                    }
+                    system(cmd.c_str());
+#endif
+                }
+#endif
             }
 
             void VEthernetNetworkSwitcher::AddRouteWithDnsServers() noexcept {
@@ -1979,7 +2214,8 @@ namespace ppp {
 
                 // To clean up the managed and unmanaged data currently held by the class, 
                 // You need to go through the complete construct fill process again after the Release of this function.
-                ribs_.reset(); 
+                ribs_.reset();
+                ribs6_.reset(); 
                 tun_ni_.reset();
                 underlying_ni_.reset();
                 
@@ -1989,11 +2225,13 @@ namespace ppp {
 #if !defined(_MACOS)
                 // Clear the routing table, forwarding table, and DNS server list of the network card, including cache.
                 rib_ = NULLPTR;
+                rib6_ = NULLPTR;
                 fib_ = NULLPTR;
 #endif
 
                 // Clear all route tables and forwarding tables held by the current object.
                 LoadAllIPListWithFilePaths(boost::asio::ip::address_v4::any());
+                LoadAllIPListWithFilePaths6(boost::asio::ip::address_v6::any());
 #endif
 
 #if defined(_LINUX)

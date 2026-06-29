@@ -119,6 +119,12 @@ struct NetworkInterface final
 #endif  
     boost::asio::ip::address                            BypassNgw;                  // Gateway for bypass routes
 
+    const std::shared_ptr<BypassSet>                    Bypass6;                    // IPv6 bypass list file path
+#if defined(_LINUX)
+    ppp::string                                         BypassNic6;                 // Network interface for IPv6 bypass
+#endif  
+    boost::asio::ip::address                            BypassNgw6;                 // Gateway for IPv6 bypass routes
+
     ppp::string                                         ComponentId;                // TAP device identifier
 #if defined(_WIN32) 
     ppp::string                                         Wintun;                     // TAP device name
@@ -138,9 +144,11 @@ struct NetworkInterface final
     static ppp::string                                  GetDefaultTun() noexcept;   // Default tun-name
 
     int                                                 BypassLoadList(const ppp::string& s) noexcept;
+    int                                                 BypassLoadList6(const ppp::string& s) noexcept;
 
     NetworkInterface() noexcept 
-        : Bypass(ppp::make_shared_object<BypassSet>()) { }
+        : Bypass(ppp::make_shared_object<BypassSet>()),
+          Bypass6(ppp::make_shared_object<BypassSet>()) { }
 };
 
 // Console window dimensions structure
@@ -460,6 +468,66 @@ int NetworkInterface::BypassLoadList(const ppp::string& s) noexcept
     }
 
     // Return the count of newly added entries
+    return events;
+}
+
+// NetworkInterface::BypassLoadList6
+// 
+// Same as BypassLoadList but operates on the Bypass6 set for IPv6 bypass files.
+int NetworkInterface::BypassLoadList6(const ppp::string& s) noexcept
+{
+    BypassSet& set = *Bypass6;
+    set.clear();
+
+    if (s.empty())
+    {
+        return 0;
+    }
+
+    ppp::vector<ppp::string> segments;
+    ppp::string work = s;
+    for (char& ch : work)
+    {
+        if (ch == '*' || ch == '?' || ch == '<' || ch == '>')
+        {
+            ch = '|';
+        }
+    }
+    ppp::Tokenize<ppp::string>(work, segments, "|");
+
+    if (segments.size() == 1)
+    {
+        set.emplace(std::move(segments[0]));
+        return 1;
+    }
+
+    int events = 0;
+    for (const ppp::string& i : segments)
+    {
+        if (i.empty())
+        {
+            continue;
+        }
+        
+        ppp::string t = ppp::LTrim(ppp::RTrim(i));
+        if (t.empty())
+        {
+            continue;
+        }
+
+        t = File::GetFullPath(File::RewritePath(t.data()).data());
+        if (t.empty())
+        {
+            continue;
+        }
+
+        auto r = set.emplace(std::move(t));
+        if (r.second)
+        {
+            events++;
+        }
+    }
+
     return events;
 }
 
@@ -1015,8 +1083,8 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         console_window_buff_size_ = ppp::Malign(console_window_content_size, 1 << 6);
     }
 
-    // Output to console (use stderr to keep console display when stdout is redirected to log file)
-    fprintf(stderr, "%s", console_window_content.data());
+    // Output to console
+    fprintf(stdout, "%s", console_window_content.data());
     return true;
 }
 
@@ -1147,6 +1215,20 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 ethernet->AddLoadIPList(bypass_path, network_interface->BypassNgw, ppp::string());
             }
 #endif
+
+            // Load IPv6 bypass IP lists
+#if defined(_LINUX)
+            for (auto&& bypass_path : *network_interface->Bypass6) 
+            {
+                ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNic6, network_interface->BypassNgw6, ppp::string());
+            }
+#else
+            for (auto&& bypass_path : *network_interface->Bypass6) 
+            {
+                ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNgw6, ppp::string());
+            }
+#endif
+
             for (auto&& route : configuration->client.routes)
             {
                 ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
@@ -1612,6 +1694,23 @@ void PppApplication::PrintHelpInformation() noexcept
         col_default_width, "auto-detect");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
+        col_option_width, "--bypass6=<file1|file2>", 
+        col_description_width, "IPv6 bypass list file", 
+        col_default_width, "./ipv6.txt");
+
+#if defined(_LINUX)
+    printf("│ %-*s │ %-*s │ %-*s │\n", 
+        col_option_width, "--bypass-nic6=<interface>", 
+        col_description_width, "Interface for IPv6 bypass list", 
+        col_default_width, "auto-select");
+#endif
+    
+    printf("│ %-*s │ %-*s │ %-*s │\n", 
+        col_option_width, "--bypass-ngw6=<ip>", 
+        col_description_width, "Gateway for IPv6 bypass list", 
+        col_default_width, "auto-detect");
+    
+    printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--virr=[file/country]", 
         col_description_width, "Auto-update and take effect IP-list", 
         col_default_width, "./ip.txt/CN");
@@ -1856,6 +1955,12 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
 #endif
         ni->BypassNgw = GetNetworkAddress("--bypass-ngw", 0, 32, "0.0.0.0", argc, argv);
         ni->BypassLoadList(File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass", argc, argv, "./ip.txt"))).data()).data()));
+
+#if defined(_LINUX)
+        ni->BypassNic6 = ppp::RTrim(ppp::LTrim(ppp::GetCommandArgument("--bypass-nic6", argc, argv)));
+#endif
+        ni->BypassNgw6 = GetNetworkAddress("--bypass-ngw6", 0, 128, "::", argc, argv);
+        ni->BypassLoadList6(File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass6", argc, argv, "./ipv6.txt"))).data()).data()));
 
         // Parse configuration files
         ni->DNSRules = ppp::GetCommandArgument("--dns-rules", argc, argv, "./dns-rules.txt");

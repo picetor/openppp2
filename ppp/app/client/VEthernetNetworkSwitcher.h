@@ -52,6 +52,15 @@ namespace ppp {
                 typedef ppp::unordered_map<void*, TimeoutEventHandlerWeakPtr>       TimeoutEventHandlerTable;
                 typedef ppp::vector<std::pair<ppp::string, uint32_t>/**/>           LoadIPListFileVector;
                 typedef std::shared_ptr<LoadIPListFileVector>                       LoadIPListFileVectorPtr;
+                typedef ppp::vector<std::pair<ppp::string, boost::asio::ip::address>> LoadIPv6ListFileVector;
+                typedef std::shared_ptr<LoadIPv6ListFileVector>                     LoadIPv6ListFileVectorPtr;
+                struct IPv6RouteEntry {
+                    boost::asio::ip::address_v6                                    Network;
+                    int                                                             Prefix;
+                    boost::asio::ip::address_v6                                    NextHop;
+                };
+                typedef ppp::vector<IPv6RouteEntry>                                 IPv6RouteTable;
+                typedef std::shared_ptr<IPv6RouteTable>                             IPv6RouteTablePtr;
                 typedef ppp::vector<boost::asio::ip::address>                       NicDnsServerAddresses;
                 typedef ppp::unordered_map<int, NicDnsServerAddresses>              AllNicDnsServerAddresses;
                 typedef ppp::transmissions::proxys::IForwarding                     IForwarding;
@@ -162,6 +171,13 @@ namespace ppp {
 #endif  
                     const boost::asio::ip::address&                                 gw,
                     const ppp::string&                                              url) noexcept;
+                virtual bool                                                        AddLoadIPList6(
+                    const ppp::string&                                              path, 
+#if defined(_LINUX) 
+                    const ppp::string&                                              nic,
+#endif  
+                    const boost::asio::ip::address&                                 gw6,
+                    const ppp::string&                                              url) noexcept;
                 virtual ppp::string                                                 GetRemoteUri() noexcept;
 #endif  
             public: 
@@ -242,6 +258,8 @@ namespace ppp {
 #endif  
                 bool                                                                ProtectDefaultRoute() noexcept;
                 bool                                                                LoadAllIPListWithFilePaths(const boost::asio::ip::address& gw) noexcept;
+                bool                                                                LoadAllIPListWithFilePaths6(const boost::asio::ip::address& gw6) noexcept;
+                void                                                                AddIPv6Route() noexcept;
 #endif
                 void                                                                Finalize() noexcept;
                 bool                                                                AddRemoteEndPointToIPList(const boost::asio::ip::address& gw) noexcept;
@@ -287,6 +305,7 @@ namespace ppp {
 #if defined(_LINUX)
                 bool                                                                protect_mode_  = false;
                 ppp::unordered_map<uint32_t, ppp::string>                           nics_;
+                ppp::unordered_map<ppp::string, ppp::string>                        nics6_;
 #endif
 #endif
 
@@ -299,6 +318,8 @@ namespace ppp {
 #else
                 bool                                                                route_added_   = false;
                 LoadIPListFileVectorPtr                                             ribs_;
+                LoadIPv6ListFileVectorPtr                                           ribs6_;
+                IPv6RouteTablePtr                                                   rib6_;
 
                 std::shared_ptr<NetworkInterface>                                   tun_ni_;
                 std::shared_ptr<NetworkInterface>                                   underlying_ni_;
