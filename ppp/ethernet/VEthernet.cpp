@@ -1,4 +1,5 @@
 #include <ppp/ethernet/VEthernet.h>
+#include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/threading/Timer.h>
@@ -400,9 +401,15 @@ namespace ppp
                 {
                     int packet_length = e.PacketLength;
                     struct ip_hdr* iphdr = ip_hdr::Parse(e.Packet, packet_length);
-                    if (NULLPTR == iphdr) // INVALID IS (Destination & Mask) != Destination;
+                    if (NULLPTR == iphdr)
                     {
-                        return false;
+                        // Try IPv6: check version nibble (top 4 bits of first byte)
+                        Byte* packet = (Byte*)e.Packet;
+                        if (packet_length >= (int)sizeof(ppp::ipv6::PacketHeader) && (packet[0] >> 4) == 6)
+                        {
+                            return OnIPv6PacketInput(packet, packet_length);
+                        }
+                        return false; // INVALID IS (Destination & Mask) != Destination;
                     }
 #if !defined(_WIN32)
                     elif(mta_)
@@ -585,6 +592,11 @@ namespace ppp
             }
 
             return -1;
+        }
+
+        bool VEthernet::OnIPv6PacketInput(Byte* packet, int packet_length) noexcept
+        {
+            return false;
         }
 
 #if !defined(_WIN32)

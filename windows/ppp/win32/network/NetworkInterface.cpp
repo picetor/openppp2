@@ -1937,6 +1937,92 @@ namespace ppp
             {
                 return Win32Native::EchoTrim("netsh winsock reset").size() > 0;
             }
+
+            bool GetIPv6DefaultGateway(boost::asio::ip::address& gateway, int& interface_index) noexcept
+            {
+                gateway = boost::asio::ip::address_v6::any();
+                interface_index = -1;
+
+                ULONG ulBufLen = 0;
+                GetAdaptersAddresses(AF_UNSPEC, 0, NULLPTR, NULLPTR, &ulBufLen);
+                if (ulBufLen == 0)
+                {
+                    return false;
+                }
+
+                char* szBuf = (char*)Malloc(ulBufLen);
+                if (NULLPTR == szBuf)
+                {
+                    return false;
+                }
+
+                PIP_ADAPTER_ADDRESSES pAddresses = (IP_ADAPTER_ADDRESSES*)szBuf;
+                DWORD dwErr = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULLPTR, pAddresses, &ulBufLen);
+                if (dwErr != NO_ERROR)
+                {
+                    Mfree(szBuf);
+                    return false;
+                }
+
+                bool found = false;
+                for (PIP_ADAPTER_ADDRESSES pAdapter = pAddresses; NULLPTR != pAdapter; pAdapter = pAdapter->Next)
+                {
+                    if (pAdapter->OperStatus != IfOperStatusUp)
+                    {
+                        continue;
+                    }
+
+                    // Skip TAP adapters by checking the name for common patterns
+                    ppp::string name = pAdapter->FriendlyName;
+                    bool is_tap = (name.find("TAP") != ppp::string::npos ||
+                                   name.find("tap") != ppp::string::npos ||
+                                   name.find("tun") != ppp::string::npos ||
+                                   name.find("TUN") != ppp::string::npos ||
+                                   name.find("VPN") != ppp::string::npos);
+                    if (is_tap)
+                    {
+                        continue;
+                    }
+
+                    // Look for IPv6 default gateway from the adapter's gateway addresses
+                    for (PIP_ADAPTER_GATEWAY_ADDRESS_LH pGateway = pAdapter->FirstGatewayAddress;
+                         NULLPTR != pGateway; pGateway = pGateway->Next)
+                    {
+                        if (pGateway->Address.lpSockaddr->sa_family != AF_INET6)
+                        {
+                            continue;
+                        }
+
+                        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)pGateway->Address.lpSockaddr;
+                        char buf[INET6_ADDRSTRLEN];
+                        if (inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf)))
+                        {
+                            boost::system::error_code ec;
+                            boost::asio::ip::address addr = boost::asio::ip::make_address(buf, ec);
+                            if (!ec && addr.is_v6() && !addr.is_unspecified())
+                            {
+                                // Prefer globally routable (non-link-local) gateway
+                                if (!found || !addr.to_v6().is_link_local())
+                                {
+                                    gateway = addr;
+                                    interface_index = pAdapter->IfIndex;
+                                    found = true;
+
+                                    // If this is a global address, stop searching
+                                    if (!addr.to_v6().is_link_local())
+                                    {
+                                        Mfree(szBuf);
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Mfree(szBuf);
+                return found;
+            }
         }
     }
 }

@@ -32,6 +32,11 @@ namespace ppp
             const uint32_t                                                  SubmaskAddress = ppp::net::IPEndPoint::AnyAddress;
 
         public:
+            const boost::asio::ip::address                                  IPv6Address;
+            const boost::asio::ip::address                                  IPv6GatewayServer;
+            const boost::asio::ip::address                                  IPv6SubmaskAddress;
+
+        public:
             PacketInputEventHandler                                         PacketInput;
             std::shared_ptr<ppp::threading::BufferswapAllocator>            BufferAllocator;
 
@@ -39,7 +44,10 @@ namespace ppp
             static constexpr int                                            Mtu = ppp::net::native::ip_hdr::MTU;
 
         public:
-            ITap(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t ip, uint32_t gw, uint32_t mask, bool hosted_network);
+            ITap(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t ip, uint32_t gw, uint32_t mask, bool hosted_network,
+                const boost::asio::ip::address& ipv6 = boost::asio::ip::address(),
+                const boost::asio::ip::address& ipv6_gw = boost::asio::ip::address(),
+                const boost::asio::ip::address& ipv6_mask = boost::asio::ip::address());
             virtual ~ITap() noexcept;
 
         public:

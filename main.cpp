@@ -1122,6 +1122,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
             ethernet->StaticMode(&network_interface->StaticMode);
             ethernet->PreferredNgw(network_interface->Ngw);
+            ethernet->PreferredNgw6(network_interface->BypassNgw6);
             ethernet->PreferredNic(network_interface->Nic);
 
             // Load bypass IP lists

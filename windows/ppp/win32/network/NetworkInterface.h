@@ -75,9 +75,7 @@ namespace ppp
             bool                                                ResetNetworkEnvironment() noexcept;
             ppp::string                                         GetInterfaceName(int interface_index) noexcept;
             bool                                                SetInterfaceName(int interface_index, const ppp::string& interface_name) noexcept;
-
-            OperationalStatus                                   GetOperationalStatus(int interface_index) noexcept;
-            OperationalStatus                                   GetOperationalStatus(INTERNAL_IF_OPER_STATUS status) noexcept;
+            bool                                                GetIPv6DefaultGateway(boost::asio::ip::address& gateway, int& interface_index) noexcept;
             bool                                                GetAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept;
             int                                                 GetInterfaceMtu(int interface_index) noexcept;
             bool                                                SetInterfaceMtu(int interface_index, int mtu) noexcept;

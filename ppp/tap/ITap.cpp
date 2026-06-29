@@ -79,10 +79,14 @@ namespace ppp
             return WrapStreamFromNativePtr(stream);
         }
 
-        ITap::ITap(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t ip, uint32_t gw, uint32_t mask, bool hosted_network)
+        ITap::ITap(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t ip, uint32_t gw, uint32_t mask, bool hosted_network,
+            const boost::asio::ip::address& ipv6, const boost::asio::ip::address& ipv6_gw, const boost::asio::ip::address& ipv6_mask)
             : IPAddress(ip)
             , GatewayServer(gw)
             , SubmaskAddress(mask)
+            , IPv6Address(ipv6)
+            , IPv6GatewayServer(ipv6_gw)
+            , IPv6SubmaskAddress(ipv6_mask)
             , _id(id)
             , _context(context)
             , _opening(false)

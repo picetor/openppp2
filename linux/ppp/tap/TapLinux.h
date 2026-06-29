@@ -53,6 +53,7 @@ namespace ppp
         public: 
             static bool                                                             GetDefaultGateway(char* ifrName, UInt32* address) noexcept;
             static bool                                                             GetDefaultGateway(UInt32* address, const ppp::function<bool(const char*, uint32_t ip, uint32_t gw, uint32_t mask, int metric)>& predicate) noexcept;
+            static bool                                                             GetDefaultGateway6(ppp::string& ifrName, boost::asio::ip::address& gw6) noexcept;
             static void                                                             CompatibleRoute(bool compatible) noexcept;
             static bool                                                             SetIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept;
             static bool                                                             DeleteIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept;

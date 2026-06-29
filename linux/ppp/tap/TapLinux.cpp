@@ -1216,6 +1216,94 @@ namespace ppp {
                 });
         }
 
+        /* parse /proc/net/ipv6_route which is as follow :
+         * destination              destination_prefix source                   source_prefix next_hop                metric      ref_count   use_count   flags       device
+         * 00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000100  00000000    00000000    00000000    eth0
+         * fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000  00000000    00000000    00000000    eth0
+         * Default route: destination=0000...0000, prefix=00
+         */
+        bool TapLinux::GetDefaultGateway6(ppp::string& ifrName, boost::asio::ip::address& gw6) noexcept {
+            ifrName.clear();
+            gw6 = boost::asio::ip::address_v6::any();
+
+            FILE* f = fopen("/proc/net/ipv6_route", "r");
+            if (!f) {
+                return false;
+            }
+
+            char buf[512];
+            bool found = false;
+            while (fgets(buf, sizeof(buf), f)) {
+                // Columns: dest dest_prefix src src_prefix next_hop metric ref_count use_count flags device
+                char dest[33], src[33], next_hop[33], device[64];
+                unsigned int dest_prefix, src_prefix;
+
+                int n = sscanf_s(buf, "%32s %02x %32s %02x %32s %*s %*s %*s %*s %63s",
+                    dest, (unsigned)sizeof(dest), &dest_prefix,
+                    src, (unsigned)sizeof(src), &src_prefix,
+                    next_hop, (unsigned)sizeof(next_hop),
+                    device, (unsigned)sizeof(device));
+                if (n < 10) {
+                    continue;
+                }
+
+                // Look for default route: destination == 0000...0000, dest_prefix == 0
+                bool all_zero = true;
+                for (int i = 0; i < 32; i++) {
+                    if (dest[i] != '0') { all_zero = false; break; }
+                }
+                if (!all_zero || dest_prefix != 0) {
+                    continue;
+                }
+
+                // Build IPv6 address from hex string
+                // Format: 32 hex chars -> 8 groups of 4, like 00000000000000000000000000000001 -> ::1
+                ppp::string ipv6_str;
+                for (int i = 0; i < 32; i += 4) {
+                    if (i > 0) ipv6_str.push_back(':');
+                    // Skip leading zeros within each group
+                    int j = 0;
+                    while (j < 4 && next_hop[i + j] == '0') j++;
+                    if (j == 4) {
+                        ipv6_str.push_back('0');
+                    } else {
+                        for (int k = j; k < 4; k++) {
+                            ipv6_str.push_back(next_hop[i + k]);
+                        }
+                    }
+                }
+
+                // Compress the IPv6 string using boost
+                boost::system::error_code ec;
+                boost::asio::ip::address_v6 addr = boost::asio::ip::make_address_v6(ipv6_str, ec);
+                if (ec) {
+                    // Try the raw format with colons
+                    ppp::string raw;
+                    for (int i = 0; i < 32; i++) {
+                        if (i > 0 && i % 4 == 0) raw.push_back(':');
+                        raw.push_back(next_hop[i]);
+                    }
+                    addr = boost::asio::ip::make_address_v6(raw, ec);
+                    if (ec) continue;
+                }
+
+                // Prefer non-link-local gateway
+                if (!found || !addr.is_link_local()) {
+                    ifrName = device;
+                    gw6 = addr;
+                    found = true;
+                }
+
+                // If we found a non-link-local gateway, stop
+                if (!gw6.to_v6().is_link_local()) {
+                    break;
+                }
+            }
+
+            fclose(f);
+            return found;
+        }
+
         bool TapLinux::SetNextHop(const ppp::string& ip) noexcept {
             if (ip.empty()) {
                 return false;

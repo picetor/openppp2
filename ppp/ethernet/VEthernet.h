@@ -70,6 +70,7 @@ namespace ppp
             virtual bool                                                    OnUpdate(uint64_t now) noexcept;
             virtual bool                                                    OnPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept;
             virtual bool                                                    OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept;
+            virtual bool                                                    OnIPv6PacketInput(Byte* packet, int packet_length) noexcept;
 
         private:
             void                                                            Finalize() noexcept;
