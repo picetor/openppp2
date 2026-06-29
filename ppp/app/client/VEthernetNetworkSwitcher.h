@@ -7,6 +7,7 @@
 #include <ppp/net/packet/IPFrame.h>
 #include <ppp/ethernet/VEthernet.h>
 #include <ppp/ethernet/VNetstack.h>
+#include <ppp/ipv6/IPv6Auxiliary.h>
 #include <ppp/transmissions/proxys/IForwarding.h>
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/transmissions/ITransmissionQoS.h>
@@ -68,6 +69,7 @@ namespace ppp {
 
             public: 
                 typedef ppp::app::protocol::VirtualEthernetInformation              VirtualEthernetInformation;
+                typedef ppp::app::protocol::VirtualEthernetInformationExtensions   VirtualEthernetInformationExtensions;
                 typedef ppp::app::protocol::VirtualEthernetLogger                   VirtualEthernetLogger;
                 typedef std::shared_ptr<VirtualEthernetLogger>                      VirtualEthernetLoggerPtr;
                 typedef ppp::app::client::proxys::VEthernetHttpProxySwitcher        VEthernetHttpProxySwitcher;
@@ -93,6 +95,7 @@ namespace ppp {
                 public: 
                     boost::asio::ip::address                                        IPAddress;
                     boost::asio::ip::address                                        GatewayServer;
+                    boost::asio::ip::address                                        IPv6GatewayServer;
                     boost::asio::ip::address                                        SubmaskAddress;
 
 #if defined(_WIN32) 
@@ -162,6 +165,7 @@ namespace ppp {
                 std::shared_ptr<NetworkInterface>                                   GetTapNetworkInterface()        noexcept { return tun_ni_; }
                 std::shared_ptr<NetworkInterface>                                   GetUnderlyingNetworkInterface() noexcept { return underlying_ni_; }
                 virtual void                                                        PreferredNgw(const boost::asio::ip::address& gw) noexcept;
+                virtual void                                                        PreferredNgw6(const boost::asio::ip::address& gw6) noexcept;
                 virtual void                                                        PreferredNic(const ppp::string& nic) noexcept;
                 virtual bool                                                        AddLoadIPList(
                     const ppp::string&                                              path, 
@@ -189,9 +193,11 @@ namespace ppp {
             protected:  
                 virtual bool                                                        OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept override;
                 virtual bool                                                        OnPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept override;
+                virtual bool                                                        OnIPv6PacketInput(Byte* packet, int packet_length) noexcept override;
                 virtual bool                                                        OnTick(uint64_t now) noexcept override;
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;
+                virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept;
 
             protected:  
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger() noexcept;
@@ -323,6 +329,7 @@ namespace ppp {
                 std::shared_ptr<NetworkInterface>                                   underlying_ni_;
                 ppp::string                                                         preferred_nic_;
                 boost::asio::ip::address                                            preferred_ngw_;
+                boost::asio::ip::address                                            preferred_ngw6_;
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
                 
 #if defined(_WIN32)

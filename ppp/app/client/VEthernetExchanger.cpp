@@ -932,6 +932,34 @@ namespace ppp {
                 return true;
             }
 
+            bool VEthernetExchanger::OnInformation(const ITransmissionPtr& transmission, const InformationEnvelope& information, YieldContext& y) noexcept {
+                std::shared_ptr<boost::asio::io_context> context = GetContext();
+                if (NULLPTR == context) {
+                    return false;
+                }
+
+                // Process base information (quota/expiry) same as before
+                auto ei = make_shared_object<VirtualEthernetInformation>(information.Base);
+                if (NULLPTR == ei) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                boost::asio::post(*context,
+                    [self, this, context, ei, information]() noexcept {
+                        information_ = ei;
+                        if (!disposed_) {
+                            switcher_->OnInformation(ei);
+
+                            // Apply IPv6 (and optionally IPv4) assignment from ExtendedJson
+                            if (!information.ExtendedJson.empty()) {
+                                switcher_->ApplyIPv6Assignment(information.Extensions);
+                            }
+                        }
+                    });
+                return true;
+            }
+
             bool VEthernetExchanger::OnPush(const ITransmissionPtr& transmission, int connection_id, Byte* packet, int packet_length, YieldContext& y) noexcept {
                 return false; // Immediate return false and forcefully close the connection due to a suspected malicious attack on the client.
             }

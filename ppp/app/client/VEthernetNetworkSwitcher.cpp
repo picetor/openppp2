@@ -24,6 +24,14 @@
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/http/HttpClient.h>
 #include <ppp/net/asio/InternetControlMessageProtocol.h>
+#include <ppp/ipv6/IPv6Packet.h>
+#if defined(_WIN32)
+#include <windows/ppp/ipv6/IPv6Auxiliary.h>
+#elif defined(_LINUX)
+#include <linux/ppp/ipv6/IPv6Auxiliary.h>
+#elif defined(_MACOS)
+#include <darwin/ppp/ipv6/IPv6Auxiliary.h>
+#endif
 
 #if defined(_WIN32)
 #include <windows/ppp/tap/TapWindows.h>
@@ -34,6 +42,7 @@
 #include <common/unix/UnixAfx.h>
 #if defined(_MACOS)
 #include <darwin/ppp/tap/TapDarwin.h>
+#include <darwin/ppp/ipv6/IPv6Auxiliary.h>
 #else
 #include <linux/ppp/tap/TapLinux.h>
 #endif
@@ -190,6 +199,21 @@ namespace ppp {
                 else {
                     return false;
                 }
+            }
+
+            bool VEthernetNetworkSwitcher::OnIPv6PacketInput(Byte* packet, int packet_length) noexcept {
+                if (!vnet_) {
+                    return false;
+                }
+                if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
+                    return false;
+                }
+                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                if (NULLPTR == exchanger) {
+                    return false;
+                }
+                exchanger->Nat(packet, packet_length);
+                return true;
             }
 
             bool VEthernetNetworkSwitcher::OnUdpPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept {
@@ -610,6 +634,93 @@ namespace ppp {
                 return false;
             }
 
+            void VEthernetNetworkSwitcher::ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept {
+                if (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_None) {
+                    return;
+                }
+
+                std::shared_ptr<ITap> tap = GetTap();
+                if (NULLPTR == tap) {
+                    return;
+                }
+
+                // Build the client context using TAP interface info.
+                ppp::ipv6::auxiliary::ClientContext ctx;
+                ctx.Tap = tap.get();
+                ctx.InterfaceIndex = tap->GetInterfaceIndex();
+
+                // Obtain interface name -- prefer tun_ni_ Name if available.
+                std::shared_ptr<NetworkInterface> tun_ni = GetTapNetworkInterface();
+                if (NULLPTR != tun_ni && !tun_ni->Name.empty()) {
+                    ctx.InterfaceName = tun_ni->Name;
+                }
+#if defined(_LINUX)
+                else {
+                    int dev_handle = (int)reinterpret_cast<std::intptr_t>(tap->GetHandle());
+                    if (dev_handle != -1) {
+                        ppp::tap::TapLinux::GetInterfaceName(dev_handle, ctx.InterfaceName);
+                    }
+                }
+#elif defined(_MACOS)
+                else {
+                    int dev_handle = (int)reinterpret_cast<std::intptr_t>(tap->GetHandle());
+                    if (dev_handle != -1) {
+                        ppp::darwin::tun::utun_get_if_name(dev_handle, ctx.InterfaceName);
+                    }
+                }
+#endif
+                // Determine nat_mode from configuration.
+                auto configuration = GetConfiguration();
+                bool nat_mode = configuration != NULLPTR && configuration->server.ipv6.nat66;
+
+                // Capture original IPv6 state before applying changes.
+                ppp::ipv6::auxiliary::ClientState state;
+                ppp::ipv6::auxiliary::CaptureClientOriginalState(ctx, nat_mode, state);
+
+                // 1. Apply the assigned IPv6 address.
+                if (extensions.AssignedIPv6Address.is_v6()) {
+                    bool gua_mode = (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua);
+                    ppp::ipv6::auxiliary::ApplyClientAddress(
+                        ctx,
+                        extensions.AssignedIPv6Address,
+                        extensions.AssignedIPv6AddressPrefixLength > 0
+                            ? extensions.AssignedIPv6AddressPrefixLength
+                            : 64,
+                        gua_mode,
+                        state);
+                }
+
+                // 2. Apply the default IPv6 route via the assigned gateway.
+                if (extensions.AssignedIPv6Gateway.is_v6()) {
+                    ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
+                }
+
+                // 3. Apply an optional routed subnet prefix.
+                if (extensions.AssignedIPv6RoutePrefix.is_v6() && extensions.AssignedIPv6RoutePrefixLength > 0) {
+                    ppp::ipv6::auxiliary::ApplyClientSubnetRoute(
+                        ctx,
+                        extensions.AssignedIPv6RoutePrefix,
+                        extensions.AssignedIPv6RoutePrefixLength,
+                        extensions.AssignedIPv6Gateway.is_v6()
+                            ? extensions.AssignedIPv6Gateway
+                            : boost::asio::ip::address(),
+                        nat_mode,
+                        state);
+                }
+
+                // 4. Apply DNS servers if configured.
+                ppp::vector<ppp::string> dns_servers;
+                if (extensions.AssignedIPv6Dns1.is_v6()) {
+                    dns_servers.push_back(extensions.AssignedIPv6Dns1.to_string());
+                }
+                if (extensions.AssignedIPv6Dns2.is_v6()) {
+                    dns_servers.push_back(extensions.AssignedIPv6Dns2.to_string());
+                }
+                if (!dns_servers.empty()) {
+                    ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
+                }
+            }
+
 #if defined(_WIN32)
             VEthernetNetworkSwitcher::PaperAirplaneControllerPtr VEthernetNetworkSwitcher::NewPaperAirplaneController() noexcept {
                 std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
@@ -704,7 +815,16 @@ namespace ppp {
 
             static std::shared_ptr<VEthernetNetworkSwitcher::NetworkInterface> Windows_GetUnderlyingNetowrkInterface(const std::shared_ptr<VEthernetNetworkSwitcher::ITap>& tap, const ppp::string& nic) noexcept {
                 auto [ai, ni] = ppp::win32::network::GetUnderlyingNetowrkInterface2(tap->GetId(), nic);
-                return Windows_GetNetworkInterface(ai, ni);
+                auto result = Windows_GetNetworkInterface(ai, ni);
+                if (NULLPTR != result) {
+                    // Detect IPv6 default gateway
+                    boost::asio::ip::address gw6;
+                    int ifindex = -1;
+                    if (ppp::win32::network::GetIPv6DefaultGateway(gw6, ifindex)) {
+                        result->IPv6GatewayServer = gw6;
+                    }
+                }
+                return result;
             }
 #elif !defined(_ANDROID) && !defined(_IPHONE)
             class UnixNetworkInterface final : public VEthernetNetworkSwitcher::NetworkInterface {
@@ -844,6 +964,19 @@ namespace ppp {
                 }
 
                 ni->DefaultRoutes = std::move(network_interface->GatewayAddresses);
+
+                // Detect IPv6 default gateway
+                {
+                    ppp::string ifname6, gw6_str;
+                    ppp::darwin::ipv6::auxiliary::ReadPrimaryDefaultRoute(ifname6, gw6_str);
+                    if (!gw6_str.empty()) {
+                        boost::system::error_code ec;
+                        boost::asio::ip::address gw6 = StringToAddress(gw6_str.data(), ec);
+                        if (!ec && gw6.is_v6()) {
+                            ni->IPv6GatewayServer = gw6;
+                        }
+                    }
+                }
 #else
                 ppp::string interface_name;
                 ppp::UInt32 ip, gw, mask;
@@ -857,6 +990,15 @@ namespace ppp {
                 ni->GatewayServer = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(IPEndPoint(gw, IPEndPoint::MinPort)).address();
                 ni->IPAddress = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(IPEndPoint(ip, IPEndPoint::MinPort)).address();
                 ni->SubmaskAddress = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(IPEndPoint(mask, IPEndPoint::MinPort)).address();
+
+                // Detect IPv6 default gateway
+                {
+                    ppp::string ifname6;
+                    boost::asio::ip::address gw6;
+                    if (ppp::tap::TapLinux::GetDefaultGateway6(ifname6, gw6)) {
+                        ni->IPv6GatewayServer = gw6;
+                    }
+                }
 #endif
 
                 ni->DnsResolveConfiguration = ppp::unix__::UnixAfx::GetDnsResolveConfiguration();
@@ -1149,7 +1291,15 @@ namespace ppp {
                 // Load all IPList route table configuration files that need to be loaded.
                 if (auto underlying_ni = underlying_ni_; NULLPTR != underlying_ni) {
                     LoadAllIPListWithFilePaths(underlying_ni->GatewayServer);
-                    LoadAllIPListWithFilePaths6(underlying_ni->GatewayServer);
+
+                    // Use preferred_ngw6_ (--bypass-ngw6) if specified; otherwise fall back to auto-detected IPv6 gateway.
+                    {
+                        boost::asio::ip::address gw6 = preferred_ngw6_;
+                        if (!gw6.is_v6() || gw6.is_unspecified() || IPEndPoint::IsInvalid(gw6)) {
+                            gw6 = underlying_ni->IPv6GatewayServer;
+                        }
+                        LoadAllIPListWithFilePaths6(gw6);
+                    }
 
                     // Add VPN remote server to IPList bypass route table iplist.
                     if (!AddRemoteEndPointToIPList(underlying_ni->GatewayServer)) {
@@ -1431,6 +1581,10 @@ namespace ppp {
                 preferred_ngw_ = gw;
             }
 
+            void VEthernetNetworkSwitcher::PreferredNgw6(const boost::asio::ip::address& gw6) noexcept {
+                preferred_ngw6_ = gw6;
+            }
+
             bool VEthernetNetworkSwitcher::AddLoadIPList(
                 const ppp::string&                                              path, 
 #if defined(_LINUX) 
@@ -1601,90 +1755,99 @@ namespace ppp {
                 rib6_ = NULLPTR;
 
                 bool any = false;
+                // Use gw6 as a fallback next-hop when an entry's gateway is unspecified.
+                boost::asio::ip::address_v6 next_hop6;
                 if (gw6.is_v6()) {
-                    boost::asio::ip::address_v6 next_hop6 = gw6.to_v6();
-                    if (!IPEndPoint::IsInvalid(boost::asio::ip::address(next_hop6))) {
-                        if (LoadIPv6ListFileVectorPtr ribs6 = std::move(ribs6_); NULLPTR != ribs6) {
-                            IPv6RouteTablePtr rib6 = make_shared_object<IPv6RouteTable>();
-                            if (NULLPTR != rib6) {
-                                for (auto&& kv : *ribs6) {
-                                    const ppp::string& path = kv.first;
-                                    const boost::asio::ip::address& ngw6_addr = kv.second;
+                    next_hop6 = gw6.to_v6();
+                }
 
-                                    boost::asio::ip::address_v6 ngw6 = ngw6_addr.is_unspecified()
-                                        ? next_hop6
-                                        : ngw6_addr.to_v6();
+                if (LoadIPv6ListFileVectorPtr ribs6 = std::move(ribs6_); NULLPTR != ribs6) {
+                    IPv6RouteTablePtr rib6 = make_shared_object<IPv6RouteTable>();
+                    if (NULLPTR != rib6) {
+                        for (auto&& kv : *ribs6) {
+                            const ppp::string& path = kv.first;
+                            const boost::asio::ip::address& ngw6_addr = kv.second;
 
-                                    // Read and parse the IPv6 CIDR file
-                                    ppp::string text = ppp::io::File::ReadAllText(path.c_str());
-                                    if (text.empty()) {
+                            // Use the entry's own gateway if specified; fall back to gw6 parameter.
+                            boost::asio::ip::address_v6 ngw6;
+                            if (ngw6_addr.is_v6() && !IPEndPoint::IsInvalid(ngw6_addr)) {
+                                ngw6 = ngw6_addr.to_v6();
+                            }
+                            else if (!next_hop6.is_unspecified()) {
+                                ngw6 = next_hop6;
+                            }
+                            else {
+                                ngw6 = boost::asio::ip::address_v6::any();
+                            }
+
+                            // Read and parse the IPv6 CIDR file
+                            ppp::string text = ppp::io::File::ReadAllText(path.c_str());
+                            if (text.empty()) {
+                                continue;
+                            }
+
+                            // Tokenize by newlines
+                            ppp::vector<ppp::string> lines;
+                            ppp::Tokenize<ppp::string>(text, lines, "\r\n");
+                            if (lines.empty()) {
+                                ppp::Tokenize<ppp::string>(text, lines, "\n");
+                            }
+
+                            for (const ppp::string& line : lines) {
+                                ppp::string cidr = ppp::LTrim(ppp::RTrim(line));
+                                if (cidr.empty()) {
+                                    continue;
+                                }
+
+                                // Skip comments
+                                if (cidr[0] == '#' || cidr[0] == ';') {
+                                    continue;
+                                }
+
+                                std::string host;
+                                int prefix = -1;
+
+                                std::size_t i = cidr.find('/');
+                                if (i == ppp::string::npos) {
+                                    host = cidr;
+                                }
+                                else {
+                                    if (i == 0) {
                                         continue;
                                     }
 
-                                    // Tokenize by newlines
-                                    ppp::vector<ppp::string> lines;
-                                    ppp::Tokenize<ppp::string>(text, lines, "\r\n");
-                                    if (lines.empty()) {
-                                        ppp::Tokenize<ppp::string>(text, lines, "\n");
-                                    }
-
-                                    for (const ppp::string& line : lines) {
-                                        ppp::string cidr = ppp::LTrim(ppp::RTrim(line));
-                                        if (cidr.empty()) {
-                                            continue;
-                                        }
-
-                                        // Skip comments
-                                        if (cidr[0] == '#' || cidr[0] == ';') {
-                                            continue;
-                                        }
-
-                                        std::string host;
-                                        int prefix = -1;
-
-                                        std::size_t i = cidr.find('/');
-                                        if (i == ppp::string::npos) {
-                                            host = cidr;
-                                        }
-                                        else {
-                                            if (i == 0) {
-                                                continue;
-                                            }
-
-                                            host = cidr.substr(0, i);
-                                            prefix = atoi(cidr.data() + (i + 1));
-                                        }
-
-                                        boost::system::error_code ec;
-                                        boost::asio::ip::address ip = ppp::StringToAddress(host, ec);
-                                        if (ec) {
-                                            continue;
-                                        }
-
-                                        if (!ip.is_v6()) {
-                                            continue;
-                                        }
-
-                                        if (prefix < 0) {
-                                            prefix = 128;
-                                        }
-                                        elif (prefix > 128) {
-                                            continue;
-                                        }
-
-                                        IPv6RouteEntry entry;
-                                        entry.Network = ip.to_v6();
-                                        entry.Prefix = prefix;
-                                        entry.NextHop = ngw6;
-                                        rib6->emplace_back(entry);
-                                        any = true;
-                                    }
+                                    host = cidr.substr(0, i);
+                                    prefix = atoi(cidr.data() + (i + 1));
                                 }
 
-                                if (any) {
-                                    rib6_ = rib6;
+                                boost::system::error_code ec;
+                                boost::asio::ip::address ip = ppp::StringToAddress(host, ec);
+                                if (ec) {
+                                    continue;
                                 }
+
+                                if (!ip.is_v6()) {
+                                    continue;
+                                }
+
+                                if (prefix < 0) {
+                                    prefix = 128;
+                                }
+                                elif (prefix > 128) {
+                                    continue;
+                                }
+
+                                IPv6RouteEntry entry;
+                                entry.Network = ip.to_v6();
+                                entry.Prefix = prefix;
+                                entry.NextHop = ngw6;
+                                rib6->emplace_back(entry);
+                                any = true;
                             }
+                        }
+
+                        if (any) {
+                            rib6_ = rib6;
                         }
                     }
                 }

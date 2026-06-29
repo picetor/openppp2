@@ -672,7 +672,24 @@ namespace ppp {
                         info.ExpiredTime    = ntohl(info.ExpiredTime);
                         info.IncomingTraffic= ppp::net::Ipep::NetworkToHostOrder(info.IncomingTraffic);
                         info.OutgoingTraffic= ppp::net::Ipep::NetworkToHostOrder(info.OutgoingTraffic);
-                        return OnInformation(transmission, info, y);
+
+                        // Check for inline ExtendedJson after the binary header:
+                        // [2-byte network-order length] [JSON data]
+                        InformationEnvelope envelope;
+                        envelope.Base = info;
+
+                        int remaining = packet_length - static_cast<int>(sizeof(VirtualEthernetInformation));
+                        if (remaining > 2) {
+                            uint16_t json_len = ntohs(*reinterpret_cast<uint16_t*>(p + sizeof(VirtualEthernetInformation)));
+                            if (json_len > 0 && remaining >= 2 + json_len) {
+                                envelope.ExtendedJson = ppp::string(
+                                    reinterpret_cast<char*>(p + sizeof(VirtualEthernetInformation) + 2), json_len);
+                                // Deserialize extensions from the JSON payload
+                                VirtualEthernetInformationExtensions::FromJson(envelope.Extensions, envelope.ExtendedJson);
+                            }
+                        }
+
+                        return OnInformation(transmission, envelope, y);
                     } else {
                         return packet_length == 0;
                     }
@@ -843,11 +860,47 @@ namespace ppp {
             }
 
             // ---------------------------------------------------------------------
-            // Send virtual Ethernet information envelope (delegates to base method).
+            // Send virtual Ethernet information envelope.
+            // Sends the binary VirtualEthernetInformation followed by any
+            // optional ExtendedJson (2-byte length prefix + data) so that
+            // old clients can safely ignore the trailing bytes.
             // ---------------------------------------------------------------------
             bool VirtualEthernetLinklayer::DoInformation(const ITransmissionPtr& transmission, const InformationEnvelope& information, YieldContext& y) noexcept
             {
-                return DoInformation(transmission, information.Base, y);
+                VirtualEthernetInformation info;
+
+                // convert host byte order to network byte order for transmission
+                info.BandwidthQoS    = ppp::net::Ipep::HostToNetworkOrder(information.Base.BandwidthQoS);
+                info.ExpiredTime     = htonl(information.Base.ExpiredTime);
+                info.IncomingTraffic = ppp::net::Ipep::HostToNetworkOrder(information.Base.IncomingTraffic);
+                info.OutgoingTraffic = ppp::net::Ipep::HostToNetworkOrder(information.Base.OutgoingTraffic);
+
+                if (information.ExtendedJson.empty()) {
+                    return global::PACKET_Push(PacketAction_INFO, transmission,
+                        reinterpret_cast<Byte*>(&info), sizeof(info), y);
+                }
+
+                // Build a contiguous buffer: action(1) + header(32) + json_len(2) + json(N)
+                int json_len = static_cast<int>(information.ExtendedJson.size());
+                if (json_len > 65535) {
+                    return false; // sanity: 2-byte length field cannot hold >64K
+                }
+                int total = 1 + static_cast<int>(sizeof(VirtualEthernetInformation)) + 2 + json_len;
+
+                std::shared_ptr<Byte> buffer = ppp::threading::BufferswapAllocator::Make(total);
+                if (NULLPTR == buffer) {
+                    return false;
+                }
+
+                Byte* p = buffer.get();
+                *p++ = static_cast<Byte>(PacketAction_INFO);
+                std::memcpy(p, &info, sizeof(info));
+                p += sizeof(info);
+                *reinterpret_cast<uint16_t*>(p) = htons(static_cast<uint16_t>(json_len));
+                p += 2;
+                std::memcpy(p, information.ExtendedJson.data(), json_len);
+
+                return transmission->Write(y, buffer.get(), total);
             }
 
             // ---------------------------------------------------------------------
