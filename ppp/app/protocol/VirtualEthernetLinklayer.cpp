@@ -843,6 +843,14 @@ namespace ppp {
             }
 
             // ---------------------------------------------------------------------
+            // Send virtual Ethernet information envelope (delegates to base method).
+            // ---------------------------------------------------------------------
+            bool VirtualEthernetLinklayer::DoInformation(const ITransmissionPtr& transmission, const InformationEnvelope& information, YieldContext& y) noexcept
+            {
+                return DoInformation(transmission, information.Base, y);
+            }
+
+            // ---------------------------------------------------------------------
             // Send a TCP connection request using an endpoint.
             // ---------------------------------------------------------------------
             bool VirtualEthernetLinklayer::DoConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept 
