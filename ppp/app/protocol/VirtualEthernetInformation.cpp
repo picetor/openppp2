@@ -76,16 +76,16 @@ namespace ppp {
                 AssignedIPv6Mode = IPv6Mode_None;
                 AssignedIPv6AddressPrefixLength = 0;
                 AssignedIPv6Flags = 0;
-                AssignedIPv6Address.reset();
-                AssignedIPv6Gateway.reset();
-                AssignedIPv6RoutePrefix.reset();
+                AssignedIPv6Address = boost::asio::ip::address();
+                AssignedIPv6Gateway = boost::asio::ip::address();
+                AssignedIPv6RoutePrefix = boost::asio::ip::address();
                 AssignedIPv6RoutePrefixLength = 0;
-                AssignedIPv6Dns1.reset();
-                AssignedIPv6Dns2.reset();
+                AssignedIPv6Dns1 = boost::asio::ip::address();
+                AssignedIPv6Dns2 = boost::asio::ip::address();
                 IPv6StatusCode = 0;
-                RequestedIPv6Address.reset();
+                RequestedIPv6Address = boost::asio::ip::address();
                 IPv6StatusMessage.clear();
-                ClientExitIP.reset();
+                ClientExitIP = boost::asio::ip::address();
                 ClientIPv4Req.Clear();
                 ClientIPv4Assign.Clear();
                 P2P.Clear();
@@ -290,7 +290,8 @@ namespace ppp {
                         return ppp::string();
                     }
                     boost::asio::ip::address_v4 address(ntohl(vip));
-                    return address.to_string();
+                    std::string s = address.to_string();
+                    return ppp::string(s.data(), s.size());
                 }
             }
 
