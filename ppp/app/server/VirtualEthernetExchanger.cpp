@@ -1535,7 +1535,7 @@ namespace ppp {
                 preferred_tun_fd_ = fd;
             }
 
-            bool VirtualEthernetExchanger::OnInformation(const ITransmissionPtr& transmission, const ppp::app::protocol::InformationEnvelope& information, YieldContext& y) noexcept {
+            bool VirtualEthernetExchanger::OnInformation(const ITransmissionPtr& transmission, const InformationEnvelope& information, YieldContext& y) noexcept {
                 return false;
             }
 
