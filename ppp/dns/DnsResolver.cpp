@@ -2866,7 +2866,8 @@ namespace ppp {
                     if (send_ec) {
                         bool expected = false;
                         if (done->compare_exchange_strong(expected, true)) {
-                            ppp::net::Socket::Cancel(*timer);
+                            boost::system::error_code cancel_ec;
+                            timer->cancel(cancel_ec);
                             ppp::net::Socket::Closesocket(socket);
                             callback(boost::asio::ip::address());
                         }
@@ -2882,7 +2883,8 @@ namespace ppp {
                                 return;
                             }
 
-                            ppp::net::Socket::Cancel(*timer);
+                            boost::system::error_code cancel_ec;
+                            timer->cancel(cancel_ec);
                             ppp::net::Socket::Closesocket(socket);
 
                             if (recv_ec || recv_size < kDnsHeaderSize) {
