@@ -1238,11 +1238,11 @@ namespace ppp {
                 char dest[33], src[33], next_hop[33], device[64];
                 unsigned int dest_prefix, src_prefix;
 
-                int n = sscanf_s(buf, "%32s %02x %32s %02x %32s %*s %*s %*s %*s %63s",
-                    dest, (unsigned)sizeof(dest), &dest_prefix,
-                    src, (unsigned)sizeof(src), &src_prefix,
-                    next_hop, (unsigned)sizeof(next_hop),
-                    device, (unsigned)sizeof(device));
+                int n = sscanf(buf, "%32s %02x %32s %02x %32s %*s %*s %*s %*s %63s",
+                    dest, &dest_prefix,
+                    src, &src_prefix,
+                    next_hop,
+                    device);
                 if (n < 10) {
                     continue;
                 }
