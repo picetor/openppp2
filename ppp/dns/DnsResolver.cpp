@@ -4,7 +4,6 @@
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/ssl/SSL.h>
-#include <ppp/diagnostics/Telemetry.h>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -32,9 +31,6 @@ namespace ppp {
         static constexpr int PPP_DNS_RESOLVER_UDP_TIMEOUT_MS    = 2000;  ///< Plain UDP: short, retried via fallback.
         static constexpr int PPP_DNS_RESOLVER_TCP_TIMEOUT_MS    = 3000;  ///< Plain TCP / DoT length-prefixed.
         static constexpr int PPP_DNS_RESOLVER_TLS_TIMEOUT_MS    = 4000;  ///< DoH / DoT (TLS handshake + request).
-        static constexpr int PPP_DNS_RESOLVER_STUN_TIMEOUT_MS   = 3000;
-
-        using ppp::telemetry::Level;
 
         typedef boost::asio::ip::udp udp;
         typedef boost::asio::ip::tcp tcp;
@@ -124,66 +120,10 @@ namespace ppp {
         }
 
         static void CountDnsTransport(Protocol protocol, DnsTransportStage stage, DnsTransportReason reason = DnsTransportReason::None) noexcept {
-            ppp::string metric = "dns.transport.";
-            metric.append(DnsTransportToString(protocol)).append(".").append(DnsTransportStageToString(stage));
-            if (reason != DnsTransportReason::None) {
-                metric.append(".").append(DnsTransportReasonToString(reason));
-            }
-            ppp::telemetry::Count(metric.c_str(), 1);
-            ppp::telemetry::Log(Level::kTrace, "dns", "transport event transport=%s stage=%s reason=%s",
-                DnsTransportToString(protocol), DnsTransportStageToString(stage), DnsTransportReasonToString(reason));
+            /* telemetry removed */
         }
-
-        /* ========================================================================
-         * STUN protocol constants (RFC 5389)
-         * ======================================================================== */
-
-        static constexpr uint16_t   kStunMsgTypeBindingRequest  = 0x0001;
-        static constexpr uint16_t   kStunMsgTypeBindingResponse = 0x0101;
-        static constexpr uint32_t   kStunMagicCookie            = 0x2112A442;
-        static constexpr uint16_t   kStunAttrXorMappedAddr      = 0x0020;
-
-        /* Default STUN candidate list — well-known public STUN servers.
-         * IPs are hardcoded where possible to avoid DNS bootstrap dependency.
-         * Hostname entries are resolved at runtime via bootstrap. */
-        static const ppp::vector<StunCandidate>& DefaultStunCandidates() noexcept {
-            static const ppp::vector<StunCandidate> candidates = [] {
-                ppp::vector<StunCandidate> v;
-                auto add = [&v](const char* ip, int port) noexcept {
-                    boost::system::error_code ec;
-                    boost::asio::ip::address a = StringToAddress(ip, ec);
-                    if (!ec && !a.is_unspecified()) {
-                        v.push_back({ a, port });
-                    }
-                };
-                /* Google STUN servers */
-                add("74.125.24.127",   19302);   /* stun.l.google.com:19302 */
-                add("74.125.25.127",   19302);   /* stun2.l.google.com:19302 */
-                add("173.194.76.127",  19302);   /* stun3.l.google.com:19302 */
-                add("74.125.200.127",  19302);   /* stun4.l.google.com:19302 */
-                /* Cloudflare STUN */
-                add("162.159.200.123", 3478);    /* stun.cloudflare.com */
-                /* Twilio STUN */
-                add("54.241.125.61",   3478);    /* global.stun.twilio.com */
-                add("35.155.227.88",   3478);    /* us1.stun.twilio.com */
-                add("34.205.20.150",   3478);    /* us2.stun.twilio.com */
-                add("54.169.62.43",    3478);    /* sg1.stun.twilio.com */
-                add("13.115.118.38",   3478);    /* jp1.stun.twilio.com */
-                return v;
-            }();
-            return candidates;
-        }
-
-        /* ========================================================================
-         * DNS OPT RR constants (RFC 6891 / RFC 7871)
-         * ======================================================================== */
 
         static constexpr std::size_t kDnsHeaderSize   = 12;
-        static constexpr uint16_t    kOptType         = 41;
-        static constexpr uint16_t    kEcsOptionCode   = 8;
-        static constexpr std::size_t kEcsNewOptionLen = 8;    /* family(2) + prefix(1) + scope(1) + addr(4) */
-        static constexpr std::size_t kEcsNewRdataLen  = 4 + kEcsNewOptionLen; /* opt-code(2) + opt-len(2) + data */
-        static constexpr std::size_t kOptRrOverhead   = 11;   /* name(1) + type(2) + class(2) + ttl(4) + rdlen(2) */
 
         /* ========================================================================
          * DNS wire-format parsing helpers
@@ -318,33 +258,6 @@ namespace ppp {
 
             entries.insert(entries.end(), provider->begin(), provider->end());
             return true;
-        }
-
-        /**
-         * @brief Expands structured entries that use provider shorthand addresses.
-         *
-         * Configuration accepts string shorthand for dns.servers.domestic/foreign.
-         * The config parser stores such strings as DnsServerEntry.address.  Without
-         * this expansion, ResolveAsyncWithEntries() treats "cloudflare" or
-         * "doh.pub" as UDP address literals, exhausts immediately, and unmatched
-         * domains can fail while system DNS has already been pointed at the tunnel.
-         */
-        static ppp::vector<ServerEntry> ExpandResolverEntries(const ppp::vector<ServerEntry>& explicit_entries) noexcept {
-            ppp::vector<ServerEntry> expanded;
-            expanded.reserve(explicit_entries.size());
-
-            for (const ServerEntry& entry : explicit_entries) {
-                ppp::string provider_name = ATrim(entry.address);
-                if (!provider_name.empty() && entry.url.empty() && entry.hostname.empty() && entry.bootstrap_ips.empty() && !IsAddressLiteral(provider_name)) {
-                    if (AppendProviderEntries(expanded, provider_name)) {
-                        continue;
-                    }
-                }
-
-                expanded.emplace_back(entry);
-            }
-
-            return expanded;
         }
 
         static int ParsePort(const ppp::string& address_text, int default_port) noexcept {
@@ -590,72 +503,6 @@ namespace ppp {
             }
         };
 
-        /**
-         * @brief STUN-flavour analogue of CompletionState.
-         *
-         * @details Same lifetime policy as CompletionState (centralised
-         *          ownership, single-shot CAS-guarded teardown, lambdas
-         *          capture only `[state]`). The callback signature is
-         *          `void(boost::asio::ip::address)` instead of
-         *          `void(ppp::vector<Byte>)`.
-         *
-         *          Added because TryStunCandidate exhibited the same
-         *          ~shared_ptr<steady_timer> SIGSEGV signature as SendDoh
-         *          on Android arm64 once the DoH/DoT chains were
-         *          centralised: the multi-level [socket, timer, ...] lambda
-         *          captures left the steady_timer to be torn down across
-         *          racing destruction frames.
-         */
-        struct StunCompletionState final {
-            std::atomic<bool>                                                       completed{ false };
-            DnsResolver::ExitIpCallback                                             callback;
-
-            std::shared_ptr<boost::asio::steady_timer>                              timer;
-            std::shared_ptr<boost::asio::ip::udp::socket>                           udp_socket;
-            std::shared_ptr<void>                                                   slot0;  // request packet
-            std::shared_ptr<void>                                                   slot1;  // recv buffer
-            std::shared_ptr<void>                                                   slot2;  // recv endpoint
-
-            explicit StunCompletionState(const DnsResolver::ExitIpCallback& cb) noexcept : callback(cb) {}
-
-            bool                                                                    IsCompleted() const noexcept {
-                return completed.load(std::memory_order_acquire);
-            }
-
-            // See CompletionState::Complete() for the full lifetime
-            // rationale. We close()+cancel() to signal in-flight ops, then
-            // fire the user callback. We do NOT reset the internal
-            // shared_ptr slots — natural ref-counting on [state] captures
-            // tears them down once the last in-flight op finishes.
-            void                                                                    Complete(boost::asio::ip::address addr) noexcept {
-                bool expected = false;
-                if (!completed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-                    return;
-                }
-
-                boost::system::error_code ignored;
-                if (NULLPTR != udp_socket) {
-                    udp_socket->close(ignored);
-                }
-                if (NULLPTR != timer) {
-                    ignored = boost::system::error_code();
-                    try {
-                        timer->cancel();
-                    }
-                    catch (const boost::system::system_error& e) {
-                        ignored = e.code();
-                    }
-                }
-
-                DnsResolver::ExitIpCallback cb = std::move(callback);
-                callback = NULLPTR;
-
-                if (NULLPTR != cb) {
-                    cb(addr);
-                }
-            }
-        };
-
         /* ========================================================================
          * DnsResolver — constructor and property setters
          * ======================================================================== */
@@ -749,169 +596,6 @@ namespace ppp {
 
         void DnsResolver::SetProtectSocketCallback(const ProtectSocketCallback& cb) noexcept {
             protect_socket_ = cb;
-        }
-
-        void DnsResolver::SetExitIP(const boost::asio::ip::address& ip) noexcept {
-            exit_ip_ = ip;
-        }
-
-        void DnsResolver::SetEcsConfig(bool enabled, const ppp::string& override_ip) noexcept {
-            ecs_enabled_ = enabled;
-            ecs_override_ip_ = override_ip;
-        }
-
-        boost::asio::ip::address DnsResolver::GetEcsIp() const noexcept {
-            // Priority 1: manual override_ip from configuration.
-            if (!ecs_override_ip_.empty()) {
-                boost::system::error_code ec;
-                boost::asio::ip::address addr = StringToAddress(ecs_override_ip_.data(), ec);
-                if (!ec && addr.is_v4() && !addr.is_unspecified()) {
-                    return addr;
-                }
-            }
-
-            // Priority 2: exit_ip from server (ClientExitIP / SetExitIP).
-            if (exit_ip_.is_v4() && !exit_ip_.is_unspecified()) {
-                return exit_ip_;
-            }
-
-            return boost::asio::ip::address();
-        }
-
-        void DnsResolver::SetDefaultProviders(const ppp::string& domestic, const ppp::string& foreign) noexcept {
-            default_domestic_ = domestic;
-            default_foreign_  = foreign;
-        }
-
-        void DnsResolver::SetStunCandidates(ppp::vector<StunCandidate> candidates) noexcept {
-            stun_candidates_ = std::move(candidates);
-            stun_rotation_.store(0, std::memory_order_relaxed);
-        }
-
-        /* ========================================================================
-         * ResolveAsyncWithFallback — provider fallback chain
-         * ======================================================================== */
-
-        void DnsResolver::ResolveAsyncWithFallback(
-            const ppp::string& provider_name,
-            const ppp::string& fallback1,
-            const ppp::string& fallback2,
-            const Byte* packet,
-            int length,
-            const ResolveCallback& callback) noexcept {
-
-            if (NULLPTR == callback) {
-                return;
-            }
-
-            if (NULLPTR == packet || length <= 0) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            // Copy packet data once for the entire fallback chain.
-            auto packet_copy = make_shared_object<ppp::vector<Byte> >();
-            if (NULLPTR == packet_copy) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-            try {
-                packet_copy->assign(packet, packet + length);
-            }
-            catch (const std::exception&) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            // Build ordered list of non-empty, registered provider names.
-            ppp::vector<ppp::string> candidates;
-            if (!provider_name.empty() && HasProvider(provider_name)) {
-                candidates.emplace_back(provider_name);
-            }
-            if (!fallback1.empty() && HasProvider(fallback1)) {
-                candidates.emplace_back(fallback1);
-            }
-            if (!fallback2.empty() && HasProvider(fallback2)) {
-                candidates.emplace_back(fallback2);
-            }
-
-            if (candidates.empty()) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            // Build the fallback chain from last to first.
-            //
-            // Chain structure (bottom-up wrapping):
-            //   layer[i] = try candidates[i], on success → callback, on fail → layer[i+1]
-            //
-            // We use shared_ptr<ResolveCallback> to keep each layer alive through
-            // async hand-offs without dangling references.
-            auto resolver_weak = weak_from_this();
-
-            // Terminal: invoke the caller's callback.
-            std::shared_ptr<ResolveCallback> chain = make_shared_object<ResolveCallback>(
-                [callback](ppp::vector<Byte> response) noexcept {
-                    callback(std::move(response));
-                });
-            if (NULLPTR == chain) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            for (int i = static_cast<int>(candidates.size()) - 1; i >= 0; --i) {
-                ppp::string name = candidates[static_cast<std::size_t>(i)];
-                std::shared_ptr<ResolveCallback> next = std::move(chain);
-                chain = make_shared_object<ResolveCallback>();
-                if (NULLPTR == chain) {
-                    // Fallback: invoke callback with empty on allocation failure.
-                    boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                    return;
-                }
-
-                *chain = [resolver_weak, name, packet_copy, next](ppp::vector<Byte> response) noexcept {
-                    if (!response.empty()) {
-                        (*next)(std::move(response));
-                        return;
-                    }
-
-                    // Current provider failed; try via ResolveAsync which itself
-                    // falls through all protocols (DoH→DoT→TCP→UDP) for this provider.
-                    std::shared_ptr<DnsResolver> resolver = resolver_weak.lock();
-                    if (NULLPTR == resolver) {
-                        (*next)(ppp::vector<Byte>());
-                        return;
-                    }
-
-                    // Preserve the domestic semantic across the fallback chain so
-                    // ECS injection is applied for the domestic tier (per
-                    // docs/DNS_MODULE_DESIGN.md).  The tier is classified as
-                    // domestic when its provider short-name matches the value
-                    // configured via SetDefaultProviders().  When SetDefaultProviders
-                    // has not been called the default is empty and the comparison
-                    // returns false, preserving prior behaviour.
-                    bool tier_domestic = false;
-                    if (!resolver->default_domestic_.empty()) {
-                        tier_domestic = NormalizeProviderName(name) ==
-                                        NormalizeProviderName(resolver->default_domestic_);
-                    }
-
-                    resolver->ResolveAsync(name, tier_domestic,
-                        packet_copy->data(), static_cast<int>(packet_copy->size()),
-                        [next](ppp::vector<Byte> inner_response) noexcept {
-                            if (!inner_response.empty()) {
-                                (*next)(std::move(inner_response));
-                            }
-                            else {
-                                // All protocols for this provider failed.
-                                (*next)(ppp::vector<Byte>());
-                            }
-                        });
-                };
-            }
-
-            // Kick off: try the first candidate (chain[0]).
-            (*chain)(ppp::vector<Byte>());
         }
 
         /* ========================================================================
@@ -1013,10 +697,6 @@ namespace ppp {
 
         /* ========================================================================
          * ResolveAsync — single-provider, protocol-cascading resolution
-         *
-         * When ECS is enabled and the query is domestic, the ECS OPT RR is
-         * injected/merged.  If no exit IP is available yet, STUN detection
-         * is attempted first (async) to discover the client's public IP.
          * ======================================================================== */
 
         void DnsResolver::ResolveAsync(const ppp::string& provider_name, bool domestic, const Byte* packet, int length, const ResolveCallback& callback) noexcept {
@@ -1031,14 +711,9 @@ namespace ppp {
 
             const ppp::vector<ServerEntry>* provider = GetProvider(provider_name);
             if (NULLPTR == provider || provider->empty()) {
-                ppp::telemetry::Log(Level::kDebug, "dns", "provider not found: %s", provider_name.data());
-                ppp::telemetry::Count("dns.resolve.provider_miss", 1);
                 boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
                 return;
             }
-
-            ppp::telemetry::Log(Level::kDebug, "dns", "resolve start provider=%s domestic=%d", provider_name.data(), (int)domestic);
-            ppp::telemetry::Count("dns.resolve.start", 1);
 
             std::shared_ptr<ppp::vector<Byte> > request = make_shared_object<ppp::vector<Byte> >();
             std::shared_ptr<ppp::vector<ServerEntry> > entries = make_shared_object<ppp::vector<ServerEntry> >();
@@ -1054,112 +729,6 @@ namespace ppp {
             catch (const std::exception&) {
                 boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
                 return;
-            }
-
-            // EDNS Client Subnet (ECS) injection for domestic queries.
-            // When ecs_enabled_ is true and the query is domestic, append/merge
-            // an OPT RR containing the ECS option so that authoritative servers
-            // can return geo-optimised answers.
-            if (ecs_enabled_ && domestic) {
-                boost::asio::ip::address ecs_ip = GetEcsIp();
-                if (ecs_ip.is_v4() && !ecs_ip.is_unspecified()) {
-                    InjectEcsOptRr(*request, ecs_ip);
-                }
-                else {
-                    // No exit IP available yet — attempt STUN detection as a
-                    // last-resort fallback before proceeding without ECS.
-                    std::weak_ptr<DnsResolver> weak_self = weak_from_this();
-                    DetectExitIPViaStun(
-                        [weak_self, request, entries, callback](const boost::asio::ip::address& stun_ip) noexcept {
-                            if (stun_ip.is_v4() && !stun_ip.is_unspecified()) {
-                                InjectEcsOptRr(*request, stun_ip);
-                            }
-                            std::shared_ptr<DnsResolver> self = weak_self.lock();
-                            if (NULLPTR == self) {
-                                callback(ppp::vector<Byte>());
-                                return;
-                            }
-                            self->TryProtocols(entries, 0, request, callback, true);
-                        });
-                    return; /* TryProtocols is invoked inside the STUN callback. */
-                }
-            }
-
-            TryProtocols(entries, 0, request, callback, domestic);
-        }
-
-        /* ========================================================================
-         * ResolveAsyncWithEntries — resolve via explicit server entries (Phase A)
-         * ======================================================================== */
-
-        void DnsResolver::ResolveAsyncWithEntries(
-            const ppp::vector<ServerEntry>& explicit_entries,
-            bool domestic,
-            const Byte* packet,
-            int length,
-            const ResolveCallback& callback) noexcept {
-
-            if (NULLPTR == callback) {
-                return;
-            }
-
-            if (NULLPTR == packet || length <= 0 || length > PPP_DNS_RESOLVER_TCP_MAX_SIZE) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            if (explicit_entries.empty()) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            ppp::telemetry::Log(Level::kDebug, "dns", "resolve entries start count=%d domestic=%d",
-                (int)explicit_entries.size(), (int)domestic);
-            ppp::telemetry::Count("dns.resolve.start", 1);
-
-            auto request = make_shared_object<ppp::vector<Byte> >();
-            auto entries = make_shared_object<ppp::vector<ServerEntry> >();
-            if (NULLPTR == request || NULLPTR == entries) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            try {
-                request->assign(packet, packet + length);
-                *entries = ExpandResolverEntries(explicit_entries);
-            }
-            catch (const std::exception&) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            if (entries->empty()) {
-                boost::asio::post(context_, [callback]() noexcept { callback(ppp::vector<Byte>()); });
-                return;
-            }
-
-            // ECS injection for domestic queries.
-            if (ecs_enabled_ && domestic) {
-                boost::asio::ip::address ecs_ip = GetEcsIp();
-                if (ecs_ip.is_v4() && !ecs_ip.is_unspecified()) {
-                    InjectEcsOptRr(*request, ecs_ip);
-                }
-                else {
-                    std::weak_ptr<DnsResolver> weak_self = weak_from_this();
-                    DetectExitIPViaStun(
-                        [weak_self, request, entries, callback](const boost::asio::ip::address& stun_ip) noexcept {
-                            if (stun_ip.is_v4() && !stun_ip.is_unspecified()) {
-                                InjectEcsOptRr(*request, stun_ip);
-                            }
-                            std::shared_ptr<DnsResolver> self = weak_self.lock();
-                            if (NULLPTR == self) {
-                                callback(ppp::vector<Byte>());
-                                return;
-                            }
-                            self->TryProtocols(entries, 0, request, callback, true);
-                        });
-                    return;
-                }
             }
 
             TryProtocols(entries, 0, request, callback, domestic);
@@ -1188,28 +757,18 @@ namespace ppp {
 
         void DnsResolver::TryProtocols(std::shared_ptr<ppp::vector<ServerEntry> > entries, std::size_t index, std::shared_ptr<ppp::vector<Byte> > packet, const ResolveCallback& callback, bool domestic) noexcept {
             if (NULLPTR == entries || NULLPTR == packet || index >= entries->size()) {
-                ppp::telemetry::Log(Level::kDebug, "dns", "resolve failed: all entries exhausted");
-                ppp::telemetry::Count("dns.resolve.failure", 1);
                 callback(ppp::vector<Byte>());
                 return;
             }
 
             const ServerEntry& entry = (*entries)[index];
-            static const char* kProtoNames[] = { "UDP", "TCP", "DoH", "DoT" };
-            ppp::telemetry::Log(Level::kTrace, "dns", "try protocol=%s entry=%zu/%zu",
-                kProtoNames[static_cast<int>(entry.protocol)], index, entries->size());
 
             std::weak_ptr<DnsResolver> weak_self = weak_from_this();
             ResolveCallback next = [weak_self, entries, index, packet, callback, domestic](ppp::vector<Byte> response) noexcept {
                 if (!response.empty()) {
-                    ppp::telemetry::Log(Level::kDebug, "dns", "resolve success entry=%zu bytes=%zu", index, response.size());
-                    ppp::telemetry::Count("dns.resolve.success", 1);
                     callback(std::move(response));
                     return;
                 }
-
-                ppp::telemetry::Log(Level::kTrace, "dns", "protocol fallback from entry=%zu", index);
-                ppp::telemetry::Count("dns.resolve.fallback", 1);
 
                 std::shared_ptr<DnsResolver> self = weak_self.lock();
                 if (NULLPTR == self) {
@@ -1334,7 +893,7 @@ namespace ppp {
 
             /* Create TLS 1.2+ client context with system/bundled CA verification enabled. */
             std::shared_ptr<boost::asio::ssl::context> ssl_ctx = ppp::ssl::SSL::CreateClientSslContext(
-                ppp::ssl::SSL::SSL_METHOD::tlsv12, tls_verify_peer_, std::string());
+                ppp::ssl::SSL::SSL_METHOD::tlsv12, true, std::string());
             if (NULLPTR == ssl_ctx) {
                 CountDnsTransport(Protocol::DoH, DnsTransportStage::Tls, DnsTransportReason::AllocFailed);
                 ppp::net::Socket::Closesocket(socket);
@@ -1356,9 +915,7 @@ namespace ppp {
             ppp::string sni_name = !entry.hostname.empty() ? entry.hostname : host;
             if (!sni_name.empty()) {
                 SSL_set_tlsext_host_name(stream->native_handle(), sni_name.data());
-                if (tls_verify_peer_) {
-                    stream->set_verify_callback(boost::asio::ssl::host_name_verification(stl::transform<std::string>(sni_name)));
-                }
+                stream->set_verify_callback(boost::asio::ssl::host_name_verification(stl::transform<std::string>(sni_name)));
             }
 
             /* Cache key composed from the SNI name and remote port. Used to look
@@ -1377,7 +934,6 @@ namespace ppp {
                 if (SSL_SESSION* cached = reinterpret_cast<SSL_SESSION*>(AcquireTlsSession(host_key))) {
                     SSL_set_session(stream->native_handle(), cached);
                     SSL_SESSION_free(cached);
-                    ppp::telemetry::Count("dns.tls.session_reuse_attempt", 1);
                     CountDnsTransport(Protocol::DoH, DnsTransportStage::Tls, DnsTransportReason::CacheHit);
                     CountDnsTransport(Protocol::DoH, DnsTransportStage::Tls, DnsTransportReason::ReuseAttempt);
                 }
@@ -1442,7 +998,6 @@ namespace ppp {
                                 if (SSL_SESSION* fresh = SSL_get1_session(stream_inner->native_handle())) {
                                     self->StoreTlsSession(host_key, reinterpret_cast<ssl_session_st*>(fresh));
                                     if (SSL_session_reused(stream_inner->native_handle())) {
-                                        ppp::telemetry::Count("dns.tls.session_reused", 1);
                                         CountDnsTransport(Protocol::DoH, DnsTransportStage::Tls, DnsTransportReason::Reused);
                                     }
                                     else {
@@ -1616,7 +1171,7 @@ namespace ppp {
 
             /* Create a TLS 1.2+ client context with system/bundled CA verification enabled. */
             std::shared_ptr<boost::asio::ssl::context> ssl_ctx = ppp::ssl::SSL::CreateClientSslContext(
-                ppp::ssl::SSL::SSL_METHOD::tlsv12, tls_verify_peer_, std::string());
+                ppp::ssl::SSL::SSL_METHOD::tlsv12, true, std::string());
             if (NULLPTR == ssl_ctx) {
                 CountDnsTransport(Protocol::DoT, DnsTransportStage::Tls, DnsTransportReason::AllocFailed);
                 ppp::net::Socket::Closesocket(socket);
@@ -1637,9 +1192,7 @@ namespace ppp {
             /* SNI: use entry.hostname for TLS Server Name Indication. */
             if (!entry.hostname.empty()) {
                 SSL_set_tlsext_host_name(stream->native_handle(), entry.hostname.data());
-                if (tls_verify_peer_) {
-                    stream->set_verify_callback(boost::asio::ssl::host_name_verification(stl::transform<std::string>(entry.hostname)));
-                }
+                stream->set_verify_callback(boost::asio::ssl::host_name_verification(stl::transform<std::string>(entry.hostname)));
             }
 
             /* Cache key for the TLS session cache. See SendDoh for the policy. */
@@ -1651,7 +1204,6 @@ namespace ppp {
                 if (SSL_SESSION* cached = reinterpret_cast<SSL_SESSION*>(AcquireTlsSession(host_key))) {
                     SSL_set_session(stream->native_handle(), cached);
                     SSL_SESSION_free(cached);
-                    ppp::telemetry::Count("dns.tls.session_reuse_attempt", 1);
                     CountDnsTransport(Protocol::DoT, DnsTransportStage::Tls, DnsTransportReason::CacheHit);
                     CountDnsTransport(Protocol::DoT, DnsTransportStage::Tls, DnsTransportReason::ReuseAttempt);
                 }
@@ -1708,7 +1260,6 @@ namespace ppp {
                                 if (SSL_SESSION* fresh = SSL_get1_session(stream_inner->native_handle())) {
                                     self->StoreTlsSession(host_key, reinterpret_cast<ssl_session_st*>(fresh));
                                     if (SSL_session_reused(stream_inner->native_handle())) {
-                                        ppp::telemetry::Count("dns.tls.session_reused", 1);
                                         CountDnsTransport(Protocol::DoT, DnsTransportStage::Tls, DnsTransportReason::Reused);
                                     }
                                     else {
@@ -2084,599 +1635,6 @@ namespace ppp {
                             });
                     });
             });
-        }
-
-        /* ========================================================================
-         * InjectEcsOptRr — EDNS Client Subnet OPT RR injection / merge
-         *
-         * Behaviour:
-         *   ARCOUNT == 0 : append a fresh OPT RR with ECS option.
-         *   ARCOUNT >  0 : scan additional records for an existing OPT RR (TYPE=41
-         *                  at root label).  If found, replace or append the ECS
-         *                  option within its RDATA.  If the packet cannot be
-         *                  safely parsed, return false (packet unchanged).
-         * ======================================================================== */
-
-        bool DnsResolver::InjectEcsOptRr(ppp::vector<Byte>& packet, const boost::asio::ip::address& ecs_ip) noexcept {
-            if (packet.size() < kDnsHeaderSize) {
-                return false;
-            }
-
-            // Only support IPv4 for ECS injection.
-            if (!ecs_ip.is_v4()) {
-                return false;
-            }
-
-            // Read ARCOUNT (big-endian at offset 10).
-            uint16_t arcount = (static_cast<uint16_t>(packet[10]) << 8) | static_cast<uint16_t>(packet[11]);
-
-            /* ---------------------------------------------------------------
-             * Fast path: ARCOUNT == 0 — append a fresh OPT RR (original logic).
-             * --------------------------------------------------------------- */
-            if (arcount == 0) {
-                // Total OPT RR size = overhead(11) + RDATA(kEcsNewRdataLen=12) = 23 bytes
-                static constexpr std::size_t kFreshOptSize = kOptRrOverhead + kEcsNewRdataLen;
-
-                // Ensure total size won't exceed the classic 512-byte UDP limit.
-                if (packet.size() + kFreshOptSize > 512) {
-                    return false;
-                }
-
-                try {
-                    std::size_t old_size = packet.size();
-                    packet.resize(old_size + kFreshOptSize);
-                    Byte* p = packet.data() + old_size;
-
-                    // OPT RR header
-                    // Name: root (0x00)
-                    *p++ = 0x00;
-                    // Type: OPT (41 = 0x0029)
-                    *p++ = 0x00; *p++ = 0x29;
-                    // Class: UDP payload size (4096 = 0x1000)
-                    *p++ = 0x10; *p++ = 0x00;
-                    // TTL: extended-rcode(8) + version(8) + DO|Z(16) = all zero
-                    *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;
-                    // RDLENGTH: 12 bytes of ECS RDATA
-                    *p++ = 0x00; *p++ = 0x0C;
-
-                    // ECS option RDATA (RFC 7871)
-                    // Option Code: ECS (8 = 0x0008)
-                    *p++ = 0x00; *p++ = 0x08;
-                    // Option Length: 8 bytes (family + prefix + scope + address)
-                    *p++ = 0x00; *p++ = 0x08;
-                    // Address Family: IPv4 (1 = 0x0001)
-                    *p++ = 0x00; *p++ = 0x01;
-                    // Source Prefix-Length: 24 (for /24 subnet)
-                    *p++ = 24;
-                    // Scope Prefix-Length: 0 (no scope)
-                    *p++ = 0;
-                    // Client IPv4 address (4 bytes, last byte zeroed for /24)
-                    boost::asio::ip::address_v4::bytes_type addr_bytes = ecs_ip.to_v4().to_bytes();
-                    *p++ = addr_bytes[0];
-                    *p++ = addr_bytes[1];
-                    *p++ = addr_bytes[2];
-                    *p++ = 0; // zero the last octet for /24 prefix
-
-                    // Increment ARCOUNT (big-endian at offset 10-11).
-                    arcount++;
-                    packet[10] = static_cast<Byte>((arcount >> 8) & 0xff);
-                    packet[11] = static_cast<Byte>(arcount & 0xff);
-
-                    return true;
-                }
-                catch (const std::exception&) {
-                    return false;
-                }
-            }
-
-            /* ---------------------------------------------------------------
-             * Merge path: ARCOUNT > 0 — attempt to find existing OPT RR and
-             * replace/append the ECS option within its RDATA.
-             *
-             * We must safely parse through QDCOUNT + ANCOUNT + NSCOUNT
-             * sections to reach the additional records, then scan for the
-             * first OPT RR (TYPE=41 at root label).
-             * --------------------------------------------------------------- */
-
-            // Read section counts from the DNS header.
-            uint16_t qdcount = (static_cast<uint16_t>(packet[4]) << 8) | static_cast<uint16_t>(packet[5]);
-            uint16_t ancount = (static_cast<uint16_t>(packet[6]) << 8) | static_cast<uint16_t>(packet[7]);
-            uint16_t nscount = (static_cast<uint16_t>(packet[8]) << 8) | static_cast<uint16_t>(packet[9]);
-
-            const Byte* data = packet.data();
-            std::size_t size  = packet.size();
-
-            // Walk through QD section.
-            std::size_t pos = SkipDnsQuestionSection(data, size, kDnsHeaderSize, qdcount);
-            if (pos == 0) {
-                return false; /* Parse error; leave packet unchanged. */
-            }
-
-            // Walk through AN section.
-            pos = SkipDnsRrSection(data, size, pos, ancount);
-            if (pos == 0) {
-                return false;
-            }
-
-            // Walk through NS section.
-            pos = SkipDnsRrSection(data, size, pos, nscount);
-            if (pos == 0) {
-                return false;
-            }
-
-            // Now `pos` points to the start of the additional records section.
-            // Scan for an existing OPT RR (TYPE=41 at root label).
-            for (uint16_t i = 0; i < arcount; ++i) {
-                std::size_t rr_start = pos;
-
-                // Verify the name is root (single 0x00 byte) — required for OPT RR.
-                if (pos >= size || data[pos] != 0x00) {
-                    // Not a root-label record; skip this RR normally.
-                    std::size_t name_len = SkipDnsName(data, size, pos);
-                    if (name_len == 0) {
-                        return false;
-                    }
-                    pos += name_len;
-                    if (pos + 10 > size) {
-                        return false;
-                    }
-                    uint16_t rdlen = (static_cast<uint16_t>(data[pos + 8]) << 8) |
-                                      static_cast<uint16_t>(data[pos + 9]);
-                    pos += 10 + rdlen;
-                    continue;
-                }
-
-                // Root label consumed (1 byte).
-                pos += 1;
-                if (pos + 10 > size) {
-                    return false;
-                }
-
-                // Read TYPE (2 bytes).
-                uint16_t rr_type = (static_cast<uint16_t>(data[pos]) << 8) |
-                                    static_cast<uint16_t>(data[pos + 1]);
-
-                if (rr_type != kOptType) {
-                    // Not an OPT RR — skip the rest of this record.
-                    uint16_t rdlen = (static_cast<uint16_t>(data[pos + 8]) << 8) |
-                                      static_cast<uint16_t>(data[pos + 9]);
-                    pos += 10 + rdlen;
-                    continue;
-                }
-
-                /* Found an existing OPT RR.  Parse its RDATA and look for
-                 * an existing ECS option (option-code 8). */
-
-                // CLASS(2) + TTL(4) are at pos+2 .. pos+7.
-                uint16_t rdlength = (static_cast<uint16_t>(data[pos + 8]) << 8) |
-                                     static_cast<uint16_t>(data[pos + 9]);
-
-                std::size_t rdata_start = pos + 10;
-                if (rdata_start + rdlength > size) {
-                    return false; /* RDATA extends beyond packet. */
-                }
-
-                // Scan EDNS options in the OPT RDATA to find ECS (option-code 8).
-                std::size_t rdata_pos = 0;
-                std::size_t ecs_option_offset = 0;  /* Offset within RDATA where ECS option starts. */
-                std::size_t ecs_option_size   = 0;  /* Total size of existing ECS option (code+len+data). */
-                bool found_ecs = false;
-
-                while (rdata_pos + 4 <= rdlength) {
-                    uint16_t opt_code = (static_cast<uint16_t>(data[rdata_start + rdata_pos]) << 8) |
-                                         static_cast<uint16_t>(data[rdata_start + rdata_pos + 1]);
-                    uint16_t opt_len  = (static_cast<uint16_t>(data[rdata_start + rdata_pos + 2]) << 8) |
-                                         static_cast<uint16_t>(data[rdata_start + rdata_pos + 3]);
-
-                    if (rdata_pos + 4 + opt_len > rdlength) {
-                        return false; /* Option data extends beyond RDATA. */
-                    }
-
-                    if (opt_code == kEcsOptionCode) {
-                        ecs_option_offset = rdata_pos;
-                        ecs_option_size   = 4 + opt_len;
-                        found_ecs = true;
-                        /* Continue scanning to validate the rest of the options
-                         * (we don't break because we need to verify the packet
-                         * structure is intact). */
-                    }
-
-                    rdata_pos += 4 + opt_len;
-                }
-
-                /* Build the new ECS option data. */
-                static constexpr std::size_t kNewEcsOptionSize = 4 + kEcsNewOptionLen; /* 4 (code+len) + 8 (data) */
-                Byte new_ecs[kNewEcsOptionSize];
-                {
-                    Byte* q = new_ecs;
-                    // Option Code: ECS (8)
-                    *q++ = 0x00; *q++ = 0x08;
-                    // Option Length: 8
-                    *q++ = 0x00; *q++ = 0x08;
-                    // Address Family: IPv4 (1)
-                    *q++ = 0x00; *q++ = 0x01;
-                    // Source Prefix-Length: 24
-                    *q++ = 24;
-                    // Scope Prefix-Length: 0
-                    *q++ = 0;
-                    // IPv4 address (last octet zeroed for /24)
-                    boost::asio::ip::address_v4::bytes_type ab = ecs_ip.to_v4().to_bytes();
-                    *q++ = ab[0];
-                    *q++ = ab[1];
-                    *q++ = ab[2];
-                    *q++ = 0;
-                }
-
-                /* Calculate new RDLENGTH. */
-                std::size_t new_rdlength;
-                if (found_ecs) {
-                    new_rdlength = rdlength - ecs_option_size + kNewEcsOptionSize;
-                }
-                else {
-                    new_rdlength = rdlength + kNewEcsOptionSize;
-                }
-
-                if (new_rdlength > 65535) {
-                    return false; /* Would overflow RDLENGTH field. */
-                }
-
-                /* Build the new RDATA in a temporary buffer. */
-                try {
-                    ppp::vector<Byte> new_rdata;
-                    new_rdata.reserve(new_rdlength);
-
-                    // Copy existing RDATA, skipping the old ECS option if present.
-                    if (found_ecs) {
-                        // Copy options before the ECS option.
-                        if (ecs_option_offset > 0) {
-                            new_rdata.insert(new_rdata.end(),
-                                data + rdata_start,
-                                data + rdata_start + ecs_option_offset);
-                        }
-                        // Copy options after the old ECS option.
-                        std::size_t after_ecs = ecs_option_offset + ecs_option_size;
-                        if (after_ecs < rdlength) {
-                            new_rdata.insert(new_rdata.end(),
-                                data + rdata_start + after_ecs,
-                                data + rdata_start + rdlength);
-                        }
-                    }
-                    else {
-                        // No existing ECS — copy all existing options.
-                        if (rdlength > 0) {
-                            new_rdata.insert(new_rdata.end(),
-                                data + rdata_start,
-                                data + rdata_start + rdlength);
-                        }
-                    }
-
-                    // Append the new ECS option.
-                    new_rdata.insert(new_rdata.end(), new_ecs, new_ecs + kNewEcsOptionSize);
-
-                    /* Resize the packet to replace the old RDATA region. */
-                    std::size_t size_delta = new_rdata.size() - rdlength;
-                    std::size_t old_packet_size = packet.size();
-                    std::size_t after_rdata = rdata_start + rdlength;
-
-                    if (size_delta > 0) {
-                        // Packet grows — need to check size limit.
-                        if (old_packet_size + size_delta > 65535) {
-                            return false;
-                        }
-                        packet.resize(old_packet_size + size_delta);
-                        // Shift trailing data right.
-                        std::memmove(packet.data() + rdata_start + new_rdata.size(),
-                                     packet.data() + after_rdata,
-                                     old_packet_size - after_rdata);
-                    }
-                    else if (size_delta < 0) {
-                        // Packet shrinks — shift trailing data left.
-                        std::size_t abs_delta = static_cast<std::size_t>(-static_cast<ptrdiff_t>(size_delta));
-                        std::memmove(packet.data() + rdata_start + new_rdata.size(),
-                                     packet.data() + after_rdata,
-                                     old_packet_size - after_rdata);
-                        packet.resize(old_packet_size - abs_delta);
-                    }
-                    else {
-                        // Same size — just overwrite in place.
-                    }
-
-                    // Write the new RDATA into the packet.
-                    std::memcpy(packet.data() + rdata_start, new_rdata.data(), new_rdata.size());
-
-                    // Update RDLENGTH in the OPT RR header.
-                    packet[rr_start + 1 + 8] = static_cast<Byte>((new_rdlength >> 8) & 0xff);
-                    packet[rr_start + 1 + 9] = static_cast<Byte>(new_rdlength & 0xff);
-
-                    return true;
-                }
-                catch (const std::exception&) {
-                    return false;
-                }
-            }
-
-            /* No OPT RR found in additional section — conservatively skip. */
-            return false;
-        }
-
-        /* ========================================================================
-         * DetectExitIPViaStun — STUN Binding Request with multi-candidate rotation
-         *
-         * Tries candidates in round-robin order.  On each call, the starting
-         * index is advanced so that repeated calls distribute load.
-         * Falls back to the built-in default list when no candidates are set.
-         * ======================================================================== */
-
-        void DnsResolver::DetectExitIPViaStun(const ExitIpCallback& callback) noexcept {
-            if (NULLPTR == callback) {
-                return;
-            }
-
-            const ppp::vector<StunCandidate>& candidates =
-                stun_candidates_.empty() ? DefaultStunCandidates() : stun_candidates_;
-
-            if (candidates.empty()) {
-                ppp::telemetry::Log(Level::kDebug, "dns", "STUN no candidates available");
-                ppp::telemetry::Count("dns.stun.no_candidates", 1);
-                boost::asio::post(context_, [callback]() noexcept {
-                    callback(boost::asio::ip::address());
-                });
-                return;
-            }
-
-            ppp::telemetry::Log(Level::kDebug, "dns", "STUN detection start candidates=%zu", candidates.size());
-            ppp::telemetry::Count("dns.stun.start", 1);
-
-            // Rotate starting index via atomic fetch_add.
-            std::size_t start = stun_rotation_.fetch_add(1, std::memory_order_relaxed) % candidates.size();
-
-            // Build the ordered candidate list starting from the rotated index.
-            auto ordered = make_shared_object<ppp::vector<StunCandidate> >();
-            if (NULLPTR == ordered) {
-                boost::asio::post(context_, [callback]() noexcept {
-                    callback(boost::asio::ip::address());
-                });
-                return;
-            }
-            ordered->reserve(candidates.size());
-            for (std::size_t i = 0; i < candidates.size(); ++i) {
-                ordered->push_back(candidates[(start + i) % candidates.size()]);
-            }
-
-            // Build a fallback chain from last candidate to first.
-            // Each layer tries one STUN candidate; on failure it invokes the next.
-            // The terminal layer invokes the caller's callback with unspecified.
-            auto resolver_weak = weak_from_this();
-            auto chain = make_shared_object<ExitIpCallback>(
-                [callback](const boost::asio::ip::address& addr) noexcept {
-                    callback(addr);
-                });
-            if (NULLPTR == chain) {
-                boost::asio::post(context_, [callback]() noexcept {
-                    callback(boost::asio::ip::address());
-                });
-                return;
-            }
-
-            for (int i = static_cast<int>(ordered->size()) - 1; i >= 0; --i) {
-                StunCandidate cand = (*ordered)[static_cast<std::size_t>(i)];
-                std::shared_ptr<ExitIpCallback> next = std::move(chain);
-                chain = make_shared_object<ExitIpCallback>();
-                if (NULLPTR == chain) {
-                    boost::asio::post(context_, [callback]() noexcept {
-                        callback(boost::asio::ip::address());
-                    });
-                    return;
-                }
-
-                *chain = [resolver_weak, cand, next](const boost::asio::ip::address& prev_result) noexcept {
-                    if (!prev_result.is_unspecified()) {
-                        ppp::telemetry::Log(Level::kDebug, "dns", "STUN success ip=%s port=%d",
-                            cand.ip.to_string().c_str(), cand.port);
-                        ppp::telemetry::Count("dns.stun.success", 1);
-                        (*next)(prev_result);
-                        return;
-                    }
-                    // Try this candidate.
-                    std::shared_ptr<DnsResolver> resolver = resolver_weak.lock();
-                    if (NULLPTR == resolver) {
-                        (*next)(boost::asio::ip::address());
-                        return;
-                    }
-                    ppp::telemetry::Log(Level::kTrace, "dns", "STUN trying candidate ip=%s:%d",
-                        cand.ip.to_string().c_str(), cand.port);
-                    resolver->TryStunCandidate(cand, *next);
-                };
-            }
-
-            // Start the chain.
-            (*chain)(boost::asio::ip::address());
-        }
-
-        /* ========================================================================
-         * TryStunCandidate — STUN probe against a single candidate
-         * ======================================================================== */
-
-        void DnsResolver::TryStunCandidate(
-            const StunCandidate& candidate,
-            const ExitIpCallback& callback) noexcept {
-
-            if (NULLPTR == callback) {
-                return;
-            }
-
-            if (candidate.ip.is_unspecified()) {
-                boost::asio::post(context_, [callback]() noexcept {
-                    callback(boost::asio::ip::address());
-                });
-                return;
-            }
-
-            udp::endpoint remote(candidate.ip, static_cast<unsigned short>(candidate.port));
-
-            // Centralise every transient resource in `state`. Lambdas in the
-            // chain capture only [state]; teardown is single-shot inside
-            // StunCompletionState::Complete().
-            std::shared_ptr<StunCompletionState> state = make_shared_object<StunCompletionState>(callback);
-            std::shared_ptr<udp::socket> socket = make_shared_object<udp::socket>(context_);
-            std::shared_ptr<boost::asio::steady_timer> timer = make_shared_object<boost::asio::steady_timer>(context_);
-            std::shared_ptr<ppp::vector<Byte> > recv_buf = make_shared_object<ppp::vector<Byte> >(1024);
-            std::shared_ptr<udp::endpoint> recv_ep = make_shared_object<udp::endpoint>();
-            std::shared_ptr<ppp::vector<Byte> > request = make_shared_object<ppp::vector<Byte> >(20, 0);
-
-            if (NULLPTR == state || NULLPTR == socket || NULLPTR == timer || NULLPTR == recv_buf || NULLPTR == recv_ep || NULLPTR == request) {
-                boost::asio::post(context_, [callback]() noexcept {
-                    callback(boost::asio::ip::address());
-                });
-                return;
-            }
-            state->udp_socket = socket;
-            state->timer = timer;
-            state->slot0 = request;
-            state->slot1 = recv_buf;
-            state->slot2 = recv_ep;
-
-            boost::system::error_code ec;
-            socket->open(udp::v4(), ec);
-            if (ec) {
-                state->Complete(boost::asio::ip::address());
-                return;
-            }
-
-            ppp::net::Socket::AdjustDefaultSocketOptional(socket->native_handle(), true);
-            ppp::net::Socket::SetTypeOfService(socket->native_handle());
-            ppp::net::Socket::SetSignalPipeline(socket->native_handle(), false);
-            ppp::net::Socket::ReuseSocketAddress(socket->native_handle(), true);
-            if (!ProtectSocket(socket->native_handle())) {
-                state->Complete(boost::asio::ip::address());
-                return;
-            }
-
-            /* Build the 20-byte STUN Binding Request (RFC 5389 §6). */
-            Byte* pkt = request->data();
-            // Message Type: Binding Request (0x0001)
-            pkt[0] = 0x00; pkt[1] = 0x01;
-            // Message Length: 0 (no attributes)
-            pkt[2] = 0x00; pkt[3] = 0x00;
-            // Magic Cookie (0x2112A442)
-            pkt[4] = 0x21; pkt[5] = 0x12; pkt[6] = 0xA4; pkt[7] = 0x42;
-            // Transaction ID: 12 random bytes.
-            pkt[8]  = 0xAA; pkt[9]  = 0xBB; pkt[10] = 0xCC; pkt[11] = 0xDD;
-            pkt[12] = 0xEE; pkt[13] = 0xFF; pkt[14] = 0x00; pkt[15] = 0x11;
-            pkt[16] = 0x22; pkt[17] = 0x33; pkt[18] = 0x44; pkt[19] = 0x55;
-
-            /* Timeout handler. */
-            timer->expires_after(std::chrono::milliseconds(PPP_DNS_RESOLVER_STUN_TIMEOUT_MS));
-            timer->async_wait([state](const boost::system::error_code& timer_ec) noexcept {
-                if (timer_ec || state->IsCompleted()) {
-                    return;
-                }
-                ppp::telemetry::Count("dns.stun.timeout", 1);
-                state->Complete(boost::asio::ip::address());
-            });
-
-            /* Send the STUN request. */
-            socket->async_send_to(boost::asio::buffer(request->data(), request->size()), remote,
-                [state](const boost::system::error_code& send_ec, std::size_t) noexcept {
-                    if (state->IsCompleted()) {
-                        return;
-                    }
-                    if (send_ec) {
-                        ppp::telemetry::Count("dns.stun.send_fail", 1);
-                        state->Complete(boost::asio::ip::address());
-                        return;
-                    }
-
-                    auto socket_local = state->udp_socket;
-                    auto recv_buf_local = std::static_pointer_cast<ppp::vector<Byte> >(state->slot1);
-                    auto recv_ep_local = std::static_pointer_cast<udp::endpoint>(state->slot2);
-                    if (NULLPTR == socket_local || NULLPTR == recv_buf_local || NULLPTR == recv_ep_local) {
-                        return;
-                    }
-
-                    /* Wait for the STUN response. */
-                    socket_local->async_receive_from(
-                        boost::asio::buffer(recv_buf_local->data(), recv_buf_local->size()), *recv_ep_local,
-                        [state](const boost::system::error_code& recv_ec, std::size_t recv_size) noexcept {
-                            if (state->IsCompleted()) {
-                                return;
-                            }
-
-                            if (recv_ec || recv_size < 20) {
-                                ppp::telemetry::Count("dns.stun.recv_fail", 1);
-                                state->Complete(boost::asio::ip::address());
-                                return;
-                            }
-
-                            auto recv_buf_r = std::static_pointer_cast<ppp::vector<Byte> >(state->slot1);
-                            if (NULLPTR == recv_buf_r) {
-                                state->Complete(boost::asio::ip::address());
-                                return;
-                            }
-                            const Byte* resp = recv_buf_r->data();
-
-                            /* Validate STUN header. */
-                            uint16_t msg_type = (static_cast<uint16_t>(resp[0]) << 8) |
-                                                 static_cast<uint16_t>(resp[1]);
-                            uint16_t msg_len  = (static_cast<uint16_t>(resp[2]) << 8) |
-                                                 static_cast<uint16_t>(resp[3]);
-                            uint32_t cookie   = (static_cast<uint32_t>(resp[4]) << 24) |
-                                                 (static_cast<uint32_t>(resp[5]) << 16) |
-                                                 (static_cast<uint32_t>(resp[6]) << 8)  |
-                                                  static_cast<uint32_t>(resp[7]);
-
-                            if (msg_type != kStunMsgTypeBindingResponse ||
-                                cookie   != kStunMagicCookie ||
-                                msg_len  > recv_size - 20) {
-                                ppp::telemetry::Count("dns.stun.invalid_response", 1);
-                                state->Complete(boost::asio::ip::address());
-                                return;
-                            }
-
-                            /* Scan attributes for XOR-MAPPED-ADDRESS (0x0020). */
-                            const Byte* attrs = resp + 20;
-                            std::size_t attrs_len = static_cast<std::size_t>(msg_len);
-                            std::size_t attr_pos = 0;
-
-                            while (attr_pos + 4 <= attrs_len) {
-                                uint16_t attr_type = (static_cast<uint16_t>(attrs[attr_pos]) << 8) |
-                                                      static_cast<uint16_t>(attrs[attr_pos + 1]);
-                                uint16_t attr_len  = (static_cast<uint16_t>(attrs[attr_pos + 2]) << 8) |
-                                                      static_cast<uint16_t>(attrs[attr_pos + 3]);
-
-                                if (attr_pos + 4 + attr_len > attrs_len) {
-                                    break; /* Malformed attribute. */
-                                }
-
-                                if (attr_type == kStunAttrXorMappedAddr && attr_len >= 8) {
-                                    uint8_t family = attrs[attr_pos + 5];
-                                    if (family == 0x01) { /* IPv4 */
-                                        uint32_t xaddr = (static_cast<uint32_t>(attrs[attr_pos + 8]) << 24) |
-                                                          (static_cast<uint32_t>(attrs[attr_pos + 9]) << 16) |
-                                                          (static_cast<uint32_t>(attrs[attr_pos + 10]) << 8)  |
-                                                           static_cast<uint32_t>(attrs[attr_pos + 11]);
-                                        uint32_t addr = xaddr ^ kStunMagicCookie;
-
-                                        boost::asio::ip::address_v4::bytes_type ab;
-                                        ab[0] = static_cast<Byte>((addr >> 24) & 0xff);
-                                        ab[1] = static_cast<Byte>((addr >> 16) & 0xff);
-                                        ab[2] = static_cast<Byte>((addr >> 8)  & 0xff);
-                                        ab[3] = static_cast<Byte>(addr & 0xff);
-
-                                        state->Complete(boost::asio::ip::address_v4(ab));
-                                        return;
-                                    }
-                                }
-
-                                /* Advance to next attribute (4-byte aligned). */
-                                attr_pos += 4 + ((attr_len + 3) & ~static_cast<std::size_t>(3));
-                            }
-
-                            /* No XOR-MAPPED-ADDRESS found. */
-                            ppp::telemetry::Count("dns.stun.no_xmapped", 1);
-                            state->Complete(boost::asio::ip::address());
-                        });
-                });
         }
 
         /* ========================================================================

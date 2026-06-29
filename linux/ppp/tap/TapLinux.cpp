@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <ppp/diagnostics/Error.h>
-#include <ppp/diagnostics/Telemetry.h>
 
 #if defined(_ANDROID) 
 #include <linux/if.h>
@@ -64,7 +63,6 @@ using ppp::net::Ipep;
 using ppp::net::Socket;
 using ppp::net::IPEndPoint;
 using ppp::net::AddressFamily;
-using ppp::telemetry::Level;
 
 namespace ppp {
     namespace tap {
@@ -591,8 +589,6 @@ namespace ppp {
         }
 
         bool TapLinux::SetIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.address.set");
-
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
@@ -600,50 +596,26 @@ namespace ppp {
 
             char command[1200];
             snprintf(command, sizeof(command), "ip -6 addr replace %s/%d dev %s > /dev/null 2>&1", addressIP.data(), std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length)), ifrName.data());
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = ExecuteIpCommand(command, ppp::diagnostics::ErrorCode::TunnelAddressConfigureFailed);
-            if (ok) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                ppp::telemetry::Histogram("tap.ipv6.address.set.us", elapsed);
-            }
             return ok;
         }
 
         bool TapLinux::SetMtu(const ppp::string& ifrName, int mtu) noexcept {
-            ppp::telemetry::SpanScope span("tap.mtu.set");
-
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = SetInterfaceMtuByName(ifrName, mtu);
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-            ppp::telemetry::Histogram("tap.mtu.set.us", elapsed);
-            if (ok) {
-                ppp::telemetry::Count("tap.mtu.set", 1);
-            }
             return ok;
         }
 
         bool TapLinux::DeleteIPv6Address(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.address.delete");
-
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = DeleteIPv6AddressByNetlink(ifrName, addressIP, prefix_length);
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-            ppp::telemetry::Histogram("tap.ipv6.address.delete.us", elapsed);
-            if (ok) {
-                ppp::telemetry::Count("tap.ipv6.address.delete", 1);
-                ppp::telemetry::Log(Level::kDebug, "tap", "ipv6 address delete: %s/%d", addressIP.data(), prefix_length);
-            }
             return ok;
         }
 
         bool TapLinux::AddRoute6(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length, const ppp::string& gw) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.route.add");
-
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP) || (!gw.empty() && !IsSafeShellToken(gw))) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
@@ -666,48 +638,27 @@ namespace ppp {
                     snprintf(command, sizeof(command), "ip -6 route replace %s/%d via %s dev %s onlink > /dev/null 2>&1", addressIP.data(), std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length)), gw.data(), ifrName.data());
                 }
             }
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = ExecuteIpCommand(command, ppp::diagnostics::ErrorCode::RouteReplaceFailed);
-            if (ok) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                ppp::telemetry::Log(Level::kDebug, "tap", "ipv6 route add: %s/%d", addressIP.data(), prefix_length);
-                ppp::telemetry::Count("tap.ipv6.route.add", 1);
-                ppp::telemetry::Histogram("tap.ipv6.route.add.us", elapsed);
-                ppp::telemetry::Gauge("tap.ipv6_routes", (int64_t)1);
-            }
             return ok;
         }
 
         bool TapLinux::DeleteRoute6(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length, const ppp::string& gw) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.route.delete");
-
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP) || (!gw.empty() && !IsSafeShellToken(gw))) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = DeleteIPv6RouteByNetlink(ifrName, addressIP, prefix_length, gw);
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-            ppp::telemetry::Histogram("tap.ipv6.route.delete.us", elapsed);
-            if (ok) {
-                ppp::telemetry::Log(Level::kDebug, "tap", "ipv6 route delete: %s/%d", addressIP.data(), prefix_length);
-                ppp::telemetry::Count("tap.ipv6.route.delete", 1);
-            }
             return ok;
         }
 
         bool TapLinux::EnableIPv6NeighborProxy(const ppp::string& ifrName) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.neighbor.proxy.enable");
             if (!IsSafeShellToken(ifrName)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = WriteProxyNdpState(ifrName, true);
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-            ppp::telemetry::Histogram("tap.ipv6.neighbor.proxy.enable.us", elapsed);
             if (!ok) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
             }
@@ -729,16 +680,12 @@ namespace ppp {
         }
 
         bool TapLinux::DisableIPv6NeighborProxy(const ppp::string& ifrName) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.neighbor.proxy.disable");
             if (!IsSafeShellToken(ifrName)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::TapLinuxUnsafeToken);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = WriteProxyNdpState(ifrName, false);
-            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-            ppp::telemetry::Histogram("tap.ipv6.neighbor.proxy.disable.us", elapsed);
             if (!ok) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
             }
@@ -746,42 +693,26 @@ namespace ppp {
         }
 
         bool TapLinux::AddIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.neighbor.add");
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = SetIPv6NeighborProxyByNetlink(ifrName, addressIP, true);
-            if (ok) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                ppp::telemetry::Log(Level::kDebug, "tap", "ipv6 neighbor add: %s", addressIP.data());
-                ppp::telemetry::Count("tap.ipv6.neighbor.add", 1);
-                ppp::telemetry::Histogram("tap.ipv6.neighbor.add.us", elapsed);
-                ppp::telemetry::Gauge("tap.neighbor_proxies", (int64_t)1);
-            }
-            else {
+            if (!ok) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
             }
             return ok;
         }
 
         bool TapLinux::DeleteIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept {
-            ppp::telemetry::SpanScope span("tap.ipv6.neighbor.delete");
             if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
                 return false;
             }
 
-            auto started_at = std::chrono::steady_clock::now();
             bool ok = SetIPv6NeighborProxyByNetlink(ifrName, addressIP, false);
-            if (ok) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                ppp::telemetry::Log(Level::kDebug, "tap", "ipv6 neighbor delete: %s", addressIP.data());
-                ppp::telemetry::Histogram("tap.ipv6.neighbor.delete.us", elapsed);
-            }
-            else {
+            if (!ok) {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
             }
             return ok;

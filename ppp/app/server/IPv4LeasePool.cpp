@@ -1,5 +1,4 @@
 #include <ppp/app/server/IPv4LeasePool.h>
-#include <ppp/diagnostics/Telemetry.h>
 
 #include <cstring>
 
@@ -78,8 +77,6 @@ namespace ppp {
              * @return Result with the allocated address, or failure with reason.
              */
             IPv4LeasePool::Result IPv4LeasePool::AcquireAuto(const Int128& session_id) noexcept {
-                ppp::telemetry::Count("server.ipv4_pool.acquire_auto", 1);
-
                 SynchronizedObjectScope scope(LockObj_);
 
                 if (!Configured_) {
@@ -107,12 +104,10 @@ namespace ppp {
 
                     /* Attempt to lease. */
                     if (TryLease(session_id, ip)) {
-                        ppp::telemetry::Count("server.ipv4_pool.acquire_success", 1);
                         return MakeAutoSuccess(ip);
                     }
                 }
 
-                ppp::telemetry::Count("server.ipv4_pool.exhausted", 1);
                 return MakeFailure("pool-exhausted");
             }
 
@@ -135,8 +130,6 @@ namespace ppp {
                 const Int128& session_id,
                 const boost::asio::ip::address_v4& requested
             ) noexcept {
-                ppp::telemetry::Count("server.ipv4_pool.acquire_manual", 1);
-
                 SynchronizedObjectScope scope(LockObj_);
 
                 if (!Configured_) {
@@ -150,8 +143,6 @@ namespace ppp {
 
                 /* Check 1: is it the broadcast address? */
                 if (IsBroadcast(ip)) {
-                    ppp::telemetry::Count("server.ipv4_pool.broadcast_reject", 1);
-
                     /* Fall back to auto-allocation. */
                     Result reassigned = AcquireAutoInternal(session_id);
                     if (reassigned.ok) {
@@ -159,7 +150,6 @@ namespace ppp {
                         reassigned.conflict         = true;
                         reassigned.reason           = "broadcast";
                         reassigned.requested_address = requested;
-                        ppp::telemetry::Count("server.ipv4_pool.reassign_success", 1);
                     }
                     else {
                         reassigned.reason = "pool-exhausted";
@@ -169,8 +159,6 @@ namespace ppp {
 
                 /* Check 2: is it leased by another session? */
                 if (IsLeasedByOtherSession(session_id, ip)) {
-                    ppp::telemetry::Count("server.ipv4_pool.manual_conflict", 1);
-
                     /* Fall back to auto-allocation. */
                     Result reassigned = AcquireAutoInternal(session_id);
                     if (reassigned.ok) {
@@ -178,7 +166,6 @@ namespace ppp {
                         reassigned.conflict         = true;
                         reassigned.reason           = "conflict";
                         reassigned.requested_address = requested;
-                        ppp::telemetry::Count("server.ipv4_pool.reassign_success", 1);
                     }
                     else {
                         reassigned.reason = "pool-exhausted";
@@ -188,8 +175,6 @@ namespace ppp {
 
                 /* Requested IP is available; lease it. */
                 if (TryLease(session_id, ip)) {
-                    ppp::telemetry::Count("server.ipv4_pool.manual_accept", 1);
-                    ppp::telemetry::Count("server.ipv4_pool.acquire_success", 1);
                     return MakeManualSuccess(ip);
                 }
 
@@ -200,7 +185,7 @@ namespace ppp {
                     reassigned.conflict         = true;
                     reassigned.reason           = "conflict";
                     reassigned.requested_address = requested;
-                    ppp::telemetry::Count("server.ipv4_pool.reassign_success", 1);
+
                 }
                 else {
                     reassigned.reason = "pool-exhausted";
@@ -221,7 +206,6 @@ namespace ppp {
                 SynchronizedObjectScope scope(LockObj_);
 
                 ReleaseInternal(session_id);
-                ppp::telemetry::Count("server.ipv4_pool.release", 1);
             }
 
             /* ------------------------------------------------------------------ */
@@ -254,12 +238,10 @@ namespace ppp {
                     }
 
                     if (TryLease(session_id, ip)) {
-                        ppp::telemetry::Count("server.ipv4_pool.acquire_success", 1);
                         return MakeAutoSuccess(ip);
                     }
                 }
 
-                ppp::telemetry::Count("server.ipv4_pool.exhausted", 1);
                 return MakeFailure("pool-exhausted");
             }
 

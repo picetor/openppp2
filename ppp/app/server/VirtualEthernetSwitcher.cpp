@@ -20,7 +20,6 @@
 #include <ppp/ipv6/IPv6Auxiliary.h>
 #include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/diagnostics/Error.h>
-#include <ppp/diagnostics/Telemetry.h>
 
 #include <openssl/rand.h>
 #include <chrono>
@@ -48,7 +47,6 @@ using ppp::net::AddressFamily;
 using ppp::threading::Executors;
 using ppp::coroutines::YieldContext;
 using ppp::collections::Dictionary;
-using ppp::telemetry::Level;
 
 
 /**
@@ -342,21 +340,6 @@ namespace ppp {
              * @return true when extensions contain a usable assignment; otherwise false.
              */
             bool VirtualEthernetSwitcher::BuildInformationIPv6Extensions(const Int128& session_id, VirtualEthernetInformationExtensions& extensions) noexcept {
-                struct ScopedIPv6AssignHistogram final {
-                    std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
-                    VirtualEthernetInformationExtensions& extensions;
-
-                    explicit ScopedIPv6AssignHistogram(VirtualEthernetInformationExtensions& value) noexcept
-                        : extensions(value) {}
-
-                    ~ScopedIPv6AssignHistogram() noexcept {
-                        if (extensions.AssignedIPv6Address.is_v6()) {
-                            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                            ppp::telemetry::Histogram("server.ipv6.assign.us", elapsed);
-                        }
-                    }
-                } ipv6_assign_histogram(extensions);
-
                 extensions.Clear();
 
                 const auto& ipv6 = configuration_->server.ipv6;
@@ -931,8 +914,6 @@ namespace ppp {
                     ipv6s_[ip_key] = exchanger;
                 }
 
-                ppp::telemetry::Count("server.ipv6.assigned", 1);
-                ppp::telemetry::Log(Level::kDebug, "server", "ipv6 assigned");
                 return true;
             }
 
@@ -948,8 +929,6 @@ namespace ppp {
              *       prevent holding syncobj_ for hundreds of milliseconds per client.
              */
             bool VirtualEthernetSwitcher::DeleteIPv6Exchanger(const Int128& session_id, const VirtualEthernetInformationExtensions& extensions) noexcept {
-                ppp::string session_guid = auxiliary::StringAuxiliary::Int128ToGuidString(session_id);
-                ppp::telemetry::SpanScope span("server.ipv6.withdraw", session_guid.c_str());
                 if (!extensions.AssignedIPv6Address.is_v6()) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6AddressInvalid);
                     return false;
@@ -986,9 +965,6 @@ namespace ppp {
                  */
                 bool route_removed = DeleteIPv6TransitRoute(ip, ppp::ipv6::IPv6_MAX_PREFIX_LENGTH);
                 bool proxy_removed = DeleteIPv6NeighborProxy(ip);
-
-                ppp::telemetry::Count("server.ipv6.withdrawn", 1);
-                ppp::telemetry::Log(Level::kDebug, "server", "ipv6 withdrawn");
 
                 RevokeIPv6Lease(session_id);
                 if (!route_removed) {
@@ -1046,8 +1022,6 @@ namespace ppp {
                         tail = ipv6s_.erase(tail);
                         released_any = true;
                         any          = true;
-                        ppp::telemetry::Count("server.ipv6.withdrawn", 1);
-                        ppp::telemetry::Log(Level::kDebug, "server", "ipv6 withdrawn");
                     }
 
                     if (released_any) {
@@ -1157,7 +1131,6 @@ namespace ppp {
              */
             bool VirtualEthernetSwitcher::AddIPv6TransitRoute(const boost::asio::ip::address& ip, int prefix_length) noexcept {
 #if defined(_LINUX)
-                ppp::telemetry::SpanScope span("server.route.add");
                 if (!ip.is_v6()) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6AddressInvalid);
                     return false;
@@ -1184,15 +1157,8 @@ namespace ppp {
                 std::string ip_std = ip.to_string();
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
-                auto started_at = std::chrono::steady_clock::now();
                 bool ok = ppp::tap::TapLinux::AddRoute6(tap->GetId(), ip_str, prefix_length, ppp::string());
-                if (ok) {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                    ppp::telemetry::Count("server.route.added", 1);
-                    ppp::telemetry::Histogram("server.route.add.us", elapsed);
-                    ppp::telemetry::Log(Level::kDebug, "server", "route added");
-                }
-                else {
+                if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteAddFailed);
                 }
                 return ok;
@@ -1210,7 +1176,6 @@ namespace ppp {
              */
             bool VirtualEthernetSwitcher::DeleteIPv6TransitRoute(const boost::asio::ip::address& ip, int prefix_length) noexcept {
 #if defined(_LINUX)
-                ppp::telemetry::SpanScope span("server.route.delete");
                 if (!ip.is_v6()) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6AddressInvalid);
                     return false;
@@ -1237,15 +1202,8 @@ namespace ppp {
                 std::string ip_std = ip.to_string();
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
-                auto started_at = std::chrono::steady_clock::now();
                 bool ok = ppp::tap::TapLinux::DeleteRoute6(tap->GetId(), ip_str, prefix_length, ppp::string());
-                if (ok) {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                    ppp::telemetry::Count("server.route.deleted", 1);
-                    ppp::telemetry::Histogram("server.route.delete.us", elapsed);
-                    ppp::telemetry::Log(Level::kDebug, "server", "route deleted");
-                }
-                else {
+                if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteDeleteFailed);
                 }
                 return ok;
@@ -1295,10 +1253,7 @@ namespace ppp {
                 std::string ip_std = ip.to_string();
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 bool ok = ppp::tap::TapLinux::AddIPv6NeighborProxy(ipv6_neighbor_proxy_ifname_, ip_str);
-                if (ok) {
-                    ppp::telemetry::Log(Level::kDebug, "server", "neighbor proxy added");
-                }
-                else {
+                if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyAddFailed);
                 }
                 return ok;
@@ -1323,10 +1278,7 @@ namespace ppp {
                 std::string ip_std = ip.to_string();
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 bool ok = ppp::tap::TapLinux::DeleteIPv6NeighborProxy(ipv6_neighbor_proxy_ifname_, ip_str);
-                if (ok) {
-                    ppp::telemetry::Log(Level::kDebug, "server", "neighbor proxy deleted");
-                }
-                else {
+                if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyDeleteFailed);
                 }
                 return ok;
@@ -1352,10 +1304,7 @@ namespace ppp {
                 std::string ip_std = ip.to_string();
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 bool ok = ppp::tap::TapLinux::DeleteIPv6NeighborProxy(ifname, ip_str);
-                if (ok) {
-                    ppp::telemetry::Log(Level::kDebug, "server", "neighbor proxy deleted");
-                }
-                else {
+                if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyDeleteFailed);
                 }
                 return ok;
@@ -1370,7 +1319,6 @@ namespace ppp {
              * @return true if at least one acceptor starts successfully.
              */
              bool VirtualEthernetSwitcher::Run() noexcept {
-                ppp::telemetry::SpanScope span("server.acceptors.start");
                 // Snapshot the acceptor list under the lock, then start accept loops
                 // outside the lock to avoid holding syncobj_ across socket operations.
                 std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptors_snapshot[NetworkAcceptorCategories_Max];
@@ -1388,7 +1336,6 @@ namespace ppp {
 
                 auto self = shared_from_this();
                 bool bany = false;
-                auto started_at = std::chrono::steady_clock::now();
                 for (int categories = NetworkAcceptorCategories_Min; categories < NetworkAcceptorCategories_Max; categories++) {
                     std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor = acceptors_snapshot[categories];
                     if (NULLPTR == acceptor) {
@@ -1423,11 +1370,6 @@ namespace ppp {
                         Socket::Closesocket(acceptor);
                         acceptors_[categories] = NULLPTR;
                     }
-                }
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count();
-                ppp::telemetry::Histogram("server.acceptors.start.us", elapsed);
-                if (bany) {
-                    ppp::telemetry::Log(Level::kInfo, "server", "server acceptors running");
                 }
                 return bany;
             }
@@ -1479,8 +1421,6 @@ namespace ppp {
                         }
                     }
 
-                    ppp::telemetry::Count("server.session.rejected", 1);
-                    ppp::telemetry::Log(Level::kInfo, "server", "session rejected");
                     return STATUS_ERROR;
                 }
 
@@ -1665,11 +1605,7 @@ namespace ppp {
                     VirtualEthernetExchangerPtr& slot = exchangers_[session_id];
                     oldExchanger = std::move(slot);
                     slot         = newExchanger;
-                    ppp::telemetry::Gauge("server.exchanger_count", (int64_t)exchangers_.size());
                 }
-
-                ppp::telemetry::Count("server.exchanger.add", 1);
-                ppp::telemetry::Log(Level::kInfo, "server", "exchanger added");
 
                 IDisposable::Dispose(oldExchanger);
                 return newExchanger;
@@ -1699,17 +1635,6 @@ namespace ppp {
              * @return true if establishment and run succeed; otherwise false.
              */
             bool VirtualEthernetSwitcher::Establish(const ITransmissionPtr& transmission, const Int128& session_id, const VirtualEthernetInformationPtr& i, YieldContext& y) noexcept {
-                ppp::string session_guid = auxiliary::StringAuxiliary::Int128ToGuidString(session_id);
-                ppp::telemetry::SpanScope span("server.session.establish", session_guid.c_str());
-                struct ScopedEstablishHistogram final {
-                    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-
-                    ~ScopedEstablishHistogram() noexcept {
-                        int64_t elapsed = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
-                        ppp::telemetry::Histogram("server.session.establish.us", elapsed);
-                    }
-                } establish_histogram;
-
                 if (NULLPTR == transmission) {
                     return false;
                 }
@@ -1719,25 +1644,16 @@ namespace ppp {
                     return false;
                 }
 
-                ppp::telemetry::Gauge("server.active_sessions", (int64_t)exchangers_.size());
-                ppp::telemetry::Count("server.session.accepted", 1);
-                ppp::telemetry::Log(Level::kInfo, "server", "session accepted");
 
                 VirtualEthernetInformation fallback_information;
                 const VirtualEthernetInformation* established_information = i.get();
-                if (NULLPTR == established_information && IsIPv6ServerEnabled() && configuration_->server.backend.empty()) {
+                if (NULLPTR == established_information) {
                     fallback_information.Clear();
                     fallback_information.BandwidthQoS = 0;
                     fallback_information.IncomingTraffic = std::numeric_limits<UInt64>::max();
                     fallback_information.OutgoingTraffic = std::numeric_limits<UInt64>::max();
                     fallback_information.ExpiredTime = std::numeric_limits<UInt32>::max();
                     established_information = &fallback_information;
-                    const char* reason = "no-managed-backend";
-                }
-
-                if (NULLPTR == established_information && !configuration_->server.backend.empty()) {
-                    DeleteExchanger(channel.get());
-                    return false;
                 }
 
                 bool run = true;
@@ -1757,23 +1673,8 @@ namespace ppp {
                         envelope.Extensions.IPv6StatusMessage = "server-ipv6-dataplane-install-failed";
                     }
 
-                    // Fill ClientExitIP from the client's remote TCP endpoint.
-                    // The client uses this value (priority-2) for EDNS Client Subnet
-                    // when dns.ecs.override_ip is not configured.  GetRemoteEndPoint()
-                    // returns the peer address of the underlying socket; it is
-                    // "usually correct" but may differ from the real DNS exit IP in
-                    // multi-WAN, proxy-chain, or transparent-proxy scenarios.
-                    {
-                        boost::asio::ip::tcp::endpoint remote_ep = transmission->GetRemoteEndPoint();
-                        boost::asio::ip::address remote_addr = remote_ep.address();
-                        if (!remote_addr.is_unspecified()) {
-                            envelope.Extensions.ClientExitIP = remote_addr;
-                        }
-                    }
-
-                    // Refresh ExtendedJson so the serialized payload reflects both
-                    // the IPv6 extensions (possibly mutated above) and the newly
-                    // populated ClientExitIP.
+                    // Refresh ExtendedJson so the serialized payload reflects the IPv6 extensions
+                    // (possibly mutated above).
                     envelope.ExtendedJson = envelope.Extensions.ToJson();
 
                     run = channel->DoInformation(transmission, envelope, y);
@@ -1932,16 +1833,14 @@ namespace ppp {
                         if (p.get() == exchanger) {
                             channel = std::move(tail->second);
                             exchangers_.erase(tail);
-                            ppp::telemetry::Gauge("server.active_sessions", (int64_t)exchangers_.size());
-                            ppp::telemetry::Gauge("server.exchanger_count", (int64_t)exchangers_.size());
+                            }
                         }
                     }
                 }
 
                 if (channel) {
                     DeleteIPv4Lease(channel->GetId());
-                    ppp::telemetry::Count("server.exchanger.remove", 1);
-                    ppp::telemetry::Log(Level::kInfo, "server", "exchanger removed");
+                    DeleteIPv6Exchanger(channel->GetId());
                     channel->Dispose();
                 }
                 return channel;
@@ -2066,8 +1965,6 @@ namespace ppp {
                     ipv6s_.clear();
                     ipv6_requests_.clear();
                     ipv6_leases_.clear();
-                    p2p_peers_.clear();
-                    p2p_virtual_ips_.clear();
                 }  // Release syncobj_ before heavy subsystem initialization.
 
                 bool ok = CreateAllAcceptors() &&
@@ -2088,23 +1985,11 @@ namespace ppp {
                     if (!ec && network_addr.is_v4()) {
                         ec.clear();
                         boost::asio::ip::address mask_addr = StringToAddress(configuration_->server.ipv4_pool.mask, ec);
-                        if (!ec && mask_addr.is_v4()) {
-                            if (!ipv4_pool_.Configure(network_addr.to_v4(), mask_addr.to_v4())) {
-                                ppp::telemetry::Log(Level::kInfo, "server", "ipv4 pool configure failed");
-                                ppp::telemetry::Count("server.ipv4.pool.configure_failed", 1);
-                            }
-                            else {
-                                ppp::telemetry::Log(Level::kInfo, "server", "ipv4 pool configured");
-                            }
+                        if (ec || !mask_addr.is_v4()) {
                         }
                         else {
-                            ppp::telemetry::Log(Level::kInfo, "server", "ipv4 pool mask invalid");
-                            ppp::telemetry::Count("server.ipv4.pool.mask_invalid", 1);
+                            ipv4_pool_.Configure(network_addr.to_v4(), mask_addr.to_v4());
                         }
-                    }
-                    else {
-                        ppp::telemetry::Log(Level::kInfo, "server", "ipv4 pool network invalid");
-                        ppp::telemetry::Count("server.ipv4.pool.network_invalid", 1);
                     }
                 }
 
@@ -2135,7 +2020,6 @@ namespace ppp {
 
                 if (ok) {
                     OpenLogger();
-                    ppp::telemetry::Log(Level::kInfo, "server", "server opened");
                 }
 
                 return ok;
@@ -2576,7 +2460,6 @@ namespace ppp {
                             }
                             catch (...)
                             {
-                                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "server", "linux ssmt worker terminated with exception");
                             }
                         });
                     ssmt_thread.detach();
@@ -2665,7 +2548,6 @@ namespace ppp {
                 }
 
                 static_echo_bind_port_ = localEP.port();
-                ppp::telemetry::Log(Level::kInfo, "server", "static echo socket opened");
                 return LoopbackDatagramSocket();
             }
 
@@ -2786,7 +2668,6 @@ namespace ppp {
                 VirtualEthernetStaticEchoAllocatedContextPtr allocated_context;
                 for (SynchronizedObjectScope scope(syncobj_);;) {
                     if (Dictionary::TryRemove(static_echo_allocateds_, allocated_id, allocated_context)) {
-                        ppp::telemetry::Log(Level::kInfo, "server", "static echo unallocated");
                         return allocated_context;
                     }
 
@@ -2905,7 +2786,6 @@ namespace ppp {
                     if (Dictionary::TryAdd(static_echo_allocateds_, generate_id, allocated_context)) {
                         remote_port  = bind_port;
                         allocated_id = generate_id;
-                        ppp::telemetry::Log(Level::kInfo, "server", "static echo allocated");
                         return allocated_context;
                     }
                 }
@@ -3110,7 +2990,6 @@ namespace ppp {
              * @brief Performs full shutdown and releases all runtime resources.
              */
              void VirtualEthernetSwitcher::Finalize() noexcept {
-                ppp::telemetry::Log(Level::kInfo, "server", "server finalizing");
                 std::shared_ptr<boost::asio::ip::tcp::resolver> tresolver;
                 std::shared_ptr<boost::asio::ip::udp::resolver> uresolver;
 
@@ -3169,8 +3048,6 @@ namespace ppp {
                     connections = std::move(connections_);
                     connections_.clear();
 
-                    p2p_peers_.clear();
-                    p2p_virtual_ips_.clear();
                     static_echo_allocateds_.clear();
                     break;
                 }
@@ -3324,8 +3201,6 @@ namespace ppp {
                         if (!ex || !ex->Update(now)) {
                             if (ex) {
                                 stale.emplace_back(ex);
-                                ppp::telemetry::Count("server.exchanger.remove", 1);
-                                ppp::telemetry::Log(Level::kInfo, "server", "exchanger removed (stale)");
                             }
 
                             tail = exchangers_.erase(tail);
@@ -3334,7 +3209,6 @@ namespace ppp {
                             ++tail;
                         }
                     }
-                    ppp::telemetry::Gauge("server.active_sessions", (int64_t)exchangers_.size());
                 }
 
                 // Dispose outside the lock to avoid holding syncobj_ across
@@ -3422,9 +3296,6 @@ namespace ppp {
                         ppp::string addr_key(addr_std.data(), addr_std.size());
                         ipv6s_.erase(addr_key);
                     }
-
-                    ppp::telemetry::Count("server.ipv6.withdrawn", 1);
-                    ppp::telemetry::Log(Level::kDebug, "server", "ipv6 withdrawn (expired)");
 
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6LeaseExpired);
                     it = ipv6_leases_.erase(it);
@@ -3865,380 +3736,6 @@ namespace ppp {
                 else {
                     return NULLPTR;
                 }
-            }
-
-            static ppp::string P2PEndpointToString(const boost::asio::ip::udp::endpoint& endpoint) noexcept {
-                if (endpoint.address().is_unspecified() || endpoint.port() <= IPEndPoint::MinPort) {
-                    return ppp::string();
-                }
-
-                std::string address = endpoint.address().to_string();
-                ppp::string value;
-                if (endpoint.address().is_v6()) {
-                    value.append("[");
-                    value.append(address.data(), address.size());
-                    value.append("]");
-                }
-                else {
-                    value.append(address.data(), address.size());
-                }
-                value.append(":");
-                value.append(stl::to_string<ppp::string>(endpoint.port()));
-                return value;
-            }
-
-            static ppp::vector<ppp::app::protocol::P2PEndpointCandidate> P2PBuildCandidates(const VirtualEthernetSwitcher::P2PPeerRecord& record) noexcept {
-                ppp::vector<ppp::app::protocol::P2PEndpointCandidate> candidates = record.Candidates;
-
-                // C4: TCP control endpoints are NOT usable as UDP P2P candidates.
-                // Do NOT append the TCP control channel's remote endpoint here.
-                // Only actual UDP/STUN candidates from the client's INFO message
-                // are included.  The server-observed TCP endpoint (record.ObservedEndpoint)
-                // is stored for server-side use only (e.g., NAT classifier diagnostics)
-                // but must not be offered to clients for UDP probing.
-
-                return candidates;
-            }
-
-            /**
-             * @brief Generates an opaque random token for a P2P offer.
-             *
-             * M1: Uses OpenSSL RAND_bytes for cryptographically strong randomness.
-             * Output is hex-encoded, preserving the existing string format.
-             */
-            static ppp::string P2PNewToken() noexcept {
-                // Generate 32 random bytes → 64 hex chars. Well within MAX_OFFER_TOKEN_SIZE.
-                uint8_t raw[32];
-                if (RAND_bytes(raw, sizeof(raw)) != 1) {
-                    // CSPRNG failure — return empty to fail closed.
-                    return ppp::string();
-                }
-
-                static constexpr char hex[] = "0123456789abcdef";
-                ppp::string token;
-                token.reserve(64);
-                for (size_t i = 0; i < sizeof(raw); ++i) {
-                    token.append(1, hex[(raw[i] >> 4) & 0x0F]);
-                    token.append(1, hex[raw[i] & 0x0F]);
-                }
-                return token;
-            }
-
-            static VirtualEthernetSwitcher::InformationEnvelope P2PBuildEnvelope(const ppp::app::protocol::P2PControlMessage& message) noexcept {
-                VirtualEthernetSwitcher::InformationEnvelope envelope;
-                envelope.Base.Clear();
-                envelope.Base.BandwidthQoS = 0;
-                envelope.Base.IncomingTraffic = std::numeric_limits<UInt64>::max();
-                envelope.Base.OutgoingTraffic = std::numeric_limits<UInt64>::max();
-                envelope.Base.ExpiredTime = std::numeric_limits<UInt32>::max();
-                envelope.Extensions.P2P = message;
-                envelope.ExtendedJson = envelope.Extensions.ToJson();
-                return envelope;
-            }
-
-            bool VirtualEthernetSwitcher::UpdateP2PPeer(const std::shared_ptr<VirtualEthernetExchanger>& exchanger, const ITransmissionPtr& transmission, const VirtualEthernetInformationExtensions& request, VirtualEthernetInformationExtensions& response) noexcept {
-                if (NULLPTR == exchanger || NULLPTR == transmission || NULLPTR == configuration_) {
-                    return false;
-                }
-
-                response.P2P.enabled = configuration_->p2p.enabled;
-                response.P2P.mode = configuration_->p2p.mode;
-                response.P2P.virtual_ip = request.P2P.virtual_ip;
-
-                // Fix #3: Only accept explicit "register" actions with enabled=true.
-                // Other actions/replies must not be treated as registration.
-                if (!request.P2P.enabled || request.P2P.action != "register") {
-                    response.P2P.action = "status";
-                    response.P2P.reason = "not-a-register";
-                    return false;
-                }
-
-                if (!configuration_->p2p.enabled) {
-                    response.P2P.action = "reject";
-                    response.P2P.reason = "p2p-disabled";
-                    return false;
-                }
-
-                if (configuration_->p2p.mode != "direct-preferred") {
-                    response.P2P.action = "status";
-                    response.P2P.reason = "relay-only";
-                    return false;
-                }
-
-                ppp::string requested_mode = ToLower(request.P2P.mode);
-                if (requested_mode != "direct-preferred") {
-                    response.P2P.action = "status";
-                    response.P2P.reason = "client-relay-only";
-                    return false;
-                }
-
-                uint32_t virtual_ip = request.P2P.virtual_ip;
-                if (virtual_ip == 0 || IPEndPoint::IsInvalid(IPEndPoint(virtual_ip, IPEndPoint::MinPort))) {
-                    response.P2P.action = "reject";
-                    response.P2P.reason = "virtual-ip-missing";
-                    return false;
-                }
-
-                // Fix #4: Validate virtual_ip ownership via the authoritative NAT table.
-                // The requesting session must own this virtual_ip in the NAT registry.
-                {
-                    NatInformationPtr nat = FindNatInformation(virtual_ip);
-                    if (NULLPTR == nat || NULLPTR == nat->Exchanger || nat->Exchanger.get() != exchanger.get()) {
-                        response.P2P.action = "reject";
-                        response.P2P.reason = "virtual-ip-not-owned";
-                        return false;
-                    }
-                }
-
-                boost::asio::ip::tcp::endpoint remote_tcp = transmission->GetRemoteEndPoint();
-                boost::asio::ip::udp::endpoint observed(remote_tcp.address(), remote_tcp.port());
-                UInt64 now = Executors::GetTickCount();
-                Int128 session_id = exchanger->GetId();
-
-                P2PPeerRecord record;
-                record.SessionId = session_id;
-                record.VirtualIP = virtual_ip;
-                record.Mode = requested_mode;
-                record.ObservedEndpoint = observed;
-                record.Candidates = request.P2P.candidates;
-                record.LastSeen = now;
-                record.Exchanger = exchanger;
-
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-
-                    // Fix #1 (P2 review): When the same session re-registers with a
-                    // different virtual_ip, remove the stale reverse-index entry for
-                    // the old IP first.  Without this, p2p_virtual_ips_ accumulates
-                    // orphaned entries that point at a session whose p2p_peers_ record
-                    // now holds a completely different virtual_ip.
-                    auto existing_peer_it = p2p_peers_.find(session_id);
-                    if (existing_peer_it != p2p_peers_.end()) {
-                        uint32_t old_vip = existing_peer_it->second.VirtualIP;
-                        if (old_vip != 0 && old_vip != virtual_ip) {
-                            auto old_vip_it = p2p_virtual_ips_.find(old_vip);
-                            if (old_vip_it != p2p_virtual_ips_.end() && old_vip_it->second == session_id) {
-                                p2p_virtual_ips_.erase(old_vip_it);
-                            }
-                        }
-                    }
-
-                    // Fix #5: Clean up any stale record for the same virtual_ip (different session).
-                    auto vip_it = p2p_virtual_ips_.find(virtual_ip);
-                    if (vip_it != p2p_virtual_ips_.end() && vip_it->second != session_id) {
-                        p2p_peers_.erase(vip_it->second);
-                        vip_it->second = session_id;
-                    }
-                    else if (vip_it == p2p_virtual_ips_.end()) {
-                        p2p_virtual_ips_[virtual_ip] = session_id;
-                    }
-
-                    p2p_peers_[session_id] = record;
-                }
-
-                response.P2P.action = "status";
-                response.P2P.reason = "registered";
-                response.P2P.candidates = P2PBuildCandidates(record);
-                return true;
-            }
-
-            bool VirtualEthernetSwitcher::DeleteP2PPeer(const Int128& session_id) noexcept {
-                SynchronizedObjectScope scope(syncobj_);
-                auto it = p2p_peers_.find(session_id);
-                if (it == p2p_peers_.end()) {
-                    return false;
-                }
-                // Fix #5: Clean up reverse index entry for this virtual_ip.
-                uint32_t vip = it->second.VirtualIP;
-                auto vip_it = p2p_virtual_ips_.find(vip);
-                if (vip_it != p2p_virtual_ips_.end() && vip_it->second == session_id) {
-                    p2p_virtual_ips_.erase(vip_it);
-                }
-                p2p_peers_.erase(it);
-                return true;
-            }
-
-            bool VirtualEthernetSwitcher::OfferP2PPeerHints(uint32_t source_ip, uint32_t destination_ip, YieldContext& y) noexcept {
-                if (NULLPTR == configuration_ || !configuration_->p2p.enabled || configuration_->p2p.mode != "direct-preferred") {
-                    return false;
-                }
-
-                static constexpr UInt64 OFFER_THROTTLE_MS = 10000;
-                UInt64 now = Executors::GetTickCount();
-                P2PPeerRecord source_record;
-                P2PPeerRecord destination_record;
-                bool found = false;
-
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-                    for (auto& kv : p2p_peers_) {
-                        P2PPeerRecord& record = kv.second;
-                        if (record.VirtualIP == source_ip) {
-                            source_record = record;
-                        }
-                        else if (record.VirtualIP == destination_ip) {
-                            destination_record = record;
-                        }
-                    }
-
-                    if (source_record.SessionId == 0 || destination_record.SessionId == 0 || source_record.SessionId == destination_record.SessionId) {
-                        return false;
-                    }
-
-                    if (source_record.Mode != "direct-preferred" || destination_record.Mode != "direct-preferred") {
-                        return false;
-                    }
-
-                    // Throttle: skip this offer only when BOTH sides are still within
-                    // their per-peer cooldown window.  Using && (not ||) is intentional:
-                    // if either peer's cooldown has expired the pair is eligible again,
-                    // which prevents one stale peer from indefinitely blocking the other
-                    // side from receiving offers in a different pairing.
-                    if (now < source_record.LastOfferAt + OFFER_THROTTLE_MS && now < destination_record.LastOfferAt + OFFER_THROTTLE_MS) {
-                        return false;
-                    }
-
-                    found = true;
-                }
-
-                if (!found) {
-                    return false;
-                }
-
-                // Fix #4: Cross-validate that the NAT table still confirms the same owner for
-                // both virtual IPs.  A stale/expired P2P record could point at a recycled session.
-                {
-                    NatInformationPtr source_nat = FindNatInformation(source_ip);
-                    NatInformationPtr destination_nat = FindNatInformation(destination_ip);
-                    if (NULLPTR == source_nat || NULLPTR == destination_nat) {
-                        // One or both IPs no longer in NAT table — clean up stale P2P records.
-                        SynchronizedObjectScope scope(syncobj_);
-                        if (NULLPTR == source_nat) {
-                            p2p_peers_.erase(source_record.SessionId);
-                            p2p_virtual_ips_.erase(source_ip);
-                        }
-                        if (NULLPTR == destination_nat) {
-                            p2p_peers_.erase(destination_record.SessionId);
-                            p2p_virtual_ips_.erase(destination_ip);
-                        }
-                        return false;
-                    }
-                    if (NULLPTR == source_nat->Exchanger || NULLPTR == destination_nat->Exchanger) {
-                        return false;
-                    }
-                    if (source_nat->Exchanger.get() != source_record.Exchanger.lock().get() ||
-                        destination_nat->Exchanger.get() != destination_record.Exchanger.lock().get()) {
-                        return false;
-                    }
-                }
-
-                // NAT classification check: skip offer if both peers have
-                // symmetric NAT or either is UDP-blocked.
-                //
-                // H2: The NAT classifier requires actual UDP relay observations
-                // (from static-echo or UDP sendto paths) to make meaningful
-                // classifications.  TCP control endpoint observations are NOT
-                // used because they reflect TCP NAT, not UDP NAT behavior.
-                // Until actual UDP observation sources are wired, the classifier
-                // returns Unknown for all peers.  Unknown allows probing
-                // (conservative: let the probe path determine reachability).
-                // Only Symmetric-Symmetric and UdpBlocked (based on real
-                // observations) cause immediate skip.
-                {
-                    ppp::p2p::P2PNatClassification source_class = p2p_nat_classifier_.Classify(source_ip, now);
-                    ppp::p2p::P2PNatClassification dest_class   = p2p_nat_classifier_.Classify(destination_ip, now);
-                    if (!ppp::p2p::P2PNatClassifier::ShouldAttemptPunch(source_class, dest_class)) {
-                        ppp::telemetry::Log(Level::kInfo, "p2p", "NAT classification skip offer source=%s(%d) dest=%s(%d)",
-                            IPEndPoint::ToAddressString(source_ip).c_str(), static_cast<int>(source_class.type),
-                            IPEndPoint::ToAddressString(destination_ip).c_str(), static_cast<int>(dest_class.type));
-                        ppp::telemetry::Count("p2p.nat_skip", 1);
-                        return false;
-                    }
-                    // Update peer records with classified NAT type.
-                    {
-                        SynchronizedObjectScope scope(syncobj_);
-                        auto src_it = p2p_peers_.find(source_record.SessionId);
-                        if (src_it != p2p_peers_.end()) {
-                            src_it->second.NatType = source_class.type;
-                        }
-                        auto dst_it = p2p_peers_.find(destination_record.SessionId);
-                        if (dst_it != p2p_peers_.end()) {
-                            dst_it->second.NatType = dest_class.type;
-                        }
-                    }
-                }
-
-                std::shared_ptr<VirtualEthernetExchanger> source_exchanger = source_record.Exchanger.lock();
-                std::shared_ptr<VirtualEthernetExchanger> destination_exchanger = destination_record.Exchanger.lock();
-                if (NULLPTR == source_exchanger || NULLPTR == destination_exchanger) {
-                    // Fix #4: Clean up stale weak_ptr records.
-                    {
-                        SynchronizedObjectScope scope(syncobj_);
-                        if (NULLPTR == source_exchanger) {
-                            p2p_peers_.erase(source_record.SessionId);
-                            p2p_virtual_ips_.erase(source_ip);
-                        }
-                        if (NULLPTR == destination_exchanger) {
-                            p2p_peers_.erase(destination_record.SessionId);
-                            p2p_virtual_ips_.erase(destination_ip);
-                        }
-                    }
-                    return false;
-                }
-
-                ITransmissionPtr source_transmission = source_exchanger->GetTransmission();
-                ITransmissionPtr destination_transmission = destination_exchanger->GetTransmission();
-                if (NULLPTR == source_transmission || NULLPTR == destination_transmission) {
-                    return false;
-                }
-
-                // M1: Use CSPRNG-backed opaque random token — no session IDs embedded.
-                ppp::string token = P2PNewToken();
-                if (token.empty()) {
-                    // CSPRNG failure — fail closed, do not send offers with empty tokens.
-                    return false;
-                }
-
-                ppp::app::protocol::P2PControlMessage source_offer;
-                source_offer.enabled = true;
-                source_offer.mode = configuration_->p2p.mode;
-                source_offer.action = "offer";
-                source_offer.virtual_ip = source_ip;
-                source_offer.peer_virtual_ip = destination_ip;
-                source_offer.token = token;
-                source_offer.candidates = P2PBuildCandidates(destination_record);
-
-                ppp::app::protocol::P2PControlMessage destination_offer;
-                destination_offer.enabled = true;
-                destination_offer.mode = configuration_->p2p.mode;
-                destination_offer.action = "offer";
-                destination_offer.virtual_ip = destination_ip;
-                destination_offer.peer_virtual_ip = source_ip;
-                destination_offer.token = token;
-                destination_offer.candidates = P2PBuildCandidates(source_record);
-
-                bool source_ok = source_exchanger->DoInformation(source_transmission, P2PBuildEnvelope(source_offer), y);
-                bool destination_ok = destination_exchanger->DoInformation(destination_transmission, P2PBuildEnvelope(destination_offer), y);
-
-                // Fix #9: Only update LastOfferAt when at least one side succeeded.
-                // This allows faster retry when both sides fail (e.g., transient transport error).
-                if (source_ok || destination_ok) {
-                    SynchronizedObjectScope scope(syncobj_);
-                    auto src_it = p2p_peers_.find(source_record.SessionId);
-                    if (src_it != p2p_peers_.end()) {
-                        src_it->second.LastOfferAt = now;
-                    }
-                    auto dst_it = p2p_peers_.find(destination_record.SessionId);
-                    if (dst_it != p2p_peers_.end()) {
-                        dst_it->second.LastOfferAt = now;
-                    }
-
-                    ppp::telemetry::Log(Level::kInfo, "p2p", "peer hints offered source=%s destination=%s",
-                        IPEndPoint::ToAddressString(source_ip).c_str(),
-                        IPEndPoint::ToAddressString(destination_ip).c_str());
-                    ppp::telemetry::Count("p2p.offer", 1);
-                }
-                return source_ok || destination_ok;
             }
 
             /**

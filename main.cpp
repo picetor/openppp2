@@ -83,9 +83,6 @@ using ppp::Int128;
 #endif
 
 // Constants for IP list update intervals
-static constexpr int PPP_VIRR_UPDATE_STRETCH  = 300;    // Retry interval in seconds if update fails
-static constexpr int PPP_VIRR_UPDATE_INTERVAL = 86400;  // Daily update interval in seconds
-static constexpr int PPP_VBGP_UPDATE_INTERVAL = 3600;   // Hourly vBGP update interval
 
 // Network interface configuration structure
 struct NetworkInterface final
@@ -255,7 +252,7 @@ public:
     // Display help information
     void                                            PrintHelpInformation() noexcept;
     // Download IP lists from APNIC
-    void                                            PullIPList(const ppp::string& command, bool virr) noexcept;
+    void                                            PullIPList(const ppp::string& command) noexcept;
     // Synchronous IP list download
     int                                             PullIPList(const ppp::string& url, ppp::set<ppp::string>& ips) noexcept;
     // Asynchronous IP list download with callback
@@ -313,19 +310,14 @@ private:
 // Global variables
 static std::shared_ptr<PppApplication>              DEFAULT_;                            // Application instance
 static ppp::string                                   LOG_FILE_PATH_;                      // Log file path from --log-file argument
+FILE*                                                ppp::g_log_stream = stdout;          // Log output stream, redirected by --log-file
 static struct {
     using BypassSet = NetworkInterface::BypassSet;
 
     bool                                            restart                     = false; // Restart flag
-    bool                                            vbgp                        = false; // vBGP enabled
-    uint64_t                                        vbgp_last                   = 0;     // Last vBGP update
 
     int                                             link_restart                = 0;     // Link restart count
     int                                             auto_restart                = 0;     // Auto restart interval
-
-    bool                                            virr                        = false; // Auto-IP update enabled
-    uint64_t                                        virr_next                   = 0;     // Next IP update time
-    ppp::string                                     virr_argument;                       // IP update argument
 
     std::shared_ptr<BypassSet>                      bypass;                              // Bypass file path
 }                                                   GLOBAL_;                             // Global application state
@@ -545,12 +537,7 @@ bool PppApplication::PullIPList(const ppp::string& url, const ppp::function<void
         [self, this, url, cb]() noexcept 
         {
             ppp::set<ppp::string> ips;
-            ppp::SetThreadName("vbgp");
-
-            int events = PullIPList(url, ips);
-            cb(events, ips);
-        }).detach();
-    return true;
+            ppp::SetThreadName("iplist");
 }
 
 // Synchronous IP list download
@@ -587,13 +574,10 @@ int PppApplication::PullIPList(const ppp::string& url, ppp::set<ppp::string>& ip
 }
 
 // Download IP list with progress notification
-void PppApplication::PullIPList(const ppp::string& command, bool virr) noexcept
+void PppApplication::PullIPList(const ppp::string& command) noexcept
 {
-    // Show progress message for non-VIRR updates
-    if (!virr)
-    {
-        fprintf(stdout, "[%s]PULL\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
-    }
+    // Show progress message
+    fprintf(stdout, "[%s]PULL\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
 
     // Parse command into path and country code
     ppp::string path;
@@ -625,85 +609,22 @@ void PppApplication::PullIPList(const ppp::string& command, bool virr) noexcept
     // Convert to absolute path
     path = File::GetFullPath(File::RewritePath(path.data()).data());
 
-    // Download IP list
+    // Synchronous download
+    ppp::set<ppp::string> ips;
     bool ok = false;
-    if (virr)
+    if (chnroutes2_getiplist(ips, nation) > 0)
     {
-        // Asynchronous download for auto-updates
-        chnroutes2_getiplist_async(
-            [path, nation](const ppp::string& response_text) noexcept 
-            {
-                auto process =
-                    [&]() noexcept 
-                    {
-                        ppp::set<ppp::string> ips;
-                        if (chnroutes2_getiplist(ips, nation, response_text) < 1)
-                        {
-                            return -1;
-                        }
-                    
-                        // Only save file if path differs from current bypass
-                        auto bypass = GLOBAL_.bypass;
-                        if (NULL == bypass || bypass->find(path) == bypass->end())
-                        {
-                            chnroutes2_saveiplist(path, ips);
-                            return 0;
-                        }
-                    
-                        // Compare with existing file to avoid unnecessary restarts
-                        ppp::set<ppp::string> olds;
-                        ppp::string iplist = ppp::LTrim(ppp::RTrim(File::ReadAllText(path.data())));
-                    
-                        chnroutes2_getiplist(olds, ppp::string(), iplist);
-                        if (chnroutes2_equals(ips, olds))
-                        {
-                            return 0;
-                        }
-                    
-                        // Save new list and restart if changed
-                        ppp::string news = chnroutes2_toiplist(ips);
-                        if (!File::WriteAllBytes(path.data(), news.data(), news.size()))
-                        {
-                            return -1;
-                        }
-                        
-                        // Trigger application restart
-                        ShutdownApplication(true);
-                        return 1;
-                    };
-
-                // Process result and schedule retry on failure
-                int return_code = process();
-                if (return_code < 0)
-                {   
-                    uint64_t now = Executors::GetTickCount();
-                    GLOBAL_.virr_next = now + (PPP_VIRR_UPDATE_STRETCH * 1000);
-                }
-
-                return return_code;
-            });
-    }
-    else 
-    {
-        // Synchronous download for manual updates
-        ppp::set<ppp::string> ips;
-        if (chnroutes2_getiplist(ips, nation) > 0)
-        {
-            ok = chnroutes2_saveiplist(path, ips);
-        }
+        ok = chnroutes2_saveiplist(path, ips);
     }
 
     // Show completion status
-    if (!virr)
+    if (ok)
     {
-        if (ok)
-        {
-            fprintf(stdout, "[%s]OK\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
-        }
-        else
-        {
-            fprintf(stdout, "[%s]FAIL\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
-        }
+        fprintf(stdout, "[%s]OK\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
+    }
+    else
+    {
+        fprintf(stdout, "[%s]FAIL\r\n", chnroutes2_gettime(chnroutes2_gettime()).data());
     }
 }
 
@@ -1238,9 +1159,9 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 }
 
 #if defined(_LINUX)
-                ethernet->AddLoadIPList(path, route.nic, Ipep::ToAddress(route.ngw), route.vbgp);
+                ethernet->AddLoadIPList(path, route.nic, Ipep::ToAddress(route.ngw), ppp::string());
 #else
-                ethernet->AddLoadIPList(path, Ipep::ToAddress(route.ngw), route.vbgp);
+                ethernet->AddLoadIPList(path, Ipep::ToAddress(route.ngw), ppp::string());
 #endif
             }
 
@@ -1568,11 +1489,6 @@ void PppApplication::PrintHelpInformation() noexcept
     );
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--vbgp=[yes|no]", 
-        col_description_width, "Enable virtual BGP routing", 
-        col_default_width, "yes");
-    
-    printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--nic=<interface>", 
         col_description_width, "Specify physical network interface", 
         col_default_width, "auto-select");
@@ -1709,11 +1625,6 @@ void PppApplication::PrintHelpInformation() noexcept
         col_option_width, "--bypass-ngw6=<ip>", 
         col_description_width, "Gateway for IPv6 bypass list", 
         col_default_width, "auto-detect");
-    
-    printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--virr=[file/country]", 
-        col_description_width, "Auto-update and take effect IP-list", 
-        col_default_width, "./ip.txt/CN");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--dns-rules=<file>", 
@@ -2173,59 +2084,6 @@ bool PppApplication::OnTick(uint64_t now) noexcept
         return false;
     }
 
-    // Check for IP list updates
-    if (now >= GLOBAL_.virr_next)
-    {
-        // Update the last automatic pull time and decide whether to pull the IP list file based on the en1abled options.
-        GLOBAL_.virr_next = now + (PPP_VIRR_UPDATE_INTERVAL * 1000);
-        if (GLOBAL_.virr)
-        {
-            PullIPList(GLOBAL_.virr_argument, true);
-        }
-    }
-
-    // Check for vBGP updates
-    if ((now - GLOBAL_.vbgp_last) / 1000 >= PPP_VBGP_UPDATE_INTERVAL)
-    {
-        GLOBAL_.vbgp_last = now;
-        if (RouteIPListTablePtr vbgp = client->GetVbgp(); GLOBAL_.vbgp && NULLPTR != vbgp)
-        {
-            // Update all vBGP routes
-            for (auto&& kv : *vbgp) 
-            {
-                // The low-version C/C++ compiler of the OS X platform has source code compilation compatibility.  
-                // In such scenarios, the temporary local variable auto&& [path, url] cannot be captured.
-                const ppp::string& path = kv.first;
-                const ppp::string& url = kv.second;
-                PullIPList(url, 
-                    [path](int count, const ppp::set<ppp::string>& ips) noexcept
-                    {
-                        if (count < 1)
-                        {
-                            return -1;
-                        }
-                        
-                        // Compare with existing file
-                        ppp::set<ppp::string> olds;
-                        ppp::string iplist = ppp::LTrim(ppp::RTrim(File::ReadAllText(path.data())));
-
-                        chnroutes2_getiplist(olds, ppp::string(), iplist);
-                        if (!chnroutes2_equals(ips, olds))
-                        {
-                            ppp::string news = chnroutes2_toiplist(ips);
-                            if (File::WriteAllBytes(path.data(), news.data(), news.size()))
-                            {
-                                ShutdownApplication(true);
-                                return 1;
-                            }
-                        }
-                    
-                        return 0;
-                    });
-            }
-        }
-    }
-
     return true;
 }
 
@@ -2632,16 +2490,8 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
         }
 #endif
 
-        // Configure auto-update settings
-        GLOBAL_.virr = ppp::HasCommandArgument("--virr", argc, argv);
-        if (GLOBAL_.virr) 
-        {
-            GLOBAL_.bypass = network_interface_->Bypass;
-            GLOBAL_.virr_argument = ppp::GetCommandArgument("--virr", argc, argv);
-        }
-
-        // If vbgp is not set up, it is enabled by default; otherwise, the vbgp function is disabled. Enabling the vbgp function will consume performance.
-        GLOBAL_.vbgp = ppp::ToBoolean(ppp::GetCommandArgument("--vbgp", argc, argv, "y").data());
+        // Configure the bypass list
+        GLOBAL_.bypass = network_interface_->Bypass;
     }
 
     // Parse restart configuration
@@ -2658,7 +2508,7 @@ static int Run(const std::shared_ptr<PppApplication>& APP, int prepared_status, 
     // Handle IP list download command
     if (ppp::HasCommandArgument("--pull-iplist", argc, argv))
     {
-        APP->PullIPList(ppp::GetCommandArgument("--pull-iplist", argc, argv), false);
+        APP->PullIPList(ppp::GetCommandArgument("--pull-iplist", argc, argv));
         return -1;
     }
 
@@ -2732,14 +2582,16 @@ int main(int argc, const char* argv[]) noexcept
     // Prepare environment and run
     int prepared_status = APP->PreparedArgumentEnvironment(argc, argv);
 
-    // Redirect stdout to log file if specified (only meaningful with PPP_LOG_VERBOSE)
+    // When --log-file is specified, redirect LOG_TAG output to file instead of stdout.
+    // The dashboard UI (fprintf to stdout) stays on console; only debug/info logs go to file.
 #if defined(PPP_LOG_VERBOSE)
     if (LOG_FILE_PATH_.size() > 0)
     {
-        FILE* log_file = freopen(LOG_FILE_PATH_.data(), "a", stdout);
+        FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
         if (NULLPTR != log_file)
         {
             setvbuf(log_file, NULLPTR, _IONBF, 0);
+            ppp::g_log_stream = log_file;
             fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
         }
     }

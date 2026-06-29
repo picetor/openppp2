@@ -899,10 +899,14 @@ extern "C" {
 #endif
 #endif
 #else
+// Global log output stream – defaults to stdout, can be redirected via --log-file
+namespace ppp {
+    extern FILE*                                        g_log_stream;
+}
 #if defined(_WIN32)
-#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(stdout, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(ppp::g_log_stream, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
 #else   
-#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(stdout, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(ppp::g_log_stream, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
 #endif
 
 #define LOG_INFO(FORMAT, ...)       LOG_TAG("INFO", FORMAT, ##__VA_ARGS__)

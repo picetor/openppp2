@@ -35,7 +35,7 @@ namespace ppp {
             /**
              * @brief Route source configuration for client route imports.
              *
-             * Specifies an external route file or a vBGP peer whose prefixes the
+             * Specifies an external route file whose prefixes the
              * client should install after establishing the tunnel.
              */
             struct RouteConfiguration final {
@@ -44,23 +44,6 @@ namespace ppp {
 #endif
                 uint32_t                                                    ngw;   ///< Next-hop gateway IPv4 address in host byte order; 0 means use tunnel default.
                 ppp::string                                                 path;  ///< Path to a static route file listing CIDR prefixes to import.
-                ppp::string                                                 vbgp;  ///< vBGP peer address string; empty disables dynamic route learning.
-            };
-
-            /**
-             * @brief Structured DNS server entry with multi-protocol metadata.
-             *
-             * Describes a single upstream DNS server with its connection
-             * parameters.  Supports plain UDP/TCP, DoH, and DoT protocols.
-             * DoQ is normalized to DoT at parse time since the resolver does
-             * not yet implement QUIC transport.
-             */
-            struct DnsServerEntry final {
-                ppp::string                                         protocol;   ///< Transport protocol: "doh", "dot", "udp", "tcp". DoQ is auto-normalized to "dot".
-                ppp::string                                         url;        ///< Full URL for DoH endpoints (e.g. "https://dns.google/dns-query").
-                ppp::string                                         hostname;   ///< TLS server name / hostname for certificate verification (DoT/DoH).
-                ppp::string                                         address;    ///< IP:port address literal (e.g. "1.1.1.1:853", "8.8.8.8:53").
-                ppp::vector<ppp::string>                            bootstrap;  ///< Bootstrap DNS servers used to resolve the hostname before connecting.
             };
 
             /**
@@ -255,65 +238,6 @@ namespace ppp {
                     ppp::string                                             password;       ///< SOCKS5 authentication password; empty = no authentication.
                 }                                                           socks_proxy;
             }                                                               client;         ///< Client-mode specific parameters.
-            struct {
-                int                                                         update_interval; ///< VIRR (virtual interface routing refresh) update interval in seconds.
-                int                                                         retry_interval;  ///< Interval in seconds between VIRR retries on failure.
-            }                                                               virr;            ///< Virtual interface routing refresh (VIRR) configuration.
-            struct {
-                int                                                         update_interval; ///< vBGP route announcement refresh interval in seconds.
-            }                                                               vbgp;            ///< Virtual BGP (vBGP) route propagation configuration.
-            struct {
-                bool                                                        enabled;        ///< Enable telemetry output when true; default false for zero-cost on low-end hardware.
-                int                                                         level;          ///< Minimum verbosity level to output: 0=INFO, 1=VERB, 2=DEBUG, 3=TRACE.
-                bool                                                        count;          ///< Enable counter metrics when true.
-                bool                                                        span;           ///< Enable trace spans when true.
-                ppp::string                                                 endpoint;       ///< Optional OTLP/gRPC endpoint; empty uses built-in stderr backend.
-                ppp::string                                                 log_file;       ///< Optional local log file path; empty disables file output.
-                bool                                                        console_log;    ///< Show log events on local console/file sink.
-                bool                                                        console_metric; ///< Show counter/gauge/histogram events on local console/file sink.
-                bool                                                        console_span;   ///< Show span events on local console/file sink.
-            }                                                               telemetry;       ///< Optional telemetry/observability configuration.
-            struct {
-                bool                                                        enabled;        ///< Enable server-coordinated P2P path discovery.
-                ppp::string                                                 mode;           ///< "relay" keeps server relay only; "direct-preferred" advertises peer candidates.
-                int                                                         punch_timeout;  ///< UDP punch timeout in seconds.
-                int                                                         keep_alived;    ///< P2P keep-alive interval in seconds.
-                ppp::vector<ppp::string>                                    stun_servers;   ///< STUN servers used for future UDP candidate discovery.
-                int                                                         max_probes;             ///< Max probe rounds before relay fallback (default 2).
-                int                                                         probe_timeout_ms;       ///< Per-round probe timeout in ms (default 2000).
-                int                                                         heartbeat_interval_ms;  ///< Heartbeat send interval in ms (default 1000).
-                int                                                         heartbeat_miss_max;     ///< Missed heartbeats before Suspect (default 2).
-                int                                                         suspect_timeout_ms;     ///< Suspect recovery timeout in ms (default 2000).
-                int                                                         migration_grace_ms;     ///< NAT rebind grace period in ms (default 5000).
-                int                                                         buffer_pool_count;      ///< Buffer pool count per channel (default 64).
-            }                                                               p2p;            ///< Optional P2P virtual-subnet coordination settings.
-            /**
-             * @brief DNS resolver configuration for multi-protocol upstream support.
-             *
-             * Controls domestic/foreign DNS server selection, unmatched-query
-             * interception policy, and EDNS Client Subnet (ECS) behavior.
-             * When all fields are at their defaults the legacy DNS forwarding
-             * path is used exclusively, preserving backward compatibility.
-             */
-        struct {
-            struct {
-                ppp::string                                         domestic;        ///< Domestic DNS server identifier (provider shorthand, IP, or URL).
-                ppp::string                                         foreign;         ///< Foreign DNS server identifier (provider shorthand, IP, or URL).
-                ppp::vector<DnsServerEntry>                         domestic_entries; ///< Structured domestic DNS server entries; populated from object/array forms.
-                ppp::vector<DnsServerEntry>                         foreign_entries;  ///< Structured foreign DNS server entries; populated from object/array forms.
-            }                                                       servers;         ///< DNS server selection for domestic and foreign queries.
-            bool                                                    intercept_unmatched; ///< When true, unmatched DNS queries are intercepted and routed through dns.servers.foreign; default false preserves legacy behavior.
-            struct {
-                bool                                                enabled;         ///< Enable EDNS Client Subnet (ECS) OPT RR injection for domestic queries; default false.
-                ppp::string                                         override_ip;     ///< Manual exit IP for ECS; highest-priority source. Empty = auto-detect from server or STUN.
-            }                                                       ecs;             ///< EDNS Client Subnet configuration.
-            struct {
-                bool                                                verify_peer;     ///< Verify DoH/DoT server certificates with system/bundled CA roots; default true.
-            }                                                       tls;             ///< TLS verification configuration for encrypted DNS upstreams.
-            struct {
-                ppp::vector<ppp::string>                            candidates;      ///< STUN server candidates for exit IP detection (ip:port or hostname:port).
-            }                                                       stun;            ///< STUN server configuration for ECS fallback.
-        }                                                           dns;             ///< DNS resolver extension configuration.
         public:
             /**
              * @brief Initializes configuration fields to default values.

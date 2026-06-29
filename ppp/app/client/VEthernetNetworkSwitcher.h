@@ -143,7 +143,6 @@ namespace ppp {
                 ForwardInformationTablePtr                                          GetFib()                     noexcept { return fib_; }
                 IForwardingPtr                                                      GetForwarding()              noexcept { return forwarding_; }
                 std::shared_ptr<aggligator::aggligator>                             GetAggligator()              noexcept { return aggligator_; }
-                RouteIPListTablePtr                                                 GetVbgp()                    noexcept { return vbgp_; }
                 bool                                                                IsBlockQUIC()                noexcept { return block_quic_; }
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
@@ -295,7 +294,6 @@ namespace ppp {
                 DNSRuleTable                                                        dns_ruless_[3];
                 RouteInformationTablePtr                                            rib_;
                 ForwardInformationTablePtr                                          fib_;
-                RouteIPListTablePtr                                                 vbgp_;
                 ppp::string                                                         server_ru_;
                 std::shared_ptr<aggligator::aggligator>                             aggligator_;
                 IForwardingPtr                                                      forwarding_;

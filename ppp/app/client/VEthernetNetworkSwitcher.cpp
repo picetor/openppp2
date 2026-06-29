@@ -1455,8 +1455,7 @@ namespace ppp {
                     return false;
                 }
 
-                bool vbgp_url = ppp::net::http::HttpClient::VerifyUri(url, NULLPTR, NULLPTR, NULLPTR, NULLPTR);
-                if (!vbgp_url && !File::Exists(fullpath.data())) {
+                if (!File::Exists(fullpath.data())) {
                     return false;
                 }
                 
@@ -1486,20 +1485,6 @@ namespace ppp {
                     if (tail != ribs->end()) {
                         return false;
                     }
-                }
-
-                if (vbgp_url) {
-                    RouteIPListTablePtr vbgp = vbgp_;
-                    if (NULLPTR == vbgp)  {
-                        vbgp = make_shared_object<RouteIPListTable>();
-                        if (NULLPTR == vbgp) {
-                            return false;
-                        }
-
-                        vbgp_ = vbgp;
-                    }
-
-                    vbgp->emplace(std::make_pair(fullpath, url));
                 }
 
 #if defined(_LINUX) 
@@ -1536,8 +1521,7 @@ namespace ppp {
                     return false;
                 }
 
-                bool vbgp_url = ppp::net::http::HttpClient::VerifyUri(url, NULLPTR, NULLPTR, NULLPTR, NULLPTR);
-                if (!vbgp_url && !File::Exists(fullpath.data())) {
+                if (!File::Exists(fullpath.data())) {
                     return false;
                 }
 
@@ -1567,20 +1551,6 @@ namespace ppp {
                     if (tail != ribs6->end()) {
                         return false;
                     }
-                }
-
-                if (vbgp_url) {
-                    RouteIPListTablePtr vbgp = vbgp_;
-                    if (NULLPTR == vbgp)  {
-                        vbgp = make_shared_object<RouteIPListTable>();
-                        if (NULLPTR == vbgp) {
-                            return false;
-                        }
-
-                        vbgp_ = vbgp;
-                    }
-
-                    vbgp->emplace(std::make_pair(fullpath, url));
                 }
 
 #if defined(_LINUX) 
@@ -2218,9 +2188,6 @@ namespace ppp {
                 ribs6_.reset(); 
                 tun_ni_.reset();
                 underlying_ni_.reset();
-                
-                // Clear the reference pointers of the held vBGP without making specific clarification, as this may pose thread safety issues.
-                vbgp_ = NULLPTR;
 
 #if !defined(_MACOS)
                 // Clear the routing table, forwarding table, and DNS server list of the network card, including cache.

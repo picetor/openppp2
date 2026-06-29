@@ -12,7 +12,6 @@
 #include <ppp/auxiliary/JsonAuxiliary.h>
 #include <ppp/auxiliary/StringAuxiliary.h>
 #include <ppp/diagnostics/Error.h>
-#include <ppp/diagnostics/Telemetry.h>
 
 #include <openssl/evp.h>  /* EVP_get_cipherbyname, EVP_CIPHER_key_length - used for legacy cipher detection */
 
@@ -364,43 +363,6 @@ namespace ppp {
             config.client.websocket.sni = "";
             config.client.log = "";
 
-            config.virr.update_interval = 86400;
-            config.virr.retry_interval = 300;
-            config.vbgp.update_interval = 3600;
-
-            config.telemetry.enabled = false;
-            config.telemetry.level = 0;
-            config.telemetry.count = false;
-            config.telemetry.span = false;
-            config.telemetry.endpoint = "";
-            config.telemetry.log_file = "";
-            config.telemetry.console_log = true;
-            config.telemetry.console_metric = true;
-            config.telemetry.console_span = true;
-
-            config.p2p.enabled = false;
-            config.p2p.mode = "relay";
-            config.p2p.punch_timeout = 5;
-            config.p2p.keep_alived = 15;
-            config.p2p.stun_servers.clear();
-            config.p2p.max_probes = 2;
-            config.p2p.probe_timeout_ms = 2000;
-            config.p2p.heartbeat_interval_ms = 1000;
-            config.p2p.heartbeat_miss_max = 2;
-            config.p2p.suspect_timeout_ms = 2000;
-            config.p2p.migration_grace_ms = 5000;
-            config.p2p.buffer_pool_count = 64;
-
-            config.dns.servers.domestic = "";
-            config.dns.servers.foreign = "";
-            config.dns.servers.domestic_entries.clear();
-            config.dns.servers.foreign_entries.clear();
-            config.dns.intercept_unmatched = false;
-            config.dns.ecs.enabled = false;
-            config.dns.ecs.override_ip = "";
-            config.dns.tls.verify_peer = true;
-            config.dns.stun.candidates.clear();
-
             config._mux_mode_diagnostic.clear();
             memset(config._lcgmods, 0, sizeof(config._lcgmods));
         }
@@ -499,10 +461,6 @@ namespace ppp {
                     &config.key.protocol_key,
                     &config.key.transport,
                     &config.key.transport_key,
-                    &config.dns.servers.domestic,
-                    &config.dns.servers.foreign,
-                    &config.dns.ecs.override_ip,
-                    &config.p2p.mode,
                 };
                 LRTrim(strings, arraysizeof(strings));
             }
@@ -695,34 +653,6 @@ namespace ppp {
 
             LRTrim(config, 0);
             LRTrim(config, 1);
-
-            // Trim string fields inside structured DNS server entries.
-            for (auto* entries : { &config.dns.servers.domestic_entries, &config.dns.servers.foreign_entries }) {
-                for (auto& entry : *entries) {
-                    entry.protocol  = LTrim(RTrim(entry.protocol));
-                    entry.url       = LTrim(RTrim(entry.url));
-                    entry.hostname  = LTrim(RTrim(entry.hostname));
-                    entry.address   = LTrim(RTrim(entry.address));
-                    for (auto& b : entry.bootstrap) {
-                        b = LTrim(RTrim(b));
-                    }
-                    // Remove empty bootstrap entries.
-                    entry.bootstrap.erase(
-                        std::remove_if(entry.bootstrap.begin(), entry.bootstrap.end(),
-                            [](const ppp::string& s) noexcept { return s.empty(); }),
-                        entry.bootstrap.end());
-                }
-            }
-
-            for (auto* vec : { &config.p2p.stun_servers }) {
-                for (auto& s : *vec) {
-                    s = LTrim(RTrim(s));
-                }
-                vec->erase(
-                    std::remove_if(vec->begin(), vec->end(),
-                        [](const ppp::string& s) noexcept { return s.empty(); }),
-                    vec->end());
-            }
 
             if (config.client.guid.empty()) {
                 config.client.guid = StringAuxiliary::Int128ToGuidString(MAKE_OWORD(UINT64_MAX, UINT64_MAX));
@@ -1051,40 +981,7 @@ namespace ppp {
 
             config.client.bandwidth = std::max<int64_t>(0, config.client.bandwidth);
 
-            config.virr.retry_interval = std::max<int>(1, config.virr.retry_interval);
-            config.virr.update_interval = std::max<int>(1, config.virr.update_interval);
-            config.vbgp.update_interval = std::max<int>(1, config.vbgp.update_interval);
 
-            config.p2p.mode = ToLower(config.p2p.mode);
-            if (config.p2p.mode != "direct-preferred") {
-                config.p2p.mode = "relay";
-            }
-            if (!config.p2p.enabled) {
-                config.p2p.mode = "relay";
-            }
-            config.p2p.punch_timeout = std::max<int>(1, config.p2p.punch_timeout);
-            config.p2p.keep_alived = std::max<int>(1, config.p2p.keep_alived);
-            config.p2p.max_probes = std::clamp<int>(config.p2p.max_probes, 1, 10);
-            config.p2p.probe_timeout_ms = std::clamp<int>(config.p2p.probe_timeout_ms, 500, 10000);
-            config.p2p.heartbeat_interval_ms = std::clamp<int>(config.p2p.heartbeat_interval_ms, 500, 5000);
-            config.p2p.heartbeat_miss_max = std::clamp<int>(config.p2p.heartbeat_miss_max, 1, 10);
-            config.p2p.suspect_timeout_ms = std::clamp<int>(config.p2p.suspect_timeout_ms, 500, 10000);
-            config.p2p.migration_grace_ms = std::clamp<int>(config.p2p.migration_grace_ms, 1000, 30000);
-            config.p2p.buffer_pool_count = std::clamp<int>(config.p2p.buffer_pool_count, 8, 256);
-
-            // Validate dns.ecs.override_ip: if non-empty, must be a valid IP address.
-            // Accept both IPv4 and IPv6.  ECS first version primarily uses IPv4,
-            // but the configuration field itself allows either family.
-            if (!config.dns.ecs.override_ip.empty()) {
-                boost::system::error_code dns_ec;
-                boost::asio::ip::address dns_addr = StringToAddress(config.dns.ecs.override_ip.data(), dns_ec);
-                if (dns_ec || IPEndPoint::IsInvalid(dns_addr)) {
-                    config.dns.ecs.override_ip = "";
-                }
-                else {
-                    config.dns.ecs.override_ip = Ipep::ToAddressString<ppp::string>(dns_addr);
-                }
-            }
 
             config._lcgmods[LCGMOD_TYPE_TRANSMISSION] = ppp::cryptography::ssea::lcgmod(config.key.kf, EVP_HEADER_MSS_MIN_MOD, EVP_HEADER_MSS_MAX_MOD);
             config._lcgmods[LCGMOD_TYPE_STATIC] = ppp::cryptography::ssea::lcgmod(config.key.kf, VEP_HEADER_MSS_MIN_MOD, VEP_HEADER_MSS_MAX_MOD);
@@ -1332,17 +1229,8 @@ namespace ppp {
                 return false;
             }
 
-            ppp::string vbgp = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["vbgp"])));
-            if (!ppp::net::http::HttpClient::VerifyUri(vbgp, NULLPTR, NULLPTR, NULLPTR, NULLPTR)) {
-                if (ppp::diagnostics::ErrorCode::Success != ppp::diagnostics::GetLastErrorCode()) {
-                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::Success);
-                }
-                vbgp = ppp::string();
-            }
-
             route.ngw = htonl(ngw.to_v4().to_uint());
             route.path = path;
-            route.vbgp = vbgp;
 #if defined(_LINUX)
             route.nic = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["nic"])));
 #endif
@@ -1375,169 +1263,6 @@ namespace ppp {
                     s.emplace_back(route);
                 }
             }
-        }
-
-        /**
-         * @brief Normalizes a DNS protocol string and applies DoQ→DoT fallback.
-         * @param raw_protocol Raw protocol string from JSON.
-         * @return Normalized lowercase protocol string.
-         *
-         * DoQ is downgraded to "dot" because the resolver does not yet
-         * implement QUIC transport, so advertising DoQ would be an
-         * empty promise.
-         */
-        static ppp::string NormalizeDnsProtocol(const ppp::string& raw_protocol) noexcept {
-            ppp::string proto = ToLower(LTrim(RTrim(raw_protocol)));
-            if (proto == "doq") {
-                return "dot";
-            }
-            return proto;
-        }
-
-        /**
-         * @brief Parses a single DNS server entry from a JSON object.
-         * @param entry Output DnsServerEntry.
-         * @param json Source JSON node (must be an object).
-         * @return True when at least one meaningful field is populated.
-         */
-        static bool ParseDnsServerEntry(AppConfiguration::DnsServerEntry& entry, const Json::Value& json) noexcept {
-            if (!json.isObject()) {
-                return false;
-            }
-
-            entry.protocol  = NormalizeDnsProtocol(JsonAuxiliary::AsValue<ppp::string>(json["protocol"]));
-            entry.url       = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["url"])));
-            entry.hostname  = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["hostname"])));
-            entry.address   = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["address"])));
-            entry.bootstrap.clear();
-
-            // Parse bootstrap list: accept array, object values, or single string.
-            const Json::Value& bootstrap_json = json["bootstrap"];
-            if (bootstrap_json.isArray()) {
-                for (Json::ArrayIndex i = 0; i < bootstrap_json.size(); i++) {
-                    ppp::string s = LTrim(RTrim(JsonAuxiliary::AsString(bootstrap_json[i])));
-                    if (!s.empty()) {
-                        entry.bootstrap.emplace_back(std::move(s));
-                    }
-                }
-            }
-            elif(bootstrap_json.isString()) {
-                ppp::string s = LTrim(RTrim(JsonAuxiliary::AsString(bootstrap_json)));
-                if (!s.empty()) {
-                    entry.bootstrap.emplace_back(std::move(s));
-                }
-            }
-
-            // Accept if any identifying field is present.
-            return !entry.protocol.empty() || !entry.url.empty() ||
-                   !entry.hostname.empty() || !entry.address.empty();
-        }
-
-        /**
-         * @brief Parses a DNS server specification that may be a string, object, or array.
-         *
-         * - **string**: Stored in the legacy shorthand field and also as a single entry
-         *   with address field populated.
-         * - **object**: Parsed as a structured DnsServerEntry into the entries list.
-         * - **array**: Each element is parsed individually; strings go to legacy shorthand
-         *   (first element only) and entries list, objects go to entries list only.
-         *
-         * @param shorthand Output legacy string shorthand (single string or first of array).
-         * @param entries   Output structured entry list.
-         * @param json      Source JSON node.
-         * @return True when at least one entry or shorthand was produced.
-         */
-        static bool ParseDnsServerSpec(ppp::string& shorthand, ppp::vector<AppConfiguration::DnsServerEntry>& entries, const Json::Value& json) noexcept {
-            using DnsServerEntry = AppConfiguration::DnsServerEntry;
-
-            shorthand.clear();
-            entries.clear();
-
-            if (json.isNull()) {
-                return false;
-            }
-
-            // --- string shorthand: "cloudflare", "1.1.1.1:53", etc. ---
-            if (json.isString()) {
-                shorthand = LTrim(RTrim(JsonAuxiliary::AsString(json)));
-                if (!shorthand.empty()) {
-                    DnsServerEntry entry;
-                    entry.address = shorthand;
-                    entries.emplace_back(std::move(entry));
-                    return true;
-                }
-                return false;
-            }
-
-            // --- object: single structured entry ---
-            if (json.isObject()) {
-                DnsServerEntry entry;
-                if (ParseDnsServerEntry(entry, json)) {
-                    entries.emplace_back(std::move(entry));
-                    return true;
-                }
-                return false;
-            }
-
-            // --- array: mixed string/object entries ---
-            if (json.isArray()) {
-                bool first_string = true;
-                for (Json::ArrayIndex i = 0; i < json.size(); i++) {
-                    const Json::Value& element = json[i];
-
-                    if (element.isString()) {
-                        ppp::string s = LTrim(RTrim(JsonAuxiliary::AsString(element)));
-                        if (!s.empty()) {
-                            // First string element also populates the legacy shorthand.
-                            if (first_string) {
-                                shorthand = s;
-                                first_string = false;
-                            }
-                            DnsServerEntry entry;
-                            entry.address = s;
-                            entries.emplace_back(std::move(entry));
-                        }
-                    }
-                    elif(element.isObject()) {
-                        DnsServerEntry entry;
-                        if (ParseDnsServerEntry(entry, element)) {
-                            entries.emplace_back(std::move(entry));
-                        }
-                    }
-                }
-                return !entries.empty();
-            }
-
-            return false;
-        }
-
-        /**
-         * @brief Serializes a DnsServerEntry to a JSON object.
-         * @param entry Source entry.
-         * @return JSON object with populated fields only.
-         */
-        static Json::Value DnsServerEntryToJson(const AppConfiguration::DnsServerEntry& entry) noexcept {
-            Json::Value jo;
-            if (!entry.protocol.empty()) {
-                jo["protocol"] = entry.protocol;
-            }
-            if (!entry.url.empty()) {
-                jo["url"] = entry.url;
-            }
-            if (!entry.hostname.empty()) {
-                jo["hostname"] = entry.hostname;
-            }
-            if (!entry.address.empty()) {
-                jo["address"] = entry.address;
-            }
-            if (!entry.bootstrap.empty()) {
-                Json::Value arr(Json::arrayValue);
-                for (const ppp::string& b : entry.bootstrap) {
-                    arr.append(b);
-                }
-                jo["bootstrap"] = arr;
-            }
-            return jo;
         }
 
         /**
@@ -1685,85 +1410,6 @@ namespace ppp {
             config.client.websocket.host = JsonAuxiliary::AsValue<ppp::string>(json["client"]["websocket"]["host"]);
             config.client.websocket.sni = JsonAuxiliary::AsValue<ppp::string>(json["client"]["websocket"]["sni"]);
             config.client.log = JsonAuxiliary::AsValue<ppp::string>(json["client"]["log"]);
-
-            AssignIfPresent(config.virr.update_interval, json["virr"]["update-interval"]);
-            AssignIfPresent(config.virr.retry_interval, json["virr"]["retry-interval"]);
-            AssignIfPresent(config.vbgp.update_interval, json["vbgp"]["update-interval"]);
-
-            AssignBoolIfPresent(config.telemetry.enabled, json["telemetry"]["enabled"]);
-            AssignIfPresent(config.telemetry.level, json["telemetry"]["level"]);
-            AssignBoolIfPresent(config.telemetry.count, json["telemetry"]["count"]);
-            AssignBoolIfPresent(config.telemetry.span, json["telemetry"]["span"]);
-            AssignIfPresent(config.telemetry.endpoint, json["telemetry"]["endpoint"]);
-            AssignIfPresent(config.telemetry.log_file, json["telemetry"]["log-file"]);
-            AssignBoolIfPresent(config.telemetry.console_log, json["telemetry"]["console-log"]);
-            AssignBoolIfPresent(config.telemetry.console_metric, json["telemetry"]["console-metric"]);
-            AssignBoolIfPresent(config.telemetry.console_span, json["telemetry"]["console-span"]);
-
-            {
-                const Json::Value& p2p_json = json["p2p"];
-                if (p2p_json.isObject()) {
-                    AssignBoolIfPresent(config.p2p.enabled, p2p_json["enabled"]);
-                    AssignIfPresent(config.p2p.mode, p2p_json["mode"]);
-                    AssignIfPresent(config.p2p.punch_timeout, p2p_json["punch-timeout"]);
-                    AssignIfPresent(config.p2p.keep_alived, p2p_json["keep-alived"]);
-
-                    const Json::Value& stun_json = p2p_json["stun"]["servers"];
-                    if (stun_json.isArray()) {
-                        config.p2p.stun_servers.clear();
-                        for (Json::ArrayIndex i = 0; i < stun_json.size(); i++) {
-                            ppp::string s = LTrim(RTrim(JsonAuxiliary::AsString(stun_json[i])));
-                            if (!s.empty()) {
-                                config.p2p.stun_servers.emplace_back(std::move(s));
-                            }
-                        }
-                    }
-                    AssignIfPresent(config.p2p.max_probes, p2p_json["max-probes"]);
-                    AssignIfPresent(config.p2p.probe_timeout_ms, p2p_json["probe-timeout-ms"]);
-                    AssignIfPresent(config.p2p.heartbeat_interval_ms, p2p_json["heartbeat-interval-ms"]);
-                    AssignIfPresent(config.p2p.heartbeat_miss_max, p2p_json["heartbeat-miss-max"]);
-                    AssignIfPresent(config.p2p.suspect_timeout_ms, p2p_json["suspect-timeout-ms"]);
-                    AssignIfPresent(config.p2p.migration_grace_ms, p2p_json["migration-grace-ms"]);
-                    AssignIfPresent(config.p2p.buffer_pool_count, p2p_json["buffer-pool-count"]);
-                }
-            }
-
-            // DNS resolver extension configuration.
-            // domestic/foreign accept three forms:
-            //   string  → legacy shorthand stored in domestic/foreign + single entry
-            //   object  → structured DnsServerEntry
-            //   array   → mixed string/object entries, first string → legacy shorthand
-            {
-                ppp::string domestic_shorthand;
-                ppp::vector<DnsServerEntry> domestic_entries;
-                ParseDnsServerSpec(domestic_shorthand, domestic_entries, json["dns"]["servers"]["domestic"]);
-                config.dns.servers.domestic = domestic_shorthand;
-                config.dns.servers.domestic_entries = std::move(domestic_entries);
-
-                ppp::string foreign_shorthand;
-                ppp::vector<DnsServerEntry> foreign_entries;
-                ParseDnsServerSpec(foreign_shorthand, foreign_entries, json["dns"]["servers"]["foreign"]);
-                config.dns.servers.foreign = foreign_shorthand;
-                config.dns.servers.foreign_entries = std::move(foreign_entries);
-            }
-            AssignBoolIfPresent(config.dns.intercept_unmatched, json["dns"]["intercept-unmatched"]);
-            AssignBoolIfPresent(config.dns.ecs.enabled, json["dns"]["ecs"]["enabled"]);
-            config.dns.ecs.override_ip = JsonAuxiliary::AsValue<ppp::string>(json["dns"]["ecs"]["override-ip"]);
-            AssignBoolIfPresent(config.dns.tls.verify_peer, json["dns"]["tls"]["verify-peer"]);
-
-            // STUN candidates: array of "ip:port" or "hostname:port" strings.
-            {
-                const Json::Value& stun_json = json["dns"]["stun"]["candidates"];
-                if (stun_json.isArray()) {
-                    config.dns.stun.candidates.clear();
-                    for (Json::ArrayIndex i = 0; i < stun_json.size(); i++) {
-                        ppp::string s = LTrim(RTrim(JsonAuxiliary::AsString(stun_json[i])));
-                        if (!s.empty()) {
-                            config.dns.stun.candidates.emplace_back(std::move(s));
-                        }
-                    }
-                }
-            }
 
             // Geo-rules configuration (Phase G) — 已独立为 picetor/openppp2-geo-rules 项目
 
@@ -1969,7 +1615,6 @@ namespace ppp {
                 jo["nic"] = route.nic;
 #endif
                 jo["path"] = route.path;
-                jo["vbgp"] = route.vbgp;
                 routes.append(jo);
             }
 
@@ -1992,85 +1637,6 @@ namespace ppp {
             client["log"] = config.client.log;
 
             root["client"] = client;
-
-            Json::Value virr;
-            virr["update-interval"] = config.virr.update_interval;
-            virr["retry-interval"] = config.virr.retry_interval;
-            root["virr"] = virr;
-
-            Json::Value vbgp;
-            vbgp["update-interval"] = config.vbgp.update_interval;
-            root["vbgp"] = vbgp;
-
-            Json::Value telemetry;
-            telemetry["enabled"] = config.telemetry.enabled;
-            telemetry["level"] = config.telemetry.level;
-            telemetry["count"] = config.telemetry.count;
-            telemetry["span"] = config.telemetry.span;
-            telemetry["endpoint"] = config.telemetry.endpoint;
-            telemetry["log-file"] = config.telemetry.log_file;
-            telemetry["console-log"] = config.telemetry.console_log;
-            telemetry["console-metric"] = config.telemetry.console_metric;
-            telemetry["console-span"] = config.telemetry.console_span;
-            root["telemetry"] = telemetry;
-
-            Json::Value p2p;
-            p2p["enabled"] = config.p2p.enabled;
-            p2p["mode"] = config.p2p.mode;
-            p2p["punch-timeout"] = config.p2p.punch_timeout;
-            p2p["keep-alived"] = config.p2p.keep_alived;
-            p2p["max-probes"] = config.p2p.max_probes;
-            p2p["probe-timeout-ms"] = config.p2p.probe_timeout_ms;
-            p2p["heartbeat-interval-ms"] = config.p2p.heartbeat_interval_ms;
-            p2p["heartbeat-miss-max"] = config.p2p.heartbeat_miss_max;
-            p2p["suspect-timeout-ms"] = config.p2p.suspect_timeout_ms;
-            p2p["migration-grace-ms"] = config.p2p.migration_grace_ms;
-            p2p["buffer-pool-count"] = config.p2p.buffer_pool_count;
-            if (!config.p2p.stun_servers.empty()) {
-                Json::Value stun_servers(Json::arrayValue);
-                for (const ppp::string& s : config.p2p.stun_servers) {
-                    stun_servers.append(s);
-                }
-                p2p["stun"]["servers"] = stun_servers;
-            }
-            root["p2p"] = p2p;
-
-            Json::Value dns;
-            // Serialize domestic/foreign: emit structured array when entries exist,
-            // otherwise emit legacy string shorthand.
-            if (!config.dns.servers.domestic_entries.empty()) {
-                Json::Value arr(Json::arrayValue);
-                for (const DnsServerEntry& entry : config.dns.servers.domestic_entries) {
-                    arr.append(DnsServerEntryToJson(entry));
-                }
-                dns["servers"]["domestic"] = arr;
-            }
-            else {
-                dns["servers"]["domestic"] = config.dns.servers.domestic;
-            }
-
-            if (!config.dns.servers.foreign_entries.empty()) {
-                Json::Value arr(Json::arrayValue);
-                for (const DnsServerEntry& entry : config.dns.servers.foreign_entries) {
-                    arr.append(DnsServerEntryToJson(entry));
-                }
-                dns["servers"]["foreign"] = arr;
-            }
-            else {
-                dns["servers"]["foreign"] = config.dns.servers.foreign;
-            }
-            dns["intercept-unmatched"] = config.dns.intercept_unmatched;
-            dns["ecs"]["enabled"] = config.dns.ecs.enabled;
-            dns["ecs"]["override-ip"] = config.dns.ecs.override_ip;
-            dns["tls"]["verify-peer"] = config.dns.tls.verify_peer;
-            if (!config.dns.stun.candidates.empty()) {
-                Json::Value stun_cands(Json::arrayValue);
-                for (const ppp::string& c : config.dns.stun.candidates) {
-                    stun_cands.append(c);
-                }
-                dns["stun"]["candidates"] = stun_cands;
-            }
-            root["dns"] = dns;
 
             return root;
         }
@@ -2100,48 +1666,32 @@ namespace ppp {
             /* Protocol key */
             if (config.key.protocol_key == default_key) {
                 ++warnings;
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Protocol key uses well-known default value; change for production use");
-                ppp::ConsoleFormat("[security] WARN: protocol key uses well-known default — change for production\n");
+                ppp::ConsoleFormat("[security] WARN: protocol key uses well-known default \u2014 change for production\n");
             }
             else if (config.key.protocol_key.size() < 8) {
                 ++warnings;
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Protocol key shorter than 8 bytes; trivially brute-forced");
-                ppp::ConsoleFormat("[security] WARN: protocol key shorter than 8 bytes — trivially brute-forced\n");
+                ppp::ConsoleFormat("[security] WARN: protocol key shorter than 8 bytes \u2014 trivially brute-forced\n");
             }
 
             /* Transport key */
             if (config.key.transport_key == default_key) {
                 ++warnings;
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Transport key uses well-known default value; change for production use");
-                ppp::ConsoleFormat("[security] WARN: transport key uses well-known default — change for production\n");
+                ppp::ConsoleFormat("[security] WARN: transport key uses well-known default \u2014 change for production\n");
             }
             else if (config.key.transport_key.size() < 8) {
                 ++warnings;
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Transport key shorter than 8 bytes; trivially brute-forced");
-                ppp::ConsoleFormat("[security] WARN: transport key shorter than 8 bytes — trivially brute-forced\n");
+                ppp::ConsoleFormat("[security] WARN: transport key shorter than 8 bytes \u2014 trivially brute-forced\n");
             }
 
             /* Plaintext mode */
             if (config.key.plaintext) {
                 ++warnings;
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Plaintext mode enabled (key.plaintext=true); packets transmitted without encryption");
-                    ppp::ConsoleFormat("[security] WARN: plaintext mode enabled (key.plaintext=true) - not suitable for untrusted networks\n");
+                ppp::ConsoleFormat("[security] WARN: plaintext mode enabled (key.plaintext=true) - not suitable for untrusted networks\n");
             }
 
             /* Summary */
             if (warnings > 0) {
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Startup security diagnostics: %d warning(s) - startup continues (non-fatal)", warnings);
                 ppp::ConsoleFormat("[security] Startup security diagnostics: %d warning(s) - startup continues (non-fatal)\n", warnings);
-            }
-            else {
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "security",
-                    "Startup security diagnostics: all checks passed");
             }
         }
 
@@ -2156,12 +1706,9 @@ namespace ppp {
         void AppConfiguration::EmitMuxDiagnostics() noexcept {
             const AppConfiguration& config = *this;
 
-            ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "mux",
-                "Active scheduler mode: %s", config.mux.mode.c_str());
             ppp::ConsoleFormat("[mux] scheduler mode: %s\n", config.mux.mode.c_str());
 
             if (!config._mux_mode_diagnostic.empty()) {
-                ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "mux", "%s", config._mux_mode_diagnostic.c_str());
                 ppp::ConsoleFormat("[mux] WARN: %s - startup continues (non-fatal)\n", config._mux_mode_diagnostic.c_str());
             }
         }

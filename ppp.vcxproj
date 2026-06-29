@@ -394,11 +394,8 @@
     <ClCompile Include="ppp\app\server\IPv4LeasePool.cpp" />
     <ClCompile Include="ppp\diagnostics\Error.cpp" />
     <ClCompile Include="ppp\diagnostics\ErrorHandler.cpp" />
-    <ClCompile Include="ppp\diagnostics\LinkTelemetry.cpp" />
-    <ClCompile Include="ppp\diagnostics\Telemetry.cpp" />
     <ClCompile Include="ppp\dns\DnsResolver.cpp" />
     <ClCompile Include="ppp\ipv6\IPv6Auxiliary.cpp" />
-    <ClCompile Include="ppp\p2p\P2PNatClassifier.cpp" />
     <ClCompile Include="windows\ppp\ipv6\WIN32_IPv6Auxiliary.cpp" />
     <ClInclude Include="common\aesni\aes.h" />
     <ClInclude Include="common\aggligator\aggligator.h" />
@@ -616,8 +613,6 @@
     <ClInclude Include="ppp\diagnostics\Error.h" />
     <ClInclude Include="ppp\diagnostics\ErrorCodes.def" />
     <ClInclude Include="ppp\diagnostics\ErrorHandler.h" />
-    <ClInclude Include="ppp\diagnostics\LinkTelemetry.h" />
-    <ClInclude Include="ppp\diagnostics\Telemetry.h" />
     <ClInclude Include="ppp\hash\hash_bytes.h" />
     <ClInclude Include="ppp\net\asio\vdns.h" />
     <ClInclude Include="ppp\dns\DnsResolver.h" />
@@ -675,8 +670,6 @@
     <ClInclude Include="ppp\expressions\YCombinator.h" />
     <ClInclude Include="ppp\ipv6\IPv6Auxiliary.h" />
     <ClInclude Include="ppp\ipv6\IPv6Packet.h" />
-    <ClInclude Include="ppp\p2p\P2PDefs.h" />
-    <ClInclude Include="ppp\p2p\P2PNatClassifier.h" />
     <ClInclude Include="ppp\net\asio\asio.h" />
     <ClInclude Include="ppp\net\native\checksum.h" />
     <ClInclude Include="ppp\net\native\eth.h" />
