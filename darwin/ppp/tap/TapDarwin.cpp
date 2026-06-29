@@ -8,7 +8,9 @@
 #include <ppp/collections/Dictionary.h>
 
 #include <sys/socket.h>
+#if !(defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000)
 #include <sys/sysctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 

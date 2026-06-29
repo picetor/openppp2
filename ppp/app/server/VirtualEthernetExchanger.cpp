@@ -1563,7 +1563,7 @@ namespace ppp {
                     return false;
                 }
 
-                return switcher->SendIPv6TransitPacket(ipv6, packet_length);
+                return switcher->SendIPv6TransitPacket(packet, packet_length);
             }
         }
     }
