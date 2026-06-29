@@ -374,7 +374,7 @@ namespace ppp {
                 ppp::string vip = JsonAuxiliary::AsString(json["virtual-ip"]);
                 if (!vip.empty()) {
                     boost::system::error_code ec;
-                    boost::asio::ip::address_v4 addr = boost::asio::ip::make_address_v4(vip, ec);
+                    boost::asio::ip::address_v4 addr = boost::asio::ip::make_address_v4(vip.c_str(), ec);
                     if (!ec) {
                         value.virtual_ip = htonl(addr.to_uint());
                     }
@@ -383,7 +383,7 @@ namespace ppp {
                 ppp::string peer_vip = JsonAuxiliary::AsString(json["peer-virtual-ip"]);
                 if (!peer_vip.empty()) {
                     boost::system::error_code ec;
-                    boost::asio::ip::address_v4 addr = boost::asio::ip::make_address_v4(peer_vip, ec);
+                    boost::asio::ip::address_v4 addr = boost::asio::ip::make_address_v4(peer_vip.c_str(), ec);
                     if (!ec) {
                         value.peer_virtual_ip = htonl(addr.to_uint());
                     }
