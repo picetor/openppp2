@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: picetor/openppp2
-          ref: master
+          ref: inet6
 
       - name: Install system dependencies
         run: |
