@@ -690,6 +690,35 @@ namespace ppp {
                         state);
                 }
 
+                // Pre-pin: before installing the default route via TAP, add a /128 route for the
+                // VPN server's IPv6 address through the physical NIC. This prevents the
+                // default route change from breaking connectivity to the VPN server itself.
+                {
+                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                    if (NULLPTR != exchanger) {
+                        boost::asio::ip::address server_address = exchanger->server_url_.remoteEP.address();
+                        if (server_address.is_v6() && !server_address.is_unspecified()) {
+                            std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
+                            if (NULLPTR != underlying_ni && !underlying_ni->Name.empty()) {
+                                std::string server_ip_str = server_address.to_string();
+                                std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
+                                if (!gw6_str.empty()) {
+#if defined(_LINUX)
+                                    std::string cmd = "ip -6 route add " + server_ip_str + "/128 via " + gw6_str + " dev " + underlying_ni->Name;
+                                    system(cmd.c_str());
+#elif defined(_MACOS)
+                                    std::string cmd = "route -n add -inet6 " + server_ip_str + "/128 " + gw6_str;
+                                    system(cmd.c_str());
+#elif defined(_WIN32)
+                                    std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + underlying_ni->Name + "\" " + gw6_str;
+                                    system(cmd.c_str());
+#endif
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 2. Apply the default IPv6 route via the assigned gateway.
                 if (extensions.AssignedIPv6Gateway.is_v6()) {
                     ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
