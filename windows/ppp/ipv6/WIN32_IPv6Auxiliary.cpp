@@ -197,10 +197,18 @@ namespace ppp {
                         return false;
                     }
 
+                    // Split ::/0 into ::/1 and 8000::/1 (same approach as IPv4's
+                    // 0.0.0.0/1 + 128.0.0.0/1) to avoid overwriting any existing
+                    // default route on the physical NIC. The server's /128 pin route
+                    // will naturally take priority over the less specific /1 routes.
                     if (gateway.is_v6()) {
                         std::string gw_std = gateway.to_string();
                         ppp::string gw_str(gw_std.data(), gw_std.size());
-                        if (!ppp::win32::network::SetIPv6DefaultGateway(context.InterfaceIndex, gw_str, 0)) {
+                        if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "::", 1, gw_str, 0)) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                            return false;
+                        }
+                        if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str, 0)) {
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
@@ -210,10 +218,17 @@ namespace ppp {
                         return true;
                     }
 
-                    if (!nat_mode || !ppp::win32::network::SetIPv6DefaultRoute(context.InterfaceIndex, 0)) {
-                        ppp::diagnostics::SetLastErrorCode(!nat_mode ?
-                            ppp::diagnostics::ErrorCode::IPv6GatewayMissing :
-                            ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                    if (!nat_mode) {
+                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6GatewayMissing);
+                        return false;
+                    }
+
+                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "::", 1, ppp::string(), 0)) {
+                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                        return false;
+                    }
+                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "8000::", 1, ppp::string(), 0)) {
+                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }
 

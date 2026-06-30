@@ -851,7 +851,15 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6GatewayMissing);
                     }
 
-                    if (!ppp::tap::TapLinux::AddRoute6(context.InterfaceName, "::", 0, gateway_string)) {
+                    // Split ::/0 into ::/1 and 8000::/1 (same approach as IPv4's
+                    // 0.0.0.0/1 + 128.0.0.0/1) to avoid overwriting any existing
+                    // default route on the physical NIC. The server's /128 pin route
+                    // will naturally take priority over the less specific /1 routes.
+                    if (!ppp::tap::TapLinux::AddRoute6(context.InterfaceName, "::", 1, gateway_string)) {
+                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                        return false;
+                    }
+                    if (!ppp::tap::TapLinux::AddRoute6(context.InterfaceName, "8000::", 1, gateway_string)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }

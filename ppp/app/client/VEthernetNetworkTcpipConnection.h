@@ -52,7 +52,14 @@ namespace ppp {
                         return -1;
                     }
 
-                    bool bypass_ip_address_ok = switcher->IsBypassIpAddress(remoteEP.address());
+                    boost::asio::ip::address remote_address = remoteEP.address();
+                    bool bypass_ip_address_ok = false;
+                    if (remote_address.is_v4()) {
+                        bypass_ip_address_ok = switcher->IsBypassIpAddress(remote_address);
+                    }
+                    elif (remote_address.is_v6()) {
+                        bypass_ip_address_ok = switcher->IsBypassIpAddress6(remote_address);
+                    }
                     if (!bypass_ip_address_ok) {
                         return 1;
                     }

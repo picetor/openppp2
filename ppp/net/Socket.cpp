@@ -1090,5 +1090,46 @@ namespace ppp {
                 return local_endpoint.sin_addr.s_addr;
             }
         }
+
+        boost::asio::ip::address Socket::GetBestInterfaceIP6(const boost::asio::ip::address& destination) noexcept {
+            if (!destination.is_v6()) {
+                return boost::asio::ip::address();
+            }
+
+            int sock_fd = socket(AF_INET6, SOCK_DGRAM, 0);
+            if (sock_fd == -1) {
+                return boost::asio::ip::address();
+            }
+
+            boost::asio::ip::address_v6 dest_v6 = destination.to_v6();
+            struct sockaddr_in6 remote_endpoint;
+            ::memset(&remote_endpoint, 0, sizeof(remote_endpoint));
+
+            remote_endpoint.sin6_family = AF_INET6;
+            remote_endpoint.sin6_port = htons(1);
+            ::memcpy(&remote_endpoint.sin6_addr, dest_v6.to_bytes().data(), 16);
+
+            Socket::SetNonblocking(sock_fd, true);
+            ::connect(sock_fd, reinterpret_cast<struct sockaddr*>(&remote_endpoint), sizeof(remote_endpoint));
+
+            struct sockaddr_in6 local_endpoint;
+            socklen_t local_endpoint_size = sizeof(local_endpoint);
+            ::memset(&local_endpoint, 0, sizeof(local_endpoint));
+
+            int err = ::getsockname(sock_fd, reinterpret_cast<struct sockaddr*>(&local_endpoint), &local_endpoint_size);
+            Socket::Closesocket(sock_fd);
+
+            if (err < 0) {
+                return boost::asio::ip::address();
+            }
+            elif (local_endpoint.sin6_family != AF_INET6) {
+                return boost::asio::ip::address();
+            }
+            else {
+                boost::asio::ip::address_v6::bytes_type bytes;
+                ::memcpy(bytes.data(), &local_endpoint.sin6_addr, 16);
+                return boost::asio::ip::address_v6(bytes);
+            }
+        }
     }
 }

@@ -118,6 +118,7 @@ namespace ppp {
             }
 
             static uint32_t                                                                             GetBestInterfaceIP(uint32_t destination) noexcept;
+            static boost::asio::ip::address                                                             GetBestInterfaceIP6(const boost::asio::ip::address& destination) noexcept;
 
         public:
             static void                                                                                 AdjustDefaultSocketOptional(int sockfd, bool in4) noexcept;

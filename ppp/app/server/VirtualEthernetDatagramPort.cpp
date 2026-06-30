@@ -79,9 +79,32 @@ namespace ppp {
                 }
 
                 std::shared_ptr<VirtualEthernetSwitcher> switcher = exchanger_->GetSwitcher();
-                boost::asio::ip::address address = switcher->GetInterfaceIP();
 
-                bool success = VirtualEthernetPacket::OpenDatagramSocket(socket_, address, IPEndPoint::MinPort, sourceEP_) && Loopback();
+                bool success = false;
+                bool ipv6_enabled = switcher->IsIPv6ServerEnabled();
+
+                // When IPv6 server is enabled, try a dual-stack IPv6 socket first.
+                // A dual-stack socket (IPV6_V6ONLY=0) can send to both v4 and v6
+                // destinations, and receive responses from either family.
+                if (ipv6_enabled) {
+                    success = Socket::OpenSocket(socket_, boost::asio::ip::address_v6::any(), IPEndPoint::MinPort);
+                    if (success) {
+#if defined(IPV6_V6ONLY)
+                        int off = 0;
+                        ::setsockopt(socket_.native_handle(), IPPROTO_IPV6, IPV6_V6ONLY,
+                            reinterpret_cast<const char*>(&off), sizeof(off));
+#endif
+                        success = Loopback();
+                    }
+                }
+
+                // Fallback: open a v4 (or protocol-matched) socket as before.
+                if (!success) {
+                    boost::asio::ip::address address = switcher->GetInterfaceIP();
+                    success = VirtualEthernetPacket::OpenDatagramSocket(socket_, address, IPEndPoint::MinPort, sourceEP_)
+                        && Loopback();
+                }
+
                 if (success) {
                     boost::system::error_code ec;
                     localEP_ = socket_.local_endpoint(ec);

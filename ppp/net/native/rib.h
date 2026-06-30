@@ -94,6 +94,25 @@ namespace ppp
             private:
                 RouteEntriesTable                                       routes;
             };
+
+            // FIB6 for IPv6 — mirrors ForwardInformationTable but for 128-bit addresses.
+            class ForwardInformationTable6
+            {
+            public:
+                ForwardInformationTable6() noexcept = default;
+                ForwardInformationTable6(RouteInformationTable6& rib) noexcept;
+
+            public:
+                boost::asio::ip::address                                GetNextHop(const boost::asio::ip::address& ip) noexcept;
+                static boost::asio::ip::address                         GetNextHop(const boost::asio::ip::address& ip, RouteEntries6& routes) noexcept;
+                void                                                    Fill(RouteInformationTable6& rib) noexcept;
+                void                                                    Clear() noexcept;
+                RouteEntries6&                                          GetAllRoutes() noexcept;
+                bool                                                    IsAvailable() noexcept { return routes.begin() != routes.end(); }
+
+            private:
+                RouteEntries6                                           routes;
+            };
         }
     }
 }

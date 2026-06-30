@@ -602,6 +602,41 @@ namespace ppp {
                     std::shared_ptr<IPFrame> ip = UdpFrame::ToIp(allocator, frame.get());
                     return Output(ip.get());
                 }
+                elif (address.is_v6()) {
+                    boost::asio::ip::address_v6 dst_v6 = sourceEP.address().to_v6();
+                    if (dst_v6.is_unspecified()) {
+                        return false;
+                    }
+
+                    std::shared_ptr<UdpFrame> frame = make_shared_object<UdpFrame>();
+                    if (NULLPTR == frame) {
+                        return false;
+                    }
+
+                    frame->AddressesFamily = AddressFamily::InterNetworkV6;
+                    frame->Source = IPEndPoint::ToEndPoint(remoteEP);
+                    frame->Destination = IPEndPoint::ToEndPoint(sourceEP);
+
+                    std::shared_ptr<BufferSegment> messages = make_shared_object<BufferSegment>();
+                    if (NULLPTR == messages) {
+                        return false;
+                    }
+
+                    messages->Buffer = wrap_shared_pointer(reinterpret_cast<Byte*>(packet));
+                    messages->Length = packet_size;
+                    frame->Payload = messages;
+
+                    if (caching && configuration_->udp.dns.cache) {
+                        int destinationPort = destinationEP.port();
+                        if (destinationPort == PPP_DNS_SYS_PORT) {
+                            ppp::net::asio::vdns::AddCache((Byte*)packet, packet_size);
+                        }
+                    }
+
+                    std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
+                    std::shared_ptr<BufferSegment> ip6 = UdpFrame::ToIp6(allocator, frame.get());
+                    return Output(ip6->Buffer.get(), ip6->Length);
+                }
 
                 return false;
             }
@@ -690,9 +725,11 @@ namespace ppp {
                         state);
                 }
 
-                // Pre-pin: before installing the default route via TAP, add a /128 route for the
-                // VPN server's IPv6 address through the physical NIC. This prevents the
-                // default route change from breaking connectivity to the VPN server itself.
+                // Pin the VPN server's IPv6 address via the physical NIC before installing
+                // split default routes (::/1 + 8000::/1) on the TAP interface. This mirrors
+                // the IPv4 approach: the server's /128 route naturally takes priority over
+                // the less specific /1 routes, preventing the TAP default route from
+                // breaking connectivity to the VPN server itself.
                 {
                     std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
                     if (NULLPTR != exchanger) {
@@ -719,7 +756,9 @@ namespace ppp {
                     }
                 }
 
-                // 2. Apply the default IPv6 route via the assigned gateway.
+                // 2. Apply split default IPv6 routes (::/1 + 8000::/1) via the assigned gateway.
+                //    Same approach as IPv4's 0.0.0.0/1 + 128.0.0.0/1 — avoids overwriting
+                //    any existing ::/0 on the physical NIC.
                 if (extensions.AssignedIPv6Gateway.is_v6()) {
                     ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
                 }
@@ -1345,6 +1384,26 @@ namespace ppp {
 
                         if (fib->IsAvailable()) {
                             fib_ = fib;
+                        }
+                    }
+                }
+
+                // Build IPv6 FIB from the loaded bypass route table entries.
+                if (IPv6RouteTablePtr rib6 = rib6_; NULLPTR != rib6 && !rib6->empty()) {
+                    RouteInformationTable6Ptr rib6_fib = make_shared_object<RouteInformationTable6>();
+                    if (NULLPTR != rib6_fib) {
+                        for (const IPv6RouteEntry& entry : *rib6) {
+                            boost::asio::ip::address dst(entry.Network);
+                            boost::asio::ip::address nh(entry.NextHop);
+                            rib6_fib->AddRoute(dst, entry.Prefix, nh);
+                        }
+
+                        ForwardInformationTable6Ptr fib6 = make_shared_object<ForwardInformationTable6>();
+                        if (NULLPTR != fib6) {
+                            fib6->Fill(*rib6_fib);
+                            if (fib6->IsAvailable()) {
+                                fib6_ = fib6;
+                            }
                         }
                     }
                 }
@@ -2308,6 +2367,47 @@ namespace ppp {
 #endif
             }
 
+            bool VEthernetNetworkSwitcher::IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept {
+                if (!ip.is_v6()) {
+                    return false;
+                }
+
+                if (ip.is_unspecified()) {
+                    return false;
+                }
+
+                if (ip.is_multicast()) {
+                    return false;
+                }
+
+                if (ppp::net::IPEndPoint::IsInvalid(ip)) {
+                    return false;
+                }
+
+                auto tap = GetTap();
+                if (NULLPTR == tap) {
+                    return false;
+                }
+
+#if defined(_ANDROID)
+                // Use FIB6 to determine the next hop; if it differs from the TAP v6 gateway, bypass.
+                if (auto fib6 = fib6_; NULLPTR != fib6) {
+                    boost::asio::ip::address ngw6 = fib6->GetNextHop(ip);
+                    return ngw6.is_v6() && !ngw6.is_unspecified() && ngw6 != tap->IPv6GatewayServer;
+                }
+
+                return false;
+#elif defined(_WIN32)
+                // Windows: use connect+getsockname to find the local exit address.
+                boost::asio::ip::address local = ppp::net::Socket::GetBestInterfaceIP6(ip);
+                return local.is_v6() && !local.is_unspecified() && local != tap->IPv6Address;
+#else
+                // Linux/macOS: same connect+getsockname approach as v4's GetBestInterfaceIP.
+                boost::asio::ip::address local = ppp::net::Socket::GetBestInterfaceIP6(ip);
+                return local.is_v6() && !local.is_unspecified() && local != tap->IPv6Address;
+#endif
+            }
+
             void VEthernetNetworkSwitcher::ReleaseAllObjects() noexcept {
 #if !defined(_ANDROID) && !defined(_IPHONE)
                 // Windows platform needs to set the prdr synchronization lock state to prevent the problem of multi-thread concurrent competition.
@@ -2386,6 +2486,7 @@ namespace ppp {
                 rib_ = NULLPTR;
                 rib6_ = NULLPTR;
                 fib_ = NULLPTR;
+                fib6_ = NULLPTR;
 #endif
 
                 // Clear all route tables and forwarding tables held by the current object.
@@ -2607,6 +2708,23 @@ namespace ppp {
                 // The gateway address must be IPV4 or it is considered a failure because there is no V6 gateway serving the V4 address.
                 if (serverEP.IsLoopback()) {
                     return true;
+                }
+
+                // Also add the IPv6 server route to the bypass table if applicable.
+                if (remoteIP.is_v6()) {
+                    if (NULLPTR == rib6_) {
+                        rib6_ = make_shared_object<IPv6RouteTable>();
+                    }
+                    if (NULLPTR != rib6_ && underlying_ni_) {
+                        boost::asio::ip::address_v6 ngw6 = underlying_ni_->IPv6GatewayServer;
+                        if (ngw6.is_v6() && !ngw6.is_unspecified()) {
+                            IPv6RouteEntry entry;
+                            entry.Network = remoteIP.to_v6();
+                            entry.Prefix = 128;
+                            entry.NextHop = ngw6;
+                            rib6_->emplace_back(entry);
+                        }
+                    }
                 }
 
                 return fib_add_route_ipv4(remoteIP);

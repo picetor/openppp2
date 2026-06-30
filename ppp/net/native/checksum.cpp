@@ -702,6 +702,138 @@ namespace ppp
                 routes.clear();
             }
 
+            static boost::asio::ip::address_v6 ApplyPrefixMaskV6(const boost::asio::ip::address_v6& ip, int prefix) noexcept
+            {
+                if (prefix >= 128) return ip;
+                if (prefix <= 0) return boost::asio::ip::address_v6::any();
+
+                auto bytes = ip.to_bytes();
+                int full_bytes = prefix / 8;
+                int bits = prefix % 8;
+                for (int i = full_bytes + 1; i < 16; i++) bytes[i] = 0;
+                if (bits > 0) bytes[full_bytes] &= static_cast<uint8_t>(0xFF << (8 - bits));
+                else if (full_bytes < 16) bytes[full_bytes] = 0;
+                return boost::asio::ip::address_v6(bytes);
+            }
+
+            bool RouteInformationTable6::AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw) noexcept
+            {
+                if (prefix < MIN_PREFIX_VALUE || prefix > MAX_PREFIX_VALUE_V6) {
+                    return false;
+                }
+
+                if (!ip.is_v6() || !gw.is_v6()) {
+                    return false;
+                }
+
+                if (gw.is_unspecified()) {
+                    return false;
+                }
+
+                boost::asio::ip::address_v6 ipv6 = ip.to_v6();
+                if (ipv6.is_unspecified()) {
+                    return false;
+                }
+
+                // Verify that ip is already prefix-masked (host bits are zero).
+                if (ApplyPrefixMaskV6(ipv6, prefix) != ipv6) {
+                    return false;
+                }
+
+                // Check for duplicate prefix; update next-hop or insert new entry.
+                auto tail = std::find_if(routes.begin(), routes.end(),
+                    [&ip, prefix](const RouteEntry6& entry) noexcept -> bool {
+                        return entry.Prefix == prefix && entry.Destination == ip;
+                    });
+                if (tail != routes.end()) {
+                    tail->NextHop = gw;
+                }
+                else {
+                    RouteEntry6 entry;
+                    entry.Destination = ip;
+                    entry.Prefix = prefix;
+                    entry.NextHop = gw;
+                    routes.emplace_back(entry);
+                }
+                return true;
+            }
+
+            bool RouteInformationTable6::AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw) noexcept
+            {
+                std::string host;
+                int prefix = -1;
+
+                std::size_t i = cidr.find('/');
+                if (i == ppp::string::npos) {
+                    host = cidr;
+                }
+                else {
+                    if (i == 0) {
+                        return false;
+                    }
+                    host = cidr.substr(0, i);
+                    prefix = atoi(cidr.data() + (i + 1));
+                }
+
+                boost::system::error_code ec;
+                boost::asio::ip::address ip = StringToAddress(host, ec);
+                if (ec) {
+                    return false;
+                }
+                if (!ip.is_v6()) {
+                    return false;
+                }
+                if (prefix < 0) {
+                    prefix = 128;
+                }
+                if (prefix > MAX_PREFIX_VALUE_V6) {
+                    return false;
+                }
+                return AddRoute(ip, prefix, gw);
+            }
+
+            ForwardInformationTable6::ForwardInformationTable6(RouteInformationTable6& rib) noexcept
+            {
+                Fill(rib);
+            }
+
+            boost::asio::ip::address ForwardInformationTable6::GetNextHop(const boost::asio::ip::address& ip, RouteEntries6& routes) noexcept
+            {
+                if (!ip.is_v6()) return boost::asio::ip::address();
+
+                boost::asio::ip::address_v6 ipv6 = ip.to_v6();
+                for (const RouteEntry6& entry : routes)
+                {
+                    boost::asio::ip::address_v6 masked_ip = ApplyPrefixMaskV6(ipv6, entry.Prefix);
+                    boost::asio::ip::address_v6 masked_dst = ApplyPrefixMaskV6(entry.Destination.to_v6(), entry.Prefix);
+                    if (masked_ip == masked_dst)
+                    {
+                        return entry.NextHop;
+                    }
+                }
+                return boost::asio::ip::address();
+            }
+
+            boost::asio::ip::address ForwardInformationTable6::GetNextHop(const boost::asio::ip::address& ip) noexcept
+            {
+                return GetNextHop(ip, routes);
+            }
+
+            void ForwardInformationTable6::Fill(RouteInformationTable6& rib) noexcept
+            {
+                routes = rib.GetAllRoutes();
+                std::sort(routes.begin(), routes.end(),
+                    [](const RouteEntry6& x, const RouteEntry6& y) noexcept
+                    {
+                        return x.Prefix > y.Prefix;
+                    });
+            }
+
+            void ForwardInformationTable6::Clear() noexcept
+            {
+                routes.clear();
+            }
+
             ppp::string eth_addr::BytesToMacAddress(const void* data, int size) noexcept
             {
                 if ((size < 1) || (NULLPTR != data && size < 1))

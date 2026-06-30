@@ -62,6 +62,10 @@ namespace ppp {
                 };
                 typedef ppp::vector<IPv6RouteEntry>                                 IPv6RouteTable;
                 typedef std::shared_ptr<IPv6RouteTable>                             IPv6RouteTablePtr;
+                typedef ppp::net::native::RouteInformationTable6                    RouteInformationTable6;
+                typedef std::shared_ptr<RouteInformationTable6>                     RouteInformationTable6Ptr;
+                typedef ppp::net::native::ForwardInformationTable6                  ForwardInformationTable6;
+                typedef std::shared_ptr<ForwardInformationTable6>                   ForwardInformationTable6Ptr;
                 typedef ppp::vector<boost::asio::ip::address>                       NicDnsServerAddresses;
                 typedef ppp::unordered_map<int, NicDnsServerAddresses>              AllNicDnsServerAddresses;
                 typedef ppp::transmissions::proxys::IForwarding                     IForwarding;
@@ -149,6 +153,7 @@ namespace ppp {
                 bool                                                                IsBlockQUIC()                noexcept { return block_quic_; }
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
+                bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
 
             public: 
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
@@ -324,6 +329,7 @@ namespace ppp {
                 LoadIPListFileVectorPtr                                             ribs_;
                 LoadIPv6ListFileVectorPtr                                           ribs6_;
                 IPv6RouteTablePtr                                                   rib6_;
+                ForwardInformationTable6Ptr                                         fib6_;
 
                 std::shared_ptr<NetworkInterface>                                   tun_ni_;
                 std::shared_ptr<NetworkInterface>                                   underlying_ni_;

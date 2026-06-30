@@ -113,7 +113,9 @@ namespace ppp {
 
 #if defined(_ANDROID)
                     // It is sent out through the local physical NIC.
-                    if (address.is_v4() && switcher_->IsBypassIpAddress(address)) {
+                    bool bypass = (address.is_v4() && switcher_->IsBypassIpAddress(address)) ||
+                                  (address.is_v6() && switcher_->IsBypassIpAddress6(address));
+                    if (bypass) {
                         // If the socket is currently open, send data directly.
                         SynchronizedObjectScope scope(syncobj_);
                         if (opened_ > 1) {

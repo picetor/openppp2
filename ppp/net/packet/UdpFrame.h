@@ -35,6 +35,15 @@ namespace ppp {
                     return packet->ToIp(allocator);
                 }
                 std::shared_ptr<IPFrame>                        ToIp(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator);
+                static std::shared_ptr<BufferSegment>           ToIp6(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const UdpFrame* frame) {
+                    if (NULLPTR == frame) {
+                        return NULLPTR;
+                    }
+
+                    UdpFrame* packet = constantof(frame);
+                    return packet->ToIp6(allocator);
+                }
+                std::shared_ptr<BufferSegment>                  ToIp6(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator);
                 static std::shared_ptr<UdpFrame>                Parse(const IPFrame* frame) noexcept;
             };
         }
