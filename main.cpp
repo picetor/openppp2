@@ -538,6 +538,11 @@ bool PppApplication::PullIPList(const ppp::string& url, const ppp::function<void
         {
             ppp::set<ppp::string> ips;
             ppp::SetThreadName("iplist");
+
+            int events = PullIPList(url, ips);
+            cb(events, ips);
+        }).detach();
+    return true;
 }
 
 // Synchronous IP list download
