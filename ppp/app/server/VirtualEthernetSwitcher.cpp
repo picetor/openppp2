@@ -1833,7 +1833,6 @@ namespace ppp {
                         if (p.get() == exchanger) {
                             channel = std::move(tail->second);
                             exchangers_.erase(tail);
-                            }
                         }
                     }
                 }

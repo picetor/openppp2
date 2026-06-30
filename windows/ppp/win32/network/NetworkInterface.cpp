@@ -1973,7 +1973,7 @@ namespace ppp
                     }
 
                     // Skip TAP adapters by checking the name for common patterns
-                    ppp::string name = pAdapter->FriendlyName;
+                    ppp::string name = static_cast<const char*>(_bstr_t(pAdapter->FriendlyName));
                     bool is_tap = (name.find("TAP") != ppp::string::npos ||
                                    name.find("tap") != ppp::string::npos ||
                                    name.find("tun") != ppp::string::npos ||

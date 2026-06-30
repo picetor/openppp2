@@ -887,7 +887,7 @@ namespace ppp {
                 }
                 int total = 1 + static_cast<int>(sizeof(VirtualEthernetInformation)) + 2 + json_len;
 
-                std::shared_ptr<Byte> buffer = ppp::threading::BufferswapAllocator::Make(total);
+                std::shared_ptr<Byte> buffer = make_shared_alloc<Byte>(total);
                 if (NULLPTR == buffer) {
                     return false;
                 }
