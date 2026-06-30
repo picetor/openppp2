@@ -718,6 +718,89 @@ namespace ppp {
             return ok;
         }
 
+        bool TapLinux::AddIPv6TransitNeighbor(const ppp::string& ifrName, const ppp::string& addressIP) noexcept {
+            if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            int interface_index = GetInterfaceIndexByName(ifrName);
+            if (interface_index < 0) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            struct in6_addr address;
+            if (!ParseIPv6Address(addressIP, address)) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            // Use a well-known dummy MAC address for the transit TAP neighbour.
+            // The application reads all Ethernet frames irrespective of destination MAC,
+            // so any valid MAC suffices for the kernel to construct an outgoing frame.
+            static const unsigned char kTransitMac[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+            NetlinkRequest<256> request;
+            memset(&request, 0, sizeof(request));
+            request.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct ndmsg));
+            request.header.nlmsg_type = RTM_NEWNEIGH;
+            request.header.nlmsg_flags = NLM_F_CREATE | NLM_F_REPLACE;
+
+            struct ndmsg* message = reinterpret_cast<struct ndmsg*>(NLMSG_DATA(&request.header));
+            message->ndm_family = AF_INET6;
+            message->ndm_ifindex = interface_index;
+            message->ndm_state = NUD_PERMANENT;
+
+            if (!AppendNetlinkAttribute(request.header, sizeof(request), NDA_DST, &address, sizeof(address))) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            if (!AppendNetlinkAttribute(request.header, sizeof(request), NDA_LLADDR, kTransitMac, sizeof(kTransitMac))) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            return SendNetlinkRequest(request.header, ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed, false);
+        }
+
+        bool TapLinux::DeleteIPv6TransitNeighbor(const ppp::string& ifrName, const ppp::string& addressIP) noexcept {
+            if (!IsSafeShellToken(ifrName) || !IsSafeShellToken(addressIP)) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            int interface_index = GetInterfaceIndexByName(ifrName);
+            if (interface_index < 0) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            struct in6_addr address;
+            if (!ParseIPv6Address(addressIP, address)) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            NetlinkRequest<256> request;
+            memset(&request, 0, sizeof(request));
+            request.header.nlmsg_len = NLMSG_LENGTH(sizeof(struct ndmsg));
+            request.header.nlmsg_type = RTM_DELNEIGH;
+
+            struct ndmsg* message = reinterpret_cast<struct ndmsg*>(NLMSG_DATA(&request.header));
+            message->ndm_family = AF_INET6;
+            message->ndm_ifindex = interface_index;
+            message->ndm_state = 0;
+
+            if (!AppendNetlinkAttribute(request.header, sizeof(request), NDA_DST, &address, sizeof(address))) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed);
+                return false;
+            }
+
+            return SendNetlinkRequest(request.header, ppp::diagnostics::ErrorCode::IPv6NDPProxyFailed, false);
+        }
+
         void TapLinux::CompatibleRoute(bool compatible) noexcept {
             ifc_ctl_sock_compatible_route = compatible;
         }

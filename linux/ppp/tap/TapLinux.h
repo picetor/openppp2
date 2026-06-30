@@ -65,6 +65,8 @@ namespace ppp
             static bool                                                             DisableIPv6NeighborProxy(const ppp::string& ifrName) noexcept;
             static bool                                                             AddIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
             static bool                                                             DeleteIPv6NeighborProxy(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
+            static bool                                                             AddIPv6TransitNeighbor(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
+            static bool                                                             DeleteIPv6TransitNeighbor(const ppp::string& ifrName, const ppp::string& addressIP) noexcept;
             static bool                                                             SetIPAddress(
                 const ppp::string&                                                  ifrName,
                 const ppp::string&                                                  addressIP,

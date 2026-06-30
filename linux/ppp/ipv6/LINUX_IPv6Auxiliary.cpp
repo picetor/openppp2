@@ -714,6 +714,12 @@ namespace ppp {
 
                     if (mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua) {
                         if (LinuxExecuteCommandWithStatus(forward_rules) == 0) {
+                            // Enable proxy_ndp on the transit TAP for GUA mode as well:
+                            // the kernel needs to resolve per-client GUA addresses when
+                            // forwarding return traffic through the transit TAP.
+                            if (!transit_ifname.empty()) {
+                                ppp::tap::TapLinux::EnableIPv6NeighborProxy(transit_ifname);
+                            }
                             return true;
                         }
 
@@ -750,6 +756,12 @@ namespace ppp {
                     }
 
                     if (LinuxExecuteCommandWithStatus(ip6tables_command) == 0) {
+                        // Enable proxy_ndp on the transit TAP so the kernel can resolve
+                        // client ULA/GUA addresses without sending Neighbor Solicitation
+                        // probes that the application would otherwise drop.
+                        if (!transit_ifname.empty()) {
+                            ppp::tap::TapLinux::EnableIPv6NeighborProxy(transit_ifname);
+                        }
                         return true;
                     }
 

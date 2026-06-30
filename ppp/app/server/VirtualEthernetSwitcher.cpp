@@ -899,6 +899,19 @@ namespace ppp {
                     return false;
                 }
 
+                // For NAT66, add a permanent neighbour entry on the transit TAP so the
+                // kernel can resolve the client's ULA address without sending NS probes
+                // that would otherwise be dropped by ReceiveIPv6TransitPacket.
+                bool transit_neighbor_required = AppConfiguration::IPv6Mode_Nat66 == mode;
+                if (transit_neighbor_required) {
+                    ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
+                    if (!transit_ifname.empty()) {
+                        std::string ip_std2 = ip.to_string();
+                        ppp::string ip_str2(ip_std2.data(), ip_std2.size());
+                        ppp::tap::TapLinux::AddIPv6TransitNeighbor(transit_ifname, ip_str2);
+                    }
+                }
+
                 bool proxy_required = AppConfiguration::IPv6Mode_Gua == mode;
                 bool proxy_ok = !proxy_required || AddIPv6NeighborProxy(ip);
                 if (!proxy_ok) {
@@ -965,6 +978,15 @@ namespace ppp {
                  */
                 bool route_removed = DeleteIPv6TransitRoute(ip, ppp::ipv6::IPv6_MAX_PREFIX_LENGTH);
                 bool proxy_removed = DeleteIPv6NeighborProxy(ip);
+
+                // For NAT66, also remove the permanent neighbour entry from the transit TAP.
+                const auto& ipv6_cfg = configuration_->server.ipv6;
+                if (AppConfiguration::IPv6Mode_Nat66 == ipv6_cfg.mode) {
+                    ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
+                    if (!transit_ifname.empty()) {
+                        ppp::tap::TapLinux::DeleteIPv6TransitNeighbor(transit_ifname, ip_key);
+                    }
+                }
 
                 RevokeIPv6Lease(session_id);
                 if (!route_removed) {
@@ -1041,6 +1063,19 @@ namespace ppp {
                 for (const boost::asio::ip::address& ip : cleanup_ipv6_addresses) {
                     DeleteIPv6TransitRoute(ip, ppp::ipv6::IPv6_MAX_PREFIX_LENGTH);
                     DeleteIPv6NeighborProxy(ip);
+                }
+
+                // For NAT66, also remove permanent neighbour entries from the transit TAP.
+                const auto& ipv6_cfg2 = configuration_->server.ipv6;
+                if (AppConfiguration::IPv6Mode_Nat66 == ipv6_cfg2.mode) {
+                    ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
+                    if (!transit_ifname.empty()) {
+                        for (const boost::asio::ip::address& ip : cleanup_ipv6_addresses) {
+                            std::string ip_std2 = ip.to_string();
+                            ppp::string ip_str2(ip_std2.data(), ip_std2.size());
+                            ppp::tap::TapLinux::DeleteIPv6TransitNeighbor(transit_ifname, ip_str2);
+                        }
+                    }
                 }
 
                 return any;
@@ -2177,8 +2212,13 @@ namespace ppp {
                     bool source_is_transit_gateway = transit_gateway.is_v6() && source == transit_gateway.to_v6();
                     bool source_in_prefix = ppp::ipv6::PrefixMatch(source, prefix.to_v6(), allowed_prefix_length);
                     if (!source_is_transit_gateway && !source_in_prefix) {
-                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6SubnetForwardFailed);
-                        return false;
+                        // In NAT66 mode, return traffic arrives from public IPv6 addresses
+                        // that are not in the ULA prefix. Allow them through provided
+                        // the destination is a known client and the source is valid.
+                        if (AppConfiguration::IPv6Mode_Nat66 != mode) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6SubnetForwardFailed);
+                            return false;
+                        }
                     }
 
                     if (!source_is_transit_gateway && source_in_prefix) {
