@@ -740,7 +740,7 @@ namespace ppp {
                                 std::string server_ip_str = server_address.to_string();
                                 std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
                                 std::string ni_name_str = underlying_ni->Name.c_str();
-                                if (!gw6_str.empty()) {
+                                if (!gw6_str.empty() && underlying_ni->IPv6GatewayServer.is_v6()) {
 #if defined(_LINUX)
                                     std::string cmd = "ip -6 route add " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
                                     system(cmd.c_str());
