@@ -908,7 +908,9 @@ namespace ppp {
                     if (!transit_ifname.empty()) {
                         std::string ip_std2 = ip.to_string();
                         ppp::string ip_str2(ip_std2.data(), ip_std2.size());
+#if defined(_LINUX)
                         ppp::tap::TapLinux::AddIPv6TransitNeighbor(transit_ifname, ip_str2);
+#endif
                     }
                 }
 
@@ -984,7 +986,9 @@ namespace ppp {
                 if (AppConfiguration::IPv6Mode_Nat66 == ipv6_cfg.mode) {
                     ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
                     if (!transit_ifname.empty()) {
+#if defined(_LINUX)
                         ppp::tap::TapLinux::DeleteIPv6TransitNeighbor(transit_ifname, ip_key);
+#endif
                     }
                 }
 
@@ -1073,7 +1077,9 @@ namespace ppp {
                         for (const boost::asio::ip::address& ip : cleanup_ipv6_addresses) {
                             std::string ip_std2 = ip.to_string();
                             ppp::string ip_str2(ip_std2.data(), ip_std2.size());
+#if defined(_LINUX)
                             ppp::tap::TapLinux::DeleteIPv6TransitNeighbor(transit_ifname, ip_str2);
+#endif
                         }
                     }
                 }
