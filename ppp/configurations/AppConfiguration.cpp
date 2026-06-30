@@ -724,13 +724,11 @@ namespace ppp {
             bool ipv6_server_enabled = config.server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66 ||
                 config.server.ipv6.mode == AppConfiguration::IPv6Mode_Gua;
             if (ipv6_server_enabled && !SupportsServerIPv6DataPlane()) {
-                if (config.server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66) {
-                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable);
-                }
-                else {
-                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::PlatformNotSupportGUAMode);
-                }
-                return false;
+                // Platform does not support server-side IPv6 data plane (Linux-only feature).
+                // Silently disable IPv6 mode instead of failing config load, so that the same
+                // config file can be shared between Linux servers and Windows/macOS clients.
+                DisableServerIPv6(config);
+                ipv6_server_enabled = false;
             }
 
             ppp::string ipv6_prefix;

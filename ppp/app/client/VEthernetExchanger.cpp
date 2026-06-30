@@ -1956,14 +1956,24 @@ namespace ppp {
                     return false;
                 }
 
+                // Try IPv6 (dual-stack socket on Windows) first, fall back to IPv4
+                // if the system has no IPv6 stack available.
+                bool is_v6 = true;
                 opened = ppp::coroutines::asio::async_open<boost::asio::ip::udp::socket>(y, socket, boost::asio::ip::udp::v6()) && !disposed_;
+                if (!opened) {
+                    is_v6 = false;
+                    opened = ppp::coroutines::asio::async_open<boost::asio::ip::udp::socket>(y, socket, boost::asio::ip::udp::v4()) && !disposed_;
+                }
                 if (!opened) {
                     return false;
                 }
 
                 bool ok = false;
                 for (;;) {
-                    opened = Socket::OpenSocket(socket, boost::asio::ip::address_v6::any(), IPEndPoint::MinPort, opened);
+                    boost::asio::ip::address listen_address = is_v6
+                        ? boost::asio::ip::address(boost::asio::ip::address_v6::any())
+                        : boost::asio::ip::address(boost::asio::ip::address_v4::any());
+                    opened = Socket::OpenSocket(socket, listen_address, IPEndPoint::MinPort, opened);
                     if (!opened) {
                         break;
                     }
