@@ -2286,6 +2286,11 @@ namespace ppp {
                     tun_name = BOOST_BEAST_VERSION_STRING;
                 }
 
+                // Append a suffix so the transit TAP never collides with the main
+                // VPN TAP (both use tun_name_ by default, e.g. "ppp").  Without
+                // this the kernel returns EEXIST and IPv6 forwarding is dead.
+                tun_name = tun_name + "_t6";
+
                 ITapPtr tap = ppp::tap::ITap::Create(context_, tun_name, "169.254.254.1", "169.254.254.2", "255.255.255.252", false, false, no_dns);
                 if (NULLPTR == tap || !tap->Open()) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitTapOpenFailed);
