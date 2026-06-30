@@ -208,6 +208,185 @@ namespace ppp {
                 if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
                     return false;
                 }
+
+                ppp::ipv6::PacketHeader* ipv6_header = reinterpret_cast<ppp::ipv6::PacketHeader*>(packet);
+
+                // Protocol dispatch based on IPv6 Next Header field
+                Byte next_header = ipv6_header->NextHeader;
+
+                // TCP (6): forward blindly via NAT (same as existing behavior)
+                if (next_header == IPPROTO_TCP) {
+                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                    if (NULLPTR == exchanger) {
+                        return false;
+                    }
+                    exchanger->Nat(packet, packet_length);
+                    return true;
+                }
+
+                // UDP (17): check for DNS interception, QUIC blocking, static mode
+                if (next_header == IPPROTO_UDP) {
+                    return OnIPv6UdpPacketInput(packet, packet_length, ipv6_header);
+                }
+
+                // ICMPv6 (58): handle echo request locally for TAP gateway
+                if (next_header == IPPROTO_ICMPV6) {
+                    return OnIPv6IcmpPacketInput(packet, packet_length, ipv6_header);
+                }
+
+                // Other protocols: forward via NAT
+                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                if (NULLPTR == exchanger) {
+                    return false;
+                }
+                exchanger->Nat(packet, packet_length);
+                return true;
+            }
+
+            bool VEthernetNetworkSwitcher::OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
+                // Need at least IPv6 header (40) + UDP header (8)
+                static constexpr int UDP_HEADER_OFFSET = sizeof(ppp::ipv6::PacketHeader);
+                static constexpr int UDP_HEADER_SIZE = 8;
+                static constexpr int UDP_PAYLOAD_OFFSET = UDP_HEADER_OFFSET + UDP_HEADER_SIZE;
+
+                if (packet_length < UDP_PAYLOAD_OFFSET) {
+                    return false;
+                }
+
+                // Parse UDP header from raw bytes
+                Byte* udp_start = packet + UDP_HEADER_OFFSET;
+                uint16_t src_port = ntohs(*(uint16_t*)(udp_start));
+                uint16_t dst_port = ntohs(*(uint16_t*)(udp_start + 2));
+
+                // DNS interception for port 53
+                if (dst_port == PPP_DNS_SYS_PORT) {
+                    int udp_payload_len = packet_length - UDP_PAYLOAD_OFFSET;
+                    if (udp_payload_len > 0) {
+                        ::dns::Message m;
+                        if (m.decode(reinterpret_cast<uint8_t*>(packet + UDP_PAYLOAD_OFFSET), udp_payload_len) == ::dns::BufferResult::NoError && !m.questions.empty()) {
+                            ::dns::QuestionSection& qs = *m.questions.data();
+
+                            // Check local DNS cache (both A and AAAA records)
+                            if (!ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m,
+                                qs.mType == ::dns::RecordType::kA ? ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
+
+                                std::size_t dns_size = 0;
+                                char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
+                                if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, dns_size) == ::dns::BufferResult::NoError && dns_size > 0) {
+                                    // Build IPv6 addresses from raw header bytes
+                                    boost::asio::ip::address_v6::bytes_type src_bytes, dst_bytes;
+                                    memcpy(src_bytes.data(), ipv6_header->Source, sizeof(src_bytes));
+                                    memcpy(dst_bytes.data(), ipv6_header->Destination, sizeof(dst_bytes));
+                                    boost::asio::ip::address_v6 src_v6(src_bytes);
+                                    boost::asio::ip::address_v6 dst_v6(dst_bytes);
+
+                                    // Add response to cache if caching is enabled
+                                    if (configuration_->udp.dns.cache) {
+                                        ppp::net::asio::vdns::AddCache(reinterpret_cast<Byte*>(dns_packet), static_cast<int>(dns_size));
+                                    }
+
+                                    // Send DNS response back to the source (swap src/dst)
+                                    return DatagramOutput(
+                                        boost::asio::ip::udp::endpoint(dst_v6, dst_port),
+                                        boost::asio::ip::udp::endpoint(src_v6, src_port),
+                                        dns_packet, static_cast<int>(dns_size), false);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Block QUIC (UDP port 443) if configured
+                if (block_quic_ && dst_port == PPP_HTTPS_SYS_PORT) {
+                    return false;
+                }
+
+                // Default: forward via NAT
+                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                if (NULLPTR == exchanger) {
+                    return false;
+                }
+                exchanger->Nat(packet, packet_length);
+                return true;
+            }
+
+            bool VEthernetNetworkSwitcher::OnIPv6IcmpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
+                // Need at least IPv6 header (40) + ICMPv6 header (4)
+                static constexpr int ICMP_HEADER_OFFSET = sizeof(ppp::ipv6::PacketHeader);
+                static constexpr int ICMP_HEADER_MIN_SIZE = 4;
+                static constexpr uint8_t ICMPV6_ECHO_REQUEST = 128;
+                static constexpr uint8_t ICMPV6_ECHO_REPLY = 129;
+
+                if (packet_length < ICMP_HEADER_OFFSET + ICMP_HEADER_MIN_SIZE) {
+                    return false;
+                }
+
+                Byte* icmp_start = packet + ICMP_HEADER_OFFSET;
+                uint8_t icmp_type = icmp_start[0];
+                uint8_t icmp_code = icmp_start[1];
+
+                // Handle Echo Request (type 128, code 0)
+                if (icmp_type == ICMPV6_ECHO_REQUEST && icmp_code == 0) {
+                    auto tap = GetTap();
+                    if (NULLPTR == tap) {
+                        return false;
+                    }
+
+                    // Extract destination address from packet
+                    boost::asio::ip::address_v6::bytes_type dst_bytes;
+                    memcpy(dst_bytes.data(), ipv6_header->Destination, sizeof(dst_bytes));
+                    boost::asio::ip::address_v6 dst_v6(dst_bytes);
+
+                    boost::asio::ip::address tap_v6 = tap->IPv6Address;
+                    boost::asio::ip::address tap_gw6 = tap->IPv6GatewayServer;
+
+                    // Only respond if the echo request is addressed to our TAP interface
+                    if (dst_v6 != tap_v6 && (!tap_gw6.is_v6() || dst_v6 != tap_gw6.to_v6())) {
+                        // Not for us - forward via NAT
+                        std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                        if (NULLPTR == exchanger) {
+                            return false;
+                        }
+                        exchanger->Nat(packet, packet_length);
+                        return true;
+                    }
+
+                    // Swap source and destination addresses in-place
+                    Byte temp_addr[16];
+                    memcpy(temp_addr, ipv6_header->Source, 16);
+                    memcpy(ipv6_header->Source, ipv6_header->Destination, 16);
+                    memcpy(ipv6_header->Destination, temp_addr, 16);
+
+                    // Change ICMPv6 type from Echo Request (128) to Echo Reply (129)
+                    icmp_start[0] = ICMPV6_ECHO_REPLY;
+
+                    // Reset hop limit to default
+                    ipv6_header->HopLimit = ppp::ipv6::IPv6_DEFAULT_HOP_LIMIT;
+
+                    // Recompute ICMPv6 checksum
+                    // Zero out old checksum first
+                    icmp_start[2] = 0;
+                    icmp_start[3] = 0;
+
+                    int icmp_len = packet_length - ICMP_HEADER_OFFSET;
+                    boost::asio::ip::address_v6 new_src_v6(dst_bytes); // Was dest, now source
+                    boost::asio::ip::address_v6::bytes_type new_dst_bytes;
+                    memcpy(new_dst_bytes.data(), temp_addr, 16); // Was source, now dest
+                    boost::asio::ip::address_v6 new_dst_v6(new_dst_bytes);
+
+                    uint16_t cksum = ppp::ipv6::ComputePseudoChecksum(
+                        icmp_start, static_cast<unsigned int>(icmp_len),
+                        new_src_v6, new_dst_v6,
+                        IPPROTO_ICMPV6);
+
+                    icmp_start[2] = static_cast<Byte>((cksum >> 8) & 0xFF);
+                    icmp_start[3] = static_cast<Byte>(cksum & 0xFF);
+
+                    // Output the modified echo reply back to TAP
+                    return Output(packet, packet_length);
+                }
+
+                // Other ICMPv6 types: forward via NAT
                 std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
                 if (NULLPTR == exchanger) {
                     return false;
@@ -736,21 +915,40 @@ namespace ppp {
                         boost::asio::ip::address server_address = exchanger->server_url_.remoteEP.address();
                         if (server_address.is_v6() && !server_address.is_unspecified()) {
                             std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
-                            if (NULLPTR != underlying_ni && !underlying_ni->Name.empty()) {
+                            if (NULLPTR == underlying_ni) {
+                                LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, GetUnderlyingNetworkInterface() returned null");
+                            }
+                            elif(underlying_ni->Name.empty()) {
+                                LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, underlying_ni->Name is empty");
+                            }
+                            else {
                                 std::string server_ip_str = server_address.to_string();
                                 std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
                                 std::string ni_name_str = underlying_ni->Name.c_str();
                                 if (!gw6_str.empty() && underlying_ni->IPv6GatewayServer.is_v6()) {
 #if defined(_LINUX)
-                                    std::string cmd = "ip -6 route add " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
-                                    system(cmd.c_str());
+                                    std::string cmd = "ip -6 route replace " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
+                                    int rc = system(cmd.c_str());
+                                    if (rc != 0) {
+                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                    }
 #elif defined(_MACOS)
                                     std::string cmd = "route -n add -inet6 " + server_ip_str + "/128 " + gw6_str;
-                                    system(cmd.c_str());
+                                    int rc = system(cmd.c_str());
+                                    if (rc != 0) {
+                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                    }
 #elif defined(_WIN32)
                                     std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str;
-                                    system(cmd.c_str());
+                                    int rc = system(cmd.c_str());
+                                    if (rc != 0) {
+                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                    }
 #endif
+                                }
+                                else {
+                                    LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, gw6_str=\"%s\", is_v6=%d",
+                                        gw6_str.c_str(), (int)underlying_ni->IPv6GatewayServer.is_v6());
                                 }
                             }
                         }
@@ -1769,11 +1967,7 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address ngw6 = boost::asio::ip::address_v6::any();
-                if (
-#if defined(_LINUX) 
-                    !nic.empty() && 
-#endif
-                    gw6.is_v6() && !IPEndPoint::IsInvalid(gw6)) {
+                if (gw6.is_v6() && !IPEndPoint::IsInvalid(gw6)) {
                     ngw6 = gw6;
                 }
 
@@ -1952,13 +2146,24 @@ namespace ppp {
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
                 for (const IPv6RouteEntry& entry : *rib6_) {
-                    // Skip adding routes via the unspecified address (::) — keep those going through the TUN
-                    if (entry.NextHop.is_unspecified()) {
+                    // Resolve the next-hop: use entry's own gateway; if unspecified, try current underlying NIC's IPv6 gateway.
+                    boost::asio::ip::address_v6 next_hop6 = entry.NextHop;
+                    if (next_hop6.is_unspecified()) {
+                        if (auto underlying_ni = underlying_ni_; NULLPTR != underlying_ni) {
+                            boost::asio::ip::address fallback6 = underlying_ni->IPv6GatewayServer;
+                            if (fallback6.is_v6() && !fallback6.is_unspecified() && !IPEndPoint::IsInvalid(fallback6)) {
+                                next_hop6 = fallback6.to_v6();
+                            }
+                        }
+                    }
+
+                    // Skip entries whose next-hop could not be resolved.
+                    if (next_hop6.is_unspecified()) {
                         continue;
                     }
 
                     std::string cidr = entry.Network.to_string() + "/" + std::to_string(entry.Prefix);
-                    std::string ngw6_str = entry.NextHop.to_string();
+                    std::string ngw6_str = next_hop6.to_string();
 
 #if defined(_WIN32)
                     // Windows: use netsh interface ipv6 add route

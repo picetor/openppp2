@@ -8,6 +8,7 @@
 #include <ppp/ethernet/VEthernet.h>
 #include <ppp/ethernet/VNetstack.h>
 #include <ppp/ipv6/IPv6Auxiliary.h>
+#include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/transmissions/proxys/IForwarding.h>
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/transmissions/ITransmissionQoS.h>
@@ -199,6 +200,8 @@ namespace ppp {
                 virtual bool                                                        OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept override;
                 virtual bool                                                        OnPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept override;
                 virtual bool                                                        OnIPv6PacketInput(Byte* packet, int packet_length) noexcept override;
+                virtual bool                                                        OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept;
+                virtual bool                                                        OnIPv6IcmpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept;
                 virtual bool                                                        OnTick(uint64_t now) noexcept override;
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;

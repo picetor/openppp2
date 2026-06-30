@@ -1975,6 +1975,14 @@ namespace ppp {
                     OpenDatagramSocket() &&
                     OpenIPv6NeighborProxyIfNeed();
 
+                // When the IPv6 transit TAP is up, configure kernel-level IPv6 forwarding
+                // and ip6tables NAT66 MASQUERADE / FORWARD rules so client ULA traffic
+                // can reach the public IPv6 internet.
+                if (ok && IsIPv6ServerEnabled()) {
+                    ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
+                    ppp::ipv6::auxiliary::PrepareServerEnvironment(configuration_, preferred_nic_, transit_ifname);
+                }
+
                 // Configure the IPv4 lease pool from configuration.
                 // Failure is non-fatal: log and continue so the server
                 // still operates without IPv4 pool assignment.
