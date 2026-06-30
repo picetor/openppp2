@@ -103,18 +103,70 @@ jobs:
           tag_name: ${{ inputs.tag }}
           name: "openppp2 ${{ inputs.tag }}"
           body: |
-            # openppp2 ${{ inputs.tag }}
+            # 🚀 openppp2 ${{ inputs.tag }}
 
-            ## 包含的构建
+            > 基于上游 [liulilittle/openppp2](https://github.com/liulilittle/openppp2) 修改版编译。
 
-            ${{ inputs.build_amd64 && '- Linux amd64 (7 variants: base, simd, io-uring, io-uring-simd, tc-simd, tc-io-uring, tc-io-uring-simd)' || '' }}
-            ${{ inputs.build_aarch64 && '- Linux aarch64 (4 variants: base, io-uring, tc, tc-io-uring)' || '' }}
-            ${{ inputs.build_windows && '- Windows x64' || '' }}
-            ${{ inputs.build_macos && '- macOS (arm64 + amd64)' || '' }}
+            ---
 
-            ## 使用说明
+            ## 编译环境
 
-            请参阅 [README](https://github.com/picetor/openppp2) 获取详细使用说明。
+            | 平台 | 环境 |
+            |------|------|
+            | Linux amd64 | Ubuntu 24.04, GCC 13, CMake 3.28.3, Make |
+            | Linux aarch64 | 交叉编译 (aarch64-linux-gnu-g++-13), Ubuntu 24.04 |
+            | macOS | macOS 14 (arm64), Apple Clang, CMake, Make |
+            | Windows | windows-latest, MSVC (Visual Studio 2022), vcpkg |
+
+            ## 包含的二进制文件
+
+            | 文件名 | 架构 | 特性 |
+            |--------|------|------|
+            ${{ inputs.build_amd64 && '| `openppp2-linux-amd64` | x86_64 | 基础版 |
+            | `openppp2-linux-amd64-simd` | x86_64 | SIMD 优化 |
+            | `openppp2-linux-amd64-io-uring` | x86_64 | io_uring |
+            | `openppp2-linux-amd64-io-uring-simd` | x86_64 | io_uring + SIMD |
+            | `openppp2-linux-amd64-tc-simd` | x86_64 | 时间校正 + SIMD |
+            | `openppp2-linux-amd64-tc-io-uring` | x86_64 | 时间校正 + io_uring |
+            | `openppp2-linux-amd64-tc-io-uring-simd` | x86_64 | 时间校正 + io_uring + SIMD |' || '' }}
+            ${{ inputs.build_aarch64 && '| `openppp2-linux-arm64` | ARM64 | 基础版 |
+            | `openppp2-linux-arm64-io-uring` | ARM64 | io_uring |
+            | `openppp2-linux-arm64-tc` | ARM64 | 时间校正 |
+            | `openppp2-linux-arm64-tc-io-uring` | ARM64 | 时间校正 + io_uring |' || '' }}
+            ${{ inputs.build_macos && '| `openppp2-darwin-amd64` | macOS x86_64 | 基础版 |
+            | `openppp2-darwin-arm64` | macOS ARM64 | 基础版 |' || '' }}
+            ${{ inputs.build_windows && '| `openppp2-windows-x64` | Windows x64 | 基础版 |' || '' }}
+
+            > 每个 zip 包含：`ppp` 二进制 + `appsettings.json` + `dns-rules.txt` + `firewall-rules.txt` + `ip.txt`
+
+            ---
+
+            ## 🚀 快速开始
+
+            ### 服务器
+            ```json
+            {"tcp":{"listen":{"port":20000}},"websocket":{"host":"your-domain.com","path":"/tun","listen":{"ws":20080,"wss":20443}}}
+            ```
+
+            ### 客户端 — PPP 直连
+            ```json
+            {"client":{"server":"ppp://your-server.com:20000/"}}
+            ```
+
+            ### 客户端 — 优选 IP + WSS
+            ```json
+            {"client":{"server":"wss://IP:20443/tun","websocket":{"host":"your-domain.com","sni":"your-domain.com"}}}
+            ```
+
+            ---
+
+            ## ⚠️ 注意事项
+            1. WSS 需要自行准备 SSL 证书
+            2. Windows 需安装 TAP 驱动（`Driver/` 目录，已签名）
+            3. `ppp.exe` 需要管理员权限运行
+            4. Debug 版本仅用于诊断，勿用于生产环境
+
+            <p align="center"><a href="https://github.com/picetor/openppp2">github.com/picetor/openppp2</a></p>
           files: release-assets/*
           draft: true
           prerelease: false
