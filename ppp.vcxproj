@@ -394,7 +394,6 @@
     <ClCompile Include="ppp\app\server\IPv4LeasePool.cpp" />
     <ClCompile Include="ppp\diagnostics\Error.cpp" />
     <ClCompile Include="ppp\diagnostics\ErrorHandler.cpp" />
-    <ClCompile Include="ppp\dns\DnsResolver.cpp" />
     <ClCompile Include="ppp\ipv6\IPv6Auxiliary.cpp" />
     <ClCompile Include="windows\ppp\ipv6\WIN32_IPv6Auxiliary.cpp" />
     <ClInclude Include="common\aesni\aes.h" />
@@ -615,7 +614,6 @@
     <ClInclude Include="ppp\diagnostics\ErrorHandler.h" />
     <ClInclude Include="ppp\hash\hash_bytes.h" />
     <ClInclude Include="ppp\net\asio\vdns.h" />
-    <ClInclude Include="ppp\dns\DnsResolver.h" />
     <ClInclude Include="ppp\net\asio\websocket\websocket_accept_sslv_websocket.h" />
     <ClInclude Include="ppp\net\asio\websocket\websocket_accept_websocket.h" />
     <ClInclude Include="ppp\net\asio\websocket\websocket_async_sslv_websocket.h" />
