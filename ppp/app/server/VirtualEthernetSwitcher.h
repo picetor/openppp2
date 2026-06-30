@@ -490,6 +490,8 @@ namespace ppp {
                 void                                                    TickAllConnections(UInt64 now) noexcept;
                 /** @brief Starts the managed server if the URL is configured. */
                 bool                                                    OpenManagedServerIfNeed() noexcept;
+
+            public:
                 /** @brief Returns true if the runtime and platform support IPv6 data plane. */
                 bool                                                    SupportsIPv6DataPlane() noexcept;
                 /** @brief Returns true if the server-side IPv6 feature is enabled in configuration. */

@@ -739,15 +739,16 @@ namespace ppp {
                             if (NULLPTR != underlying_ni && !underlying_ni->Name.empty()) {
                                 std::string server_ip_str = server_address.to_string();
                                 std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
+                                std::string ni_name_str = underlying_ni->Name.c_str();
                                 if (!gw6_str.empty()) {
 #if defined(_LINUX)
-                                    std::string cmd = "ip -6 route add " + server_ip_str + "/128 via " + gw6_str + " dev " + underlying_ni->Name;
+                                    std::string cmd = "ip -6 route add " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
                                     system(cmd.c_str());
 #elif defined(_MACOS)
                                     std::string cmd = "route -n add -inet6 " + server_ip_str + "/128 " + gw6_str;
                                     system(cmd.c_str());
 #elif defined(_WIN32)
-                                    std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + underlying_ni->Name + "\" " + gw6_str;
+                                    std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str;
                                     system(cmd.c_str());
 #endif
                                 }
@@ -2716,8 +2717,9 @@ namespace ppp {
                         rib6_ = make_shared_object<IPv6RouteTable>();
                     }
                     if (NULLPTR != rib6_ && underlying_ni_) {
-                        boost::asio::ip::address_v6 ngw6 = underlying_ni_->IPv6GatewayServer;
-                        if (ngw6.is_v6() && !ngw6.is_unspecified()) {
+                        boost::asio::ip::address ngw6_addr = underlying_ni_->IPv6GatewayServer;
+                        if (ngw6_addr.is_v6() && !ngw6_addr.is_unspecified()) {
+                            boost::asio::ip::address_v6 ngw6 = ngw6_addr.to_v6();
                             IPv6RouteEntry entry;
                             entry.Network = remoteIP.to_v6();
                             entry.Prefix = 128;
