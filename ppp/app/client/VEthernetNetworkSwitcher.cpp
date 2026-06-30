@@ -202,7 +202,7 @@ namespace ppp {
             }
 
             bool VEthernetNetworkSwitcher::OnIPv6PacketInput(Byte* packet, int packet_length) noexcept {
-                if (!vnet_) {
+                if (!IsVNet()) {
                     return false;
                 }
                 if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
@@ -671,7 +671,7 @@ namespace ppp {
 #endif
                 // Determine nat_mode from configuration.
                 auto configuration = GetConfiguration();
-                bool nat_mode = configuration != NULLPTR && configuration->server.ipv6.nat66;
+                bool nat_mode = configuration != NULLPTR && configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66;
 
                 // Capture original IPv6 state before applying changes.
                 ppp::ipv6::auxiliary::ClientState state;
@@ -711,10 +711,10 @@ namespace ppp {
                 // 4. Apply DNS servers if configured.
                 ppp::vector<ppp::string> dns_servers;
                 if (extensions.AssignedIPv6Dns1.is_v6()) {
-                    dns_servers.push_back(extensions.AssignedIPv6Dns1.to_string());
+                    dns_servers.emplace_back(extensions.AssignedIPv6Dns1.to_string());
                 }
                 if (extensions.AssignedIPv6Dns2.is_v6()) {
-                    dns_servers.push_back(extensions.AssignedIPv6Dns2.to_string());
+                    dns_servers.emplace_back(extensions.AssignedIPv6Dns2.to_string());
                 }
                 if (!dns_servers.empty()) {
                     ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
