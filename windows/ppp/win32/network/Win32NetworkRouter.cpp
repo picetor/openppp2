@@ -262,7 +262,33 @@ namespace ppp
 
                 DWORD result = ::CreateIpForwardEntry2(&row);
                 if (result != NO_ERROR) {
+                    // ERROR_OBJECT_ALREADY_EXISTS (5010) means the route is already
+                    // installed — this can happen when retrying after a failed connection
+                    // attempt whose cleanup did not remove the IPv6 route. Treat it as
+                    // success since the route is already in place.
+                    if (result == ERROR_OBJECT_ALREADY_EXISTS) {
+                        return true;
+                    }
+
                     LOG_DEBUG("Router::AddIPv6RouteEntry: CreateIpForwardEntry2 failed, result=%lu, ifindex=%d", result, interface_index);
+
+                    if (result == ERROR_NOT_SUPPORTED) {
+                        // Fallback to netsh when the API is not supported on this system.
+                        // CreateIpForwardEntry2 may return ERROR_NOT_SUPPORTED (50) on
+                        // some Windows versions/configurations where the IPv6 forwarding
+                        // API is unavailable. netsh interface ipv6 is the traditional way.
+                        std::string network_str = network.to_string();
+                        std::string next_hop_str = next_hop.to_string();
+                        char command[1024];
+                        ::snprintf(command, sizeof(command),
+                            "netsh interface ipv6 add route %s/%d %d %s > nul 2>&1",
+                            network_str.c_str(), prefix_length, interface_index, next_hop_str.c_str());
+                        int rc = ::system(command);
+                        if (rc == 0) {
+                            return true;
+                        }
+                        LOG_DEBUG("Router::AddIPv6RouteEntry: netsh fallback also failed, rc=%d", rc);
+                    }
                 }
                 return result == NO_ERROR;
             }
