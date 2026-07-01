@@ -1117,6 +1117,7 @@ namespace ppp {
 
                 bool ok = DoEcho(transmission, ack_id, nullof<YieldContext>());
                 if (!ok) {
+                    LOG_DEBUG("VEthernetExchanger::Echo(ack_id=%d): DoEcho failed, disposing transmission", ack_id);
                     transmission->Dispose();
                 }
 
@@ -1139,6 +1140,7 @@ namespace ppp {
 
                 bool ok = DoEcho(transmission, (Byte*)packet, packet_size, nullof<YieldContext>());
                 if (!ok) {
+                    LOG_DEBUG("VEthernetExchanger::Echo(packet): DoEcho failed, disposing transmission, packet_size=%d", packet_size);
                     transmission->Dispose();
                 }
 

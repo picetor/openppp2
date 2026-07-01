@@ -208,6 +208,8 @@ namespace ppp {
                     return ITransmissionBridge::Write(transmission, packet, packet_length,
                         [transmission](bool ok) noexcept {
                             if (!ok) {
+                                LOG_DEBUG("ITransmission::Write(non-coroutine): write failed, disposing transmission, disposed=%d",
+                                    (int)transmission->disposed_);
                                 transmission->Dispose();
                             }
                         });

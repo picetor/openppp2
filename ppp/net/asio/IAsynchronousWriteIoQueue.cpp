@@ -96,6 +96,7 @@ namespace ppp {
                     SynchronizedObjectScope scope(q->syncobj_);
                     if (q->sending_) {
                         if (q->disposed_) {
+                            LOG_DEBUG("IAsynchronousWriteIoQueue::WriteBytes: disposed while sending, dropping write, packet_length=%d", packet_length);
                             break;
                         }
 
@@ -133,6 +134,8 @@ namespace ppp {
                         }
 
                         if (err < 0) {
+                            LOG_DEBUG("IAsynchronousWriteIoQueue::DoTryWriteBytesUnsafe: callback failed, err=%d, ok=%d, disposed=%d, sending=%d",
+                                err, (int)ok, (int)disposed_, (int)sending_);
                             Dispose();
                         }
                     };
