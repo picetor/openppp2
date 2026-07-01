@@ -7,7 +7,6 @@ name: Build openppp2 (Windows)
 
 on:
   push:
-    branches: [ inet6 ]
     paths:
       - '**.cpp'
       - '**.h'
