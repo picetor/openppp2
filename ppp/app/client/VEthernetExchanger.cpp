@@ -105,6 +105,7 @@ namespace ppp {
 
                 StaticEchoClean();
                 if (NULLPTR != transmission) {
+                    LOG_DEBUG("VEthernetExchanger::Finalize: disposing transmission, disposed=%d", (int)disposed_);
                     transmission->Dispose();
                 }
 
@@ -121,6 +122,7 @@ namespace ppp {
             }
 
             void VEthernetExchanger::Dispose() noexcept {
+                LOG_DEBUG("VEthernetExchanger::Dispose: posting Finalize, disposed=%d", (int)disposed_);
                 auto self = shared_from_this();
                 std::shared_ptr<boost::asio::io_context> context = GetContext();
                 boost::asio::post(*context, 

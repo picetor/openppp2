@@ -631,6 +631,7 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::Dispose() noexcept {
+                LOG_DEBUG("VEthernetNetworkSwitcher::Dispose: posting Finalize");
                 auto self = shared_from_this();
                 std::shared_ptr<boost::asio::io_context> context = GetContext();
                 boost::asio::dispatch(*context, 
@@ -641,6 +642,7 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::Finalize() noexcept {
+                LOG_DEBUG("VEthernetNetworkSwitcher::Finalize: releasing all objects");
                 IDisposable::Dispose(logger_);
                 ReleaseAllObjects();
                 ReleaseAllPackets();
