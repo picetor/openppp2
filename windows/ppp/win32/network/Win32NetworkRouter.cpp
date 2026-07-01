@@ -247,9 +247,23 @@ namespace ppp
                     memcpy(&in6, bytes.data(), sizeof(in6));
                     row.NextHop.Ipv6.sin6_family = AF_INET6;
                     row.NextHop.Ipv6.sin6_addr = in6;
+
+                    // Link-local (fe80::) next-hop addresses MUST have sin6_scope_id
+                    // set to the interface index, otherwise CreateIpForwardEntry2
+                    // fails with ERROR_INVALID_PARAMETER.
+                    if (next_hop.is_link_local()) {
+                        unsigned long scope_id = static_cast<unsigned long>(next_hop.scope_id());
+                        if (scope_id == 0) {
+                            scope_id = static_cast<unsigned long>(interface_index);
+                        }
+                        row.NextHop.Ipv6.sin6_scope_id = scope_id;
+                    }
                 }
 
                 DWORD result = ::CreateIpForwardEntry2(&row);
+                if (result != NO_ERROR) {
+                    LOG_DEBUG("Router::AddIPv6RouteEntry: CreateIpForwardEntry2 failed, result=%lu, ifindex=%d", result, interface_index);
+                }
                 return result == NO_ERROR;
             }
         }

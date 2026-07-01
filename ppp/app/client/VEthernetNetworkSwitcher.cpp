@@ -941,8 +941,11 @@ namespace ppp {
                                     (void)server_ip_str;
                                     (void)ni_name_str;
                                     int v6_ifindex = underlying_ni->Index;
-                                    if (v6_ifindex >= 0 && !ppp::win32::network::Router::AddIPv6RouteEntry(server_address.to_v6(), 128, underlying_ni->IPv6GatewayServer.to_v6(), v6_ifindex)) {
-                                        LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Configuration: pin server IPv6 route via API failed (may already exist), ifindex=%d", v6_ifindex);
+                                    if (v6_ifindex >= 0) {
+                                        if (!ppp::win32::network::Router::AddIPv6RouteEntry(server_address.to_v6(), 128, underlying_ni->IPv6GatewayServer.to_v6(), v6_ifindex)) {
+                                            LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: pin server IPv6 route via API failed, ifindex=%d, gw=\"%s\"",
+                                                v6_ifindex, gw6_str.c_str());
+                                        }
                                     }
                                 }
 #endif

@@ -407,22 +407,22 @@ namespace ppp {
 
                         Byte atype = data[3];
                         if (atype == SOCKS_ATYPE_IPV4) {
-                            if (!ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(data, 4), y)) {
+                            if (!ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(data, 6), y)) {
                                 return PublishSocketReadFailure(socket);
                             }
 
-                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + 2));
+                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + 4));
                             boost::asio::ip::address_v4::bytes_type ip = *(boost::asio::ip::address_v4::bytes_type*)data;
                             address = boost::asio::ip::address_v4(ip).to_string();
                             address_type = ppp::app::protocol::AddressType::IPv4;
                             return SOCKS_ERR_OK;
                         }
                         elif(atype == SOCKS_ATYPE_IPV6) {
-                            if (!ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(data, 16), y)) {
+                            if (!ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(data, 18), y)) {
                                 return PublishSocketReadFailure(socket);
                             }
 
-                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + 14));
+                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + 16));
                             boost::asio::ip::address_v6::bytes_type ip = *(boost::asio::ip::address_v6::bytes_type*)data;
                             address = boost::asio::ip::address_v6(ip).to_string();
                             address_type = ppp::app::protocol::AddressType::IPv6;
