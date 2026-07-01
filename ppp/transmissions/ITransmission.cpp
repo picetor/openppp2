@@ -777,16 +777,19 @@ namespace ppp {
 
             auto header = ITransmissionBridge::ReadBytes(transmission, y, EVP_HEADER_MSS);
             if (NULLPTR == header) {
+                LOG_DEBUG("Transmission_Packet_Read: header read failed, EVP_HEADER_MSS=%d", EVP_HEADER_MSS);
                 return NULLPTR;
             }
 
             int payload_len = Transmission_Header_Decrypt(APP, allocator, EVP_protocol, header.get(), header_kf);
             if (payload_len < 1) {
+                LOG_DEBUG("Transmission_Packet_Read: header decrypt failed, payload_len=%d", payload_len);
                 return NULLPTR;
             }
 
             auto payload = ITransmissionBridge::ReadBytes(transmission, y, payload_len);
             if (NULLPTR == payload) {
+                LOG_DEBUG("Transmission_Packet_Read: payload read failed, payload_len=%d", payload_len);
                 return NULLPTR;
             }
 
