@@ -39,7 +39,17 @@ namespace ppp {
             disposed_ = true;
 
             if (socket) {
+                boost::system::error_code ec;
+                boost::asio::ip::tcp::endpoint ep = socket->remote_endpoint(ec);
+                bool is_open = socket->is_open();
+                LOG_DEBUG("ITcpipTransmission::Finalize: closing socket, is_open=%d, remote=%s, native=%p",
+                    (int)is_open,
+                    ec ? "n/a" : ep.address().to_string().c_str(),
+                    (void*)(uintptr_t)socket->native_handle());
                 Socket::Closesocket(socket);
+            }
+            else {
+                LOG_DEBUG("ITcpipTransmission::Finalize: socket already null, disposed=%d", (int)disposed_);
             }
 
 #if defined(_WIN32)
@@ -172,6 +182,12 @@ namespace ppp {
             auto strand = GetStrand();
 
             auto complete_do_write_bytes_async_callback = [self, this, socket, context, strand, packet, offset, packet_length, cb]() noexcept {
+                if (!socket->is_open()) {
+                    LOG_DEBUG("ITcpipTransmission::DoWriteBytes: socket closed before async_write, packet_length=%d, disposed=%d",
+                        packet_length, (int)disposed_);
+                    if (cb) cb(false);
+                    return;
+                }
                 boost::asio::async_write(*socket, boost::asio::buffer((Byte*)packet.get() + offset, packet_length),
                     [self, this, context, strand, packet, packet_length, cb](const boost::system::error_code& ec, std::size_t sz) noexcept {
                         bool ok = ec == boost::system::errc::success;
@@ -182,8 +198,11 @@ namespace ppp {
                             }
                         }
                         else {
-                            LOG_DEBUG("ITcpipTransmission::DoWriteBytes: async_write failed, ec=%s, packet_length=%d", ec.message().data(), packet_length);
-                            Dispose();
+                            LOG_DEBUG("ITcpipTransmission::DoWriteBytes: async_write failed, ec=%s, ecv=%d, packet_length=%d, disposed=%d, socket_open=%d",
+                                ec.message().data(), ec.value(), packet_length, (int)disposed_, socket ? (int)socket->is_open() : -1);
+                            if (!disposed_) {
+                                Dispose();
+                            }
                         }
 
                         if (cb) {

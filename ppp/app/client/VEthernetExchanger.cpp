@@ -315,31 +315,20 @@ namespace ppp {
 #elif defined(_WIN32)
                 // On Windows, use IP_UNICAST_IF to bind the socket to the physical NIC interface.
                 // This prevents routing loops when the TAP adapter becomes the default gateway.
-                if (!remoteIP.is_loopback()) {
+                // IPv6 connections do NOT need interface binding (same as Linux behavior),
+                // because the VPN operates at IPv4 layer and IPv6 routing is independent.
+                if (!remoteIP.is_loopback() && remoteIP.is_v4()) {
                     auto underlying_ni = switcher_->GetUnderlyingNetworkInterface();
                     if (NULLPTR != underlying_ni && underlying_ni->Index > 0) {
                         int if_index = underlying_ni->Index;
                         LOG_DEBUG("VEthernetExchanger::OpenTransmission: binding to NIC if_index=%d", if_index);
-                        if (remoteIP.is_v4()) {
-                            // IP_UNICAST_IF = 31 (IPPROTO_IP level)
-                            // The value is the interface index in network byte order (ULONG)
-                            ULONG index = htonl((ULONG)if_index);
-                            int rc = ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
-                            if (rc < 0) {
-                                LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v4) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
-                            }
+                        // IP_UNICAST_IF = 31 (IPPROTO_IP level)
+                        // The value is the interface index in network byte order (ULONG)
+                        ULONG index = htonl((ULONG)if_index);
+                        int rc = ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
+                        if (rc < 0) {
+                            LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v4) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
                         }
-#if defined(IPPROTO_IPV6)
-                        else {
-                            // IPV6_UNICAST_IF = 31 (IPPROTO_IPV6 level)
-                            // The value is the interface index directly (ULONG)
-                            ULONG index = (ULONG)if_index;
-                            int rc = ::setsockopt(socket->native_handle(), IPPROTO_IPV6, 31, (const char*)&index, sizeof(index));
-                            if (rc < 0) {
-                                LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v6) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
-                            }
-                        }
-#endif
                     }
                     else {
                         LOG_DEBUG("VEthernetExchanger::OpenTransmission: underlying NIC not found, Index=%d", underlying_ni ? underlying_ni->Index : -1);
@@ -391,8 +380,14 @@ namespace ppp {
                 boost::asio::post(*context, 
                     [self, this, context]() noexcept {
                         uint64_t now = ppp::threading::Executors::GetTickCount();
-                        SendEchoKeepAlivePacket(now, false); 
+                        SendEchoKeepAlivePacket(now, false);
+                        if (disposed_) {
+                            return;
+                        }
                         DoMuxEvents();
+                        if (disposed_) {
+                            return;
+                        }
                         DoKeepAlived(GetTransmission(), now);
 
                         for (;;) {
