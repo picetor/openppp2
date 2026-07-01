@@ -937,10 +937,10 @@ namespace ppp {
                                     LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
                                 }
 #elif defined(_WIN32)
-                                std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str;
+                                std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str + " >nul 2>&1";
                                 int rc = system(cmd.c_str());
                                 if (rc != 0) {
-                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Configuration: pin server IPv6 route (may already exist), cmd=\"%s\", rc=%d", cmd.c_str(), rc);
                                 }
 #endif
                             }
@@ -2175,11 +2175,11 @@ namespace ppp {
                     if (!ifname6.empty()) {
                         cmd += " \"" + ifname6 + "\"";
                     }
-                    cmd += " " + ngw6_str;
+                    cmd += " " + ngw6_str + " >nul 2>&1";
                     system(cmd.c_str());
 #elif defined(_MACOS)
                     // macOS: use route -n add -inet6
-                    std::string cmd = "route -n add -inet6 " + cidr + " " + ngw6_str;
+                    std::string cmd = "route -n add -inet6 " + cidr + " " + ngw6_str + " 2>/dev/null";
                     system(cmd.c_str());
 #else
                     // Linux: use ip -6 route add via with dev
@@ -2198,6 +2198,7 @@ namespace ppp {
                     if (!ifname6.empty()) {
                         cmd += " dev " + ifname6;
                     }
+                    cmd += " 2>/dev/null";
                     system(cmd.c_str());
 #endif
                 }
