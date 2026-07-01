@@ -2,6 +2,7 @@
 #include <ppp/net/Socket.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
+#include <intrin.h>
 
 #include <ppp/threading/Executors.h>
 #include <ppp/coroutines/asio/asio.h>
@@ -59,8 +60,8 @@ namespace ppp {
         }
 
         void ITcpipTransmission::Dispose() noexcept {
-            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p",
-                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this);
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p, caller=%p",
+                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this, _ReturnAddress());
             auto self = shared_from_this();
             ppp::threading::Executors::ContextPtr context = GetContext();
             ppp::threading::Executors::StrandPtr strand = GetStrand();
