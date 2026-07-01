@@ -903,45 +903,50 @@ namespace ppp {
                         gua_mode,
                         state);
 
-        // Update the tap object so the console display can show IPv6 info.
-        tap->IPv6Address = extensions.AssignedIPv6Address;
-                        if (server_address.is_v6() && !server_address.is_unspecified()) {
-                            std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
-                            if (NULLPTR == underlying_ni) {
-                                LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, GetUnderlyingNetworkInterface() returned null");
-                            }
-                            elif(underlying_ni->Name.empty()) {
-                                LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, underlying_ni->Name is empty");
+                    // Update the tap object so the console display can show IPv6 info.
+                    tap->IPv6Address = extensions.AssignedIPv6Address;
+
+                    // Pin server IPv6 route to the underlying physical NIC (avoid routing loop).
+                    boost::asio::ip::address server_address;
+                    if (auto exchanger = exchanger_) {
+                        server_address = exchanger->server_url_.remoteEP.address();
+                    }
+                    if (server_address.is_v6() && !server_address.is_unspecified()) {
+                        std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
+                        if (NULLPTR == underlying_ni) {
+                            LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, GetUnderlyingNetworkInterface() returned null");
+                        }
+                        elif(underlying_ni->Name.empty()) {
+                            LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, underlying_ni->Name is empty");
+                        }
+                        else {
+                            std::string server_ip_str = server_address.to_string();
+                            std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
+                            std::string ni_name_str = underlying_ni->Name.c_str();
+                            if (!gw6_str.empty() && underlying_ni->IPv6GatewayServer.is_v6()) {
+#if defined(_LINUX)
+                                std::string cmd = "ip -6 route replace " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
+                                int rc = system(cmd.c_str());
+                                if (rc != 0) {
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                }
+#elif defined(_MACOS)
+                                std::string cmd = "route -n add -inet6 " + server_ip_str + "/128 " + gw6_str;
+                                int rc = system(cmd.c_str());
+                                if (rc != 0) {
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                }
+#elif defined(_WIN32)
+                                std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str;
+                                int rc = system(cmd.c_str());
+                                if (rc != 0) {
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
+                                }
+#endif
                             }
                             else {
-                                std::string server_ip_str = server_address.to_string();
-                                std::string gw6_str = underlying_ni->IPv6GatewayServer.to_string();
-                                std::string ni_name_str = underlying_ni->Name.c_str();
-                                if (!gw6_str.empty() && underlying_ni->IPv6GatewayServer.is_v6()) {
-#if defined(_LINUX)
-                                    std::string cmd = "ip -6 route replace " + server_ip_str + "/128 via " + gw6_str + " dev " + ni_name_str;
-                                    int rc = system(cmd.c_str());
-                                    if (rc != 0) {
-                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
-                                    }
-#elif defined(_MACOS)
-                                    std::string cmd = "route -n add -inet6 " + server_ip_str + "/128 " + gw6_str;
-                                    int rc = system(cmd.c_str());
-                                    if (rc != 0) {
-                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
-                                    }
-#elif defined(_WIN32)
-                                    std::string cmd = "netsh interface ipv6 add route " + server_ip_str + "/128 \"" + ni_name_str + "\" " + gw6_str;
-                                    int rc = system(cmd.c_str());
-                                    if (rc != 0) {
-                                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
-                                    }
-#endif
-                                }
-                                else {
-                                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Configuration: skip pinning server IPv6 route, underlying interface has no IPv6 gateway, gw6_str=\"%s\", is_v6=%d",
-                                        gw6_str.c_str(), (int)underlying_ni->IPv6GatewayServer.is_v6());
-                                }
+                                LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Configuration: skip pinning server IPv6 route, underlying interface has no IPv6 gateway, gw6_str=\"%s\", is_v6=%d",
+                                    gw6_str.c_str(), (int)underlying_ni->IPv6GatewayServer.is_v6());
                             }
                         }
                     }
