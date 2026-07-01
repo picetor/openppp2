@@ -2085,7 +2085,7 @@ namespace ppp
                             FreeMibTable(pRouteTable);
                         }
                     }
-                    }
+
                 }
 
                 Mfree(szBuf);
