@@ -101,8 +101,12 @@ namespace ppp {
                         return connection->run();
                     }
                     else {
-                        return false;
+                        return RunAfterHandshakeWithoutBridge(y);
                     }
+                }
+
+                bool VEthernetLocalProxyConnection::RunAfterHandshakeWithoutBridge(YieldContext& y) noexcept {
+                    return false;
                 }
 
                 bool VEthernetLocalProxyConnection::SendBufferToPeer(YieldContext& y, const void* messages, int messages_size) noexcept {

@@ -875,6 +875,43 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                     ni->GatewayServer.to_string().data(),
                     ni->SubmaskAddress.to_string().data());
 
+                // Show IPv6 interface info if available
+                if (sti.tun)
+                {
+                    if (std::shared_ptr<ITap> tap = client->GetTap(); NULLPTR != tap)
+                    {
+                        if (tap->IPv6Address.is_v6() || tap->IPv6GatewayServer.is_v6())
+                        {
+                            ppp::string ipv6_interface;
+                            if (tap->IPv6Address.is_v6())
+                            {
+                                ipv6_interface = tap->IPv6Address.to_string();
+                                ipv6_interface += "/64";
+                            }
+                            if (tap->IPv6GatewayServer.is_v6())
+                            {
+                                if (ipv6_interface.size() > 0)
+                                {
+                                    ipv6_interface += " ";
+                                }
+                                ipv6_interface += tap->IPv6GatewayServer.to_string();
+                            }
+                            if (tap->IPv6SubmaskAddress.is_v6())
+                            {
+                                ipv6_interface += " " + tap->IPv6SubmaskAddress.to_string();
+                            }
+                            if (ipv6_interface.size() > 0)
+                            {
+                                printfn("Interface IPv6        : %s", ipv6_interface.data());
+                            }
+                        }
+                    }
+                }
+                else if (ni->IPv6GatewayServer.is_v6())
+                {
+                    printfn("Interface IPv6        : %s", ni->IPv6GatewayServer.to_string().data());
+                }
+
                 if (sti.tun)
                 {
                     // Aggligator status
@@ -958,9 +995,11 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                 // DNS servers
                 for (std::size_t i = 0, l = ni->DnsAddresses.size(); i < l; i++)
                 {
+                    const boost::asio::ip::address& addr = ni->DnsAddresses[i];
                     ppp::string tmp = "DNS Server " + stl::to_string<ppp::string>(i + 1);
                     tmp = ppp::PaddingRight(tmp, 22, ' ');
-                    tmp += ": " + ni->DnsAddresses[i].to_string();
+                    tmp += ": " + addr.to_string();
+                    tmp += addr.is_v6() ? " (IPv6)" : " (IPv4)";
                     printfn("%s", tmp.data());
                 }
 

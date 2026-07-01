@@ -37,6 +37,8 @@ namespace ppp {
                 typedef ppp::threading::Executors::StrandPtr                            StrandPtr;
                 typedef std::mutex                                                      SynchronizedObject;
                 typedef std::lock_guard<SynchronizedObject>                             SynchronizedObjectScope;
+                typedef ppp::function<bool(const boost::asio::ip::udp::endpoint&, const boost::asio::ip::udp::endpoint&, void*, int)> DatagramPacketHandler;
+                typedef ppp::unordered_map<boost::asio::ip::udp::endpoint, DatagramPacketHandler> DatagramPacketHandlerTable;
 
             private:
                 typedef ppp::unordered_map<boost::asio::ip::udp::endpoint,
@@ -102,6 +104,11 @@ namespace ppp {
                 virtual bool                                                            Update() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP) noexcept;
+
+            public:
+                bool                                                                    RegisterDatagramHandler(const boost::asio::ip::udp::endpoint& sourceEP, const DatagramPacketHandler& handler) noexcept;
+                bool                                                                    ReleaseDatagramHandler(const boost::asio::ip::udp::endpoint& sourceEP) noexcept;
+                bool                                                                    TryHandleDatagram(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length) noexcept;
 
             protected:
                 virtual bool                                                            OnLan(const ITransmissionPtr& transmission, uint32_t ip, uint32_t mask, YieldContext& y) noexcept override;
@@ -248,6 +255,7 @@ namespace ppp {
                 VEthernetNetworkSwitcherPtr                                             switcher_;
                 std::shared_ptr<VirtualEthernetInformation>                             information_;
                 VEthernetDatagramPortTable                                              datagrams_;
+                DatagramPacketHandlerTable                                              datagram_handlers_;
                 ITransmissionPtr                                                        transmission_;
                 std::atomic<NetworkState>                                               network_state_      = NetworkState_Connecting;
                 VirtualEthernetMappingPortTable                                         mappings_;

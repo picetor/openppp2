@@ -71,6 +71,7 @@ namespace ppp {
 
                 protected:
                     virtual bool                                                        Handshake(YieldContext& y) noexcept = 0;
+                    virtual bool                                                        RunAfterHandshakeWithoutBridge(YieldContext& y) noexcept;
                     bool                                                                ConnectBridgeToPeer(const std::shared_ptr<ppp::app::protocol::AddressEndPoint>& destinationEP, YieldContext& y) noexcept;
                     bool                                                                SendBufferToPeer(YieldContext& y, const void* messages, int messages_size) noexcept;
 

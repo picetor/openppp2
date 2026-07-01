@@ -1028,6 +1028,10 @@ namespace ppp {
                     return false;
                 }
 
+                if (TryHandleDatagram(sourceEP, destinationEP, packet, packet_length)) {
+                    return true;
+                }
+
                 VEthernetDatagramPortPtr datagram = GetDatagramPort(sourceEP);
                 if (NULLPTR != datagram) {
                     if (NULLPTR != packet && packet_length > 0) {
@@ -1065,6 +1069,45 @@ namespace ppp {
                 }
 
                 return datagram->SendTo(packet, packet_size, destinationEP);
+            }
+
+            bool VEthernetExchanger::RegisterDatagramHandler(const boost::asio::ip::udp::endpoint& sourceEP, const DatagramPacketHandler& handler) noexcept {
+                if (sourceEP.port() <= ppp::net::IPEndPoint::MinPort) {
+                    return false;
+                }
+
+                SynchronizedObjectScope scope(syncobj_);
+                auto r = datagram_handlers_.emplace(sourceEP, handler);
+                return r.second;
+            }
+
+            bool VEthernetExchanger::ReleaseDatagramHandler(const boost::asio::ip::udp::endpoint& sourceEP) noexcept {
+                if (sourceEP.port() <= ppp::net::IPEndPoint::MinPort) {
+                    return false;
+                }
+
+                SynchronizedObjectScope scope(syncobj_);
+                auto r = datagram_handlers_.erase(sourceEP);
+                return r > 0;
+            }
+
+            bool VEthernetExchanger::TryHandleDatagram(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length) noexcept {
+                if (sourceEP.port() <= ppp::net::IPEndPoint::MinPort) {
+                    return false;
+                }
+
+                SynchronizedObjectScope scope(syncobj_);
+                auto tail = datagram_handlers_.find(sourceEP);
+                if (tail == datagram_handlers_.end()) {
+                    return false;
+                }
+
+                DatagramPacketHandler& handler = tail->second;
+                if (NULLPTR == handler) {
+                    return false;
+                }
+
+                return handler(sourceEP, destinationEP, packet, packet_length);
             }
 
             bool VEthernetExchanger::Echo(int ack_id) noexcept {
