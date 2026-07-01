@@ -452,6 +452,7 @@ namespace ppp {
                     return transmission;
                 }
                 else {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: handshake failed, disposing sub-transmission, this=%p", (void*)transmission.get());
                     transmission->Dispose();
                     return NULLPTR;
                 }

@@ -42,14 +42,15 @@ namespace ppp {
                 boost::system::error_code ec;
                 boost::asio::ip::tcp::endpoint ep = socket->remote_endpoint(ec);
                 bool is_open = socket->is_open();
-                LOG_DEBUG("ITcpipTransmission::Finalize: closing socket, is_open=%d, remote=%s, native=%p",
+                LOG_DEBUG("ITcpipTransmission::Finalize: closing socket, is_open=%d, remote=%s, native=%p, this=%p",
                     (int)is_open,
                     ec ? "n/a" : ep.address().to_string().c_str(),
-                    (void*)(uintptr_t)socket->native_handle());
+                    (void*)(uintptr_t)socket->native_handle(),
+                    (void*)this);
                 Socket::Closesocket(socket);
             }
             else {
-                LOG_DEBUG("ITcpipTransmission::Finalize: socket already null, disposed=%d", (int)disposed_);
+                LOG_DEBUG("ITcpipTransmission::Finalize: socket already null, disposed=%d, this=%p", (int)disposed_, (void*)this);
             }
 
 #if defined(_WIN32)
@@ -58,8 +59,8 @@ namespace ppp {
         }
 
         void ITcpipTransmission::Dispose() noexcept {
-            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d",
-                (int)disposed_, socket_ ? (int)socket_->is_open() : -1);
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p",
+                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this);
             auto self = shared_from_this();
             ppp::threading::Executors::ContextPtr context = GetContext();
             ppp::threading::Executors::StrandPtr strand = GetStrand();
