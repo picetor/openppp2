@@ -1,6 +1,8 @@
 #include <ppp/net/IPEndPoint.h>
 #include <windows/ppp/win32/network/Router.h>
 
+#include <boost/asio.hpp>
+
 typedef ppp::net::IPEndPoint IPEndPoint;
 
 namespace ppp
@@ -198,6 +200,55 @@ namespace ppp
             {
                 int err = ::CreateIpForwardEntry(&route);
                 return err == NO_ERROR;
+            }
+
+            bool Router::AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index) noexcept
+            {
+                if (interface_index < 0)
+                {
+                    return false;
+                }
+
+                if (prefix_length < 0 || prefix_length > 128)
+                {
+                    return false;
+                }
+
+                if (network.is_unspecified() || next_hop.is_unspecified())
+                {
+                    return false;
+                }
+
+                MIB_IPFORWARDROW2 row;
+                memset(&row, 0, sizeof(row));
+
+                row.InterfaceIndex = interface_index;
+                row.Metric = 1;
+                row.Protocol = MIB_IPPROTO_NETMGMT;
+                row.Origin = NlroManual;
+                row.PreferredLifetime = 0xFFFFFFFF;
+                row.ValidLifetime = 0xFFFFFFFF;
+                row.SitePrefixLength = 0;
+                row.DestinationPrefix.PrefixLength = static_cast<UINT8>(prefix_length);
+
+                // Set destination prefix address (::/prefix)
+                {
+                    auto bytes = network.to_bytes();
+                    IN6_ADDR in6;
+                    memcpy(&in6, bytes.data(), sizeof(in6));
+                    ::INETADDR_SETIN6(&row.DestinationPrefix.Prefix, &in6);
+                }
+
+                // Set next hop address
+                {
+                    auto bytes = next_hop.to_bytes();
+                    IN6_ADDR in6;
+                    memcpy(&in6, bytes.data(), sizeof(in6));
+                    ::INETADDR_SETIN6(&row.NextHop, &in6);
+                }
+
+                DWORD result = ::CreateIpv6ForwardEntry(&row);
+                return result == NO_ERROR;
             }
         }
     }

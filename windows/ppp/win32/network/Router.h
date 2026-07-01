@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <Iphlpapi.h>
+#include <netioapi.h>
 
 namespace ppp
 {
@@ -32,6 +33,9 @@ namespace ppp
                 static bool                                 Add(uint32_t destination, uint32_t mask, uint32_t gw, int metric) noexcept;
                 static bool                                 Add(uint32_t destination, uint32_t mask, uint32_t gw, int metric, int interface_index) noexcept;
                 static bool                                 Add(MIB_IPFORWARDROW& route) noexcept;
+
+            public:
+                static bool                                 AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index) noexcept;
             };
         }
     }
