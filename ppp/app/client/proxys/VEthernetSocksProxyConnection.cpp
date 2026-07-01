@@ -243,7 +243,11 @@ namespace ppp {
                     address_endpoint->Host = host;
                     address_endpoint->Port = port;
 
-                    return ConnectBridgeToPeer(address_endpoint, y);
+                    if (!ConnectBridgeToPeer(address_endpoint, y)) {
+                        return false;
+                    }
+
+                    return SendSocksRequestReply(GetSocket(), SOCKS_ERR_OK, y);
                 }
 
                 int VEthernetSocksProxyConnection::Authentication(YieldContext& y) noexcept {

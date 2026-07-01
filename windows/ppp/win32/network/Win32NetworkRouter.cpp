@@ -219,7 +219,7 @@ namespace ppp
                     return false;
                 }
 
-                MIB_IPFORWARDROW2 row;
+                MIB_IPFORWARD_ROW2 row;
                 memset(&row, 0, sizeof(row));
 
                 row.InterfaceIndex = interface_index;
@@ -236,7 +236,8 @@ namespace ppp
                     auto bytes = network.to_bytes();
                     IN6_ADDR in6;
                     memcpy(&in6, bytes.data(), sizeof(in6));
-                    ::INETADDR_SETIN6(&row.DestinationPrefix.Prefix, &in6);
+                    row.DestinationPrefix.Prefix.si.si6.sin6_family = AF_INET6;
+                    row.DestinationPrefix.Prefix.si.si6.sin6_addr = in6;
                 }
 
                 // Set next hop address
@@ -244,7 +245,8 @@ namespace ppp
                     auto bytes = next_hop.to_bytes();
                     IN6_ADDR in6;
                     memcpy(&in6, bytes.data(), sizeof(in6));
-                    ::INETADDR_SETIN6(&row.NextHop, &in6);
+                    row.NextHop.si.si6.sin6_family = AF_INET6;
+                    row.NextHop.si.si6.sin6_addr = in6;
                 }
 
                 DWORD result = ::CreateIpv6ForwardEntry(&row);
