@@ -68,6 +68,30 @@ namespace ppp {
                 return len == buffers.size();
             }
 
+            template <typename AsyncWriteStream, typename MutableBufferSequence>
+            bool                                                                async_read(AsyncWriteStream& stream, const MutableBufferSequence& buffers, YieldContext& y, boost::system::error_code& out_ec) noexcept {
+                if (!buffers.data() || !buffers.size()) {
+                    out_ec = boost::asio::error::invalid_argument;
+                    return false;
+                }
+
+                boost::system::error_code capture_ec;
+                int len = -1;
+                boost::asio::post(stream.get_executor(),
+                    [&stream, &buffers, &y, &len, &capture_ec]() noexcept {
+                        boost::asio::async_read(stream, constantof(buffers),
+                            [&y, &len, &capture_ec](const boost::system::error_code& ec, std::size_t sz) noexcept {
+                                capture_ec = ec;
+                                len = std::max<int>(ec ? -1 : sz, -1);
+                                y.R();
+                            });
+                    });
+
+                y.Suspend();
+                out_ec = capture_ec;
+                return len == buffers.size();
+            }
+
             template <typename AsyncWriteStream, typename ConstBufferSequence>
             bool                                                                async_write(AsyncWriteStream& stream, const ConstBufferSequence& buffers, YieldContext& y) noexcept {
                 if (!buffers.data() || !buffers.size()) {

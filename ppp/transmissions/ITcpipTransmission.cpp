@@ -77,7 +77,7 @@ namespace ppp {
                 LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d, socket_open=%d, disposed=%d, remote=%s",
                     length,
                     socket ? (int)socket->is_open() : -1,
-                    (int)disposed_.load(),
+                    (int)disposed_,
                     socket && socket->is_open() ? socket->remote_endpoint().address().to_string().c_str() : "n/a");
 #else
                 LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d", length);

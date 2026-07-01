@@ -951,7 +951,7 @@ namespace ppp {
 #endif
                             }
                             else {
-                                LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Configuration: skip pinning server IPv6 route, underlying interface has no IPv6 gateway, gw6_str=\"%s\", is_v6=%d",
+                                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Configuration: skip pinning server IPv6 route, underlying interface has no IPv6 gateway, gw6_str=\"%s\", is_v6=%d",
                                     gw6_str.c_str(), (int)underlying_ni->IPv6GatewayServer.is_v6());
                             }
                         }
