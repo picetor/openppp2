@@ -673,6 +673,14 @@ namespace ppp {
                         info.IncomingTraffic= ppp::net::Ipep::NetworkToHostOrder(info.IncomingTraffic);
                         info.OutgoingTraffic= ppp::net::Ipep::NetworkToHostOrder(info.OutgoingTraffic);
 
+                        LOG_DEBUG("PacketInput: INFO received, IncomingTraffic=%llu, OutgoingTraffic=%llu, ExpiredTime=%u, BandwidthQoS=%lld, packet_length=%d, sizeof=%d",
+                            (unsigned long long)info.IncomingTraffic,
+                            (unsigned long long)info.OutgoingTraffic,
+                            info.ExpiredTime,
+                            (long long)info.BandwidthQoS,
+                            packet_length,
+                            (int)sizeof(VirtualEthernetInformation));
+
                         // Check for inline ExtendedJson after the binary header:
                         // [2-byte network-order length] [JSON data]
                         InformationEnvelope envelope;
@@ -691,6 +699,8 @@ namespace ppp {
 
                         return OnInformation(transmission, envelope, y);
                     } else {
+                        LOG_DEBUG("PacketInput: INFO packet too short, packet_length=%d, min=%d",
+                            packet_length, (int)sizeof(VirtualEthernetInformation));
                         return packet_length == 0;
                     }
                 }

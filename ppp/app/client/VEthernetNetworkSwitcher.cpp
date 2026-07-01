@@ -834,12 +834,21 @@ namespace ppp {
 
                 // If the user still has the remaining incoming/outgoing traffic and the expiration time is not reached, 
                 // The VPN link is regarded as successful. Otherwise, the VPN link needs to be disconnected.
-                if (info->Valid()) {
+                bool valid = info->Valid();
+                LOG_DEBUG("VEthernetNetworkSwitcher::OnInformation: Valid=%d, IncomingTraffic=%llu, OutgoingTraffic=%llu, ExpiredTime=%u, now=%u, BandwidthQoS=%lld",
+                    (int)valid,
+                    (unsigned long long)info->IncomingTraffic,
+                    (unsigned long long)info->OutgoingTraffic,
+                    info->ExpiredTime,
+                    (UInt32)time(NULLPTR),
+                    (long long)info->BandwidthQoS);
+                if (valid) {
                     return true;
                 }
 
                 // If the VPN link needs to be disconnected, the client requires the active end, and the server forcibly disconnects. 
                 // This prevents you from bypassing the disconnection problem by modifying the code of the client switch.
+                LOG_DEBUG("VEthernetNetworkSwitcher::OnInformation: Valid() returned false, disposing transmission!");
                 std::shared_ptr<ppp::transmissions::ITransmission> transmission = exchanger->GetTransmission(); 
                 if (NULLPTR != transmission) {
                     transmission->Dispose();
