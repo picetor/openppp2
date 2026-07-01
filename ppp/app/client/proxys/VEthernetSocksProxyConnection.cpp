@@ -499,11 +499,7 @@ namespace ppp {
                     }
 
                     udp_buffer_ = Executors::GetCachedBuffer(GetContext());
-                    if (NULLPTR == udp_buffer_) {
-                        return true;
-                    }
-
-                    return UdpAssociateLoopback(y);
+                    return true;
                 }
 
                 bool VEthernetSocksProxyConnection::UdpAssociateLoopback(YieldContext& y) noexcept {
