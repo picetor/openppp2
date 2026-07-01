@@ -189,7 +189,7 @@ namespace ppp {
                     return;
                 }
                 boost::asio::async_write(*socket, boost::asio::buffer((Byte*)packet.get() + offset, packet_length),
-                    [self, this, context, strand, packet, packet_length, cb](const boost::system::error_code& ec, std::size_t sz) noexcept {
+                    [self, this, context, strand, packet, packet_length, cb, socket](const boost::system::error_code& ec, std::size_t sz) noexcept {
                         bool ok = ec == boost::system::errc::success;
                         if (ok) {
                             std::shared_ptr<ITransmissionStatistics> statistics = this->Statistics;
