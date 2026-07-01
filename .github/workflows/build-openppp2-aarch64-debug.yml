@@ -7,6 +7,7 @@ name: Build openppp2 (Linux aarch64 Debug)
 
 on:
   push:
+    branches: [ inet6 ]
     paths:
       - '**.cpp'
       - '**.h'

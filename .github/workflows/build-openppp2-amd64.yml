@@ -8,6 +8,7 @@ name: Build openppp2 (Linux amd64)
 
 on:
   push:
+    branches: [ inet6 ]
     paths:
       - '**.cpp'
       - '**.h'
