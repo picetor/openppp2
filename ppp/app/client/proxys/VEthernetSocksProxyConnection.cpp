@@ -31,6 +31,8 @@ namespace ppp {
                 static constexpr int SOCKS_ATYPE_DOMAIN         = 3;
                 static constexpr int SOCKS_CMD_CONNECT          = 1;
                 static constexpr int SOCKS_CMD_UDP              = 3;
+                static constexpr int SOCKS_ERSV                = 0;
+                static constexpr int SOCKS_ERR_RSV             = 2;
                 static constexpr int SOCKS_UDP_MIN_PACKET_SIZE  = 10;
 
                 static int PublishSocketReadFailure(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) noexcept {
@@ -394,7 +396,6 @@ namespace ppp {
                             return SOCKS_ERR_CMD;
                         }
 
-                        data[2] = 0;
                         if (data[2] != SOCKS_ERSV) {
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::SocksReservedFieldInvalid);
                             return SOCKS_ERR_RSV;
@@ -455,7 +456,7 @@ namespace ppp {
                     udp_client_ep_ = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4::any(), ppp::net::IPEndPoint::MinPort);
 
                     boost::system::error_code ec;
-                    udp_socket_ = make_shared_object<boost::asio::ip::udp::socket>(GetContext());
+                    udp_socket_ = make_shared_object<boost::asio::ip::udp::socket>(*GetContext());
                     if (NULLPTR == udp_socket_) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::UdpOpenFailed);
                         return false;
@@ -480,13 +481,13 @@ namespace ppp {
                         return false;
                     }
 
-                    ppp::net::Socket::AdjustSocketOptional(*udp_socket_, true, boost::asio::ip::udp::v4());
+                    ppp::net::Socket::AdjustSocketOptional(*udp_socket_, true);
 
                     VEthernetExchangerPtr exchanger = GetExchanger();
                     if (NULLPTR != exchanger) {
                         exchanger->RegisterDatagramHandler(udp_client_ep_, 
                             std::bind(&VEthernetSocksProxyConnection::ForwardUdpAssociatePacket,
-                                shared_from_this(),
+                                std::static_pointer_cast<VEthernetSocksProxyConnection>(shared_from_this()),
                                 std::placeholders::_1,
                                 std::placeholders::_2,
                                 std::placeholders::_3,
@@ -512,10 +513,20 @@ namespace ppp {
 
                     while (udp_socket_->is_open()) {
                         boost::system::error_code ec;
-                        int datagram_length = udp_socket_->async_receive_from(
-                            boost::asio::buffer(udp_buffer_.get(), PPP_BUFFER_SIZE),
-                            udp_remote_ep_,
-                            y[ec]);
+                        int datagram_length = 0;
+                        boost::asio::post(udp_socket_->get_executor(),
+                            [this, &y, &ec, &datagram_length]() noexcept {
+                                udp_socket_->async_receive_from(
+                                    boost::asio::buffer(udp_buffer_.get(), PPP_BUFFER_SIZE),
+                                    udp_remote_ep_,
+                                    [&y, &ec, &datagram_length](const boost::system::error_code& e, std::size_t sz) noexcept {
+                                        ec = e;
+                                        datagram_length = std::max<int>(e ? -1 : static_cast<int>(sz), -1);
+                                        y.R();
+                                    });
+                            });
+
+                        y.Suspend();
                         if (ec) {
                             return false;
                         }

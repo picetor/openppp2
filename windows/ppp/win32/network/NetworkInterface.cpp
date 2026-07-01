@@ -2026,68 +2026,65 @@ namespace ppp
                 // discovered via RA/NDP. Manually-added default routes won't appear there.
                 if (!found)
                 {
-                    ULONG ulBufSize2 = 0;
-                    GetIpForwardTable2(AF_INET6, NULLPTR, &ulBufSize2);
-                    if (ulBufSize2 > 0)
+                    PMIB_IPFORWARD_TABLE2 pRouteTable = NULLPTR;
+                    DWORD dwErr2 = GetIpForwardTable2(AF_INET6, &pRouteTable);
+                    if (dwErr2 == NO_ERROR && pRouteTable != NULLPTR)
                     {
-                        char* szBuf2 = (char*)Malloc(ulBufSize2);
-                        if (NULLPTR != szBuf2)
+                        for (ULONG i = 0; i < pRouteTable->NumEntries; i++)
                         {
-                            PMIB_IPFORWARD_TABLE2 pRouteTable = (PMIB_IPFORWARD_TABLE2)szBuf2;
-                            DWORD dwErr2 = GetIpForwardTable2(AF_INET6, pRouteTable, &ulBufSize2);
-                            if (dwErr2 == NO_ERROR)
+                            MIB_IPFORWARD_ROW2& row = pRouteTable->Table[i];
+                            if (row.DestinationPrefix.PrefixLength != 0)
                             {
-                                for (ULONG i = 0; i < pRouteTable->NumEntries; i++)
+                                continue;
+                            }
+                            if (row.DestinationPrefix.Prefix.si_family != AF_INET6)
+                            {
+                                continue;
+                            }
+                            if (!IN6_IS_ADDR_UNSPECIFIED(&row.DestinationPrefix.Prefix.Ipv6.sin6_addr))
+                            {
+                                continue;
+                            }
+                            if (row.NextHop.si_family != AF_INET6)
+                            {
+                                continue;
+                            }
+                            if (IN6_IS_ADDR_UNSPECIFIED(&row.NextHop.Ipv6.sin6_addr))
+                            {
+                                continue;
+                            }
+                            char buf[INET6_ADDRSTRLEN];
+                            if (inet_ntop(AF_INET6, &row.NextHop.Ipv6.sin6_addr, buf, sizeof(buf)))
+                            {
+                                boost::system::error_code ec;
+                                boost::asio::ip::address addr = boost::asio::ip::make_address(buf, ec);
+                                if (!ec && addr.is_v6() && !addr.is_unspecified())
                                 {
-                                    MIB_IPFORWARD_ROW2& row = pRouteTable->Table[i];
-                                    if (row.DestinationPrefix.PrefixLength != 0)
+                                    if (!found || !addr.to_v6().is_link_local())
                                     {
-                                        continue;
-                                    }
-                                    if (row.DestinationPrefix.Prefix.si_family != AF_INET6)
-                                    {
-                                        continue;
-                                    }
-                                    struct sockaddr_in6* sin6_dst = (struct sockaddr_in6*)row.DestinationPrefix.Prefix.lpSockaddr;
-                                    if (!IN6_IS_ADDR_UNSPECIFIED(&sin6_dst->sin6_addr))
-                                    {
-                                        continue;
-                                    }
-                                    if (row.NextHop.si_family != AF_INET6)
-                                    {
-                                        continue;
-                                    }
-                                    struct sockaddr_in6* sin6_nh = (struct sockaddr_in6*)row.NextHop.lpSockaddr;
-                                    if (IN6_IS_ADDR_UNSPECIFIED(&sin6_nh->sin6_addr))
-                                    {
-                                        continue;
-                                    }
-                                    char buf[INET6_ADDRSTRLEN];
-                                    if (inet_ntop(AF_INET6, &sin6_nh->sin6_addr, buf, sizeof(buf)))
-                                    {
-                                        boost::system::error_code ec;
-                                        boost::asio::ip::address addr = boost::asio::ip::make_address(buf, ec);
-                                        if (!ec && addr.is_v6() && !addr.is_unspecified())
-                                        {
-                                            if (!found || !addr.to_v6().is_link_local())
-                                            {
-                                                gateway = addr;
-                                                interface_index = static_cast<int>(row.InterfaceIndex);
-                                                found = true;
+                                        gateway = addr;
+                                        interface_index = static_cast<int>(row.InterfaceIndex);
+                                        found = true;
 
-                                                if (!addr.to_v6().is_link_local())
-                                                {
-                                                    Mfree(szBuf2);
-                                                    Mfree(szBuf);
-                                                    return true;
-                                                }
+                                        if (!addr.to_v6().is_link_local())
+                                        {
+                                            if (pRouteTable != NULLPTR)
+                                            {
+                                                FreeMibTable(pRouteTable);
                                             }
+                                            Mfree(szBuf);
+                                            return true;
                                         }
                                     }
                                 }
                             }
-                            Mfree(szBuf2);
                         }
+
+                        if (pRouteTable != NULLPTR)
+                        {
+                            FreeMibTable(pRouteTable);
+                        }
+                    }
                     }
                 }
 
