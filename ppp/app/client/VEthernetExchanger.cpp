@@ -1163,6 +1163,7 @@ namespace ppp {
 
                 bool ok = DoNat(transmission, (Byte*)packet, packet_size, nullof<YieldContext>());
                 if (!ok) {
+                    LOG_DEBUG("VEthernetExchanger::Nat: DoNat failed, disposing transmission, packet_size=%d", packet_size);
                     transmission->Dispose();
                 }
 
@@ -1193,6 +1194,7 @@ namespace ppp {
                     return 1;
                 }
 
+                LOG_DEBUG("VEthernetExchanger::EchoLanToRemoteExchanger: DoLan failed, disposing transmission");
                 transmission->Dispose();
                 return -1;
             }

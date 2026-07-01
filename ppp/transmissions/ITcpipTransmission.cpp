@@ -58,6 +58,8 @@ namespace ppp {
         }
 
         void ITcpipTransmission::Dispose() noexcept {
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d",
+                (int)disposed_, socket_ ? (int)socket_->is_open() : -1);
             auto self = shared_from_this();
             ppp::threading::Executors::ContextPtr context = GetContext();
             ppp::threading::Executors::StrandPtr strand = GetStrand();
