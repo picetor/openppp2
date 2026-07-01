@@ -290,7 +290,7 @@ namespace ppp {
                         }
                     }
 
-                    if (socks_proxy.username != strings[0] && socks_proxy.password != strings[1]) {
+                    if (socks_proxy.username != strings[0] || socks_proxy.password != strings[1]) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::AuthCredentialInvalid);
                         return SOCKS_ERR_NO;
                     }
@@ -443,9 +443,9 @@ namespace ppp {
                                 return PublishSocketReadFailure(socket);
                             }
 
+                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + address_length));
                             data[address_length] = '\x0';
                             address = (char*)data;
-                            port = boost::asio::detail::socket_ops::network_to_host_short(*(short*)(data + address_length));
                             address_type = ppp::app::protocol::AddressType::Domain;
                             return SOCKS_ERR_OK;
                         }

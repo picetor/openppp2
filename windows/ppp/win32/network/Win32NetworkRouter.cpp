@@ -236,8 +236,8 @@ namespace ppp
                     auto bytes = network.to_bytes();
                     IN6_ADDR in6;
                     memcpy(&in6, bytes.data(), sizeof(in6));
-                    row.DestinationPrefix.Prefix.si.si6.sin6_family = AF_INET6;
-                    row.DestinationPrefix.Prefix.si.si6.sin6_addr = in6;
+                    row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
+                    row.DestinationPrefix.Prefix.Ipv6.sin6_addr = in6;
                 }
 
                 // Set next hop address
@@ -245,11 +245,11 @@ namespace ppp
                     auto bytes = next_hop.to_bytes();
                     IN6_ADDR in6;
                     memcpy(&in6, bytes.data(), sizeof(in6));
-                    row.NextHop.si.si6.sin6_family = AF_INET6;
-                    row.NextHop.si.si6.sin6_addr = in6;
+                    row.NextHop.Ipv6.sin6_family = AF_INET6;
+                    row.NextHop.Ipv6.sin6_addr = in6;
                 }
 
-                DWORD result = ::CreateIpv6ForwardEntry(&row);
+                DWORD result = ::CreateIpForwardEntry2(&row);
                 return result == NO_ERROR;
             }
         }
