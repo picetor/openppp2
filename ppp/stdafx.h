@@ -24,6 +24,11 @@
 #endif
 #endif
 
+// Debug builds automatically enable verbose logging for LOG_DEBUG output.
+#if defined(_DEBUG) && !defined(PPP_LOG_VERBOSE)
+#define PPP_LOG_VERBOSE 1
+#endif
+
 #if defined(_WIN64)
 #if !defined(WIN64)
 #define WIN64 1
