@@ -32,9 +32,9 @@ namespace ppp
             const uint32_t                                                  SubmaskAddress = ppp::net::IPEndPoint::AnyAddress;
 
         public:
-            const boost::asio::ip::address                                  IPv6Address;
-            const boost::asio::ip::address                                  IPv6GatewayServer;
-            const boost::asio::ip::address                                  IPv6SubmaskAddress;
+            boost::asio::ip::address                                        IPv6Address;
+            boost::asio::ip::address                                        IPv6GatewayServer;
+            boost::asio::ip::address                                        IPv6SubmaskAddress;
 
         public:
             PacketInputEventHandler                                         PacketInput;

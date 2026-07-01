@@ -902,17 +902,9 @@ namespace ppp {
                             : 64,
                         gua_mode,
                         state);
-                }
 
-                // Pin the VPN server's IPv6 address via the physical NIC before installing
-                // split default routes (::/1 + 8000::/1) on the TAP interface. This mirrors
-                // the IPv4 approach: the server's /128 route naturally takes priority over
-                // the less specific /1 routes, preventing the TAP default route from
-                // breaking connectivity to the VPN server itself.
-                {
-                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
-                    if (NULLPTR != exchanger) {
-                        boost::asio::ip::address server_address = exchanger->server_url_.remoteEP.address();
+        // Update the tap object so the console display can show IPv6 info.
+        tap->IPv6Address = extensions.AssignedIPv6Address;
                         if (server_address.is_v6() && !server_address.is_unspecified()) {
                             std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
                             if (NULLPTR == underlying_ni) {
@@ -960,6 +952,9 @@ namespace ppp {
                 //    any existing ::/0 on the physical NIC.
                 if (extensions.AssignedIPv6Gateway.is_v6()) {
                     ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
+
+                    // Update the tap object so the console display can show the IPv6 gateway.
+                    tap->IPv6GatewayServer = extensions.AssignedIPv6Gateway;
                 }
 
                 // 3. Apply an optional routed subnet prefix.
