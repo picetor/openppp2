@@ -395,7 +395,7 @@ namespace ppp
 
         bool TapWindows::Output(const void* packet, int packet_size) noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -422,7 +422,7 @@ namespace ppp
 
         bool TapWindows::Output(const std::shared_ptr<Byte>& packet, int packet_size) noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -444,7 +444,7 @@ namespace ppp
         bool TapWindows::AsynchronousReadPacketLoops() noexcept
         {
             LOG_DEBUG("TapWindows::AsynchronousReadPacketLoops: starting");
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
                 if (!wintun->IsOpen())
@@ -807,7 +807,7 @@ namespace ppp
 
         void TapWindows::Dispose() noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 void* handle = GetHandle();
                 if (NULLPTR != handle)
