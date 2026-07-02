@@ -65,6 +65,11 @@ namespace ppp {
         }
 
         void ITcpipTransmission::Dispose() noexcept {
+            if (disposed_) {
+                LOG_DEBUG("ITcpipTransmission::Dispose: already disposed, skipping, this=%p", (void*)this);
+                return;
+            }
+            disposed_ = true;
 #if defined(_WIN32)
             void* stack[16];
             USHORT frames = RtlCaptureStackBackTrace(0, 16, stack, NULL);
@@ -73,11 +78,10 @@ namespace ppp {
             for (USHORT i = 0; i < frames && pos < (int)sizeof(stack_buf) - 20; i++) {
                 pos += sprintf_s(stack_buf + pos, sizeof(stack_buf) - pos, " %p", stack[i]);
             }
-            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p, stack=%s",
-                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this, stack_buf);
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, this=%p, stack=%s",
+                (void*)this, stack_buf);
 #else
-            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p",
-                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this);
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, this=%p", (void*)this);
 #endif
             auto self = shared_from_this();
             ppp::threading::Executors::ContextPtr context = GetContext();

@@ -31,6 +31,9 @@ namespace ppp {
                     break;
                 }
 
+                LOG_DEBUG("IAsynchronousWriteIoQueue::Finalize: forwarding %zu queued items with false, this=%p",
+                    queues.size(), (void*)this);
+
                 for (AsynchronousWriteIoContextPtr& context : queues) {
                     context->Forward(false);
                 }
