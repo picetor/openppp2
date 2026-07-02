@@ -457,7 +457,21 @@ namespace ppp {
                 }
 
                 bool VEthernetSocksProxyConnection::OpenUdpAssociate(YieldContext& y) noexcept {
-                    udp_client_ep_ = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4::any(), ppp::net::IPEndPoint::MinPort);
+                    // Use the TCP socket's local address instead of any() so that
+                    // the sourceEP passes PACKET_IPEndPoint validation (which rejects
+                    // unspecified addresses like 0.0.0.0). Fall back to loopback if
+                    // TCP was bound to any() as well.
+                    boost::asio::ip::address local_addr = boost::asio::ip::address_v4::loopback();
+                    std::shared_ptr<boost::asio::ip::tcp::socket> tcp_socket = GetSocket();
+                    if (NULLPTR != tcp_socket) {
+                        boost::system::error_code ec;
+                        boost::asio::ip::tcp::endpoint tcp_ep = tcp_socket->local_endpoint(ec);
+                        if (!ec && !tcp_ep.address().is_unspecified()) {
+                            local_addr = tcp_ep.address();
+                        }
+                    }
+
+                    udp_client_ep_ = boost::asio::ip::udp::endpoint(local_addr, ppp::net::IPEndPoint::MinPort);
 
                     boost::system::error_code ec;
                     udp_socket_ = make_shared_object<boost::asio::ip::udp::socket>(*GetContext());
