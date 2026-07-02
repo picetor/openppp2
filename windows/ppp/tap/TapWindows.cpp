@@ -250,16 +250,28 @@ namespace ppp
 
             if (WintunAdapter::Ready())
             {
-                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                auto tap = WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                if (NULLPTR != tap)
+                {
+                    return tap;
+                }
             }
 
-            int interface_index = GetNetworkInterfaceIndex(componentId);
+            // Resolve componentId to actual TAP device GUID via registry.
+            ppp::win32::network::NetworkInterfacePtr ni;
+            ppp::string deviceId = TapWindows_FindComponentId(componentId, ni);
+            if (deviceId.empty())
+            {
+                deviceId = componentId;
+            }
+
+            int interface_index = GetNetworkInterfaceIndex(deviceId);
             if (interface_index < -1)
             {
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(componentId.data());
+            void* tun = OpenDriver(deviceId.data());
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
                 LOG_DEBUG("TapWindows::Create: OpenDriver failed for componentId=%s", componentId.data());
@@ -336,29 +348,34 @@ namespace ppp
         {
             using NetworkInterface = ppp::win32::network::AdapterInterfacePtr;
 
-            if (WintunAdapter::Ready())
-            {
-                return ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
-            }
-
             if (componentId.empty())
             {
                 return -1;
             }
 
-            ppp::vector<NetworkInterface> interfaces;
-            if (!ppp::win32::network::GetAllAdapterInterfaces(interfaces))
+            // Try UUID-based lookup first (works for TAP driver GUIDs).
             {
-                return -1;
+                ppp::vector<NetworkInterface> interfaces;
+                if (ppp::win32::network::GetAllAdapterInterfaces(interfaces))
+                {
+                    boost::uuids::uuid reft_id = StringToGuid(componentId);
+                    for (NetworkInterface& ni : interfaces)
+                    {
+                        if (StringToGuid(ni->Id) == reft_id)
+                        {
+                            return ni->IfIndex;
+                        }
+                    }
+                }
             }
 
-            boost::uuids::uuid reft_id = StringToGuid(componentId);
-            for (NetworkInterface& ni : interfaces)
+            // Try friendly-name lookup (works for Wintun adapters).
+            if (WintunAdapter::Ready())
             {
-                boost::uuids::uuid left_id = StringToGuid(ni->Id);
-                if (left_id == reft_id)
+                int idx = ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
+                if (idx >= 0)
                 {
-                    return ni->IfIndex;
+                    return idx;
                 }
             }
 
