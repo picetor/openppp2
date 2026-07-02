@@ -250,6 +250,21 @@ namespace ppp
 
                 return success;
             }
+
+            bool ClearDnsAddressesV6(int interface_index) noexcept
+            {
+                if (interface_index < 0)
+                {
+                    return false;
+                }
+
+                char command[256];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 delete dnsservers %d all",
+                    interface_index);
+
+                return ExecuteNetshCommand(command);
+            }
         }
     }
 }

@@ -829,6 +829,12 @@ namespace ppp
                     });
             }
 
+            bool ClearDnsAddresses(int interface_index) noexcept
+            {
+                ppp::vector<ppp::string> empty;
+                return SetDnsAddresses(interface_index, empty);
+            }
+
             bool SetDefaultIPGateway(int interface_index, const ppp::vector<boost::asio::ip::address>& servers) noexcept
             {
                 ppp::vector<ppp::string> addresses;
@@ -1792,6 +1798,9 @@ namespace ppp
 
                 for (NetworkInterfacePtr& ni : interfaces)
                 {
+                    // Clear first to ensure no stale DNS remains on the NIC
+                    // before applying the VPN DNS servers.
+                    ClearDnsAddresses(ni->InterfaceIndex);
                     bool ok = SetDnsAddresses(ni->InterfaceIndex, servers_string);
                     if (ok)
                     {

@@ -1854,6 +1854,8 @@ void PppApplication::GetDnsAddresses(ppp::vector<boost::asio::ip::address>& addr
         boost::system::error_code ec;
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_1, ec));
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_2, ec));
+        addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_1_V6, ec));
+        addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_2_V6, ec));
     }
 }
 

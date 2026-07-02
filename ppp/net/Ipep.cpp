@@ -496,6 +496,7 @@ namespace ppp {
 
         int Ipep::ToDnsAddresses(const ppp::string& s, ppp::vector<boost::asio::ip::address>& out, bool at_least_two) noexcept {
             static constexpr const char* DEFAULT_DNS_ADDRESSES[] = { PPP_PREFERRED_DNS_SERVER_1, PPP_PREFERRED_DNS_SERVER_2 };
+            static constexpr const char* DEFAULT_DNS_ADDRESSES_V6[] = { PPP_PREFERRED_DNS_SERVER_1_V6, PPP_PREFERRED_DNS_SERVER_2_V6 };
 
             if (s.empty()) {
                 return -1;
@@ -508,15 +509,35 @@ namespace ppp {
             ppp::vector<boost::asio::ip::address> addresses;
             Ipep::ToAddresses2(s, addresses);
 
+            bool has_v4 = false;
+            bool has_v6 = false;
+            for (const boost::asio::ip::address& addr : addresses) {
+                if (addr.is_v4()) { has_v4 = true; }
+                if (addr.is_v6()) { has_v6 = true; }
+            }
+
+            int addresses_size = static_cast<int>(addresses.size());
             for (const char* dns_addresss_string : DEFAULT_DNS_ADDRESSES) {
-                int addresses_size = addresses.size();
-                if (addresses_size >= arraysizeof(DEFAULT_DNS_ADDRESSES)) {
+                if (addresses_size >= arraysizeof(DEFAULT_DNS_ADDRESSES) + arraysizeof(DEFAULT_DNS_ADDRESSES_V6)) {
                     break;
                 }
 
                 boost::asio::ip::address dns_address = Ipep::ToAddress(dns_addresss_string, false);
                 if (std::find(addresses.begin(), addresses.end(), dns_address) == addresses.end()) {
                     addresses.emplace_back(dns_address);
+                    addresses_size++;
+                }
+            }
+
+            for (const char* dns_addresss_string : DEFAULT_DNS_ADDRESSES_V6) {
+                if (addresses_size >= arraysizeof(DEFAULT_DNS_ADDRESSES) + arraysizeof(DEFAULT_DNS_ADDRESSES_V6)) {
+                    break;
+                }
+
+                boost::asio::ip::address dns_address = Ipep::ToAddress(dns_addresss_string, false);
+                if (std::find(addresses.begin(), addresses.end(), dns_address) == addresses.end()) {
+                    addresses.emplace_back(dns_address);
+                    addresses_size++;
                 }
             }
 

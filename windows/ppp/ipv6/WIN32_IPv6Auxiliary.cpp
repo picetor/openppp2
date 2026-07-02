@@ -159,6 +159,43 @@ namespace ppp {
                     if (auto current_ni = ppp::win32::network::GetNetworkInterfaceByInterfaceIndex(context.InterfaceIndex); NULLPTR != current_ni) {
                         state.OriginalDnsServers = current_ni->DnsAddresses;
                     }
+
+                    // Capture IPv6 DNS servers from ALL interfaces to prevent DNS leak.
+                    // When VPN is active, non-TAP NICs' IPv6 DNS must be cleared so that
+                    // Windows multi-homed DNS resolution does not query them in parallel.
+                    ULONG bufLen = 15000;
+                    ppp::vector<BYTE> buffer(bufLen);
+                    PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+                    DWORD ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                    if (ret == ERROR_BUFFER_OVERFLOW) {
+                        buffer.resize(bufLen);
+                        pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                        ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                    }
+
+                    if (ret == NO_ERROR) {
+                        for (PIP_ADAPTER_ADDRESSES p = pAddresses; p != NULLPTR; p = p->Next) {
+                            if (p->OperStatus != IfOperStatusUp) {
+                                continue;
+                            }
+
+                            ppp::vector<ppp::string> dns_v6_list;
+                            for (PIP_ADAPTER_DNS_SERVER_ADDRESS dns = p->FirstDnsServerAddress; dns != NULLPTR; dns = dns->Next) {
+                                if (dns->Address.lpSockaddr->sa_family == AF_INET6) {
+                                    SOCKADDR_IN6* addr6 = reinterpret_cast<SOCKADDR_IN6*>(dns->Address.lpSockaddr);
+                                    char buf[INET6_ADDRSTRLEN];
+                                    if (NULLPTR != ::inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf))) {
+                                        dns_v6_list.emplace_back(ppp::string(buf));
+                                    }
+                                }
+                            }
+
+                            if (!dns_v6_list.empty()) {
+                                state.OriginalAllDnsServers[(int)p->IfIndex] = std::move(dns_v6_list);
+                            }
+                        }
+                    }
                 }
 
                 bool ApplyClientAddress(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& address, int prefix_length, bool gua_mode, ::ppp::ipv6::auxiliary::ClientState& state) noexcept {
@@ -282,6 +319,15 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ClientDnsApplyFailed);
                     }
 
+                    // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leak.
+                    // Windows multi-homed DNS queries ALL configured DNS servers on ALL NICs in parallel.
+                    // Leaving the physical NIC's IPv6 DNS (from RA/DHCPv6) would leak AAAA queries to the ISP.
+                    for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
+                        if (if_index != context.InterfaceIndex) {
+                            ppp::win32::network::ClearDnsAddressesV6(if_index);
+                        }
+                    }
+
                     state.DnsApplied = true;
                     state.DnsServers = dns_servers;
                     ppp::tap::TapWindows::DnsFlushResolverCache();
@@ -308,6 +354,14 @@ namespace ppp {
 
                     if (state.DnsApplied) {
                         ppp::win32::network::SetDnsAddressesV6(context.InterfaceIndex, state.OriginalDnsServers);
+
+                        // Restore IPv6 DNS on all non-TAP NICs that were cleared during ApplyClientDns.
+                        for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
+                            if (if_index != context.InterfaceIndex && !servers.empty()) {
+                                ppp::win32::network::SetDnsAddressesV6(if_index, servers);
+                            }
+                        }
+
                         ppp::tap::TapWindows::DnsFlushResolverCache();
                     }
 
