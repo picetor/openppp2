@@ -328,18 +328,15 @@ namespace ppp
             {
                 tap->GetInterfaceIndex() = interface_index;
             }
-            
-            ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
-            fprintf(stdout, "[TapWindows::Create] SetAdapterInterface=%s\r\n", ok ? "OK" : "FAIL");
-            if (ok)
-            {
-                fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
-                return tap;
-            }
 
-            fprintf(stdout, "[TapWindows::Create] FAIL: SetAdapterInterface failed\r\n");
-            tap->Dispose();
-            return NULLPTR;
+            // For TAP fallback path, skip Windows WMI IP configuration (SetAdapterInterface).
+            // The TAP driver is already configured via IOCTL calls above (ConfigureDriver_SetTunModeWithAddress,
+            // ConfigureDriver_SetDhcpMASQ, ConfigureDriver_SetDhcpOptionData). The internal DHCP server handles
+            // IP assignment and DNS configuration on the Windows network interface automatically.
+            // WMI EnableStatic would conflict with the TAP's DHCP mode and fail.
+            fprintf(stdout, "[TapWindows::Create] TAP fallback: skipping SetAdapterInterface (handled by TAP IOCTL+DhcpMASQ)\r\n");
+            fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
+            return tap;
         }
 
         void* TapWindows::OpenDriver(const ppp::string& componentId) noexcept
