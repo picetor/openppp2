@@ -188,4 +188,5 @@ jobs:
           path: |
             ${{ github.workspace }}/openppp2-windows-x64-debug_*.exe
             ${{ github.workspace }}/openppp2-windows-x64-debug_*.pdb
+            ${{ github.workspace }}/ipv6.txt
           if-no-files-found: warn

@@ -93,6 +93,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"
           cd "${PKG_DIR}" && zip -r "../openppp2-${TRIPLE}-debug.zip" . && cd ..
           ls -la "openppp2-${TRIPLE}-debug.zip"
 

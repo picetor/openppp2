@@ -334,6 +334,7 @@ jobs:
           cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/ipv6.txt" "${PKG_DIR}/"
           cd "${PKG_DIR}" && zip -r "../${ZIP_NAME}.zip" . && cd ..
           ls -la "${ZIP_NAME}.zip"
 

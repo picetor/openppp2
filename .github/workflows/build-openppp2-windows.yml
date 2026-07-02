@@ -182,7 +182,8 @@ jobs:
           Write-Output "Found Release ppp.exe at: $releaseExe"
 
           # Create package directory with all supporting files (like Linux release)
-          $PackageDir = "openppp2-windows-x64_${TS}"
+          $PackageDir = "openppp2-windows-x64"
+          if (Test-Path $PackageDir) { Remove-Item -Recurse -Force $PackageDir }
           New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
 
           Copy-Item $releaseExe "$PackageDir\ppp.exe"
@@ -190,7 +191,9 @@ jobs:
           Copy-Item "${{ github.workspace }}\dns-rules.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\firewall-rules.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ip.txt" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\ipv6.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\cacert.pem" "$PackageDir\"
+          Copy-Item -Recurse "${{ github.workspace }}\Driver" "$PackageDir\Driver"
 
           Compress-Archive -Path "$PackageDir\*" -DestinationPath "${PackageDir}.zip" -Force
 

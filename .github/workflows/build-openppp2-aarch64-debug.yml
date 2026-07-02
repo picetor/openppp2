@@ -276,6 +276,7 @@ jobs:
           cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/ipv6.txt" "${PKG_DIR}/"
           cd "${PKG_DIR}" && zip -r "../openppp2-linux-aarch64-debug.zip" . && cd ..
           ls -la "openppp2-linux-aarch64-debug.zip"
 

@@ -102,6 +102,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"
           cd "${PKG_DIR}" && zip -r "../${ZIP_NAME}.zip" . && cd ..
           ls -la "${ZIP_NAME}.zip"
 
