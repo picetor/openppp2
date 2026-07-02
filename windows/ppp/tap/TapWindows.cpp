@@ -661,13 +661,17 @@ namespace ppp
 
                     ppp::string component_id = ToLower<ppp::string>(componentId);
                     std::size_t interfaces_size = interfaces.size();
+                    LOG_DEBUG("TapWindows_FindComponentId: searching '%s' across %zu interfaces", componentId.data(), interfaces_size);
                     for (std::size_t i = 0; i < interfaces_size; i++)
                     {
                         NetworkInterfacePtr& ni = interfaces[i];
+                        LOG_DEBUG("TapWindows_FindComponentId: if[%zu] Guid=%s, ConnectionId='%s', Name='%s', Description='%s'",
+                            i, ni->Guid.data(), ni->ConnectionId.data(), ni->Name.data(), ni->Description.data());
                         if (component_uuid_sgen)
                         {
                             if (StringToGuid(ni->Guid) == component_uuid)
                             {
+                                LOG_DEBUG("TapWindows_FindComponentId: matched by UUID -> '%s'", ni->Guid.data());
                                 network_interface = ni;
                                 return ni->Guid;
                             }
@@ -678,11 +682,13 @@ namespace ppp
                         connection_id = RTrim<ppp::string>(connection_id);
                         if (connection_id == component_id)
                         {
+                            LOG_DEBUG("TapWindows_FindComponentId: matched by ConnectionId -> '%s'", ni->Guid.data());
                             network_interface = ni;
                             return ni->Guid;
                         }
                     }
                 }
+                LOG_DEBUG("TapWindows_FindComponentId: no match found for '%s'", componentId.data());
                 return ppp::string();
             }
             else
