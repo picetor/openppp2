@@ -2360,22 +2360,65 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
     
     if (need_install)
     {
-        fprintf(stdout, "[PrepEth] Need install (empty=%d, isGuid=%d), triggering InstallDriver...\r\n",
-            network_interface->ComponentId.empty(), is_guid);
-        LOG_INFO("%s", "Installing TAP-Windows driver.");
-
-        // Install the TAP-Windows vNIC in the Windows operating system.
-        ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
-        fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
-        ppp::string newTapGuid = ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun);
-        if (!newTapGuid.empty())
+        // First, check if a TAP adapter with this name already exists
+        ppp::string existingGuid;
+        ppp::string targetName = ppp::ToLower<ppp::string>(network_interface->Wintun);
+        targetName = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(targetName));
+        if (!targetName.empty())
         {
-            fprintf(stdout, "[PrepEth] InstallDriver OK, new TAP GUID: %s\r\n", newTapGuid.data());
-            network_interface->ComponentId = newTapGuid;
+            ppp::unordered_set<ppp::string> allTapIds;
+            if (ppp::tap::TapWindows::FindAllComponentIds(allTapIds) && !allTapIds.empty())
+            {
+                ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                if (ppp::win32::network::GetAllNetworkInterfaces(interfaces))
+                {
+                    for (const auto& ni : interfaces)
+                    {
+                        ppp::string connId = ppp::ToLower<ppp::string>(ni->ConnectionId);
+                        connId = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(connId));
+                        if (connId == targetName)
+                        {
+                            ppp::string guidLower = ppp::ToLower<ppp::string>(ni->Guid);
+                            for (const auto& cid : allTapIds)
+                            {
+                                if (ppp::ToLower<ppp::string>(cid) == guidLower)
+                                {
+                                    existingGuid = cid;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!existingGuid.empty())
+        {
+            fprintf(stdout, "[PrepEth] Found existing TAP '%s' with GUID %s, reusing\r\n",
+                network_interface->Wintun.data(), existingGuid.data());
+            network_interface->ComponentId = existingGuid;
         }
         else
         {
-            fprintf(stdout, "[PrepEth] InstallDriver FAILED!\r\n");
+            fprintf(stdout, "[PrepEth] Need install (empty=%d, isGuid=%d), triggering InstallDriver...\r\n",
+                network_interface->ComponentId.empty(), is_guid);
+            LOG_INFO("%s", "Installing TAP-Windows driver.");
+
+            // Install the TAP-Windows vNIC in the Windows operating system.
+            ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
+            fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
+            ppp::string newTapGuid = ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun);
+            if (!newTapGuid.empty())
+            {
+                fprintf(stdout, "[PrepEth] InstallDriver OK, new TAP GUID: %s\r\n", newTapGuid.data());
+                network_interface->ComponentId = newTapGuid;
+            }
+            else
+            {
+                fprintf(stdout, "[PrepEth] InstallDriver FAILED!\r\n");
+            }
         }
 
         // The virtual Ethernet card device was not successfully deployed on your computer.
