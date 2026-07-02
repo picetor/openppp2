@@ -207,13 +207,17 @@ namespace ppp
 
         std::shared_ptr<ITap> TapWindows::Create(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& componentId, uint32_t ip, uint32_t gw, uint32_t mask, uint32_t lease_time_in_seconds, bool hosted_network, const ppp::vector<uint32_t>& dns_addresses)
         {
+            fprintf(stdout, "[TapWindows::Create] componentId=%s ip=%u gw=%u mask=%u\r\n", componentId.data(), ip, gw, mask);
+
             if (NULLPTR == context)
             {
+                fprintf(stdout, "[TapWindows::Create] FAIL: NULLPTR == context\r\n");
                 return NULLPTR;
             }
 
             if (componentId.empty())
             {
+                fprintf(stdout, "[TapWindows::Create] FAIL: componentId.empty()\r\n");
                 return NULLPTR;
             }
 
@@ -242,18 +246,23 @@ namespace ppp
 
             if (WintunAdapter::Ready())
             {
+                fprintf(stdout, "[TapWindows::Create] WintunAdapter::Ready() -> CreateWintunAdapter\r\n");
                 return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
             }
 
             int interface_index = GetNetworkInterfaceIndex(componentId);
+            fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
             if (interface_index < -1)
             {
+                fprintf(stdout, "[TapWindows::Create] FAIL: interface_index < -1\r\n");
                 return NULLPTR;
             }
 
             void* tun = OpenDriver(componentId.data());
+            fprintf(stdout, "[TapWindows::Create] OpenDriver=%p\r\n", tun);
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
+                fprintf(stdout, "[TapWindows::Create] FAIL: OpenDriver failed (err=%d)\r\n", GetLastError());
                 return NULLPTR;
             }
 
@@ -265,6 +274,7 @@ namespace ppp
 
             if (!ok)
             {
+                fprintf(stdout, "[TapWindows::Create] FAIL: ConfigureDriver failed\r\n");
                 CloseHandle(tun);
                 return NULLPTR;
             }
@@ -281,11 +291,14 @@ namespace ppp
             }
             
             ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
+            fprintf(stdout, "[TapWindows::Create] SetAdapterInterface=%s\r\n", ok ? "OK" : "FAIL");
             if (ok)
             {
+                fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
                 return tap;
             }
 
+            fprintf(stdout, "[TapWindows::Create] FAIL: SetAdapterInterface failed\r\n");
             tap->Dispose();
             return NULLPTR;
         }

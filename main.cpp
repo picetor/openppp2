@@ -2352,32 +2352,47 @@ bool PppApplication::AddShutdownApplicationEventHandler() noexcept
 static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInterface>& network_interface) noexcept
 {
     // Install TAP-Windows driver if not present
+    fprintf(stdout, "[PrepEth] ComponentId='%s' Wintun='%s'\r\n", network_interface->ComponentId.data(), network_interface->Wintun.data());
     if (network_interface->ComponentId.empty())
     {
+        fprintf(stdout, "[PrepEth] ComponentId empty, triggering InstallDriver...\r\n");
         LOG_INFO("%s", "Installing TAP-Windows driver.");
 
         // Install the TAP-Windows vNIC in the Windows operating system.
         ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
+        fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
         if (ppp::tap::TapWindows::InstallDriver(driverPath.data(), NetworkInterface::GetDefaultTun())) // ppp::ToUpper<ppp::string>(BOOST_BEAST_VERSION_STRING)
         {
+            fprintf(stdout, "[PrepEth] InstallDriver OK, re-finding ComponentId...\r\n");
             // Find default TAP device if not specified
             network_interface->ComponentId = ppp::tap::TapWindows::FindComponentId(network_interface->Wintun);
             if (network_interface->ComponentId.empty())
             {
                 network_interface->ComponentId = ppp::tap::ITap::FindAnyDevice();
             }
+            fprintf(stdout, "[PrepEth] After re-find: ComponentId='%s'\r\n", network_interface->ComponentId.data());
+        }
+        else
+        {
+            fprintf(stdout, "[PrepEth] InstallDriver FAILED!\r\n");
         }
 
         // The virtual Ethernet card device was not successfully deployed on your computer.
         if (network_interface->ComponentId.empty())
         {
+            fprintf(stdout, "[PrepEth] FAIL: ComponentId still empty after install attempt\r\n");
             LOG_INFO("%s", "Failed to install TAP-Windows driver.");
             return false;
         }
         else
         {
+            fprintf(stdout, "[PrepEth] OK: ComponentId='%s'\r\n", network_interface->ComponentId.data());
             LOG_INFO("%s", "Success to install TAP-Windows driver.");
         }
+    }
+    else
+    {
+        fprintf(stdout, "[PrepEth] ComponentId already set, skipping install\r\n");
     }
     return true;
 }
