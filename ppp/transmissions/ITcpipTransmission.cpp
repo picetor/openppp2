@@ -2,7 +2,12 @@
 #include <ppp/net/Socket.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
+
+#if defined(_WIN32)
 #include <intrin.h>
+#include <windows.h>
+#include <stdio.h>
+#endif
 
 #include <ppp/threading/Executors.h>
 #include <ppp/coroutines/asio/asio.h>
@@ -60,8 +65,20 @@ namespace ppp {
         }
 
         void ITcpipTransmission::Dispose() noexcept {
-            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p, caller=%p",
-                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this, _ReturnAddress());
+#if defined(_WIN32)
+            void* stack[16];
+            USHORT frames = RtlCaptureStackBackTrace(0, 16, stack, NULL);
+            char stack_buf[512] = {0};
+            int pos = 0;
+            for (USHORT i = 0; i < frames && pos < (int)sizeof(stack_buf) - 20; i++) {
+                pos += sprintf_s(stack_buf + pos, sizeof(stack_buf) - pos, " %p", stack[i]);
+            }
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p, stack=%s",
+                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this, stack_buf);
+#else
+            LOG_DEBUG("ITcpipTransmission::Dispose: disposing, disposed=%d, socket_open=%d, this=%p",
+                (int)disposed_, socket_ ? (int)socket_->is_open() : -1, (void*)this);
+#endif
             auto self = shared_from_this();
             ppp::threading::Executors::ContextPtr context = GetContext();
             ppp::threading::Executors::StrandPtr strand = GetStrand();
