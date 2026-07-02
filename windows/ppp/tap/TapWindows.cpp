@@ -199,7 +199,7 @@ namespace ppp
                     return NULLPTR;
                 }
 
-                tap->wintun_ = wrap_shared_pointer<void>(wintun.get(), tap);
+                tap->wintun_ = wrap_shared_pointer<void>(wintun.get(), wintun); // alias borrows wintun's refcount, keeping WintunAdapter alive
                 tap->GetInterfaceIndex() = interface_index;
                 return tap;
             }
@@ -805,7 +805,7 @@ namespace ppp
 
         void TapWindows::Dispose() noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_) // only use Wintun path if this instance actually owns a WintunAdapter (not TAP fallback)
             {
                 void* handle = GetHandle();
                 if (NULLPTR != handle)
