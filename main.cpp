@@ -2376,6 +2376,17 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
             {
                 network_interface->ComponentId = ppp::tap::ITap::FindAnyDevice();
             }
+            // If still not a GUID (Wintun short-circuit), enumerate all TAP devices directly
+            if (!network_interface->ComponentId.empty() && network_interface->ComponentId.find('{') == ppp::string::npos)
+            {
+                fprintf(stdout, "[PrepEth] '%s' is not a GUID, scanning all TAP devices...\r\n", network_interface->ComponentId.data());
+                ppp::unordered_set<ppp::string> allTapIds;
+                if (ppp::tap::TapWindows::FindAllComponentIds(allTapIds) && !allTapIds.empty())
+                {
+                    network_interface->ComponentId = *allTapIds.begin();
+                    fprintf(stdout, "[PrepEth] Using first TAP device: '%s'\r\n", network_interface->ComponentId.data());
+                }
+            }
             fprintf(stdout, "[PrepEth] After re-find: ComponentId='%s'\r\n", network_interface->ComponentId.data());
         }
         else

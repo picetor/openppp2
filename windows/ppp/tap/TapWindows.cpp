@@ -260,6 +260,29 @@ namespace ppp
             ppp::win32::network::NetworkInterfacePtr tap_ni;
             ppp::string tapComponentId = TapWindows_FindComponentId(componentId, tap_ni);
             fprintf(stdout, "[TapWindows::Create] TAP resolved '%s' -> '%s'\r\n", componentId.data(), tapComponentId.data());
+
+            // If resolution failed, enumerate all TAP devices and try each
+            if (tapComponentId.empty())
+            {
+                fprintf(stdout, "[TapWindows::Create] Trying all TAP devices...\r\n");
+                ppp::unordered_set<ppp::string> allIds;
+                if (TapWindows::FindAllComponentIds(allIds) && !allIds.empty())
+                {
+                    for (const auto& cid : allIds)
+                    {
+                        fprintf(stdout, "[TapWindows::Create]   Trying componentId='%s'\r\n", cid.data());
+                        void* test_tun = OpenDriver(cid.data());
+                        if (test_tun != NULLPTR && test_tun != INVALID_HANDLE_VALUE)
+                        {
+                            tapComponentId = cid;
+                            CloseHandle(test_tun);
+                            fprintf(stdout, "[TapWindows::Create]   Found working TAP: '%s'\r\n", cid.data());
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (tapComponentId.empty())
             {
                 fprintf(stdout, "[TapWindows::Create] FAIL: TAP resolution failed for '%s'\r\n", componentId.data());
@@ -348,7 +371,9 @@ namespace ppp
 
             if (WintunAdapter::Ready())
             {
-                return ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
+                int idx = ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
+                if (idx > 0) return idx;
+                // Fall through to GUID matching if friendly name lookup failed
             }
 
             if (componentId.empty())
