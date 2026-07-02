@@ -23,6 +23,8 @@ namespace ppp
 {
     namespace tap
     {
+        static ppp::string TapWindows_FindComponentId(const ppp::string& key, ppp::win32::network::NetworkInterfacePtr& network_interface) noexcept;
+
         TapWindows::TapWindows(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t address, uint32_t gw, uint32_t mask, bool hosted_network)
             : ITap(context, id, tun, address, gw, mask, hosted_network)
         {
