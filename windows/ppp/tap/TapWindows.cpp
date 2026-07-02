@@ -207,29 +207,19 @@ namespace ppp
 
         std::shared_ptr<ITap> TapWindows::Create(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& componentId, uint32_t ip, uint32_t gw, uint32_t mask, uint32_t lease_time_in_seconds, bool hosted_network, const ppp::vector<uint32_t>& dns_addresses)
         {
-            LOG_DEBUG("TapWindows::Create: componentId=%s, ip=%s, gw=%s, mask=%s, hosted_network=%d", 
-                componentId.data(), 
-                (const char*)boost::asio::ip::address_v4(ip).to_string().data(),
-                (const char*)boost::asio::ip::address_v4(gw).to_string().data(),
-                (const char*)boost::asio::ip::address_v4(mask).to_string().data(),
-                hosted_network ? 1 : 0);
-
             if (NULLPTR == context)
             {
-                LOG_DEBUG("TapWindows::Create: context is null");
                 return NULLPTR;
             }
 
             if (componentId.empty())
             {
-                LOG_DEBUG("TapWindows::Create: componentId is empty");
                 return NULLPTR;
             }
 
             IPEndPoint ipEP(ip, 0);
             if (IPEndPoint::IsInvalid(ipEP))
             {
-                LOG_DEBUG("TapWindows::Create: invalid IP address");
                 return NULLPTR;
             }
 
@@ -252,34 +242,20 @@ namespace ppp
 
             if (WintunAdapter::Ready())
             {
-                auto tap = WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
-                if (NULLPTR != tap)
-                {
-                    return tap;
-                }
+                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
             }
 
-            // Resolve componentId to actual TAP device GUID via registry.
-            ppp::win32::network::NetworkInterfacePtr ni;
-            ppp::string deviceId = TapWindows_FindComponentId(componentId, ni);
-            if (deviceId.empty())
-            {
-                deviceId = componentId;
-            }
-
-            int interface_index = GetNetworkInterfaceIndex(deviceId);
+            int interface_index = GetNetworkInterfaceIndex(componentId);
             if (interface_index < -1)
             {
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(deviceId.data());
+            void* tun = OpenDriver(componentId.data());
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
-                LOG_DEBUG("TapWindows::Create: OpenDriver failed for componentId=%s", componentId.data());
                 return NULLPTR;
             }
-            LOG_DEBUG("TapWindows::Create: OpenDriver succeeded, handle=%p", tun);
 
             bool ok = ConfigureDriver_SetNetifUp(tun, true) &&
                 (ConfigureDriver_SetTunModeWithAddress(tun, ip, gw, mask) || 
@@ -289,11 +265,9 @@ namespace ppp
 
             if (!ok)
             {
-                LOG_DEBUG("TapWindows::Create: ConfigureDriver failed");
                 CloseHandle(tun);
                 return NULLPTR;
             }
-            LOG_DEBUG("TapWindows::Create: ConfigureDriver succeeded");
 
             std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, componentId, tun, ip, gw, mask, hosted_network);
             if (NULLPTR == tap)
@@ -321,11 +295,9 @@ namespace ppp
             char szDeviceName[MAX_PATH];
             if (snprintf(szDeviceName, sizeof(szDeviceName), "\\\\.\\Global\\%s.tap", componentId.data()) < 1)
             {
-                LOG_DEBUG("TapWindows::OpenDriver: snprintf failed");
                 return NULLPTR;
             }
 
-            LOG_DEBUG("TapWindows::OpenDriver: opening %s", szDeviceName);
             HANDLE handle = CreateFileA(szDeviceName,
                 GENERIC_READ | GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -335,12 +307,7 @@ namespace ppp
                 NULLPTR);
             if (NULLPTR == handle || handle == INVALID_HANDLE_VALUE)
             {
-                LOG_DEBUG("TapWindows::OpenDriver: CreateFileA failed, error=%lu", GetLastError());
                 handle = NULLPTR;
-            }
-            else
-            {
-                LOG_DEBUG("TapWindows::OpenDriver: opened successfully, handle=%p", handle);
             }
 
             return handle;
@@ -350,34 +317,29 @@ namespace ppp
         {
             using NetworkInterface = ppp::win32::network::AdapterInterfacePtr;
 
+            if (WintunAdapter::Ready())
+            {
+                return ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
+            }
+
             if (componentId.empty())
             {
                 return -1;
             }
 
-            // Try UUID-based lookup first (works for TAP driver GUIDs).
+            ppp::vector<NetworkInterface> interfaces;
+            if (!ppp::win32::network::GetAllAdapterInterfaces(interfaces))
             {
-                ppp::vector<NetworkInterface> interfaces;
-                if (ppp::win32::network::GetAllAdapterInterfaces(interfaces))
-                {
-                    boost::uuids::uuid reft_id = StringToGuid(componentId);
-                    for (NetworkInterface& ni : interfaces)
-                    {
-                        if (StringToGuid(ni->Id) == reft_id)
-                        {
-                            return ni->IfIndex;
-                        }
-                    }
-                }
+                return -1;
             }
 
-            // Try friendly-name lookup (works for Wintun adapters).
-            if (WintunAdapter::Ready())
+            boost::uuids::uuid reft_id = StringToGuid(componentId);
+            for (NetworkInterface& ni : interfaces)
             {
-                int idx = ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
-                if (idx >= 0)
+                boost::uuids::uuid left_id = StringToGuid(ni->Id);
+                if (left_id == reft_id)
                 {
-                    return idx;
+                    return ni->IfIndex;
                 }
             }
 
@@ -386,7 +348,7 @@ namespace ppp
 
         bool TapWindows::Output(const void* packet, int packet_size) noexcept
         {
-            if (wintun_)
+            if (WintunAdapter::Ready())
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -396,16 +358,10 @@ namespace ppp
                 WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
                 if (!wintun->IsOpen())
                 {
-                    LOG_DEBUG("TapWindows::Output: wintun not open");
                     return false;
                 }
 
-                bool ok = wintun->SendPacket((uint8_t*)packet, packet_size);
-                if (!ok)
-                {
-                    LOG_DEBUG("TapWindows::Output: SendPacket failed, size=%d", packet_size);
-                }
-                return ok;
+                return wintun->SendPacket((uint8_t*)packet, packet_size);
             }
 
             return ITap::Output(packet, packet_size);
@@ -413,7 +369,7 @@ namespace ppp
 
         bool TapWindows::Output(const std::shared_ptr<Byte>& packet, int packet_size) noexcept
         {
-            if (wintun_)
+            if (WintunAdapter::Ready())
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -434,8 +390,7 @@ namespace ppp
 
         bool TapWindows::AsynchronousReadPacketLoops() noexcept
         {
-            LOG_DEBUG("TapWindows::AsynchronousReadPacketLoops: starting");
-            if (wintun_)
+            if (WintunAdapter::Ready())
             {
                 WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
                 if (!wintun->IsOpen())
@@ -661,17 +616,13 @@ namespace ppp
 
                     ppp::string component_id = ToLower<ppp::string>(componentId);
                     std::size_t interfaces_size = interfaces.size();
-                    LOG_DEBUG("TapWindows_FindComponentId: searching '%s' across %zu interfaces", componentId.data(), interfaces_size);
                     for (std::size_t i = 0; i < interfaces_size; i++)
                     {
                         NetworkInterfacePtr& ni = interfaces[i];
-                        LOG_DEBUG("TapWindows_FindComponentId: if[%zu] Guid=%s, ConnectionId='%s', Name='%s', Description='%s'",
-                            i, ni->Guid.data(), ni->ConnectionId.data(), ni->Name.data(), ni->Description.data());
                         if (component_uuid_sgen)
                         {
                             if (StringToGuid(ni->Guid) == component_uuid)
                             {
-                                LOG_DEBUG("TapWindows_FindComponentId: matched by UUID -> '%s'", ni->Guid.data());
                                 network_interface = ni;
                                 return ni->Guid;
                             }
@@ -682,13 +633,11 @@ namespace ppp
                         connection_id = RTrim<ppp::string>(connection_id);
                         if (connection_id == component_id)
                         {
-                            LOG_DEBUG("TapWindows_FindComponentId: matched by ConnectionId -> '%s'", ni->Guid.data());
                             network_interface = ni;
                             return ni->Guid;
                         }
                     }
                 }
-                LOG_DEBUG("TapWindows_FindComponentId: no match found for '%s'", componentId.data());
                 return ppp::string();
             }
             else
@@ -802,7 +751,7 @@ namespace ppp
 
         void TapWindows::Dispose() noexcept
         {
-            if (wintun_)
+            if (WintunAdapter::Ready())
             {
                 void* handle = GetHandle();
                 if (NULLPTR != handle)
