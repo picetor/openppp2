@@ -1935,7 +1935,7 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
 #if defined(_WIN32)
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
-        ni->ComponentId = ni->Wintun;
+        ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
 #else
         ni->ComponentId = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
 
