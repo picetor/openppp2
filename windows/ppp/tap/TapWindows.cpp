@@ -247,10 +247,26 @@ namespace ppp
             if (WintunAdapter::Ready())
             {
                 fprintf(stdout, "[TapWindows::Create] WintunAdapter::Ready() -> CreateWintunAdapter\r\n");
-                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                auto wintun_result = WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                if (wintun_result != NULLPTR)
+                {
+                    return wintun_result;
+                }
+                fprintf(stdout, "[TapWindows::Create] WintunAdapter failed, fallback to TAP\r\n");
+                // Fall through to TAP path below
             }
 
-            int interface_index = GetNetworkInterfaceIndex(componentId);
+            // TAP path: resolve friendly name to GUID if needed
+            ppp::win32::network::NetworkInterfacePtr tap_ni;
+            ppp::string tapComponentId = TapWindows_FindComponentId(componentId, tap_ni);
+            fprintf(stdout, "[TapWindows::Create] TAP resolved '%s' -> '%s'\r\n", componentId.data(), tapComponentId.data());
+            if (tapComponentId.empty())
+            {
+                fprintf(stdout, "[TapWindows::Create] FAIL: TAP resolution failed for '%s'\r\n", componentId.data());
+                return NULLPTR;
+            }
+
+            int interface_index = GetNetworkInterfaceIndex(tapComponentId);
             fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
             if (interface_index < -1)
             {
@@ -258,8 +274,8 @@ namespace ppp
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(componentId.data());
-            fprintf(stdout, "[TapWindows::Create] OpenDriver=%p\r\n", tun);
+            void* tun = OpenDriver(tapComponentId.data());
+            fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", tapComponentId.data(), tun);
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
                 fprintf(stdout, "[TapWindows::Create] FAIL: OpenDriver failed (err=%d)\r\n", GetLastError());
@@ -279,7 +295,7 @@ namespace ppp
                 return NULLPTR;
             }
 
-            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, componentId, tun, ip, gw, mask, hosted_network);
+            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, tapComponentId, tun, ip, gw, mask, hosted_network);
             if (NULLPTR == tap)
             {
                 CloseHandle(tun);

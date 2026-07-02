@@ -2353,15 +2353,21 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
 {
     // Install TAP-Windows driver if not present
     fprintf(stdout, "[PrepEth] ComponentId='%s' Wintun='%s'\r\n", network_interface->ComponentId.data(), network_interface->Wintun.data());
-    if (network_interface->ComponentId.empty())
+    
+    // Determine if we need to install: empty ComponentId, or raw name (not GUID) that needs TAP fallback
+    bool is_guid = (network_interface->ComponentId.size() == 38 && network_interface->ComponentId[0] == '{');
+    bool need_install = network_interface->ComponentId.empty() || !is_guid;
+    
+    if (need_install)
     {
-        fprintf(stdout, "[PrepEth] ComponentId empty, triggering InstallDriver...\r\n");
+        fprintf(stdout, "[PrepEth] Need install (empty=%d, isGuid=%d), triggering InstallDriver...\r\n",
+            network_interface->ComponentId.empty(), is_guid);
         LOG_INFO("%s", "Installing TAP-Windows driver.");
 
         // Install the TAP-Windows vNIC in the Windows operating system.
         ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
         fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
-        if (ppp::tap::TapWindows::InstallDriver(driverPath.data(), NetworkInterface::GetDefaultTun())) // ppp::ToUpper<ppp::string>(BOOST_BEAST_VERSION_STRING)
+        if (ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun)) // Use the Wintun (raw) name for the adapter
         {
             fprintf(stdout, "[PrepEth] InstallDriver OK, re-finding ComponentId...\r\n");
             // Find default TAP device if not specified
@@ -2392,7 +2398,7 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
     }
     else
     {
-        fprintf(stdout, "[PrepEth] ComponentId already set, skipping install\r\n");
+        fprintf(stdout, "[PrepEth] ComponentId is a valid GUID, skipping install\r\n");
     }
     return true;
 }
