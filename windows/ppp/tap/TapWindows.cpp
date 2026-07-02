@@ -248,40 +248,18 @@ namespace ppp
                 lease_time_in_seconds = 86400;
             }
 
-            LOG_DEBUG("TapWindows::Create: using TAP driver");
-
-            // Resolve componentId to the actual TAP device GUID from registry.
-            // The TAP driver's \\.\Global\ device node is named by GUID
-            // (e.g. {BBB2FE47-...}), not by friendly name.
-            ppp::string tapDeviceId = componentId;
-            ppp::unordered_set<ppp::string> tapGuids;
-            if (TapWindows::FindAllComponentIds(tapGuids) && !tapGuids.empty())
+            if (WintunAdapter::Ready())
             {
-                auto tail = tapGuids.begin();
-                auto endl = tapGuids.end();
-                for (; tail != endl; ++tail)
-                {
-                    // Prefer exact componentId match; otherwise use first available.
-                    if (*tail == componentId)
-                    {
-                        tapDeviceId = *tail;
-                        break;
-                    }
-                }
-                if (tail == endl)
-                {
-                    tapDeviceId = *tapGuids.begin();
-                }
+                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
             }
 
-            int interface_index = GetNetworkInterfaceIndex(tapDeviceId);
+            int interface_index = GetNetworkInterfaceIndex(componentId);
             if (interface_index < -1)
             {
-                LOG_DEBUG("TapWindows::Create: GetNetworkInterfaceIndex failed, index=%d", interface_index);
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(tapDeviceId.data());
+            void* tun = OpenDriver(componentId.data());
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
                 LOG_DEBUG("TapWindows::Create: OpenDriver failed for componentId=%s", componentId.data());
@@ -358,35 +336,29 @@ namespace ppp
         {
             using NetworkInterface = ppp::win32::network::AdapterInterfacePtr;
 
+            if (WintunAdapter::Ready())
+            {
+                return ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
+            }
+
             if (componentId.empty())
             {
                 return -1;
             }
 
-            // Try UUID-based lookup first (works for TAP driver GUIDs).
+            ppp::vector<NetworkInterface> interfaces;
+            if (!ppp::win32::network::GetAllAdapterInterfaces(interfaces))
             {
-                ppp::vector<NetworkInterface> interfaces;
-                if (ppp::win32::network::GetAllAdapterInterfaces(interfaces))
-                {
-                    boost::uuids::uuid reft_id = StringToGuid(componentId);
-                    for (NetworkInterface& ni : interfaces)
-                    {
-                        boost::uuids::uuid left_id = StringToGuid(ni->Id);
-                        if (left_id == reft_id)
-                        {
-                            return ni->IfIndex;
-                        }
-                    }
-                }
+                return -1;
             }
 
-            // If UUID lookup failed and Wintun is available, try friendly-name lookup.
-            if (WintunAdapter::Ready())
+            boost::uuids::uuid reft_id = StringToGuid(componentId);
+            for (NetworkInterface& ni : interfaces)
             {
-                int idx = ppp::win32::network::GetIfIndexByFriendlyName(ppp::text::Encoding::ascii_to_wstring(stl::transform<std::string>(componentId)));
-                if (idx >= 0)
+                boost::uuids::uuid left_id = StringToGuid(ni->Id);
+                if (left_id == reft_id)
                 {
-                    return idx;
+                    return ni->IfIndex;
                 }
             }
 
@@ -702,15 +674,13 @@ namespace ppp
 
         ppp::string TapWindows::FindComponentId(const ppp::string& key) noexcept
         {
-            // Always try registry lookup first — works for both TAP ("PPP" → GUID)
-            // and Wintun (friendly name → falls through to return key as-is).
-            ppp::win32::network::NetworkInterfacePtr ni;
-            ppp::string result = TapWindows_FindComponentId(key, ni);
-            if (!result.empty())
+            if (WintunAdapter::Ready())
             {
-                return result;
+                return key;
             }
-            return key;
+
+            ppp::win32::network::NetworkInterfacePtr ni;
+            return TapWindows_FindComponentId(key, ni);
         }
 
         bool TapWindows::InstallDriver(const ppp::string& path, const ppp::string& declareTapName) noexcept
