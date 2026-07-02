@@ -68,9 +68,8 @@ namespace ppp {
                 exchanger_->ReleaseDatagramPort(sourceEP_);
                 if (fin && transmission) {
                     if (!exchanger_->DoSendTo(transmission, sourceEP_, sourceEP_, NULLPTR, 0, nullof<YieldContext>())) {
-                        LOG_DEBUG("VEthernetDatagramPort::Finalize: DoSendTo failed, disposing transmission, this=%p, transmission=%p",
+                        LOG_DEBUG("VEthernetDatagramPort::Finalize: DoSendTo(ICMP unreachable) failed, this=%p, transmission=%p",
                             (void*)this, (void*)transmission.get());
-                        transmission->Dispose();
                     }
                 }
             }
@@ -174,10 +173,9 @@ namespace ppp {
                     // Send it to the VPN server for outgoing.
                     ok = exchanger_->DoSendTo(transmission, sourceEP_, destinationEP, (Byte*)packet, packet_length, nullof<YieldContext>());
                     if (!ok) {
-                        LOG_DEBUG("VEthernetDatagramPort::SendTo: DoSendTo failed, disposing transmission, this=%p, transmission=%p",
+                        LOG_DEBUG("VEthernetDatagramPort::SendTo: DoSendTo failed, finalizing datagram port only, this=%p, transmission=%p",
                             (void*)this, (void*)transmission.get());
                         fin = true;
-                        transmission->Dispose();
                     }
                 } while (false);
 
