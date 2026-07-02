@@ -2383,8 +2383,40 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
                 ppp::unordered_set<ppp::string> allTapIds;
                 if (ppp::tap::TapWindows::FindAllComponentIds(allTapIds) && !allTapIds.empty())
                 {
-                    network_interface->ComponentId = *allTapIds.begin();
-                    fprintf(stdout, "[PrepEth] Using first TAP device: '%s'\r\n", network_interface->ComponentId.data());
+                    // Try to find the device matching the requested adapter name (e.g. "PPP")
+                    ppp::string matchedId;
+                    ppp::string targetName = ppp::ToLower<ppp::string>(network_interface->Wintun);
+                    targetName = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(targetName));
+                    if (!targetName.empty())
+                    {
+                        ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                        if (ppp::win32::network::GetAllNetworkInterfaces(interfaces))
+                        {
+                            for (const auto& ni : interfaces)
+                            {
+                                ppp::string connId = ppp::ToLower<ppp::string>(ni->ConnectionId);
+                                connId = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(connId));
+                                if (connId == targetName)
+                                {
+                                    ppp::string guidLower = ppp::ToLower<ppp::string>(ni->Guid);
+                                    for (const auto& cid : allTapIds)
+                                    {
+                                        if (ppp::ToLower<ppp::string>(cid) == guidLower)
+                                        {
+                                            matchedId = cid;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    network_interface->ComponentId = matchedId.empty() ? *allTapIds.begin() : matchedId;
+                    fprintf(stdout, "[PrepEth] Using TAP device: '%s'%s\r\n",
+                        network_interface->ComponentId.data(),
+                        matchedId.empty() ? " (first available)" : " (by name match)");
                 }
             }
             fprintf(stdout, "[PrepEth] After re-find: ComponentId='%s'\r\n", network_interface->ComponentId.data());
