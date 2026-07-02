@@ -251,7 +251,12 @@ namespace ppp
             if (WintunAdapter::Ready())
             {
                 LOG_DEBUG("TapWindows::Create: using Wintun adapter");
-                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                auto tap = WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                if (NULLPTR != tap)
+                {
+                    return tap;
+                }
+                LOG_DEBUG("TapWindows::Create: Wintun adapter failed, falling back to TAP driver");
             }
 
             LOG_DEBUG("TapWindows::Create: using TAP driver");
