@@ -2367,59 +2367,11 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
         // Install the TAP-Windows vNIC in the Windows operating system.
         ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
         fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
-        if (ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun)) // Use the Wintun (raw) name for the adapter
+        ppp::string newTapGuid = ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun);
+        if (!newTapGuid.empty())
         {
-            fprintf(stdout, "[PrepEth] InstallDriver OK, re-finding ComponentId...\r\n");
-            // Find default TAP device if not specified
-            network_interface->ComponentId = ppp::tap::TapWindows::FindComponentId(network_interface->Wintun);
-            if (network_interface->ComponentId.empty())
-            {
-                network_interface->ComponentId = ppp::tap::ITap::FindAnyDevice();
-            }
-            // If still not a GUID (Wintun short-circuit), enumerate all TAP devices directly
-            if (!network_interface->ComponentId.empty() && network_interface->ComponentId.find('{') == ppp::string::npos)
-            {
-                fprintf(stdout, "[PrepEth] '%s' is not a GUID, scanning all TAP devices...\r\n", network_interface->ComponentId.data());
-                ppp::unordered_set<ppp::string> allTapIds;
-                if (ppp::tap::TapWindows::FindAllComponentIds(allTapIds) && !allTapIds.empty())
-                {
-                    // Try to find the device matching the requested adapter name (e.g. "PPP")
-                    ppp::string matchedId;
-                    ppp::string targetName = ppp::ToLower<ppp::string>(network_interface->Wintun);
-                    targetName = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(targetName));
-                    if (!targetName.empty())
-                    {
-                        ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
-                        if (ppp::win32::network::GetAllNetworkInterfaces(interfaces))
-                        {
-                            for (const auto& ni : interfaces)
-                            {
-                                ppp::string connId = ppp::ToLower<ppp::string>(ni->ConnectionId);
-                                connId = ppp::LTrim<ppp::string>(ppp::RTrim<ppp::string>(connId));
-                                if (connId == targetName)
-                                {
-                                    ppp::string guidLower = ppp::ToLower<ppp::string>(ni->Guid);
-                                    for (const auto& cid : allTapIds)
-                                    {
-                                        if (ppp::ToLower<ppp::string>(cid) == guidLower)
-                                        {
-                                            matchedId = cid;
-                                            break;
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    network_interface->ComponentId = matchedId.empty() ? *allTapIds.begin() : matchedId;
-                    fprintf(stdout, "[PrepEth] Using TAP device: '%s'%s\r\n",
-                        network_interface->ComponentId.data(),
-                        matchedId.empty() ? " (first available)" : " (by name match)");
-                }
-            }
-            fprintf(stdout, "[PrepEth] After re-find: ComponentId='%s'\r\n", network_interface->ComponentId.data());
+            fprintf(stdout, "[PrepEth] InstallDriver OK, new TAP GUID: %s\r\n", newTapGuid.data());
+            network_interface->ComponentId = newTapGuid;
         }
         else
         {

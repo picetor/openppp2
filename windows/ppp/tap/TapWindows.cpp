@@ -711,17 +711,17 @@ namespace ppp
             return TapWindows_FindComponentId(key, ni);
         }
 
-        bool TapWindows::InstallDriver(const ppp::string& path, const ppp::string& declareTapName) noexcept
+        ppp::string TapWindows::InstallDriver(const ppp::string& path, const ppp::string& declareTapName) noexcept
         {
             if (path.empty() || declareTapName.empty())
             {
-                return false;
+                return ppp::string();
             }
 
             ppp::string installPath = ppp::io::File::RewritePath((path + "tapinstall.exe").data());
             if (!PathFileExistsA(installPath.data()))
             {
-                return false;
+                return ppp::string();
             }
 
             ppp::string driverPath = path + "OemVista.inf";
@@ -733,12 +733,12 @@ namespace ppp
             int dwExitCode = INFINITE;
             if (!ppp::win32::Win32Native::Execute(false, installPath.data(), argumentsText.data(), &dwExitCode))
             {
-                return false;
+                return ppp::string();
             }
 
             if (dwExitCode != ERROR_SUCCESS)
             {
-                return false;
+                return ppp::string();
             }
 
             ppp::unordered_set<ppp::string> news;
@@ -756,18 +756,25 @@ namespace ppp
 
             if (news.empty())
             {
-                return false;
+                return ppp::string();
             }
 
+            ppp::string newGuid = *news.begin();
+
             ppp::win32::network::NetworkInterfacePtr network_interface;
-            TapWindows_FindComponentId(*news.begin(), network_interface);
+            TapWindows_FindComponentId(newGuid, network_interface);
 
             if (NULLPTR == network_interface)
             {
-                return false;
+                return ppp::string();
             }
 
-            return ppp::win32::network::SetInterfaceName(network_interface->InterfaceIndex, declareTapName);
+            if (!ppp::win32::network::SetInterfaceName(network_interface->InterfaceIndex, declareTapName))
+            {
+                return ppp::string();
+            }
+
+            return newGuid;
         }
 
         bool TapWindows::UninstallDriver(const ppp::string& path) noexcept
