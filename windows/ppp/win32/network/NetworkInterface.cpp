@@ -1222,6 +1222,8 @@ namespace ppp
             {
                 if (interface_name.empty() || ip.empty() || mask.empty())
                 {
+                    fprintf(stdout, "[SetIPAddresses-netsh] FAIL: empty param (name='%s' ip='%s' mask='%s')\r\n",
+                        interface_name.data(), ip.data(), mask.data());
                     return false;
                 }
 
@@ -1235,9 +1237,12 @@ namespace ppp
                 char command[1000];
                 snprintf(command, sizeof(command), "netsh interface ipv4 set address name=\"%s\" static %s %s", interface_name.data(), ip.data(), mask.data());
 
+                fprintf(stdout, "[SetIPAddresses-netsh] Running: %s\r\n", command);
+
                 if (!CreateProcessA(NULLPTR, command,
                     NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
                 {
+                    fprintf(stdout, "[SetIPAddresses-netsh] FAIL: CreateProcess failed (err=%d)\r\n", GetLastError());
                     return false;
                 }
 
@@ -1252,6 +1257,15 @@ namespace ppp
 
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
+
+                if (dwExitCode != ERROR_SUCCESS)
+                {
+                    fprintf(stdout, "[SetIPAddresses-netsh] FAIL: exit code %lu\r\n", dwExitCode);
+                }
+                else
+                {
+                    fprintf(stdout, "[SetIPAddresses-netsh] OK\r\n");
+                }
                 return dwExitCode == ERROR_SUCCESS;
             }
 

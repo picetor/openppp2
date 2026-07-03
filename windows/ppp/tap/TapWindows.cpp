@@ -92,12 +92,14 @@ namespace ppp
             IPEndPoint ipEP(ip, 0);
             if (IPEndPoint::IsInvalid(ipEP))
             {
+                fprintf(stdout, "[SetAddresses] FAIL: invalid IP (ip=%u)\r\n", ip);
                 return false;
             }
 
             IPEndPoint maskEP(mask, 0);
             if (IPEndPoint::IsInvalid(maskEP))
             {
+                fprintf(stdout, "[SetAddresses] FAIL: invalid mask (mask=%u)\r\n", mask);
                 return false;
             }
 
@@ -107,14 +109,20 @@ namespace ppp
                 ppp::string interface_name = ppp::win32::network::GetInterfaceName(interface_index);
                 if (interface_name.empty())
                 {
+                    fprintf(stdout, "[SetAddresses] FAIL: GetInterfaceName(%d) returned empty\r\n", interface_index);
                     return false;
                 }
 
+                fprintf(stdout, "[SetAddresses] Using netsh: idx=%d name='%s' ip=%s mask=%s\r\n",
+                    interface_index, interface_name.data(), ipEP.ToAddressString().data(), maskEP.ToAddressString().data());
                 return ppp::win32::network::SetIPAddresses(interface_name, ipEP.ToAddressString(), maskEP.ToAddressString());
             }
 
+            fprintf(stdout, "[SetAddresses] Using WMI: idx=%d ip=%s mask=%s gw=%s\r\n",
+                interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(), gwEP.ToAddressString().data());
             if (!ppp::win32::network::SetIPAddresses(interface_index, { ipEP.ToAddressString() }, { maskEP.ToAddressString() }))
             {
+                fprintf(stdout, "[SetAddresses] FAIL: SetIPAddresses(WMI) failed\r\n");
                 return false;
             }
 
@@ -140,18 +148,22 @@ namespace ppp
             ppp::vector<ppp::string> mask_stloc;
             Ipep::ToAddresses({ mask }, mask_stloc);
 
-            bool ok = true;
+            bool set_addr_ok = false;
             if (hosted_network)
             {
-                ok = ok && TapWindows::SetAddresses(interface_index, ip, mask, gw);
+                set_addr_ok = TapWindows::SetAddresses(interface_index, ip, mask, gw);
+                fprintf(stdout, "[SetAdapterInterface] SetAddresses(hosted) = %s\r\n", set_addr_ok ? "OK" : "FAIL");
             }
             else
             {
-                ok = ok && TapWindows::SetAddresses(interface_index, ip, mask, IPEndPoint::NoneAddress);
+                set_addr_ok = TapWindows::SetAddresses(interface_index, ip, mask, IPEndPoint::NoneAddress);
+                fprintf(stdout, "[SetAdapterInterface] SetAddresses(non-hosted) = %s\r\n", set_addr_ok ? "OK" : "FAIL");
             }
 
-            ok = ok && TapWindows::SetDnsAddresses(interface_index, dns_addresses_stloc);
-            return ok;
+            bool set_dns_ok = TapWindows::SetDnsAddresses(interface_index, dns_addresses_stloc);
+            fprintf(stdout, "[SetAdapterInterface] SetDnsAddresses = %s\r\n", set_dns_ok ? "OK" : "FAIL");
+
+            return set_addr_ok && set_dns_ok;
         }
 
         struct WintunAdapterDriver final
@@ -330,46 +342,45 @@ namespace ppp
             }
 
             // Use WMI (netsh) to configure IP, gateway, and DNS on the network interface.
-            // This is the primary configuration mechanism - the TAP IOCTL DHCP calls above
-            // are secondary and may fail if DHCP parameters are invalid, but WMI ensures
-            // the interface is configured correctly regardless.
+            // This is the primary configuration mechanism in the original code. However,
+            // if it fails, the TAP IOCTLs above have already configured the adapter at the
+            // driver level, so we can still proceed. We log the failure for diagnostics.
             fprintf(stdout, "[TapWindows::Create] Setting adapter interface via WMI...\r\n");
             ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
-            if (ok)
+            if (!ok)
             {
-                // Assign a default IPv6 ULA address to the TAP interface (mirroring IPv4's
-                // static address assignment). This ensures the TAP has an IPv6 address
-                // before the server pushes its own IPv6 configuration via ApplyIPv6Assignment.
-                // The IPv6 address is derived from the IPv4 IP for consistency:
-                //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
-                {
-                    uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
-                    uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
-                    char ipv6_addr[64];
-                    const int ipv6_prefix_len = 64;
-                    ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
-                    ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
-                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
-                }
-
-                // Initialize the async I/O stream from the TAP handle.
-                // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
-                // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
-                // _handle is a TAP device handle, so we must create the stream explicitly.
-                if (!tap->InitializeStream())
-                {
-                    fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
-                    CloseHandle(tun);
-                    return NULLPTR;
-                }
-
-                fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
-                return tap;
+                fprintf(stdout, "[TapWindows::Create] WARNING: SetAdapterInterface failed, "
+                    "proceeding with IOCTL-only configuration (WMI/netsh is non-critical)\r\n");
             }
 
-            fprintf(stdout, "[TapWindows::Create] FAIL: SetAdapterInterface failed\r\n");
-            tap->Dispose();
-            return NULLPTR;
+            // Assign a default IPv6 ULA address to the TAP interface (mirroring IPv4's
+            // static address assignment). This ensures the TAP has an IPv6 address
+            // before the server pushes its own IPv6 configuration via ApplyIPv6Assignment.
+            // The IPv6 address is derived from the IPv4 IP for consistency:
+            //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
+            {
+                uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
+                uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
+                char ipv6_addr[64];
+                const int ipv6_prefix_len = 64;
+                ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
+                ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
+                fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
+            }
+
+            // Initialize the async I/O stream from the TAP handle.
+            // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
+            // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
+            // _handle is a TAP device handle, so we must create the stream explicitly.
+            if (!tap->InitializeStream())
+            {
+                fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
+                CloseHandle(tun);
+                return NULLPTR;
+            }
+
+            fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
+            return tap;
         }
 
         void* TapWindows::OpenDriver(const ppp::string& componentId) noexcept
