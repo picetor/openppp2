@@ -1774,6 +1774,9 @@ namespace ppp {
 
                 // Adds the loaded route table to the operating system.
                 ppp::win32::network::AddAllRoutes(rib_);
+
+                // Also add IPv6 bypass routes (ipv6.txt / --bypass6).
+                AddIPv6Route();
 #elif defined(_MACOS)
                 // Delete all found default gateway routes.
                 if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
