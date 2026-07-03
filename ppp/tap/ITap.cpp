@@ -241,10 +241,26 @@ namespace ppp
 
         std::shared_ptr<ITap> ITap::Create(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& dev, const ppp::string& ip, const ppp::string& gw, const ppp::string& mask, uint32_t lease_time_in_seconds, bool hosted_network, const ppp::vector<ppp::string>& dns_addresses) noexcept 
         {
-            ppp::vector<uint32_t> dns_addresses_stloc;
-            Ipep::ToAddresses(dns_addresses, dns_addresses_stloc);
+            // Separate IPv4 and IPv6 DNS: IPv6 addresses cannot be represented as uint32_t
+            // and would be silently dropped by Ipep::ToAddresses (inet_addr returns INADDR_NONE).
+            ppp::vector<ppp::string> dns_v4;
+            ppp::vector<ppp::string> dns_v6;
+            for (const auto& addr : dns_addresses) {
+                boost::system::error_code ec;
+                auto ip_addr = boost::asio::ip::make_address(addr, ec);
+                if (ec) continue;
+                if (ip_addr.is_v6()) {
+                    dns_v6.emplace_back(addr);
+                }
+                else if (ip_addr.is_v4()) {
+                    dns_v4.emplace_back(addr);
+                }
+            }
 
-            return ITap::Create(context,
+            ppp::vector<uint32_t> dns_addresses_stloc;
+            Ipep::ToAddresses(dns_v4, dns_addresses_stloc);
+
+            auto tap = ITap::Create(context,
                 dev,
                 inet_addr(ip.data()),
                 inet_addr(gw.data()),
@@ -252,6 +268,18 @@ namespace ppp
                 lease_time_in_seconds,
                 hosted_network,
                 dns_addresses_stloc);
+
+            // Set IPv6 DNS on the TAP interface after creation.
+            // TAP DHCP Option 6 only supports IPv4 DNS, so IPv6 DNS must be
+            // configured separately via WMI/netsh.
+            if (NULLPTR != tap && !dns_v6.empty()) {
+                int ifidx = tap->GetInterfaceIndex();
+                if (ifidx >= 0) {
+                    ppp::tap::TapWindows::SetDnsAddressesV6(ifidx, dns_v6);
+                }
+            }
+
+            return tap;
         }
 
 #else
