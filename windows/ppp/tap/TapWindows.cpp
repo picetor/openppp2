@@ -352,18 +352,23 @@ namespace ppp
 
                 // NetSH fallback: WMI may fail on some systems (e.g., TAP/Wintun
                 // adapters with partial WMI provider support). Build the interface
-                // name from the NetworkInterface connection ID, or fall back to
-                // the numeric interface index (netsh accepts both).
+                // name (netsh needs the full Caption, not the short NetConnectionID).
+                // Priority: tap_ni->Caption > componentId (GUID) > numeric index.
                 ppp::string netsh_if_name;
                 if (tap_ni)
                 {
-                    netsh_if_name = tap_ni->ConnectionId;
+                    netsh_if_name = tap_ni->Caption; // e.g. "PPP[TAP-Windows Adapter V9 #2]"
                 }
                 else
                 {
-                    char idx_str[16];
-                    ::snprintf(idx_str, sizeof(idx_str), "%d", interface_index);
-                    netsh_if_name = ppp::string(idx_str);
+                    // Fallback: use the component GUID or numeric index
+                    netsh_if_name = tapComponentId;
+                    if (netsh_if_name.empty())
+                    {
+                        char idx_str[16];
+                        ::snprintf(idx_str, sizeof(idx_str), "%d", interface_index);
+                        netsh_if_name = ppp::string(idx_str);
+                    }
                 }
 
                 // Convert raw address integers to dotted-decimal strings.
@@ -412,11 +417,17 @@ namespace ppp
                 }
 
                 // 2) Set DNS servers via netsh (one per call).
+                // Skip NoneAddress (0xFFFFFFFF = 255.255.255.255) which may leak in.
                 {
                     ppp::vector<ppp::string> dns_strings;
                     Ipep::ToAddresses(dns_addresses, dns_strings);
                     for (const auto& dns_srv : dns_strings)
                     {
+                        if (dns_srv.empty() || dns_srv == "255.255.255.255")
+                        {
+                            fprintf(stdout, "[TapWindows::Create-netsh] Skipping bogus DNS: '%s'\r\n", dns_srv.data());
+                            continue;
+                        }
                         char cmd[2048];
                         ::snprintf(cmd, sizeof(cmd),
                             "netsh interface ipv4 set dns name=\"%s\" source=static addr=%s register=primary validate=no",
