@@ -162,9 +162,9 @@ namespace ppp
             }
 
             bool set_dns_ok = TapWindows::SetDnsAddresses(interface_index, dns_addresses_stloc);
-            fprintf(stdout, "[SetAdapterInterface] SetDnsAddresses = %s\r\n", set_dns_ok ? "OK" : "FAIL");
+            fprintf(stdout, "[SetAdapterInterface] SetDnsAddresses = %s (best-effort, TAP DHCP delivers DNS)\r\n", set_dns_ok ? "OK" : "FAIL");
 
-            return set_addr_ok && set_dns_ok;
+            return set_addr_ok;
         }
 
         struct WintunAdapterDriver final
