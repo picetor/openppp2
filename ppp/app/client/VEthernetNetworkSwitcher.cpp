@@ -1644,6 +1644,21 @@ namespace ppp {
                         ppp::win32::network::SetAllNicsDnsAddresses(tun_ni->DnsAddresses, ni_dns_servers_);
                     }
 
+                    // Also save and clear IPv6 DNS on all physical NICs to prevent IPv6 DNS leaks.
+                    // Windows multi-homed DNS resolver may query IPv6 DNS servers on physical NICs
+                    // in parallel even when the TAP interface is the default route. Without this,
+                    // DNS queries can leak to ISP-assigned IPv6 DNS servers on physical interfaces.
+                    ni_dns_servers_v6_.clear();
+                    ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
+                    if (NULLPTR != tun_ni) {
+                        int tap_if_index = tun_ni->InterfaceIndex;
+                        for (auto& [if_index, _] : ni_dns_servers_v6_) {
+                            if (if_index != tap_if_index) {
+                                ppp::win32::network::ClearDnsAddressesV6(if_index);
+                            }
+                        }
+                    }
+
                     // Windows clients need to request the operating system FLUSH to reset all DNS query cache immediately after 
                     // The VPN is constructed, because the original DNS cache may not be the best destination IP resolution record 
                     // Available in the region where the VPN server is located.
@@ -2686,7 +2701,12 @@ namespace ppp {
                     DeleteRoute();
 
 #if defined(_WIN32)
-                    // Restore all dns servers addresses that have been configured when VPN routes are enabled.
+                    // Restore IPv6 DNS on all physical NICs that were cleared during VPN connect.
+                    // This must happen BEFORE restoring IPv4 DNS to ensure DNS is fully operational
+                    // after VPN disconnect.
+                    ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
+
+                    // Restore all IPv4 dns servers addresses that have been configured when VPN routes are enabled.
                     ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
 
                     // Windows clients need to request the operating system FLUSH to reset all DNS query cache immediately after 

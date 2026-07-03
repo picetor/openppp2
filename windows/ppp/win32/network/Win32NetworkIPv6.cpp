@@ -265,6 +265,80 @@ namespace ppp
 
                 return ExecuteNetshCommand(command);
             }
+
+            int GetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept
+            {
+                dns_map.clear();
+
+                ULONG bufLen = 15000;
+                ppp::vector<BYTE> buffer(bufLen);
+                PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+                DWORD ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                if (ret == ERROR_BUFFER_OVERFLOW)
+                {
+                    buffer.resize(bufLen);
+                    pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                    ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                }
+
+                if (ret != NO_ERROR)
+                {
+                    return 0;
+                }
+
+                int count = 0;
+                for (PIP_ADAPTER_ADDRESSES p = pAddresses; p != NULLPTR; p = p->Next)
+                {
+                    if (p->OperStatus != IfOperStatusUp)
+                    {
+                        continue;
+                    }
+
+                    ppp::vector<ppp::string> dns_v6_list;
+                    for (PIP_ADAPTER_DNS_SERVER_ADDRESS dns = p->FirstDnsServerAddress; dns != NULLPTR; dns = dns->Next)
+                    {
+                        if (dns->Address.lpSockaddr->sa_family == AF_INET6)
+                        {
+                            SOCKADDR_IN6* addr6 = reinterpret_cast<SOCKADDR_IN6*>(dns->Address.lpSockaddr);
+                            // Skip link-local and loopback addresses used by TAP DHCPv6 or similar.
+                            if (addr6->sin6_addr.u.Byte[0] == 0xFE && (addr6->sin6_addr.u.Byte[1] & 0xC0) == 0x80)
+                            {
+                                continue;
+                            }
+                            char buf[INET6_ADDRSTRLEN];
+                            if (NULLPTR != ::inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf)))
+                            {
+                                dns_v6_list.emplace_back(ppp::string(buf));
+                            }
+                        }
+                    }
+
+                    if (!dns_v6_list.empty())
+                    {
+                        dns_map[(int)p->IfIndex] = std::move(dns_v6_list);
+                        count++;
+                    }
+                }
+                return count;
+            }
+
+            int SetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept
+            {
+                int events = 0;
+                for (auto&& [interface_index, servers] : dns_map)
+                {
+                    if (!servers.empty())
+                    {
+                        if (SetDnsAddressesV6(interface_index, servers))
+                        {
+                            events++;
+                        }
+                    }
+                }
+                dns_map.clear();
+                return events;
+            }
         }
     }
 }

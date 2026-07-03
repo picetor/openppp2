@@ -117,6 +117,8 @@ namespace ppp
             bool                                                DeleteIPv6Address(int interface_index, const ppp::string& address) noexcept;
             bool                                                SetDnsAddressesV6(int interface_index, const ppp::vector<ppp::string>& servers) noexcept;
             bool                                                ClearDnsAddressesV6(int interface_index) noexcept;
+            int                                                 GetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
+            int                                                 SetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
             bool                                                ClearDnsAddresses(int interface_index) noexcept;
         }
     }
