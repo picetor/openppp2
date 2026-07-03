@@ -343,6 +343,7 @@ namespace ppp {
                 boost::asio::ip::address                                            preferred_ngw_;
                 boost::asio::ip::address                                            preferred_ngw6_;
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
+                ppp::vector<ppp::string>                                           v6_default_route_restore_cmds_;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
@@ -350,12 +351,6 @@ namespace ppp {
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 ppp::vector<ppp::string>                                           initial_ipv6_dns_;
-                struct IPv6DefaultRouteRecord {
-                    int                                                              InterfaceIndex = -1;
-                    int                                                              Metric = 0;
-                    ppp::string                                                     Gateway;
-                };
-                ppp::vector<IPv6DefaultRouteRecord>                                 default_routes_v6_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;

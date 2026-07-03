@@ -1827,24 +1827,76 @@ namespace ppp {
                                     if (memcmp(&pfx, &in6addr_any, sizeof(pfx)) != 0) continue;
                                     if ((int)row.InterfaceIndex != phys_if_index) continue;
 
-                                    IPv6DefaultRouteRecord rec;
-                                    rec.InterfaceIndex = (int)row.InterfaceIndex;
-                                    rec.Metric = (int)row.Metric;
                                     char gw[INET6_ADDRSTRLEN] = { 0 };
                                     const IN6_ADDR& nh = row.NextHop.Ipv6.sin6_addr;
                                     if (memcmp(&nh, &in6addr_any, sizeof(nh)) != 0) {
                                         if (NULLPTR != ::inet_ntop(AF_INET6, &nh, gw, sizeof(gw))) {
-                                            rec.Gateway = gw;
+                                            char cmd[512];
+                                            ::snprintf(cmd, sizeof(cmd),
+                                                "interface ipv6 add route ::/0 %d %s metric=%d",
+                                                phys_if_index, gw, (int)row.Metric);
+                                            v6_default_route_restore_cmds_.emplace_back(cmd);
                                         }
                                     }
-                                    default_routes_v6_.emplace_back(std::move(rec));
+                                    else {
+                                        char cmd[256];
+                                        ::snprintf(cmd, sizeof(cmd),
+                                            "interface ipv6 add route ::/0 %d metric=%d",
+                                            phys_if_index, (int)row.Metric);
+                                        v6_default_route_restore_cmds_.emplace_back(cmd);
+                                    }
 
                                     // Delete this ::/0 route to block non-bypass IPv6 leak.
                                     ppp::win32::network::DeleteIPv6DefaultGateway(
-                                        rec.InterfaceIndex, rec.Gateway);
+                                        (int)row.InterfaceIndex, gw);
                                 }
                                 ::FreeMibTable(table);
                             }
+                        }
+                    }
+                }
+#elif defined(_LINUX)
+                // Same as above: on dual-stack client + v4-only server, delete the physical
+                // NIC's IPv6 ::/0 default route to prevent non-bypass traffic leak.
+                {
+                    auto tap = GetTap();
+                    if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
+                        if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                            ppp::string ifname = underlying_ni->Name;
+                            if (!ifname.empty()) {
+                                // Build restore command: ip -6 route add ::/0 dev <ifname>
+                                ppp::string restore_cmd = "ip -6 route add ::/0 dev " + ifname + " 2>/dev/null";
+                                v6_default_route_restore_cmds_.emplace_back(restore_cmd);
+
+                                // Delete the default route to block IPv6 leak.
+                                ppp::string del_cmd = "ip -6 route del ::/0 dev " + ifname + " 2>/dev/null";
+                                ::system(del_cmd.c_str());
+                            }
+                        }
+                    }
+                }
+#elif defined(_MACOS)
+                // Same as above: on dual-stack client + v4-only server, delete the physical
+                // NIC's IPv6 ::/0 default route to prevent non-bypass traffic leak.
+                {
+                    auto tap = GetTap();
+                    if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
+                        if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                            // macOS: delete default IPv6 route.
+                            // Build restore command: route -n add -inet6 ::/0 <gateway>
+                            ppp::string restore_cmd = "route -n add -inet6 ::/0 ";
+                            if (underlying_ni->IPv6GatewayServer.is_v6() && !underlying_ni->IPv6GatewayServer.is_unspecified()) {
+                                restore_cmd += underlying_ni->IPv6GatewayServer.to_string();
+                            }
+                            else {
+                                restore_cmd += "-interface " + underlying_ni->Name;
+                            }
+                            restore_cmd += " 2>/dev/null";
+                            v6_default_route_restore_cmds_.emplace_back(restore_cmd);
+
+                            // Delete the default route to block IPv6 leak.
+                            ppp::string del_cmd = "route -n delete -inet6 ::/0 2>/dev/null";
+                            ::system(del_cmd.c_str());
                         }
                     }
                 }
@@ -1891,21 +1943,18 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
-#if defined(_WIN32)
                 // Restore IPv6 ::/0 default routes on the physical NIC (if they were
                 // deleted by AddRoute() in a dual-stack client + v4-only server scenario).
-                for (const auto& rec : default_routes_v6_) {
-                    if (!rec.Gateway.empty()) {
-                        ppp::win32::network::SetIPv6DefaultGateway(
-                            rec.InterfaceIndex, rec.Gateway, rec.Metric);
-                    }
-                    else {
-                        ppp::win32::network::SetIPv6DefaultRoute(
-                            rec.InterfaceIndex, rec.Metric);
-                    }
+                for (const auto& cmd : v6_default_route_restore_cmds_) {
+#if defined(_WIN32)
+                    ::system(("netsh " + cmd + " > nul 2>&1").c_str());
+#else
+                    ::system(cmd.c_str());
+#endif
                 }
-                default_routes_v6_.clear();
+                v6_default_route_restore_cmds_.clear();
 
+#if defined(_WIN32)
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);
 
