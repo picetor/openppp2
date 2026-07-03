@@ -356,6 +356,43 @@ namespace ppp
                 dns_map.clear();
                 return events;
             }
+
+            bool SetIPv6PrefixPolicy(const ppp::string& prefix, int precedence, int label) noexcept
+            {
+                if (prefix.empty())
+                {
+                    return false;
+                }
+
+                // Configure IPv6 prefix policy to adjust source address selection.
+                // Using netsh: netsh interface ipv6 set prefixpolicy <prefix> <precedence> <label>
+                char command[512];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 set prefixpolicy %s %d %d",
+                    prefix.c_str(), precedence, label);
+
+                return ExecuteNetshCommand(command);
+            }
+
+            bool SetIPv6PrefixPolicyPreferULA() noexcept
+            {
+                // Elevate ULA prefix (fd00::/8) precedence above global unicast (::/0).
+                // Default: ::/0 precedence=30, fc00::/7 precedence=3
+                // After:   fc00::/7 stays at 3, but fd00::/8 gets precedence=50 to win over ::/0 (30).
+                // Netsh requires a prefix to exist before it can be changed, so we use the
+                // same label (13) that the default fc00::/7 entry uses.
+                constexpr int ULA_PREFERRED_PRECEDENCE = 50;
+                constexpr int ULA_LABEL = 13;
+                return SetIPv6PrefixPolicy("fd00::/8", ULA_PREFERRED_PRECEDENCE, ULA_LABEL);
+            }
+
+            bool RestoreIPv6PrefixPolicyULA() noexcept
+            {
+                // Restore ULA prefix (fd00::/8) to its default precedence (3) matching fc00::/7.
+                constexpr int ULA_DEFAULT_PRECEDENCE = 3;
+                constexpr int ULA_LABEL = 13;
+                return SetIPv6PrefixPolicy("fd00::/8", ULA_DEFAULT_PRECEDENCE, ULA_LABEL);
+            }
         }
     }
 }

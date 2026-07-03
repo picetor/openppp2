@@ -272,6 +272,18 @@ namespace ppp {
                             return false;
                         }
 
+                        // The physical NIC may have global IPv6 addresses (e.g., 2409:...) 
+                        // while the TAP uses ULA addresses (fd42::/...). Windows RFC 6724 
+                        // source address selection prefers global unicast (precedence 30) 
+                        // over ULA (precedence 3), so outbound IPv6 traffic would bypass 
+                        // the VPN entirely. Elevate the fd00::/8 prefix precedence to 50
+                        // so the ULA source address on TAP is preferred for all IPv6 traffic.
+                        if (!ppp::win32::network::SetIPv6PrefixPolicyPreferULA()) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                            return false;
+                        }
+
+                        state.PrefixPolicyApplied = true;
                         state.DefaultRouteApplied = true;
                         state.DefaultRouteGateway = gw_str;
                         return true;
@@ -390,6 +402,13 @@ namespace ppp {
                         }
 
                         ppp::tap::TapWindows::DnsFlushResolverCache();
+                    }
+
+                    if (state.PrefixPolicyApplied) {
+                        // Restore the default fd00::/8 prefix policy precedence from 50 back to 3.
+                        // This ensures the physical NIC's global IPv6 addresses regain normal
+                        // priority when the VPN is disconnected.
+                        ppp::win32::network::RestoreIPv6PrefixPolicyULA();
                     }
 
                     if (state.DefaultRouteApplied && state.DefaultRouteWasPresent) {

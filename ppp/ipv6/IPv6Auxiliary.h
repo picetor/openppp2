@@ -29,6 +29,7 @@ namespace ppp {
                 bool                                                          DefaultRouteApplied = false;
                 bool                                                          SubnetRouteApplied = false;
                 bool                                                          DnsApplied = false;
+                bool                                                          PrefixPolicyApplied = false;
                 bool                                                          DefaultRouteWasPresent = false;
                 int                                                           OriginalDefaultRouteInterfaceIndex = -1;
                 int                                                           OriginalDefaultRouteMetric = -1;
@@ -53,6 +54,7 @@ namespace ppp {
                     DefaultRouteApplied = false;
                     SubnetRouteApplied = false;
                     DnsApplied = false;
+                    PrefixPolicyApplied = false;
                     DefaultRouteWasPresent = false;
                     OriginalDefaultRouteInterfaceIndex = -1;
                     OriginalDefaultRouteMetric = -1;

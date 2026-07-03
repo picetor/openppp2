@@ -121,6 +121,9 @@ namespace ppp
             int                                                 GetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
             int                                                 SetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
             bool                                                ClearDnsAddresses(int interface_index) noexcept;
+            bool                                                SetIPv6PrefixPolicy(const ppp::string& prefix, int precedence, int label) noexcept;
+            bool                                                SetIPv6PrefixPolicyPreferULA() noexcept;
+            bool                                                RestoreIPv6PrefixPolicyULA() noexcept;
         }
     }
 }
