@@ -367,10 +367,10 @@ static constexpr int                                                        PPP_
 static constexpr int                                                        PPP_MAX_DNS_PACKET_BUFFER_SIZE  = 512; 
 // Allocation size of the PPP coroutine stack space.
 static constexpr int                                                        PPP_COROUTINE_STACK_SIZE        = 1 << 17; /* boost::context::stack_traits::default_size() */
-#define                                                                     PPP_PREFERRED_DNS_SERVER_1      "8.8.8.8"
-#define                                                                     PPP_PREFERRED_DNS_SERVER_2      "8.8.4.4"
-#define                                                                     PPP_PREFERRED_DNS_SERVER_1_V6   "2001:4860:4860::8888"
-#define                                                                     PPP_PREFERRED_DNS_SERVER_2_V6   "2001:4860:4860::8844"
+#define                                                                     PPP_PREFERRED_DNS_SERVER_1      "1.1.1.1"
+#define                                                                     PPP_PREFERRED_DNS_SERVER_2      "8.8.8.8"
+#define                                                                     PPP_PREFERRED_DNS_SERVER_1_V6   "2606:4700:4700::1111"
+#define                                                                     PPP_PREFERRED_DNS_SERVER_2_V6   "2001:4860:4860::8888"
 static constexpr const char*                                                PPP_DEFAULT_KEY_PROTOCOL        = "aes-128-cfb";
 static constexpr const char*                                                PPP_DEFAULT_KEY_TRANSPORT       = "aes-256-cfb";
 static constexpr int                                                        PPP_DEFAULT_HTTP_PROXY_PORT     = 8080;
