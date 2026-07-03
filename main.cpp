@@ -1212,7 +1212,24 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 
             // Load DNS rules
             ethernet->LoadAllDnsRules(network_interface->DNSRules, true);
-            
+
+            // Pass IPv6 DNS addresses from --dns= to the switcher for IPv6 DNS propagation
+            // (mirroring how IPv4 DNS is configured via SetAllNicsDnsAddresses).
+            {
+                ppp::vector<ppp::string> dns_v6;
+                for (const auto& addr : network_interface->DnsAddresses)
+                {
+                    if (addr.is_v6())
+                    {
+                        dns_v6.emplace_back(addr.to_string());
+                    }
+                }
+                if (!dns_v6.empty())
+                {
+                    ethernet->SetInitialIPv6Dns(dns_v6);
+                }
+            }
+
             // Open switcher
             if (!ethernet->Open(tap))
             {

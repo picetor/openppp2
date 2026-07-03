@@ -172,6 +172,7 @@ namespace ppp {
                 std::shared_ptr<NetworkInterface>                                   GetUnderlyingNetworkInterface() noexcept { return underlying_ni_; }
                 virtual void                                                        PreferredNgw(const boost::asio::ip::address& gw) noexcept;
                 virtual void                                                        PreferredNgw6(const boost::asio::ip::address& gw6) noexcept;
+                virtual void                                                        SetInitialIPv6Dns(const ppp::vector<ppp::string>& dns) noexcept { initial_ipv6_dns_ = dns; }
                 virtual void                                                        PreferredNic(const ppp::string& nic) noexcept;
                 virtual bool                                                        AddLoadIPList(
                     const ppp::string&                                              path, 
@@ -346,6 +347,7 @@ namespace ppp {
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
+                ppp::vector<ppp::string>                                           initial_ipv6_dns_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;

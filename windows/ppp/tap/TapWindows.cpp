@@ -305,18 +305,11 @@ namespace ppp
                 return NULLPTR;
             }
 
-            // Note: ConfigureDriver_SetTunModeWithAddress expects gw as the network address (ip & mask),
-            // which is 192.168.12.0 for --tun-gw=192.168.12.0 --tun-ip=192.168.12.68 --tun-mask=24.
-            // However, ConfigureDriver_SetDhcpMASQ and ConfigureDriver_SetDhcpOptionData need a valid
-            // unicast host IP for the DHCP server address (Option 54) and default gateway (Option 3).
-            // Using gw (the network address 192.168.12.0) in those calls causes Windows DHCP client
-            // to reject the DHCP offer and fall back to APIPA (169.254.x.x). Use ip (adapter IP)
-            // instead for all DHCP-related gateway and server address parameters.
             bool ok = ConfigureDriver_SetNetifUp(tun, true) &&
                 (ConfigureDriver_SetTunModeWithAddress(tun, ip, gw, mask) || 
                     ConfigureDriver_SetTunModeWithAddress(tun, ip, (ip & mask), mask)) &&
-                ConfigureDriver_SetDhcpMASQ(tun, ip, ip, mask, lease_time_in_seconds) &&
-                ConfigureDriver_SetDhcpOptionData(tun, ip, ip, mask, ip, dns_addresses);
+                ConfigureDriver_SetDhcpMASQ(tun, ip, gw, mask, lease_time_in_seconds) &&
+                ConfigureDriver_SetDhcpOptionData(tun, ip, gw, mask, gw, dns_addresses);
 
             if (!ok)
             {
@@ -336,26 +329,47 @@ namespace ppp
                 tap->GetInterfaceIndex() = interface_index;
             }
 
-            // For TAP fallback path, skip Windows WMI IP configuration (SetAdapterInterface).
-            // The TAP driver is already configured via IOCTL calls above (ConfigureDriver_SetTunModeWithAddress,
-            // ConfigureDriver_SetDhcpMASQ, ConfigureDriver_SetDhcpOptionData). The internal DHCP server handles
-            // IP assignment and DNS configuration on the Windows network interface automatically.
-            // WMI EnableStatic would conflict with the TAP's DHCP mode and fail.
-            fprintf(stdout, "[TapWindows::Create] TAP fallback: skipping SetAdapterInterface (handled by TAP IOCTL+DhcpMASQ)\r\n");
-
-            // Initialize the async I/O stream from the TAP handle.
-            // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
-            // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
-            // _handle is a TAP device handle, so we must create the stream explicitly.
-            if (!tap->InitializeStream())
+            // Use WMI (netsh) to configure IP, gateway, and DNS on the network interface.
+            // This is the primary configuration mechanism - the TAP IOCTL DHCP calls above
+            // are secondary and may fail if DHCP parameters are invalid, but WMI ensures
+            // the interface is configured correctly regardless.
+            fprintf(stdout, "[TapWindows::Create] Setting adapter interface via WMI...\r\n");
+            ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
+            if (ok)
             {
-                fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
-                CloseHandle(tun);
-                return NULLPTR;
+                // Assign a default IPv6 ULA address to the TAP interface (mirroring IPv4's
+                // static address assignment). This ensures the TAP has an IPv6 address
+                // before the server pushes its own IPv6 configuration via ApplyIPv6Assignment.
+                // The IPv6 address is derived from the IPv4 IP for consistency:
+                //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
+                {
+                    uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
+                    uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
+                    char ipv6_addr[64];
+                    const int ipv6_prefix_len = 64;
+                    ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
+                    ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
+                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
+                }
+
+                // Initialize the async I/O stream from the TAP handle.
+                // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
+                // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
+                // _handle is a TAP device handle, so we must create the stream explicitly.
+                if (!tap->InitializeStream())
+                {
+                    fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
+                    CloseHandle(tun);
+                    return NULLPTR;
+                }
+
+                fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
+                return tap;
             }
 
-            fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
-            return tap;
+            fprintf(stdout, "[TapWindows::Create] FAIL: SetAdapterInterface failed\r\n");
+            tap->Dispose();
+            return NULLPTR;
         }
 
         void* TapWindows::OpenDriver(const ppp::string& componentId) noexcept
