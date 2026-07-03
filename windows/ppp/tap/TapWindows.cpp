@@ -309,7 +309,7 @@ namespace ppp
                 (ConfigureDriver_SetTunModeWithAddress(tun, ip, gw, mask) || 
                     ConfigureDriver_SetTunModeWithAddress(tun, ip, (ip & mask), mask)) &&
                 ConfigureDriver_SetDhcpMASQ(tun, ip, gw, mask, lease_time_in_seconds) &&
-                ConfigureDriver_SetDhcpOptionData(tun, ip, mask, gw, gw, dns_addresses);
+                ConfigureDriver_SetDhcpOptionData(tun, ip, gw, mask, gw, dns_addresses);
 
             if (!ok)
             {
@@ -568,26 +568,26 @@ namespace ppp
             BYTE* mask_bytes = (BYTE*)&mask;
             BYTE* dhcp_bytes = (BYTE*)&dhcp;
 
-            // IP地址
+            // IP地址 (Option 50: Requested IP Address)
             dhcpOptionData.emplace_back(0x32);
             dhcpOptionData.emplace_back(0x04);
-            for (uint32_t i = 0; i < sizeof(*mask_bytes); i++)
+            for (uint32_t i = 0; i < sizeof(uint32_t); i++)
             {
-                dhcpOptionData.emplace_back(mask_bytes[i]);
+                dhcpOptionData.emplace_back(ip_bytes[i]);
             }
 
-            // 子网地址
+            // 子网地址 (Option 1: Subnet Mask)
             dhcpOptionData.emplace_back(0x01);
             dhcpOptionData.emplace_back(0x04);
-            for (uint32_t i = 0; i < sizeof(*mask_bytes); i++)
+            for (uint32_t i = 0; i < sizeof(uint32_t); i++)
             {
                 dhcpOptionData.emplace_back(mask_bytes[i]);
             }
 
-            // 网关服务器
+            // 网关服务器 (Option 3: Router/Gateway)
             dhcpOptionData.emplace_back(0x03);
             dhcpOptionData.emplace_back(0x04);
-            for (uint32_t i = 0; i < sizeof(*gw_bytes); i++)
+            for (uint32_t i = 0; i < sizeof(uint32_t); i++)
             {
                 dhcpOptionData.emplace_back(gw_bytes[i]);
             }
@@ -617,10 +617,10 @@ namespace ppp
                 }
             }
 
-            // DHCP服务器
+            // DHCP服务器 (Option 54: DHCP Server Identifier)
             dhcpOptionData.emplace_back(0x36);
             dhcpOptionData.emplace_back(0x04);
-            for (uint32_t i = 0; i < sizeof(*dhcp_bytes); i++)
+            for (uint32_t i = 0; i < sizeof(uint32_t); i++)
             {
                 dhcpOptionData.emplace_back(dhcp_bytes[i]);
             }
