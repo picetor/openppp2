@@ -341,16 +341,112 @@ namespace ppp
                 tap->GetInterfaceIndex() = interface_index;
             }
 
-            // Use WMI (netsh) to configure IP, gateway, and DNS on the network interface.
-            // This is the primary configuration mechanism in the original code. However,
-            // if it fails, the TAP IOCTLs above have already configured the adapter at the
-            // driver level, so we can still proceed. We log the failure for diagnostics.
+            // Use WMI to configure IP, gateway, and DNS on the network interface.
+            // This is the primary configuration mechanism in the original code.
             fprintf(stdout, "[TapWindows::Create] Setting adapter interface via WMI...\r\n");
             ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
             if (!ok)
             {
-                fprintf(stdout, "[TapWindows::Create] WARNING: SetAdapterInterface failed, "
-                    "proceeding with IOCTL-only configuration (WMI/netsh is non-critical)\r\n");
+                fprintf(stdout, "[TapWindows::Create] WARNING: SetAdapterInterface (WMI) failed, "
+                    "trying netsh fallback...\r\n");
+
+                // NetSH fallback: WMI may fail on some systems (e.g., TAP/Wintun
+                // adapters with partial WMI provider support). Build the interface
+                // name from the NetworkInterface connection ID, or fall back to
+                // the numeric interface index (netsh accepts both).
+                ppp::string netsh_if_name;
+                if (tap_ni)
+                {
+                    netsh_if_name = tap_ni->ConnectionId;
+                }
+                else
+                {
+                    char idx_str[16];
+                    ::snprintf(idx_str, sizeof(idx_str), "%d", interface_index);
+                    netsh_if_name = ppp::string(idx_str);
+                }
+
+                // Convert raw address integers to dotted-decimal strings.
+                ppp::string netsh_ip   = Ipep::ToAddressString<ppp::string>(ip);
+                ppp::string netsh_gw   = Ipep::ToAddressString<ppp::string>(gw);
+                ppp::string netsh_mask = Ipep::ToAddressString<ppp::string>(mask);
+
+                // 1) Set IP address and (optionally) default gateway via netsh.
+                {
+                    char cmd[2048];
+                    if (hosted_network)
+                    {
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ipv4 set address name=\"%s\" source=static addr=%s mask=%s gateway=%s gwmetric=1",
+                            netsh_if_name.data(), netsh_ip.data(), netsh_mask.data(), netsh_gw.data());
+                    }
+                    else
+                    {
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ipv4 set address name=\"%s\" source=static addr=%s mask=%s gateway=none",
+                            netsh_if_name.data(), netsh_ip.data(), netsh_mask.data());
+                    }
+
+                    fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
+                    PROCESS_INFORMATION pi;
+                    ZeroMemory(&pi, sizeof(pi));
+                    STARTUPINFOA si;
+                    ZeroMemory(&si, sizeof(si));
+                    si.cb = sizeof(si);
+
+                    if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
+                    {
+                        WaitForSingleObject(pi.hProcess, INFINITE);
+                        DWORD dwExitCode = 0;
+                        if (GetExitCodeProcess(pi.hProcess, &dwExitCode))
+                        {
+                            fprintf(stdout, "[TapWindows::Create-netsh] Set address exit code: %lu\r\n", dwExitCode);
+                        }
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                    }
+                    else
+                    {
+                        fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
+                    }
+                }
+
+                // 2) Set DNS servers via netsh (one per call).
+                {
+                    ppp::vector<ppp::string> dns_strings;
+                    Ipep::ToAddresses(dns_addresses, dns_strings);
+                    for (const auto& dns_srv : dns_strings)
+                    {
+                        char cmd[2048];
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ipv4 set dns name=\"%s\" source=static addr=%s register=primary validate=no",
+                            netsh_if_name.data(), dns_srv.data());
+
+                        fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
+                        PROCESS_INFORMATION pi;
+                        ZeroMemory(&pi, sizeof(pi));
+                        STARTUPINFOA si;
+                        ZeroMemory(&si, sizeof(si));
+                        si.cb = sizeof(si);
+
+                        if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
+                        {
+                            WaitForSingleObject(pi.hProcess, INFINITE);
+                            DWORD dwExitCode = 0;
+                            if (GetExitCodeProcess(pi.hProcess, &dwExitCode))
+                            {
+                                fprintf(stdout, "[TapWindows::Create-netsh] Set DNS %s exit code: %lu\r\n",
+                                    dns_srv.data(), dwExitCode);
+                            }
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
+                        }
+                        else
+                        {
+                            fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
+                        }
+                    }
+                }
             }
 
             // Assign a default IPv6 ULA address to the TAP interface (mirroring IPv4's
