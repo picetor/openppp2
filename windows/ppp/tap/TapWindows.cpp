@@ -348,74 +348,78 @@ namespace ppp
             if (!ok)
             {
                 fprintf(stdout, "[TapWindows::Create] WARNING: SetAdapterInterface (WMI) failed, "
-                    "trying iphlpapi fallback...\r\n");
+                    "trying netsh fallback...\r\n");
 
-                // iphlpapi fallback: configure IP/gateway/DNS by interface index.
-                // Unlike netsh, this does not depend on matching the adapter name.
+                // Use netsh with interface INDEX (numeric) instead of name.
+                // This avoids WMI name-matching issues entirely.
                 ppp::string ip_str   = IPEndPoint(ip, 0).ToAddressString();
                 ppp::string gw_str   = IPEndPoint(gw, 0).ToAddressString();
                 ppp::string mask_str = IPEndPoint(mask, 0).ToAddressString();
 
-                // 1) Add IP address (AddIPAddress expects network byte order).
+                // 1) Set static IP address + subnet mask + gateway via netsh by index.
+                //    Syntax: netsh interface ipv4 set address <idx> static <ip> <mask> [<gw>]
                 {
-                    ULONG nte_ctx = 0, nte_inst = 0;
-                    DWORD err = AddIPAddress(htonl(ip), htonl(mask), (DWORD)interface_index, &nte_ctx, &nte_inst);
-                    fprintf(stdout, "[TapWindows::Create-iphlpapi] AddIPAddress(%s/%s if=%d): err=%lu ctx=%lu\r\n",
-                        ip_str.data(), mask_str.data(), interface_index, err, nte_ctx);
+                    char cmd[1024];
+                    ::snprintf(cmd, sizeof(cmd),
+                        "netsh interface ipv4 set address %d static %s %s %s",
+                        interface_index, ip_str.data(), mask_str.data(), gw_str.data());
+
+                    fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
+                    PROCESS_INFORMATION pi;
+                    ZeroMemory(&pi, sizeof(pi));
+                    STARTUPINFOA si;
+                    ZeroMemory(&si, sizeof(si));
+                    si.cb = sizeof(si);
+
+                    if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
+                    {
+                        WaitForSingleObject(pi.hProcess, 30000); // 30s timeout
+                        DWORD dwExitCode = 0;
+                        GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                        fprintf(stdout, "[TapWindows::Create-netsh] Set address exit code: %lu\r\n", dwExitCode);
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                    }
+                    else
+                    {
+                        fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
+                    }
                 }
 
-                // 2) Add default gateway route (hosted network only).
-                if (hosted_network)
-                {
-                    MIB_IPFORWARDROW fw;
-                    ZeroMemory(&fw, sizeof(fw));
-                    fw.dwForwardDest    = 0;
-                    fw.dwForwardMask    = 0;
-                    fw.dwForwardNextHop = htonl(gw);
-                    fw.dwForwardIfIndex = (DWORD)interface_index;
-                    fw.dwForwardType    = MIB_IPROUTE_TYPE_INDIRECT;
-                    fw.dwForwardProto   = MIB_IPPROTO_NETMGMT;
-                    fw.dwForwardMetric1 = 1;
-
-                    DWORD err = CreateIpForwardEntry(&fw);
-                    fprintf(stdout, "[TapWindows::Create-iphlpapi] CreateIpForwardEntry(0/0->%s if=%d): err=%lu\r\n",
-                        gw_str.data(), interface_index, err);
-                }
-
-                // 3) Set DNS via registry.
-                //    Key: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}
+                // 2) Set DNS servers via netsh by index (one per call).
+                //    Syntax: netsh interface ipv4 set dns <idx> static <dns>
                 {
                     ppp::vector<ppp::string> dns_strs;
                     Ipep::ToAddresses(dns_addresses, dns_strs);
-
-                    ppp::string dns_csv;
                     for (const auto& s : dns_strs)
                     {
                         if (s.empty() || s == "255.255.255.255") continue;
-                        if (!dns_csv.empty()) dns_csv += ",";
-                        dns_csv += s;
-                    }
 
-                    if (!dns_csv.empty())
-                    {
-                        ppp::string reg_path = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
-                        reg_path += tapComponentId;
+                        char cmd[512];
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ipv4 set dns %d static %s validate=no",
+                            interface_index, s.data());
 
-                        HKEY hkey = NULLPTR;
-                        LSTATUS reg_err = RegOpenKeyExA(HKEY_LOCAL_MACHINE, reg_path.data(), 0,
-                            KEY_SET_VALUE, &hkey);
-                        if (reg_err == ERROR_SUCCESS && hkey != NULLPTR)
+                        fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
+                        PROCESS_INFORMATION pi;
+                        ZeroMemory(&pi, sizeof(pi));
+                        STARTUPINFOA si;
+                        ZeroMemory(&si, sizeof(si));
+                        si.cb = sizeof(si);
+
+                        if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
                         {
-                            reg_err = RegSetValueExA(hkey, "NameServer", 0, REG_SZ,
-                                (const BYTE*)dns_csv.data(), (DWORD)(dns_csv.size() + 1));
-                            RegCloseKey(hkey);
-                            fprintf(stdout, "[TapWindows::Create-iphlpapi] Registry DNS: %s -> %s (err=%ld)\r\n",
-                                reg_path.data(), dns_csv.data(), reg_err);
+                            WaitForSingleObject(pi.hProcess, 15000);
+                            DWORD dwExitCode = 0;
+                            GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                            fprintf(stdout, "[TapWindows::Create-netsh] Set DNS %s exit code: %lu\r\n",
+                                s.data(), dwExitCode);
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
                         }
                         else
                         {
-                            fprintf(stdout, "[TapWindows::Create-iphlpapi] RegOpenKeyEx(%s) failed: %ld\r\n",
-                                reg_path.data(), reg_err);
+                            fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
                         }
                     }
                 }
