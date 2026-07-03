@@ -1695,6 +1695,28 @@ namespace ppp {
                     ProtectDefaultRoute();
                 }
 #endif
+#if defined(_WIN32)
+                // For client mode: clear IPv6 DNS on non-TAP NICs to prevent DNS leak.
+                // Windows may query IPv6 DNS servers on physical NICs even when the
+                // TAP interface is the default route. ISP-assigned IPv6 DNS servers
+                // (e.g. 2409:8a55:: China Mobile) can return poisoned results.
+                if (!tap->IsHostedNetwork()) {
+                    auto tun_ni = tun_ni_;
+                    if (NULLPTR != tun_ni) {
+                        int tap_if_index = tun_ni->Index;
+                        // Save original IPv6 DNS for restoration on disconnect.
+                        if (ni_dns_servers_v6_.empty()) {
+                            ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
+                        }
+                        // Clear IPv6 DNS on non-TAP NICs.
+                        for (auto& [if_index, _] : ni_dns_servers_v6_) {
+                            if (if_index != tap_if_index) {
+                                ppp::win32::network::ClearDnsAddressesV6(if_index);
+                            }
+                        }
+                    }
+                }
+#endif
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: completed successfully");
                 return true;
             }
