@@ -495,8 +495,10 @@ namespace ppp {
         }
 
         int Ipep::ToDnsAddresses(const ppp::string& s, ppp::vector<boost::asio::ip::address>& out, bool at_least_two) noexcept {
-            static constexpr const char* DEFAULT_DNS_ADDRESSES[] = { PPP_PREFERRED_DNS_SERVER_1, PPP_PREFERRED_DNS_SERVER_2 };
-            static constexpr const char* DEFAULT_DNS_ADDRESSES_V6[] = { PPP_PREFERRED_DNS_SERVER_1_V6, PPP_PREFERRED_DNS_SERVER_2_V6 };
+            static constexpr const char* DEFAULT_DNS_V4[] = { PPP_PREFERRED_DNS_SERVER_1, PPP_PREFERRED_DNS_SERVER_2 };
+            static constexpr const char* DEFAULT_DNS_V6[] = { PPP_PREFERRED_DNS_SERVER_1_V6, PPP_PREFERRED_DNS_SERVER_2_V6 };
+            static constexpr int DEFAULT_V4_COUNT = arraysizeof(DEFAULT_DNS_V4);
+            static constexpr int DEFAULT_V6_COUNT = arraysizeof(DEFAULT_DNS_V6);
 
             if (s.empty()) {
                 return -1;
@@ -506,44 +508,54 @@ namespace ppp {
                 return Ipep::ToAddresses2(s, out);
             }
 
-            ppp::vector<boost::asio::ip::address> addresses;
-            Ipep::ToAddresses2(s, addresses);
-
-            bool has_v4 = false;
-            bool has_v6 = false;
-            for (const boost::asio::ip::address& addr : addresses) {
-                if (addr.is_v4()) { has_v4 = true; }
-                if (addr.is_v6()) { has_v6 = true; }
-            }
-
-            int addresses_size = static_cast<int>(addresses.size());
-            for (const char* dns_addresss_string : DEFAULT_DNS_ADDRESSES) {
-                if (addresses_size >= arraysizeof(DEFAULT_DNS_ADDRESSES) + arraysizeof(DEFAULT_DNS_ADDRESSES_V6)) {
-                    break;
-                }
-
-                boost::asio::ip::address dns_address = Ipep::ToAddress(dns_addresss_string, false);
-                if (std::find(addresses.begin(), addresses.end(), dns_address) == addresses.end()) {
-                    addresses.emplace_back(dns_address);
-                    addresses_size++;
+            // Split user-provided DNS into v4/v6 groups.
+            ppp::vector<boost::asio::ip::address> user_v4;
+            ppp::vector<boost::asio::ip::address> user_v6;
+            {
+                ppp::vector<boost::asio::ip::address> user_addresses;
+                Ipep::ToAddresses2(s, user_addresses);
+                for (auto& addr : user_addresses) {
+                    if (addr.is_v4()) {
+                        user_v4.emplace_back(std::move(addr));
+                    }
+                    else if (addr.is_v6()) {
+                        user_v6.emplace_back(std::move(addr));
+                    }
                 }
             }
 
-            for (const char* dns_addresss_string : DEFAULT_DNS_ADDRESSES_V6) {
-                if (addresses_size >= arraysizeof(DEFAULT_DNS_ADDRESSES) + arraysizeof(DEFAULT_DNS_ADDRESSES_V6)) {
-                    break;
-                }
+            // Merge: user entries first, then fill remaining slots with leftmost defaults.
+            // This means the rightmost defaults are dropped per group.
+            // E.g. --dns=208.67.222.222 → v4=[208.67.222.222, 1.1.1.1], v6 all defaults kept.
+            ppp::vector<boost::asio::ip::address> result;
 
-                boost::asio::ip::address dns_address = Ipep::ToAddress(dns_addresss_string, false);
-                if (std::find(addresses.begin(), addresses.end(), dns_address) == addresses.end()) {
-                    addresses.emplace_back(dns_address);
-                    addresses_size++;
+            // v4 group
+            for (auto& addr : user_v4) {
+                result.emplace_back(std::move(addr));
+            }
+            int v4_fill = DEFAULT_V4_COUNT - (int)user_v4.size();
+            for (int i = 0; i < v4_fill && i < DEFAULT_V4_COUNT; ++i) {
+                auto def = Ipep::ToAddress(DEFAULT_DNS_V4[i], false);
+                if (std::find(result.begin(), result.end(), def) == result.end()) {
+                    result.emplace_back(def);
+                }
+            }
+
+            // v6 group
+            for (auto& addr : user_v6) {
+                result.emplace_back(std::move(addr));
+            }
+            int v6_fill = DEFAULT_V6_COUNT - (int)user_v6.size();
+            for (int i = 0; i < v6_fill && i < DEFAULT_V6_COUNT; ++i) {
+                auto def = Ipep::ToAddress(DEFAULT_DNS_V6[i], false);
+                if (std::find(result.begin(), result.end(), def) == result.end()) {
+                    result.emplace_back(def);
                 }
             }
 
             std::size_t last = out.size();
-            for (boost::asio::ip::address& ip : addresses) {
-                out.emplace_back(ip);
+            for (auto& ip : result) {
+                out.emplace_back(std::move(ip));
             }
 
             return static_cast<int>(out.size() - last);

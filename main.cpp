@@ -1487,7 +1487,7 @@ void PppApplication::PrintHelpInformation() noexcept
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--dns=<ip-list>", 
         col_description_width, "DNS server addresses", 
-        col_default_width, "8.8.8.8,8.8.4.4");
+        col_default_width, "1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--tun-flash=[yes|no]", 
