@@ -367,9 +367,9 @@ namespace ppp
                 }
 
                 // Convert raw address integers to dotted-decimal strings.
-                ppp::string netsh_ip   = Ipep::ToAddressString<ppp::string>(ip);
-                ppp::string netsh_gw   = Ipep::ToAddressString<ppp::string>(gw);
-                ppp::string netsh_mask = Ipep::ToAddressString<ppp::string>(mask);
+                ppp::string netsh_ip   = IPEndPoint(ip, 0).ToAddressString();
+                ppp::string netsh_gw   = IPEndPoint(gw, 0).ToAddressString();
+                ppp::string netsh_mask = IPEndPoint(mask, 0).ToAddressString();
 
                 // 1) Set IP address and (optionally) default gateway via netsh.
                 {
