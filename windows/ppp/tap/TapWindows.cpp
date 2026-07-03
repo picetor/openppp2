@@ -305,11 +305,18 @@ namespace ppp
                 return NULLPTR;
             }
 
+            // Note: ConfigureDriver_SetTunModeWithAddress expects gw as the network address (ip & mask),
+            // which is 192.168.12.0 for --tun-gw=192.168.12.0 --tun-ip=192.168.12.68 --tun-mask=24.
+            // However, ConfigureDriver_SetDhcpMASQ and ConfigureDriver_SetDhcpOptionData need a valid
+            // unicast host IP for the DHCP server address (Option 54) and default gateway (Option 3).
+            // Using gw (the network address 192.168.12.0) in those calls causes Windows DHCP client
+            // to reject the DHCP offer and fall back to APIPA (169.254.x.x). Use ip (adapter IP)
+            // instead for all DHCP-related gateway and server address parameters.
             bool ok = ConfigureDriver_SetNetifUp(tun, true) &&
                 (ConfigureDriver_SetTunModeWithAddress(tun, ip, gw, mask) || 
                     ConfigureDriver_SetTunModeWithAddress(tun, ip, (ip & mask), mask)) &&
-                ConfigureDriver_SetDhcpMASQ(tun, ip, gw, mask, lease_time_in_seconds) &&
-                ConfigureDriver_SetDhcpOptionData(tun, ip, gw, mask, gw, dns_addresses);
+                ConfigureDriver_SetDhcpMASQ(tun, ip, ip, mask, lease_time_in_seconds) &&
+                ConfigureDriver_SetDhcpOptionData(tun, ip, ip, mask, ip, dns_addresses);
 
             if (!ok)
             {
