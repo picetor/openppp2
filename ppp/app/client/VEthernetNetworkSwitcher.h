@@ -343,7 +343,6 @@ namespace ppp {
                 boost::asio::ip::address                                            preferred_ngw_;
                 boost::asio::ip::address                                            preferred_ngw6_;
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
-                ppp::vector<ppp::string>                                           v6_default_route_restore_cmds_;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;

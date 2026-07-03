@@ -1807,90 +1807,6 @@ namespace ppp {
                 // Add IPv6 bypass routes to the operating system.
                 AddIPv6Route();
 
-#if defined(_WIN32)
-                // Always delete the physical NIC's IPv6 ::/0 default route after installing
-                // bypass routes. Rationale:
-                //   - Bypass /N routes have explicit next-hop and don't depend on ::/0.
-                //   - For dual-stack servers, ApplyIPv6Assignment() later installs ::/1+8000::/1
-                //     via TAP, which are more specific than ::/0 and cover the full IPv6 space.
-                //   - For v4-only servers, no IPv6 routes are pushed; non-bypass traffic
-                //     finds no route → dropped (no leak).
-                // The route is restored in DeleteRoute().
-                {
-                    if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
-                        int phys_if_index = underlying_ni->Index;
-                        PMIB_IPFORWARD_TABLE2 table = NULLPTR;
-                        if (::GetIpForwardTable2(AF_INET6, &table) == NO_ERROR && NULLPTR != table) {
-                            for (ULONG i = 0; i < table->NumEntries; ++i) {
-                                const MIB_IPFORWARD_ROW2& row = table->Table[i];
-                                if (row.DestinationPrefix.PrefixLength != 0) continue;
-                                if (row.DestinationPrefix.Prefix.si_family != AF_INET6) continue;
-                                const IN6_ADDR& pfx = row.DestinationPrefix.Prefix.Ipv6.sin6_addr;
-                                if (memcmp(&pfx, &in6addr_any, sizeof(pfx)) != 0) continue;
-                                if ((int)row.InterfaceIndex != phys_if_index) continue;
-
-                                char gw[INET6_ADDRSTRLEN] = { 0 };
-                                const IN6_ADDR& nh = row.NextHop.Ipv6.sin6_addr;
-                                if (memcmp(&nh, &in6addr_any, sizeof(nh)) != 0) {
-                                    if (NULLPTR != ::inet_ntop(AF_INET6, &nh, gw, sizeof(gw))) {
-                                        char cmd[512];
-                                        ::snprintf(cmd, sizeof(cmd),
-                                            "interface ipv6 add route ::/0 %d %s metric=%d",
-                                            phys_if_index, gw, (int)row.Metric);
-                                        v6_default_route_restore_cmds_.emplace_back(cmd);
-                                    }
-                                }
-                                else {
-                                    char cmd[256];
-                                    ::snprintf(cmd, sizeof(cmd),
-                                        "interface ipv6 add route ::/0 %d metric=%d",
-                                        phys_if_index, (int)row.Metric);
-                                    v6_default_route_restore_cmds_.emplace_back(cmd);
-                                }
-
-                                ppp::win32::network::DeleteIPv6DefaultGateway(
-                                    (int)row.InterfaceIndex, gw);
-                            }
-                            ::FreeMibTable(table);
-                        }
-                    }
-                }
-#elif defined(_LINUX)
-                // Same as Windows: always delete physical NIC ::/0.
-                // Bypass /N routes work without it; dual-stack servers install ::/1 later.
-                {
-                    if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
-                        ppp::string ifname = underlying_ni->Name;
-                        if (!ifname.empty()) {
-                            ppp::string restore_cmd = "ip -6 route add ::/0 dev " + ifname + " 2>/dev/null";
-                            v6_default_route_restore_cmds_.emplace_back(restore_cmd);
-
-                            ppp::string del_cmd = "ip -6 route del ::/0 dev " + ifname + " 2>/dev/null";
-                            ::system(del_cmd.c_str());
-                        }
-                    }
-                }
-#elif defined(_MACOS)
-                // Same as Windows: always delete physical NIC ::/0.
-                // Bypass /N routes work without it; dual-stack servers install ::/1 later.
-                {
-                    if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
-                        ppp::string restore_cmd = "route -n add -inet6 ::/0 ";
-                        if (underlying_ni->IPv6GatewayServer.is_v6() && !underlying_ni->IPv6GatewayServer.is_unspecified()) {
-                            restore_cmd += underlying_ni->IPv6GatewayServer.to_string();
-                        }
-                        else {
-                            restore_cmd += "-interface " + underlying_ni->Name;
-                        }
-                        restore_cmd += " 2>/dev/null";
-                        v6_default_route_restore_cmds_.emplace_back(restore_cmd);
-
-                        ppp::string del_cmd = "route -n delete -inet6 ::/0 2>/dev/null";
-                        ::system(del_cmd.c_str());
-                    }
-                }
-#endif
-
                 // Configure the DNS servers used by the virtual network adapter to route to the operating system.
                 AddRouteWithDnsServers();
             }
@@ -1932,17 +1848,6 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
-                // Restore IPv6 ::/0 default routes on the physical NIC (deleted by AddRoute()
-                // to prevent non-bypass IPv6 traffic leak on all server types).
-                for (const auto& cmd : v6_default_route_restore_cmds_) {
-#if defined(_WIN32)
-                    ::system(("netsh " + cmd + " > nul 2>&1").c_str());
-#else
-                    ::system(cmd.c_str());
-#endif
-                }
-                v6_default_route_restore_cmds_.clear();
-
 #if defined(_WIN32)
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);

@@ -260,49 +260,10 @@ namespace ppp
             if (WintunAdapter::Ready())
             {
                 fprintf(stdout, "[TapWindows::Create] WintunAdapter::Ready() -> CreateWintunAdapter\r\n");
-                auto wintun_result = WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
-                if (wintun_result != NULLPTR)
-                {
-                    return wintun_result;
-                }
-                fprintf(stdout, "[TapWindows::Create] WintunAdapter failed, fallback to TAP\r\n");
-                // Fall through to TAP path below
+                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
             }
 
-            // TAP path: resolve friendly name to GUID if needed
-            ppp::win32::network::NetworkInterfacePtr tap_ni;
-            ppp::string tapComponentId = TapWindows_FindComponentId(componentId, tap_ni);
-            fprintf(stdout, "[TapWindows::Create] TAP resolved '%s' -> '%s'\r\n", componentId.data(), tapComponentId.data());
-
-            // If resolution failed, enumerate all TAP devices and try each
-            if (tapComponentId.empty())
-            {
-                fprintf(stdout, "[TapWindows::Create] Trying all TAP devices...\r\n");
-                ppp::unordered_set<ppp::string> allIds;
-                if (TapWindows::FindAllComponentIds(allIds) && !allIds.empty())
-                {
-                    for (const auto& cid : allIds)
-                    {
-                        fprintf(stdout, "[TapWindows::Create]   Trying componentId='%s'\r\n", cid.data());
-                        void* test_tun = OpenDriver(cid.data());
-                        if (test_tun != NULLPTR && test_tun != INVALID_HANDLE_VALUE)
-                        {
-                            tapComponentId = cid;
-                            CloseHandle(test_tun);
-                            fprintf(stdout, "[TapWindows::Create]   Found working TAP: '%s'\r\n", cid.data());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (tapComponentId.empty())
-            {
-                fprintf(stdout, "[TapWindows::Create] FAIL: TAP resolution failed for '%s'\r\n", componentId.data());
-                return NULLPTR;
-            }
-
-            int interface_index = GetNetworkInterfaceIndex(tapComponentId);
+            int interface_index = GetNetworkInterfaceIndex(componentId);
             fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
             if (interface_index < -1)
             {
@@ -310,8 +271,8 @@ namespace ppp
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(tapComponentId.data());
-            fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", tapComponentId.data(), tun);
+            void* tun = OpenDriver(componentId.data());
+            fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", componentId.data(), tun);
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
                 fprintf(stdout, "[TapWindows::Create] FAIL: OpenDriver failed (err=%d)\r\n", GetLastError());
@@ -331,7 +292,7 @@ namespace ppp
                 return NULLPTR;
             }
 
-            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, tapComponentId, tun, ip, gw, mask, hosted_network);
+            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, componentId, tun, ip, gw, mask, hosted_network);
             if (NULLPTR == tap)
             {
                 CloseHandle(tun);
@@ -341,118 +302,40 @@ namespace ppp
             {
                 tap->GetInterfaceIndex() = interface_index;
             }
-
+            
             // Use WMI to configure IP, gateway, and DNS on the network interface.
             fprintf(stdout, "[TapWindows::Create] Setting adapter interface via WMI...\r\n");
             ok = SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses);
-            if (!ok)
+            if (ok)
             {
-                fprintf(stdout, "[TapWindows::Create] WARNING: SetAdapterInterface (WMI) failed, "
-                    "trying netsh fallback...\r\n");
-
-                // Use netsh with interface INDEX (numeric) instead of name.
-                // This avoids WMI name-matching issues entirely.
-                ppp::string ip_str   = IPEndPoint(ip, 0).ToAddressString();
-                ppp::string gw_str   = IPEndPoint(gw, 0).ToAddressString();
-                ppp::string mask_str = IPEndPoint(mask, 0).ToAddressString();
-
-                // 1) Set static IP address + subnet mask + gateway via netsh by index.
-                //    Syntax: netsh interface ipv4 set address <idx> static <ip> <mask> [<gw>]
+                // Assign a default IPv6 ULA address to the TAP interface.
+                // The IPv6 address is derived from the IPv4 IP for consistency:
+                //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
                 {
-                    char cmd[1024];
-                    ::snprintf(cmd, sizeof(cmd),
-                        "netsh interface ipv4 set address %d static %s %s %s",
-                        interface_index, ip_str.data(), mask_str.data(), gw_str.data());
-
-                    fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
-                    PROCESS_INFORMATION pi;
-                    ZeroMemory(&pi, sizeof(pi));
-                    STARTUPINFOA si;
-                    ZeroMemory(&si, sizeof(si));
-                    si.cb = sizeof(si);
-
-                    if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
-                    {
-                        WaitForSingleObject(pi.hProcess, 30000); // 30s timeout
-                        DWORD dwExitCode = 0;
-                        GetExitCodeProcess(pi.hProcess, &dwExitCode);
-                        fprintf(stdout, "[TapWindows::Create-netsh] Set address exit code: %lu\r\n", dwExitCode);
-                        CloseHandle(pi.hProcess);
-                        CloseHandle(pi.hThread);
-                    }
-                    else
-                    {
-                        fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
-                    }
+                    uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
+                    uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
+                    char ipv6_addr[64];
+                    const int ipv6_prefix_len = 64;
+                    ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
+                    ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
+                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
                 }
 
-                // 2) Set DNS servers via netsh by index (one per call).
-                //    Syntax: netsh interface ipv4 set dns <idx> static <dns>
+                // Initialize the async I/O stream from the TAP handle.
+                if (!tap->InitializeStream())
                 {
-                    ppp::vector<ppp::string> dns_strs;
-                    Ipep::ToAddresses(dns_addresses, dns_strs);
-                    for (const auto& s : dns_strs)
-                    {
-                        if (s.empty() || s == "255.255.255.255") continue;
-
-                        char cmd[512];
-                        ::snprintf(cmd, sizeof(cmd),
-                            "netsh interface ipv4 set dns %d static %s validate=no",
-                            interface_index, s.data());
-
-                        fprintf(stdout, "[TapWindows::Create-netsh] Running: %s\r\n", cmd);
-                        PROCESS_INFORMATION pi;
-                        ZeroMemory(&pi, sizeof(pi));
-                        STARTUPINFOA si;
-                        ZeroMemory(&si, sizeof(si));
-                        si.cb = sizeof(si);
-
-                        if (CreateProcessA(NULLPTR, cmd, NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
-                        {
-                            WaitForSingleObject(pi.hProcess, 15000);
-                            DWORD dwExitCode = 0;
-                            GetExitCodeProcess(pi.hProcess, &dwExitCode);
-                            fprintf(stdout, "[TapWindows::Create-netsh] Set DNS %s exit code: %lu\r\n",
-                                s.data(), dwExitCode);
-                            CloseHandle(pi.hProcess);
-                            CloseHandle(pi.hThread);
-                        }
-                        else
-                        {
-                            fprintf(stdout, "[TapWindows::Create-netsh] CreateProcess failed (err=%d)\r\n", GetLastError());
-                        }
-                    }
+                    fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
+                    CloseHandle(tun);
+                    return NULLPTR;
                 }
+
+                fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
+                return tap;
             }
 
-            // Assign a default IPv6 ULA address to the TAP interface (mirroring IPv4's
-            // static address assignment). This ensures the TAP has an IPv6 address
-            // before the server pushes its own IPv6 configuration via ApplyIPv6Assignment.
-            // The IPv6 address is derived from the IPv4 IP for consistency:
-            //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
-            {
-                uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
-                uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
-                char ipv6_addr[64];
-                const int ipv6_prefix_len = 64;
-                ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
-                ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
-                fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
-            }
-
-            // Initialize the async I/O stream from the TAP handle.
-            // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
-            // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
-            // _handle is a TAP device handle, so we must create the stream explicitly.
-            if (!tap->InitializeStream())
-            {
-                fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
-                CloseHandle(tun);
-                return NULLPTR;
-            }
-
-            fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
-            return tap;
+            fprintf(stdout, "[TapWindows::Create] FAIL: SetAdapterInterface (WMI) failed\r\n");
+            tap->Dispose();
+            return NULLPTR;
         }
 
         void* TapWindows::OpenDriver(const ppp::string& componentId) noexcept
