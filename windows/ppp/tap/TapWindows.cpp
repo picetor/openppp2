@@ -257,12 +257,6 @@ namespace ppp
                 lease_time_in_seconds = 86400;
             }
 
-            if (WintunAdapter::Ready())
-            {
-                fprintf(stdout, "[TapWindows::Create] WintunAdapter::Ready() -> CreateWintunAdapter\r\n");
-                return WintunAdapterDriver::CreateWintunAdapter(context, componentId, ip, gw, mask, hosted_network, dns_addresses);
-            }
-
             int interface_index = GetNetworkInterfaceIndex(componentId);
             fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
             if (interface_index < -1)
