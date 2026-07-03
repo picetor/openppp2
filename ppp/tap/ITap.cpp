@@ -243,9 +243,8 @@ namespace ppp
         {
             // Filter out IPv6 DNS: TAP DHCP Option 6 only supports IPv4, and
             // IPv6 DNS cannot be represented as uint32_t (inet_addr returns INADDR_NONE).
-            // IPv6 DNS will be configured later via:
-            //   - initial_ipv6_dns_ (hosted mode) or
-            //   - ApplyClientDns (when server assigns IPv6 via AssignedIPv6Dns1/2).
+            // IPv6 DNS is configured by the server via protocol extensions
+            // (AssignedIPv6Dns1/2 → ApplyClientDns).
             ppp::vector<ppp::string> dns_v4;
             for (const auto& addr : dns_addresses) {
                 boost::system::error_code ec;

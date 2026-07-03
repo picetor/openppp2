@@ -1654,22 +1654,11 @@ namespace ppp {
                     ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
                     if (NULLPTR != tun_ni) {
                         int tap_if_index = tun_ni->Index;
-                        if (!initial_ipv6_dns_.empty()) {
-                            // Set TAP's IPv6 DNS from --dns= and propagate to ALL NICs (same as IPv4).
-                            ppp::win32::network::SetDnsAddressesV6(tap_if_index, initial_ipv6_dns_);
-                            for (auto& [if_index, _] : ni_dns_servers_v6_) {
-                                if (if_index != tap_if_index) {
-                                    ppp::win32::network::SetDnsAddressesV6(if_index, initial_ipv6_dns_);
-                                }
-                            }
-                        }
-                        else {
-                            // No initial IPv6 DNS from --dns=, just clear non-TAP NICs to prevent leaks.
-                            // IPv6 DNS will be set later by server push via ApplyIPv6Assignment.
-                            for (auto& [if_index, _] : ni_dns_servers_v6_) {
-                                if (if_index != tap_if_index) {
-                                    ppp::win32::network::ClearDnsAddressesV6(if_index);
-                                }
+                        // Clear IPv6 DNS on non-TAP NICs to prevent DNS leak.
+                        // IPv6 DNS will be set on TAP later by server push via ApplyIPv6Assignment.
+                        for (auto& [if_index, _] : ni_dns_servers_v6_) {
+                            if (if_index != tap_if_index) {
+                                ppp::win32::network::ClearDnsAddressesV6(if_index);
                             }
                         }
                     }
