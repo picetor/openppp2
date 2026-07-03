@@ -253,11 +253,21 @@ namespace ppp {
                     if (gateway.is_v6()) {
                         std::string gw_std = gateway.to_string();
                         ppp::string gw_str(gw_std.data(), gw_std.size());
+
                         if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "::", 1, gw_str, 0)) {
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
                         if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str, 0)) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                            return false;
+                        }
+
+                        // Wintun is an L3-only TAP driver — it does not perform L2
+                        // NDP resolution. Add a static neighbor entry so the kernel
+                        // can resolve the gateway MAC without NDP and send IPv6
+                        // packets directly to the TAP interface.
+                        if (!ppp::win32::network::AddIPv6Neighbor(context.InterfaceIndex, gw_str, "00-00-00-00-00-01")) {
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
@@ -300,6 +310,10 @@ namespace ppp {
                     ppp::string prefix_str(prefix_std.data(), prefix_std.size());
                     prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
 
+                    // On-link subnet route (no gateway): Wintun L3 driver does not
+                    // support NDP, so all routes directed to the TAP interface must
+                    // be on-link to avoid failed neighbor resolution.
+                    // The user-mode NAT stack handles all forwarding logic.
                     ppp::string gateway_str;
                     if (gateway.is_v6()) {
                         std::string gw_std = gateway.to_string();
@@ -309,7 +323,8 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6GatewayMissing);
                     }
 
-                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, gateway_str, 0)) {
+                    // Use on-link route (empty gateway) for Wintun L3 compatibility.
+                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, ppp::string(), 0)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }

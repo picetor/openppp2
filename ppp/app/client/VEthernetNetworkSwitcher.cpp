@@ -205,9 +205,12 @@ namespace ppp {
 
             bool VEthernetNetworkSwitcher::OnIPv6PacketInput(Byte* packet, int packet_length) noexcept {
                 if (!IsVNet()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: SKIP, IsVNet()=false");
                     return false;
                 }
                 if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: SKIP, invalid packet=%p, len=%d",
+                        (void*)packet, packet_length);
                     return false;
                 }
 
@@ -215,6 +218,9 @@ namespace ppp {
 
                 // Protocol dispatch based on IPv6 Next Header field
                 Byte next_header = ipv6_header->NextHeader;
+
+                LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: processing, next_header=%d (TCP=%d,UDP=%d,ICMPv6=%d), len=%d",
+                    (int)next_header, IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMPV6, packet_length);
 
                 // TCP (6): forward blindly via NAT (same as existing behavior)
                 if (next_header == IPPROTO_TCP) {

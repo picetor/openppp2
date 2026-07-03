@@ -97,6 +97,23 @@ namespace ppp
                 return ExecuteNetshCommand(command);
             }
 
+            bool AddIPv6Neighbor(int interface_index, const ppp::string& address, const ppp::string& mac) noexcept
+            {
+                if (interface_index < 0 || address.empty() || mac.empty())
+                {
+                    return false;
+                }
+
+                // Add a static IPv6 neighbor entry (NDP cache).
+                // Using netsh: netsh interface ipv6 add neighbors <ifindex> <address> <mac> store=persistent
+                char command[512];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 add neighbors %d %s %s store=persistent",
+                    interface_index, address.c_str(), mac.c_str());
+
+                return ExecuteNetshCommand(command);
+            }
+
             bool AddIPv6Route(int interface_index, const ppp::string& prefix, int prefix_length, const ppp::string& gateway, int metric) noexcept
             {
                 if (interface_index < 0 || prefix.empty() || prefix_length < 0)

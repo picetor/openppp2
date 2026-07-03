@@ -407,8 +407,12 @@ namespace ppp
                         Byte* packet = (Byte*)e.Packet;
                         if (packet_length >= (int)sizeof(ppp::ipv6::PacketHeader) && (packet[0] >> 4) == 6)
                         {
+                            LOG_DEBUG("VEthernet::TAP_PACKET_INPUT: IPv6 packet detected, packet_length=%d, first_byte=0x%02x, vnet_=%d",
+                                packet_length, packet[0], (int)vnet_);
                             return OnIPv6PacketInput(packet, packet_length);
                         }
+                        LOG_DEBUG("VEthernet::TAP_PACKET_INPUT: unknown packet, packet_length=%d, first_byte=0x%02x, vnet_=%d",
+                            packet_length, packet[0], (int)vnet_);
                         return false; // INVALID IS (Destination & Mask) != Destination;
                     }
 #if !defined(_WIN32)
