@@ -38,6 +38,8 @@
 #include <windows/ppp/win32/network/Router.h>
 #include <windows/ppp/net/proxies/HttpProxy.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
+#include <netioapi.h>
+#include <ws2tcpip.h>
 #else
 #include <common/unix/UnixAfx.h>
 #if defined(_MACOS)
@@ -1805,6 +1807,49 @@ namespace ppp {
                 // Add IPv6 bypass routes to the operating system.
                 AddIPv6Route();
 
+#if defined(_WIN32)
+                // When the server is IPv4-only (TAP has no IPv6 gateway), the physical NIC's
+                // IPv6 ::/0 default route would leak non-bypass IPv6 traffic to the ISP.
+                // Delete it after bypass routes are installed — bypass /N routes have explicit
+                // next-hop and don't depend on the default route.
+                {
+                    auto tap = GetTap();
+                    if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
+                        if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                            int phys_if_index = underlying_ni->Index;
+                            PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                            if (::GetIpForwardTable2(AF_INET6, &table) == NO_ERROR && NULLPTR != table) {
+                                for (ULONG i = 0; i < table->NumEntries; ++i) {
+                                    const MIB_IPFORWARD_ROW2& row = table->Table[i];
+                                    if (row.DestinationPrefix.PrefixLength != 0) continue;
+                                    if (row.DestinationPrefix.Prefix.si_family != AF_INET6) continue;
+                                    const IN6_ADDR& pfx = row.DestinationPrefix.Prefix.Ipv6.sin6_addr;
+                                    if (memcmp(&pfx, &in6addr_any, sizeof(pfx)) != 0) continue;
+                                    if ((int)row.InterfaceIndex != phys_if_index) continue;
+
+                                    IPv6DefaultRouteRecord rec;
+                                    rec.InterfaceIndex = (int)row.InterfaceIndex;
+                                    rec.Metric = (int)row.Metric;
+                                    char gw[INET6_ADDRSTRLEN] = { 0 };
+                                    const IN6_ADDR& nh = row.NextHop.Ipv6.sin6_addr;
+                                    if (memcmp(&nh, &in6addr_any, sizeof(nh)) != 0) {
+                                        if (NULLPTR != ::inet_ntop(AF_INET6, &nh, gw, sizeof(gw))) {
+                                            rec.Gateway = gw;
+                                        }
+                                    }
+                                    default_routes_v6_.emplace_back(std::move(rec));
+
+                                    // Delete this ::/0 route to block non-bypass IPv6 leak.
+                                    ppp::win32::network::DeleteIPv6DefaultGateway(
+                                        rec.InterfaceIndex, rec.Gateway);
+                                }
+                                ::FreeMibTable(table);
+                            }
+                        }
+                    }
+                }
+#endif
+
                 // Configure the DNS servers used by the virtual network adapter to route to the operating system.
                 AddRouteWithDnsServers();
             }
@@ -1847,6 +1892,20 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
 #if defined(_WIN32)
+                // Restore IPv6 ::/0 default routes on the physical NIC (if they were
+                // deleted by AddRoute() in a dual-stack client + v4-only server scenario).
+                for (const auto& rec : default_routes_v6_) {
+                    if (!rec.Gateway.empty()) {
+                        ppp::win32::network::SetIPv6DefaultGateway(
+                            rec.InterfaceIndex, rec.Gateway, rec.Metric);
+                    }
+                    else {
+                        ppp::win32::network::SetIPv6DefaultRoute(
+                            rec.InterfaceIndex, rec.Metric);
+                    }
+                }
+                default_routes_v6_.clear();
+
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);
 

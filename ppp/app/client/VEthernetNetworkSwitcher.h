@@ -350,6 +350,12 @@ namespace ppp {
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 ppp::vector<ppp::string>                                           initial_ipv6_dns_;
+                struct IPv6DefaultRouteRecord {
+                    int                                                              InterfaceIndex = -1;
+                    int                                                              Metric = 0;
+                    ppp::string                                                     Gateway;
+                };
+                ppp::vector<IPv6DefaultRouteRecord>                                 default_routes_v6_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
