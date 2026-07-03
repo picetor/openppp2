@@ -335,6 +335,18 @@ namespace ppp
             // IP assignment and DNS configuration on the Windows network interface automatically.
             // WMI EnableStatic would conflict with the TAP's DHCP mode and fail.
             fprintf(stdout, "[TapWindows::Create] TAP fallback: skipping SetAdapterInterface (handled by TAP IOCTL+DhcpMASQ)\r\n");
+
+            // Initialize the async I/O stream from the TAP handle.
+            // The ITap constructor skips stream creation when WintunAdapter::Ready() is true
+            // (because it assumes _handle is a WintunAdapter*). In the TAP fallback path,
+            // _handle is a TAP device handle, so we must create the stream explicitly.
+            if (!tap->InitializeStream())
+            {
+                fprintf(stdout, "[TapWindows::Create] FAIL: InitializeStream failed\r\n");
+                CloseHandle(tun);
+                return NULLPTR;
+            }
+
             fprintf(stdout, "[TapWindows::Create] SUCCESS!\r\n");
             return tap;
         }
@@ -399,7 +411,7 @@ namespace ppp
 
         bool TapWindows::Output(const void* packet, int packet_size) noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -420,7 +432,7 @@ namespace ppp
 
         bool TapWindows::Output(const std::shared_ptr<Byte>& packet, int packet_size) noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 if (NULLPTR == packet || packet_size < 1)
                 {
@@ -441,7 +453,7 @@ namespace ppp
 
         bool TapWindows::AsynchronousReadPacketLoops() noexcept
         {
-            if (WintunAdapter::Ready())
+            if (wintun_)
             {
                 WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
                 if (!wintun->IsOpen())

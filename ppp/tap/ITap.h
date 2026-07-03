@@ -82,6 +82,7 @@ namespace ppp
 
         protected:
             std::shared_ptr<boost::asio::posix::stream_descriptor>          GetStream() noexcept { return _stream; }
+            bool                                                            InitializeStream() noexcept;
             Byte*                                                           GetPacketBuffers() noexcept { return _packet; }
             virtual void                                                    OnInput(PacketInputEventArgs& e) noexcept;
             virtual bool                                                    AsynchronousReadPacketLoops() noexcept;

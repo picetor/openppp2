@@ -131,14 +131,18 @@ namespace ppp
             bool b = NULLPTR != _context;
             if (b)
             {
-                if (WintunAdapter::Ready())
+                if (NULLPTR != _stream)
+                {
+                    b = true;
+                }
+                else if (WintunAdapter::Ready())
                 {
                     WintunAdapter* wintun = static_cast<WintunAdapter*>(_handle);
                     b = wintun->IsOpen();
                 }
                 else
                 {
-                    b = NULLPTR != _stream;
+                    b = false;
                 }
             }
 #else
@@ -158,6 +162,26 @@ namespace ppp
                 }
             }
             return b;
+        }
+
+        bool ITap::InitializeStream() noexcept
+        {
+            if (_stream)
+            {
+                return true;
+            }
+
+#if defined(_WIN32)
+            if (NULLPTR == _handle || _handle == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+
+            _stream = NewStreamFromHandle(*_context, _handle);
+            return NULLPTR != _stream;
+#else
+            return false;
+#endif
         }
 
         bool ITap::IsOpen() noexcept
