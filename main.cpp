@@ -1215,6 +1215,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 
             // Pass IPv6 DNS addresses from --dns= to the switcher for IPv6 DNS propagation
             // (mirroring how IPv4 DNS is configured via SetAllNicsDnsAddresses).
+#if defined(_WIN32)
             {
                 ppp::vector<ppp::string> dns_v6;
                 for (const auto& addr : network_interface->DnsAddresses)
@@ -1229,6 +1230,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                     ethernet->SetInitialIPv6Dns(dns_v6);
                 }
             }
+#endif
 
             // Open switcher
             if (!ethernet->Open(tap))

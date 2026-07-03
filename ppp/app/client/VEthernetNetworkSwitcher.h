@@ -172,7 +172,9 @@ namespace ppp {
                 std::shared_ptr<NetworkInterface>                                   GetUnderlyingNetworkInterface() noexcept { return underlying_ni_; }
                 virtual void                                                        PreferredNgw(const boost::asio::ip::address& gw) noexcept;
                 virtual void                                                        PreferredNgw6(const boost::asio::ip::address& gw6) noexcept;
+#if defined(_WIN32)
                 virtual void                                                        SetInitialIPv6Dns(const ppp::vector<ppp::string>& dns) noexcept { initial_ipv6_dns_ = dns; }
+#endif
                 virtual void                                                        PreferredNic(const ppp::string& nic) noexcept;
                 virtual bool                                                        AddLoadIPList(
                     const ppp::string&                                              path, 
