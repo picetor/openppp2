@@ -162,7 +162,44 @@ namespace ppp
             }
 
             bool set_dns_ok = TapWindows::SetDnsAddresses(interface_index, dns_addresses_stloc);
-            fprintf(stdout, "[SetAdapterInterface] SetDnsAddresses = %s (best-effort, TAP DHCP delivers DNS)\r\n", set_dns_ok ? "OK" : "FAIL");
+            fprintf(stdout, "[SetAdapterInterface] SetDnsAddresses(WMI) = %s\r\n", set_dns_ok ? "OK" : "FAIL");
+
+            if (!set_dns_ok && !dns_addresses_stloc.empty())
+            {
+                // WMI DNS failed, fallback to netsh.
+                // TAP DHCP Option 6 pushes DNS to the driver, but Windows DHCP Client
+                // may not always pick it up. netsh ensures DNS is set on the interface.
+                ppp::string ifname = ppp::win32::network::GetInterfaceName(interface_index);
+                fprintf(stdout, "[SetAdapterInterface] netsh DNS fallback on '%s' (idx=%d)...\r\n",
+                    ifname.data(), interface_index);
+
+                if (!ifname.empty())
+                {
+                    // Set primary DNS: netsh interface ip set dns name="..." static <dns>
+                    {
+                        char cmd[512];
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ip set dns name=\"%s\" static %s",
+                            ifname.data(), dns_addresses_stloc[0].data());
+                        int rc = ::system(cmd);
+                        fprintf(stdout, "[SetAdapterInterface] netsh set dns 1: %s (rc=%d)\r\n",
+                            dns_addresses_stloc[0].data(), rc);
+                    }
+                    // Set secondary DNS: netsh interface ip add dns name="..." <dns> index=2
+                    for (size_t i = 1; i < dns_addresses_stloc.size() && i < 4; ++i)
+                    {
+                        const auto& s = dns_addresses_stloc[i];
+                        if (s.empty() || s == "255.255.255.255") continue;
+                        char cmd[512];
+                        ::snprintf(cmd, sizeof(cmd),
+                            "netsh interface ip add dns name=\"%s\" %s index=%zu",
+                            ifname.data(), s.data(), i + 1);
+                        int rc = ::system(cmd);
+                        fprintf(stdout, "[SetAdapterInterface] netsh add dns %zu: %s (rc=%d)\r\n",
+                            i + 1, s.data(), rc);
+                    }
+                }
+            }
 
             return set_addr_ok;
         }
