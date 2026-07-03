@@ -24,7 +24,6 @@ namespace ppp
             static bool                             SetAddresses(int interface_index, uint32_t ip, uint32_t mask, uint32_t gw) noexcept;
             static bool                             SetDnsAddresses(int interface_index, ppp::vector<uint32_t>& servers) noexcept;
             static bool                             SetDnsAddresses(int interface_index, ppp::vector<ppp::string>& servers) noexcept;
-            static bool                             SetDnsAddressesV6(int interface_index, const ppp::vector<ppp::string>& servers) noexcept;
             static std::shared_ptr<ITap>            Create(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& componentId, uint32_t ip, uint32_t gw, uint32_t mask, uint32_t lease_time_in_seconds, bool hosted_network, const ppp::vector<uint32_t>& dns_addresses);
             static ppp::string                      InstallDriver(const ppp::string& path, const ppp::string& declareTapName) noexcept;
             static bool                             UninstallDriver(const ppp::string& path) noexcept;

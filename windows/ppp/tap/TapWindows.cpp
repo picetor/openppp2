@@ -71,11 +71,6 @@ namespace ppp
             return ppp::win32::network::SetDnsAddresses(interface_index, servers);
         }
 
-        bool TapWindows::SetDnsAddressesV6(int interface_index, const ppp::vector<ppp::string>& servers) noexcept
-        {
-            return ppp::win32::network::SetDnsAddressesV6(interface_index, servers);
-        }
-
         bool TapWindows::SetDnsAddresses(int interface_index, ppp::vector<uint32_t>& servers) noexcept
         {
             ppp::vector<ppp::string> addresses;
