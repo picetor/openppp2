@@ -862,12 +862,20 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept {
+                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: entered, AssignedIPv6Mode=%d, AssignedIPv6Address=%s, AssignedIPv6Gateway=%s, AssignedIPv6Dns1=%s, AssignedIPv6Dns2=%s",
+                    (int)extensions.AssignedIPv6Mode,
+                    extensions.AssignedIPv6Address.is_v6() ? extensions.AssignedIPv6Address.to_string().c_str() : "(none)",
+                    extensions.AssignedIPv6Gateway.is_v6() ? extensions.AssignedIPv6Gateway.to_string().c_str() : "(none)",
+                    extensions.AssignedIPv6Dns1.is_v6() ? extensions.AssignedIPv6Dns1.to_string().c_str() : "(none)",
+                    extensions.AssignedIPv6Dns2.is_v6() ? extensions.AssignedIPv6Dns2.to_string().c_str() : "(none)");
                 if (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_None) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: IPv6Mode=None, returning");
                     return;
                 }
 
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR == tap) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: GetTap() returned null, returning");
                     return;
                 }
 
@@ -896,9 +904,9 @@ namespace ppp {
                     }
                 }
 #endif
-                // Determine nat_mode from configuration.
-                auto configuration = GetConfiguration();
-                bool nat_mode = configuration != NULLPTR && configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66;
+                // Determine nat_mode from the extensions (server-assigned), not from local config.
+                // The client config may not have a server.ipv6 section at all.
+                bool nat_mode = (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Nat66);
 
                 // Capture original IPv6 state before applying changes.
                 ppp::ipv6::auxiliary::ClientState state;
@@ -907,6 +915,10 @@ namespace ppp {
                 // 1. Apply the assigned IPv6 address.
                 if (extensions.AssignedIPv6Address.is_v6()) {
                     bool gua_mode = (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying address=%s/%d gua=%d",
+                        extensions.AssignedIPv6Address.to_string().c_str(),
+                        (int)(extensions.AssignedIPv6AddressPrefixLength > 0 ? extensions.AssignedIPv6AddressPrefixLength : 64),
+                        (int)gua_mode);
                     ppp::ipv6::auxiliary::ApplyClientAddress(
                         ctx,
                         extensions.AssignedIPv6Address,
@@ -975,6 +987,8 @@ namespace ppp {
                 //    Same approach as IPv4's 0.0.0.0/1 + 128.0.0.0/1 — avoids overwriting
                 //    any existing ::/0 on the physical NIC.
                 if (extensions.AssignedIPv6Gateway.is_v6()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying default route via gateway=%s nat_mode=%d",
+                        extensions.AssignedIPv6Gateway.to_string().c_str(), (int)nat_mode);
                     ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
 
                     // Update the tap object so the console display can show the IPv6 gateway.
@@ -1003,6 +1017,7 @@ namespace ppp {
                     dns_servers.emplace_back(extensions.AssignedIPv6Dns2.to_string());
                 }
                 if (!dns_servers.empty()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying %d DNS servers", (int)dns_servers.size());
                     ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
                 }
             }

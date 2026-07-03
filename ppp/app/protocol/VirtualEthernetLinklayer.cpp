@@ -694,7 +694,18 @@ namespace ppp {
                                     reinterpret_cast<char*>(p + sizeof(VirtualEthernetInformation) + 2), json_len);
                                 // Deserialize extensions from the JSON payload
                                 VirtualEthernetInformationExtensions::FromJson(envelope.Extensions, envelope.ExtendedJson);
+                                LOG_DEBUG("PacketInput: INFO extensions parsed, json_len=%u, AssignedIPv6Mode=%d, AssignedIPv6Address=%s, AssignedIPv6Gateway=%s, ExtendedJson=%.200s",
+                                    (unsigned int)json_len,
+                                    (int)envelope.Extensions.AssignedIPv6Mode,
+                                    envelope.Extensions.AssignedIPv6Address.is_v6() ? envelope.Extensions.AssignedIPv6Address.to_string().c_str() : "(none)",
+                                    envelope.Extensions.AssignedIPv6Gateway.is_v6() ? envelope.Extensions.AssignedIPv6Gateway.to_string().c_str() : "(none)",
+                                    envelope.ExtendedJson.c_str());
+                            } else {
+                                LOG_DEBUG("PacketInput: INFO no extensions in payload, json_len=%u, remaining=%d",
+                                    (unsigned int)json_len, remaining);
                             }
+                        } else {
+                            LOG_DEBUG("PacketInput: INFO no extension room, remaining=%d", remaining);
                         }
 
                         return OnInformation(transmission, envelope, y);

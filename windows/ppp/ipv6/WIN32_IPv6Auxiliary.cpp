@@ -200,8 +200,14 @@ namespace ppp {
 
                 bool ApplyClientAddress(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& address, int prefix_length, bool gua_mode, ::ppp::ipv6::auxiliary::ClientState& state) noexcept {
                     if (NULLPTR == context.Tap || context.InterfaceIndex < 0 || context.InterfaceName.empty() || !address.is_v6()) {
+                        LOG_ERROR("ApplyClientAddress: invalid context, tap=%p, ifIndex=%d, ifName=%s, addr=%s",
+                            (void*)context.Tap, context.InterfaceIndex, context.InterfaceName.c_str(),
+                            address.is_v6() ? address.to_string().c_str() : "(not v6)");
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::NetworkInterfaceConfigureFailed);
                     }
+
+                    LOG_DEBUG("ApplyClientAddress: applying %s/%d gua=%d on ifIndex=%d",
+                        address.to_string().c_str(), prefix_length, (int)gua_mode, context.InterfaceIndex);
 
                     boost::asio::ip::address_v6 addr_v6 = address.to_v6();
                     // Reject non-routable or interface-scoped address categories.
@@ -230,9 +236,15 @@ namespace ppp {
 
                 bool ApplyClientDefaultRoute(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& gateway, bool nat_mode, ::ppp::ipv6::auxiliary::ClientState& state) noexcept {
                     if (NULLPTR == context.Tap || context.InterfaceIndex < 0 || context.InterfaceName.empty()) {
+                        LOG_ERROR("ApplyClientDefaultRoute: invalid context, tap=%p, ifIndex=%d, ifName=%s",
+                            (void*)context.Tap, context.InterfaceIndex, context.InterfaceName.c_str());
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::NetworkInterfaceConfigureFailed);
                         return false;
                     }
+
+                    LOG_DEBUG("ApplyClientDefaultRoute: gateway=%s, nat_mode=%d, ifIndex=%d",
+                        gateway.is_v6() ? gateway.to_string().c_str() : "(not v6)",
+                        (int)nat_mode, context.InterfaceIndex);
 
                     // Split ::/0 into ::/1 and 8000::/1 (same approach as IPv4's
                     // 0.0.0.0/1 + 128.0.0.0/1) to avoid overwriting any existing

@@ -950,6 +950,10 @@ namespace ppp {
                             switcher_->OnInformation(ei);
 
                             // Apply IPv6 (and optionally IPv4) assignment from ExtendedJson
+                            LOG_DEBUG("VEthernetExchanger::OnInformation: ExtendedJson.empty()=%d, len=%d, AssignedIPv6Mode=%d",
+                                (int)information.ExtendedJson.empty(),
+                                (int)information.ExtendedJson.size(),
+                                (int)information.Extensions.AssignedIPv6Mode);
                             if (!information.ExtendedJson.empty()) {
                                 switcher_->ApplyIPv6Assignment(information.Extensions);
                             }
