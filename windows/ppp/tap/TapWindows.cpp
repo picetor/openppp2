@@ -354,7 +354,11 @@ namespace ppp
                     ppp::string ipv6_addr_str(ipv6_addr);
                     ppp::win32::network::SetIPv6Address(interface_index, ipv6_addr_str, ipv6_prefix_len);
                     ppp::win32::network::SetIPv6AddressSkipAsSource(interface_index, ipv6_addr_str);
-                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d (SkipAsSource)\r\n", ipv6_addr, ipv6_prefix_len);
+                    // Lower TAP interface metric to 5 so Windows DNS client
+                    // prefers VPN DNS servers over physical NIC's DNS servers,
+                    // preventing DNS leaks.
+                    ppp::win32::network::SetIPv6InterfaceMetric(interface_index, 5);
+                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d (SkipAsSource, Metric=5)\r\n", ipv6_addr, ipv6_prefix_len);
                 }
 
                 // Initialize the async I/O stream from the TAP handle.

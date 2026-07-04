@@ -536,6 +536,24 @@ namespace ppp
 
                 return ExecuteNetshCommand(command);
             }
+
+            bool SetIPv6InterfaceMetric(int interface_index, int metric) noexcept
+            {
+                if (interface_index < 0 || metric < 0)
+                {
+                    return false;
+                }
+
+                // Lower the interface metric so Windows DNS client prefers
+                // this interface's DNS servers over physical NIC's.
+                // Using netsh: netsh interface ipv6 set interface <ifindex> metric=<value>
+                char command[256];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 set interface %d metric=%d",
+                    interface_index, metric);
+
+                return ExecuteNetshCommand(command);
+            }
         }
     }
 }
