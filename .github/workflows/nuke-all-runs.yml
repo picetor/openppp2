@@ -12,17 +12,20 @@ jobs:
       - name: Delete ALL completed runs (all branches, all workflows)
         shell: bash
         run: |
-          page=1
           total=0
-          while :; do
-            resp=$(gh api "/repos/picetor/openppp2/actions/runs?per_page=100&page=$page" 2>/dev/null)
-            ids=$(echo "$resp" | jq -r '.workflow_runs[] | select(.status == "completed") | .id' 2>/dev/null)
-            [ -z "$ids" ] && break
+          for page in $(seq 1 20); do
+            echo "--- Page $page ---"
+            resp=$(gh api "/repos/picetor/openppp2/actions/runs?per_page=100&page=$page")
+            count=$(echo "$resp" | jq '.workflow_runs | length')
+            echo "  Runs on this page: $count"
+            [ "$count" -eq 0 ] && { echo "  No more runs."; break; }
+            ids=$(echo "$resp" | jq -r '.workflow_runs[] | select(.status == "completed") | .id')
+            [ -z "$ids" ] && { echo "  No completed runs on this page."; continue; }
             while IFS= read -r id; do
               [ -z "$id" ] && continue
               echo "  DELETE id=$id"
-              gh api -X DELETE "/repos/picetor/openppp2/actions/runs/$id" --silent 2>/dev/null && ((total++)) || echo "    fail"
+              gh api -X DELETE "/repos/picetor/openppp2/actions/runs/$id" && ((total++))
             done <<< "$ids"
-            page=$((page + 1))
           done
+          echo "=========="
           echo "Deleted $total runs total."
