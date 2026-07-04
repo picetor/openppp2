@@ -266,13 +266,22 @@ namespace ppp {
                 if (m.questions[0].mType != ::dns::RecordType::kAAAA) {
                     return;
                 }
+
+                const char* domain = m.questions[0].mName.data();
+                int original_aaaa_count = 0;
+                for (const auto& rr : m.answers) {
+                    if (rr.mType == ::dns::RecordType::kAAAA) original_aaaa_count++;
+                }
+
                 // Check cache for A records of the same domain
                 ::dns::Message a_check;
                 a_check.questions = m.questions;
                 a_check.questions[0].mType = ::dns::RecordType::kA;
                 ppp::string cache_result = ppp::net::asio::vdns::QueryCache2(
-                    m.questions[0].mName.data(), a_check, ppp::net::asio::vdns::AddressFamily::kA);
+                    domain, a_check, ppp::net::asio::vdns::AddressFamily::kA);
                 if (cache_result.empty()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, keeping %d AAAA records",
+                        domain, original_aaaa_count);
                     return;
                 }
                 bool hasA = false;
@@ -283,6 +292,8 @@ namespace ppp {
                     }
                 }
                 if (!hasA) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: cached no A for %s, keeping %d AAAA records",
+                        domain, original_aaaa_count);
                     return;
                 }
                 // Strip AAAA records from the response
@@ -292,6 +303,13 @@ namespace ppp {
                 m.additions.erase(std::remove_if(m.additions.begin(), m.additions.end(),
                     [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
                     m.additions.end());
+
+                int remaining_aaaa_count = 0;
+                for (const auto& rr : m.answers) {
+                    if (rr.mType == ::dns::RecordType::kAAAA) remaining_aaaa_count++;
+                }
+                LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: STRIPPED %d AAAA for %s, remaining AAAA=%d",
+                    original_aaaa_count, domain, remaining_aaaa_count);
             }
 
             bool VEthernetNetworkSwitcher::OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
