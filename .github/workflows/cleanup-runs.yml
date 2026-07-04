@@ -25,7 +25,7 @@ jobs:
             "Build openppp2 (macOS Debug)"
           )
 
-          KEEP=40
+          KEEP=0
 
           for WF in "${WORKFLOWS[@]}"; do
             echo "=== $WF ==="

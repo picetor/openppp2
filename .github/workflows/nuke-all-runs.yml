@@ -9,14 +9,14 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Delete ALL completed runs across all branches
+      - name: Delete ALL completed runs (all branches, all workflows)
         shell: bash
         run: |
           page=1
           total=0
           while :; do
             resp=$(gh api "/repos/picetor/openppp2/actions/runs?per_page=100&page=$page" 2>/dev/null)
-            ids=$(echo "$resp" | jq -r '"'"'.workflow_runs[] | select(.status == "completed") | .id'"'"' 2>/dev/null)
+            ids=$(echo "$resp" | jq -r '.workflow_runs[] | select(.status == "completed") | .id' 2>/dev/null)
             [ -z "$ids" ] && break
             while IFS= read -r id; do
               [ -z "$id" ] && continue
