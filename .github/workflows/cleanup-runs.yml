@@ -34,7 +34,7 @@ jobs:
             # Paginate through all completed runs
             page=1
             while :; do
-              resp=$(gh api "/repos/${{ github.repository }}/actions/runs?workflow=$(echo "$WF" | sed 's/ /%20/g')&branch=${{ github.ref_name }}&per_page=100&page=$page" 2>/dev/null)
+              resp=$(gh api "/repos/${{ github.repository }}/actions/runs?workflow=$(echo "$WF" | sed 's/ /%20/g')&per_page=100&page=$page" 2>/dev/null)
               items=$(echo "$resp" | jq -c '.workflow_runs[] | select(.status == "completed") | {id: .id, number: .run_number}' 2>/dev/null)
               [ -z "$items" ] && break
               while IFS= read -r item; do

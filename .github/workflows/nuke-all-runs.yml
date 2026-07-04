@@ -12,6 +12,7 @@ jobs:
       - name: Delete ALL completed runs (all branches, all workflows)
         shell: bash
         run: |
+          set +e
           total=0
           for page in $(seq 1 20); do
             echo "--- Page $page ---"
