@@ -1,4 +1,4 @@
-# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
 # Description: Build openppp2 macOS Debug (LOG_DEBUG) - standalone workflow
 # Author     : picetor
 # Date-Time  : 2026/06/26
@@ -106,22 +106,3 @@ jobs:
           name: openppp2-macos-${{ matrix.platform.name }}-debug
           path: build/openppp2-${{ matrix.platform.triple }}-debug.zip
           if-no-files-found: error
-
-      - name: Cleanup old workflow runs (keep last 10)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          CURRENT_RUN=${{ github.run_id }}
-          echo "Fetching runs for workflow '${{ github.workflow }}'..."
-          gh api "/repos/${{ github.repository }}/actions/runs?workflow=${{ github.workflow }}&branch=${{ github.ref_name }}&per_page=100" --jq '
-            .workflow_runs
-            | sort_by(.run_number) | reverse
-            | .[10:]
-            | .[]
-            | select(.id != '"'$CURRENT_RUN'"')
-            | "\(.id) \(.run_number)"' | while read -r id run_number; do
-            echo "  DELETE run #$run_number (id=$id)"
-            gh api -X DELETE "/repos/${{ github.repository }}/actions/runs/$id" || echo "  Run #$run_number skipped (may be running)"
-          done
-          echo "Cleanup complete."
