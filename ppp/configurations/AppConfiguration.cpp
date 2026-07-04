@@ -1290,6 +1290,7 @@ namespace ppp {
             config.udp.dns.ttl = JsonAuxiliary::AsValue<int>(json["udp"]["dns"]["ttl"]);
             config.udp.dns.turbo = JsonAuxiliary::AsValue<bool>(json["udp"]["dns"]["turbo"]);
             config.udp.dns.cache = JsonAuxiliary::AsInt64(json["udp"]["dns"]["cache"], 1) != 0;
+            config.udp.dns.prefer_ipv4 = JsonAuxiliary::AsValue<bool>(json["udp"]["dns"]["prefer_ipv4"]);
             config.udp.dns.redirect = JsonAuxiliary::AsValue<ppp::string>(json["udp"]["dns"]["redirect"]);
             config.udp.listen.port = JsonAuxiliary::AsValue<int>(json["udp"]["listen"]["port"]);
             config.udp.cwnd = std::max<int>(0, JsonAuxiliary::AsValue<int>(json["udp"]["cwnd"]));
@@ -1454,6 +1455,7 @@ namespace ppp {
             udp["dns"]["ttl"] = config.udp.dns.ttl;
             udp["dns"]["turbo"] = config.udp.dns.turbo;
             udp["dns"]["cache"] = config.udp.dns.cache;
+            udp["dns"]["prefer_ipv4"] = config.udp.dns.prefer_ipv4;
             udp["dns"]["redirect"] = config.udp.dns.redirect;
             udp["listen"]["port"] = config.udp.listen.port;
             udp["cwnd"] = config.udp.cwnd;

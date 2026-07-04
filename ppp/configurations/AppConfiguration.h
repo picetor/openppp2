@@ -74,6 +74,7 @@ namespace ppp {
                     int                                                     ttl;          ///< DNS response TTL in seconds used for local cache entries.
                     bool                                                    turbo;        ///< Enable turbo (parallel/aggressive) DNS query mode.
                     bool                                                    cache;        ///< Enable local DNS response caching.
+                    bool                                                    prefer_ipv4 = false; ///< Strip AAAA records from DNS responses when A records exist.
                     ppp::string                                             redirect;     ///< Upstream DNS server address to redirect queries to; empty = system default.
                 }                                                           dns;
                 struct {

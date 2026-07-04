@@ -251,6 +251,34 @@ namespace ppp {
                 return true;
             }
 
+            // Prefer IPv4 DNS responses: when a DNS response contains both A and AAAA
+            // records, strip out the AAAA records so the client prefers IPv4 connectivity.
+            // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
+            void PreferIPv4DnsResponse(::dns::Message& m) noexcept {
+                if (!configuration_ || !configuration_->udp.dns.prefer_ipv4) {
+                    return;
+                }
+                // Only strip if there are A records in the answers
+                bool hasA = false;
+                for (const auto& rr : m.answers) {
+                    if (rr.mType == ::dns::RecordType::kA) {
+                        hasA = true;
+                        break;
+                    }
+                }
+                if (!hasA) {
+                    return; // No A records, keep AAAA intact
+                }
+
+                // Remove AAAA records from answers and additions
+                m.answers.erase(std::remove_if(m.answers.begin(), m.answers.end(),
+                    [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
+                    m.answers.end());
+                m.additions.erase(std::remove_if(m.additions.begin(), m.additions.end(),
+                    [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
+                    m.additions.end());
+            }
+
             bool VEthernetNetworkSwitcher::OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
                 // Need at least IPv6 header (40) + UDP header (8)
                 static constexpr int UDP_HEADER_OFFSET = sizeof(ppp::ipv6::PacketHeader);
@@ -277,6 +305,8 @@ namespace ppp {
                             // Check local DNS cache (both A and AAAA records)
                             if (!ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m,
                                 qs.mType == ::dns::RecordType::kA ? ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
+
+                                PreferIPv4DnsResponse(m);
 
                                 std::size_t dns_size = 0;
                                 char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
@@ -352,10 +382,17 @@ namespace ppp {
                                                                 (boost::system::error_code ec, size_t sz) noexcept {
                                                                     DeleteTimeout(socket.get());
                                                                     if (ec == boost::system::errc::success && sz > 0) {
-                                                                        DatagramOutput(
-                                                                            boost::asio::ip::udp::endpoint(dst_v6, PPP_DNS_SYS_PORT),
-                                                                            boost::asio::ip::udp::endpoint(src_v6, src_port),
-                                                                            buffer.get(), static_cast<int>(sz), false);
+                                                                        ::dns::Message m;
+                                                                        if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
+                                                                            PreferIPv4DnsResponse(m);
+                                                                            size_t new_sz = 0;
+                                                                            if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
+                                                                                DatagramOutput(
+                                                                                    boost::asio::ip::udp::endpoint(dst_v6, PPP_DNS_SYS_PORT),
+                                                                                    boost::asio::ip::udp::endpoint(src_v6, src_port),
+                                                                                    buffer.get(), static_cast<int>(new_sz), false);
+                                                                            }
+                                                                        }
                                                                     }
                                                                     ppp::net::Socket::Closesocket(socket);
                                                                     if (timeout) {
@@ -3203,7 +3240,14 @@ namespace ppp {
                         DeleteTimeout(socket.get());
                         if (ec == boost::system::errc::success) {
                             if (sz > 0) {
-                                DatagramOutput(sourceEP, destinationEP, buffer.get(), sz);
+                                ::dns::Message m;
+                                if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
+                                    PreferIPv4DnsResponse(m);
+                                    size_t new_sz = 0;
+                                    if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
+                                        DatagramOutput(sourceEP, destinationEP, buffer.get(), static_cast<int>(new_sz));
+                                    }
+                                }
                             }
                         }
 
@@ -3231,6 +3275,8 @@ namespace ppp {
 
                 if (!ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m, qs.mType == ::dns::RecordType::kA ?
                     ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
+
+                    PreferIPv4DnsResponse(m);
 
                     std::size_t dns_size = 0;
                     char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE]; 
