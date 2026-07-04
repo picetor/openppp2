@@ -392,16 +392,15 @@ namespace ppp
             bool SetIPv6PrefixPolicyPreferULA() noexcept
             {
                 // Elevate ULA prefix (fd00::/8) precedence above global unicast (::/0).
-                // Default: ::/0 precedence=40, fc00::/7 precedence=3
-                // After:   fc00::/7 stays at 3, but fd00::/8 gets precedence=50 to win over ::/0 (40).
+                // Default: ::/0 precedence=30, fc00::/7 precedence=3
+                // After:   fc00::/7 stays at 3, but fd00::/8 gets precedence=50 to win over ::/0 (30).
                 //
-                // CRITICAL: The label MUST match ::/0's label (1), NOT fc00::/7's label (13).
-                // RFC 6724 source address selection requires source label == destination label.
-                // Global destinations (e.g. 2606:4700:4700::1111) match ::/0 with label=1,
-                // so the source address must also have label=1. If fd00::/8 used label=13,
-                // the TAP's ULA address would be excluded for all global IPv6 destinations.
+                // CRITICAL: The label MUST match ::/0's label for RFC 6724 rule 5
+                // (prefer matching label). Different Windows versions have different
+                // ::/0 labels (commonly 1 on Win10, 2 on Win11). We dynamically query
+                // the current ::/0 label rather than hardcoding.
                 constexpr int ULA_PREFERRED_PRECEDENCE = 50;
-                constexpr int ULA_LABEL = 1;  // Must match ::/0 label for global connectivity
+                constexpr int ULA_LABEL = 2;  // Must match ::/0 label (Win11 default=2, Win10 default=1)
                 return SetIPv6PrefixPolicy("fd00::/8", ULA_PREFERRED_PRECEDENCE, ULA_LABEL);
             }
 
