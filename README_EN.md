@@ -193,10 +193,4 @@ Each build automatically cleans up old workflow runs, keeping only the last 10 p
 | Linux | aarch64 (4 variants) | Release / Debug |
 | macOS | arm64 + amd64 | Release / Debug |
 
-For detailed build environment, see:
-- [`环境需求.md`](环境需求.md) — Original dependency list (Chinese)
-- [`WSS修改版环境需求.md`](WSS修改版环境需求.md) — Fork-specific build notes (Chinese)
-
----
-
 > All other features (tunnel protocols, routing policies, MUX multiplexing, PaperAirplane acceleration, etc.) are identical to the original. Please refer to the upstream documentation.
