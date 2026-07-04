@@ -256,7 +256,7 @@ namespace ppp {
             // prefers IPv4. If no cached A records exist (pure IPv6 site), keep
             // the AAAA response intact so IPv6 still works as fallback.
             // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
-            void StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept {
+            void VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept {
                 if (!configuration_ || !configuration_->udp.dns.prefer_ipv4) {
                     return;
                 }
