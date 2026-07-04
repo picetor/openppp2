@@ -6,6 +6,19 @@
 #include <Windows.h>
 #include <Iphlpapi.h>
 #include <netioapi.h>
+#include <cstdio>
+#include <sstream>
+#include <string>
+
+#ifndef PPP_POPEN
+#if defined(_MSC_VER)
+#define PPP_POPEN  ::_popen
+#define PPP_PCLOSE ::_pclose
+#else
+#define PPP_POPEN  ::popen
+#define PPP_PCLOSE ::pclose
+#endif
+#endif
 
 #pragma comment(lib, "Iphlpapi.lib")
 #pragma comment(lib, "Netapi32.lib")
@@ -389,19 +402,90 @@ namespace ppp
                 return ExecuteNetshCommand(command);
             }
 
+            static int QueryGlobalUnicastLabel() noexcept
+            {
+                // Dynamically query the label of ::/0 from the current prefix policy table.
+                // This is needed because different Windows versions assign different labels
+                // to the default global unicast prefix: Win10 uses label=1, Win11 uses label=2.
+                //
+                // We parse the output of: netsh interface ipv6 show prefixpolicies
+                // Format: "        30      2  ::/0"  (precedence, label, prefix)
+                //
+                // Returns label on success, -1 on failure.
+
+                std::string cmd = "netsh interface ipv6 show prefixpolicies 2>nul";
+                FILE* pipe = PPP_POPEN(cmd.c_str(), "r");
+                if (NULLPTR == pipe) {
+                    return -1;
+                }
+
+                char buffer[512];
+                std::string output;
+                while (::fgets(buffer, sizeof(buffer), pipe) != NULLPTR) {
+                    output += buffer;
+                }
+                PPP_PCLOSE(pipe);
+
+                if (output.empty()) {
+                    return -1;
+                }
+
+                // Parse each line looking for "::/0" (or "::/0 " with trailing space).
+                // Each data line has format: precedence, label, prefix
+                std::istringstream iss(output);
+                std::string line;
+                while (std::getline(iss, line)) {
+                    if (line.empty()) continue;
+
+                    // Look for "::/0" in the line (could be "::/0" or "::ffff:0:0/96" etc.)
+                    std::size_t pos = line.find("::/0");
+                    if (pos == std::string::npos) continue;
+
+                    // Make sure it's exactly "::/0" and not "::/0 " followed by more, 
+                    // or "::ffff:0:0/96" (contains "::/0" as substring)
+                    // "::/0" has len 4; next char should be space, end-of-line, or EOS
+                    std::size_t end_pos = pos + 4;  // "::/0" is 4 chars
+                    if (end_pos < line.size()) {
+                        char next = line[end_pos];
+                        if (next != ' ' && next != '\r' && next != '\n' && next != '\t') {
+                            continue;  // e.g., "::ffff:0:0/96" — skip
+                        }
+                    }
+
+                    // Parse: read space-delimited ints; the prefix is the last token
+                    // Tokens: spaces, precedence(int), spaces, label(int), spaces, prefix(string)
+                    int precedence = -1, label = -1;
+                    std::istringstream liss(line);
+                    if (liss >> precedence >> label) {
+                        return label;
+                    }
+                }
+
+                return -1;
+            }
+
             bool SetIPv6PrefixPolicyPreferULA() noexcept
             {
                 // Elevate ULA prefix (fd00::/8) precedence above global unicast (::/0).
-                // Default: ::/0 precedence=30, fc00::/7 precedence=3
-                // After:   fc00::/7 stays at 3, but fd00::/8 gets precedence=50 to win over ::/0 (30).
+                // Default: ::/0 precedence=30 (Win10) or 40 (Win11), fc00::/7 precedence=3
+                // After:   fc00::/7 stays at 3, but fd00::/8 gets precedence=50 to win over ::/0.
                 //
                 // CRITICAL: The label MUST match ::/0's label for RFC 6724 rule 5
-                // (prefer matching label). Different Windows versions have different
-                // ::/0 labels (commonly 1 on Win10, 2 on Win11). We dynamically query
-                // the current ::/0 label rather than hardcoding.
+                // (prefer matching label). This varies: Win10 uses label=1, Win11 uses label=2.
+                // We dynamically query the current ::/0 label rather than hardcoding.
                 constexpr int ULA_PREFERRED_PRECEDENCE = 50;
-                constexpr int ULA_LABEL = 2;  // Must match ::/0 label (Win11 default=2, Win10 default=1)
-                return SetIPv6PrefixPolicy("fd00::/8", ULA_PREFERRED_PRECEDENCE, ULA_LABEL);
+                constexpr int ULA_LABEL_FALLBACK = 2;  // Win11 default, most common now
+
+                int label = QueryGlobalUnicastLabel();
+                if (label <= 0) {
+                    label = ULA_LABEL_FALLBACK;
+                    LOG_WARN("SetIPv6PrefixPolicyPreferULA: could not query ::/0 label, using fallback=%d", label);
+                }
+                else {
+                    LOG_DEBUG("SetIPv6PrefixPolicyPreferULA: queried ::/0 label=%d", label);
+                }
+
+                return SetIPv6PrefixPolicy("fd00::/8", ULA_PREFERRED_PRECEDENCE, label);
             }
 
             bool RestoreIPv6PrefixPolicyULA() noexcept
