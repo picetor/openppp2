@@ -190,3 +190,22 @@ jobs:
             ${{ github.workspace }}/openppp2-windows-x64-debug_*.pdb
             ${{ github.workspace }}/ipv6.txt
           if-no-files-found: warn
+
+      - name: Cleanup old workflow runs (keep last 10)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          CURRENT_RUN=${{ github.run_id }}
+          echo "Fetching runs for workflow '${{ github.workflow }}'..."
+          gh api "/repos/${{ github.repository }}/actions/runs?workflow=${{ github.workflow }}&branch=${{ github.ref_name }}&per_page=100" --jq '
+            .workflow_runs
+            | sort_by(.run_number) | reverse
+            | .[10:]
+            | .[]
+            | select(.id != '"'$CURRENT_RUN'"')
+            | "\(.id) \(.run_number)"' | while read -r id run_number; do
+            echo "  DELETE run #$run_number (id=$id)"
+            gh api -X DELETE "/repos/${{ github.repository }}/actions/runs/$id" || echo "  Run #$run_number skipped (may be running)"
+          done
+          echo "Cleanup complete."
