@@ -206,7 +206,7 @@ namespace ppp {
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;
                 virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept;
-                void                                                                PreferIPv4DnsResponse(::dns::Message& m) noexcept;
+                void                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept;
 
             protected:  
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger() noexcept;
