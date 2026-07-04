@@ -1982,7 +1982,11 @@ namespace ppp {
 
                         // Restore proper DNS on the TAP NIC so VPN DNS resolution still works.
                         if (!tun_ni->DnsAddresses.empty()) {
-                            ppp::win32::network::SetDnsAddresses(tun_ni->Index, tun_ni->DnsAddresses);
+                            ppp::vector<ppp::string> dns_strings;
+                            for (auto& addr : tun_ni->DnsAddresses) {
+                                dns_strings.emplace_back(addr.to_string());
+                            }
+                            ppp::win32::network::SetDnsAddresses(tun_ni->Index, dns_strings);
                         }
                     }
 
