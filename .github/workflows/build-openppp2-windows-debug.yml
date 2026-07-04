@@ -8,12 +8,6 @@ name: Build openppp2 (Windows Debug)
 on:
   push:
     branches: [ inet6 ]
-    paths:
-      - '**.cpp'
-      - '**.h'
-      - '**.hpp'
-      - 'CMakeLists.txt'
-      - '.github/workflows/build-openppp2-windows-debug.yml'
   workflow_dispatch:
 
 jobs:
