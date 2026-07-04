@@ -300,6 +300,79 @@ namespace ppp {
                                         dns_packet, static_cast<int>(dns_size), false);
                                 }
                             }
+
+                            // Check dns-rules.txt for domain-based DNS redirect (mirrors IPv4 RedirectDnsServer logic)
+                            // This ensures Chinese domains are resolved via domestic DNS (e.g. AliDNS 223.5.5.5)
+                            // instead of the VPN's DNS (Cloudflare), preventing non-China CDN IPs from being returned.
+                            if (NULLPTR != exchanger_) {
+                                boost::asio::ip::address_v6::bytes_type src_bytes, dst_bytes;
+                                memcpy(src_bytes.data(), ipv6_header->Source, sizeof(src_bytes));
+                                memcpy(dst_bytes.data(), ipv6_header->Destination, sizeof(dst_bytes));
+                                boost::asio::ip::address_v6 src_v6(src_bytes);
+                                boost::asio::ip::address_v6 dst_v6(dst_bytes);
+
+                                ppp::app::client::dns::Rule::Ptr rulePtr =
+                                    ppp::app::client::dns::Rule::Get(
+                                        stl::transform<ppp::string>(qs.mName),
+                                        dns_ruless_[0], dns_ruless_[1], dns_ruless_[2]);
+                                if (NULLPTR != rulePtr && rulePtr->Server != dst_v6) {
+                                    std::shared_ptr<boost::asio::io_context> context = exchanger_->GetContext();
+                                    std::shared_ptr<Byte> buffer = exchanger_->GetBuffer();
+                                    if (NULLPTR != context && NULLPTR != buffer) {
+                                        std::shared_ptr<boost::asio::ip::udp::socket> socket =
+                                            make_shared_object<boost::asio::ip::udp::socket>(*context);
+                                        if (socket) {
+                                            boost::system::error_code ec;
+                                            boost::asio::ip::udp::endpoint serverEP(rulePtr->Server, PPP_DNS_SYS_PORT);
+                                            socket->open(serverEP.protocol(), ec);
+                                            if (!ec) {
+                                                int handle = socket->native_handle();
+                                                ppp::net::Socket::AdjustDefaultSocketOptional(handle, rulePtr->Server.is_v4());
+                                                ppp::net::Socket::SetTypeOfService(handle);
+                                                ppp::net::Socket::SetSignalPipeline(handle, false);
+                                                ppp::net::Socket::ReuseSocketAddress(handle, true);
+
+                                                socket->send_to(boost::asio::buffer(packet + UDP_PAYLOAD_OFFSET, udp_payload_len),
+                                                    serverEP, 0, ec);
+                                                if (!ec) {
+                                                    const auto self = shared_from_this();
+                                                    const auto cb = make_shared_object<Timer::TimeoutEventHandler>(
+                                                        [self, socket](Timer*) noexcept {
+                                                            ppp::net::Socket::Closesocket(socket);
+                                                        });
+                                                    if (NULLPTR != cb) {
+                                                        const auto timeout = Timer::Timeout(context,
+                                                            (uint64_t)configuration_->udp.dns.timeout * 1000, *cb);
+                                                        if (NULLPTR != timeout && EmplaceTimeout(socket.get(), cb)) {
+                                                            const auto max_buffer_size = PPP_BUFFER_SIZE - sizeof(serverEP);
+                                                            socket->async_receive_from(
+                                                                boost::asio::buffer(buffer.get(), max_buffer_size),
+                                                                *reinterpret_cast<boost::asio::ip::udp::endpoint*>(buffer.get() + max_buffer_size),
+                                                                [self, this, socket, timeout, buffer, src_v6, dst_v6, src_port]
+                                                                (boost::system::error_code ec, size_t sz) noexcept {
+                                                                    DeleteTimeout(socket.get());
+                                                                    if (ec == boost::system::errc::success && sz > 0) {
+                                                                        DatagramOutput(
+                                                                            boost::asio::ip::udp::endpoint(dst_v6, PPP_DNS_SYS_PORT),
+                                                                            boost::asio::ip::udp::endpoint(src_v6, src_port),
+                                                                            buffer.get(), static_cast<int>(sz), false);
+                                                                    }
+                                                                    ppp::net::Socket::Closesocket(socket);
+                                                                    if (timeout) {
+                                                                        timeout->Stop();
+                                                                        timeout->Dispose();
+                                                                    }
+                                                                });
+                                                            return true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            ppp::net::Socket::Closesocket(socket);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1014,7 +1087,26 @@ namespace ppp {
                         state);
                 }
 
-                // 4. Apply DNS servers if configured.
+                // 4. DNS: Windows RFC 6724 prefers IPv6 DNS over IPv4 DNS, which forces all
+                //    queries through the IPv6 UDP path (OnIPv6UdpPacketInput). The IPv4
+                //    path has mature dns-rules.txt redirection via RedirectDnsServer.
+                //    To prioritize IPv4 DNS, we skip IPv6 DNS assignment on TAP so the
+                //    system falls back to IPv4 DNS (set via DHCP / SetDnsAddresses).
+                //    We still clear non-TAP NICs' IPv6 DNS to prevent DNS leaks from
+                //    physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
+#if defined(_WIN32)
+                ppp::vector<ppp::string> dns_servers; // intentionally empty - skip IPv6 DNS on TAP
+                for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
+                    if (if_index != ctx.InterfaceIndex && !servers.empty()) {
+                        ppp::win32::network::ClearDnsAddressesV6(if_index);
+                    }
+                }
+                state.DnsApplied = true;
+                state.DnsServers = std::move(dns_servers);
+                ppp::tap::TapWindows::DnsFlushResolverCache();
+                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: skipped IPv6 DNS on TAP (prefer IPv4), cleared %d non-TAP NICs IPv6 DNS",
+                    (int)state.OriginalAllDnsServers.size());
+#else
                 ppp::vector<ppp::string> dns_servers;
                 if (extensions.AssignedIPv6Dns1.is_v6()) {
                     dns_servers.emplace_back(extensions.AssignedIPv6Dns1.to_string());
@@ -1026,6 +1118,7 @@ namespace ppp {
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying %d DNS servers", (int)dns_servers.size());
                     ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
                 }
+#endif
             }
 
 #if defined(_WIN32)
