@@ -7,6 +7,9 @@ on:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Cleanup old workflow runs (keep last 40 per workflow)
         shell: bash
@@ -26,19 +29,18 @@ jobs:
 
           for WF in "${WORKFLOWS[@]}"; do
             echo "=== $WF ==="
-            page=1
             all_ids=()
             all_nums=()
+            # Paginate through all completed runs
+            page=1
             while :; do
               resp=$(gh api "/repos/${{ github.repository }}/actions/runs?workflow=$(echo "$WF" | sed 's/ /%20/g')&branch=${{ github.ref_name }}&per_page=100&page=$page" 2>/dev/null)
               items=$(echo "$resp" | jq -c '.workflow_runs[] | select(.status == "completed") | {id: .id, number: .run_number}' 2>/dev/null)
-              count=$(echo "$items" | grep -c . 2>/dev/null) || count=0
-              [ "$count" -eq 0 ] && break
+              [ -z "$items" ] && break
               while IFS= read -r item; do
-                id=$(echo "$item" | jq -r '.id')
-                num=$(echo "$item" | jq -r '.number')
-                all_ids+=("$id")
-                all_nums+=("$num")
+                [ -z "$item" ] && continue
+                all_ids+=("$(echo "$item" | jq -r '.id')")
+                all_nums+=("$(echo "$item" | jq -r '.number')")
               done <<< "$items"
               page=$((page + 1))
             done
@@ -46,23 +48,17 @@ jobs:
             total=${#all_ids[@]}
             echo "  Total runs: $total"
 
-            if [ "$total" -le "$KEEP" ]; then
-              echo "  <= $KEEP runs, nothing to clean."
-              continue
-            fi
+            [ "$total" -le "$KEEP" ] && { echo "  <= $KEEP runs, nothing to clean."; continue; }
 
-            combined=()
-            for i in "${!all_ids[@]}"; do
-              combined+=("${all_nums[$i]}:${all_ids[$i]}")
-            done
-            IFS=$'\n' sorted=($(sort -t: -k1 -n <<< "${combined[*]}")); unset IFS
+            # Sort by run_number ascending, keep last KEEP
+            mapfile -t sorted < <(for i in "${!all_ids[@]}"; do echo "${all_nums[$i]}:${all_ids[$i]}"; done | sort -t: -k1 -n)
             to_delete=("${sorted[@]:0:$((total - KEEP))}")
 
             for entry in "${to_delete[@]}"; do
               num="${entry%%:*}"
               id="${entry#*:}"
               echo "  DELETE run #$num (id=$id)"
-              gh api -X DELETE "/repos/${{ github.repository }}/actions/runs/$id" --silent 2>/dev/null || echo "    (DELETE failed)"
+              gh api -X DELETE "/repos/${{ github.repository }}/actions/runs/$id" || echo "    (DELETE failed)"
             done
             echo "  Deleted ${#to_delete[@]} runs, kept ${KEEP}."
           done
