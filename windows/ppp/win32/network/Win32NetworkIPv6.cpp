@@ -365,10 +365,11 @@ namespace ppp
                 }
 
                 // Configure IPv6 prefix policy to adjust source address selection.
-                // Using netsh: netsh interface ipv6 set prefixpolicy <prefix> <precedence> <label>
+                // Using netsh: netsh interface ipv6 add prefixpolicy <prefix> <precedence> <label>
+                // (use "add" not "set" because fd00::/8 is a new entry, not an existing one)
                 char command[512];
                 ::snprintf(command, sizeof(command),
-                    "interface ipv6 set prefixpolicy %s %d %d",
+                    "interface ipv6 add prefixpolicy %s %d %d",
                     prefix.c_str(), precedence, label);
 
                 return ExecuteNetshCommand(command);
@@ -388,10 +389,16 @@ namespace ppp
 
             bool RestoreIPv6PrefixPolicyULA() noexcept
             {
-                // Restore ULA prefix (fd00::/8) to its default precedence (3) matching fc00::/7.
-                constexpr int ULA_DEFAULT_PRECEDENCE = 3;
-                constexpr int ULA_LABEL = 13;
-                return SetIPv6PrefixPolicy("fd00::/8", ULA_DEFAULT_PRECEDENCE, ULA_LABEL);
+                // Remove the fd00::/8 prefix policy entry that was added by
+                // SetIPv6PrefixPolicyPreferULA(). The original fc00::/7 entry
+                // (precedence=3, label=13) remains untouched and handles ULA matching.
+                constexpr const char* ULA_PREFIX = "fd00::/8";
+                char command[512];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 delete prefixpolicy %s",
+                    ULA_PREFIX);
+
+                return ExecuteNetshCommand(command);
             }
         }
     }
