@@ -1,0 +1,28 @@
+﻿name: Nuke all workflow runs
+
+on: workflow_dispatch
+
+jobs:
+  nuke:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete ALL completed runs across all branches
+        shell: bash
+        run: |
+          page=1
+          total=0
+          while :; do
+            resp=$(gh api "/repos/picetor/openppp2/actions/runs?per_page=100&page=$page" 2>/dev/null)
+            ids=$(echo "$resp" | jq -r '"'"'.workflow_runs[] | select(.status == "completed") | .id'"'"' 2>/dev/null)
+            [ -z "$ids" ] && break
+            while IFS= read -r id; do
+              [ -z "$id" ] && continue
+              echo "  DELETE id=$id"
+              gh api -X DELETE "/repos/picetor/openppp2/actions/runs/$id" --silent 2>/dev/null && ((total++)) || echo "    fail"
+            done <<< "$ids"
+            page=$((page + 1))
+          done
+          echo "Deleted $total runs total."
