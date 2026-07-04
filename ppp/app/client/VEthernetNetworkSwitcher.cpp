@@ -1969,25 +1969,35 @@ namespace ppp {
                     AddRoute();
 
 #if defined(_WIN32)
-                    // Configure all network card DNS servers in the entire operating system, because not doing so will cause DNS Leak and DNS contamination problems only Windows.
+                    // Replace all non-TAP NICs' DNS with 127.0.0.1 to prevent Windows multi-homed
+                    // DNS resolver from sending queries via physical NICs. The loopback address ensures
+                    // DNS queries on physical interfaces timeout immediately, forcing Windows to use
+                    // only the TAP NIC's DNS servers which route through the VPN tunnel.
+                    // Original DNS is saved to ni_dns_servers_ for restoration on disconnect.
                     auto tun_ni = tun_ni_; 
                     if (NULLPTR != tun_ni) {
-                        ppp::win32::network::SetAllNicsDnsAddresses(tun_ni->DnsAddresses, ni_dns_servers_);
+                        ppp::vector<boost::asio::ip::address> null_dns;
+                        null_dns.emplace_back(boost::asio::ip::make_address("127.0.0.1"));
+                        ppp::win32::network::SetAllNicsDnsAddresses(null_dns, ni_dns_servers_);
+
+                        // Restore proper DNS on the TAP NIC so VPN DNS resolution still works.
+                        if (!tun_ni->DnsAddresses.empty()) {
+                            ppp::win32::network::SetDnsAddresses(tun_ni->InterfaceIndex, tun_ni->DnsAddresses);
+                        }
                     }
 
-                    // Also save and configure IPv6 DNS on all NICs (mirroring IPv4's SetAllNicsDnsAddresses).
-                    // Windows multi-homed DNS resolver may query IPv6 DNS servers on physical NICs
-                    // in parallel even when the TAP interface is the default route. Without this,
-                    // DNS queries can leak to ISP-assigned IPv6 DNS servers on physical interfaces.
+                    // Also save and configure IPv6 DNS on all NICs (mirroring IPv4's 127.0.0.1 approach).
+                    // Set non-TAP NICs' IPv6 DNS to ::1 to prevent Windows multi-homed DNS resolver
+                    // from sending AAAA queries via ISP-assigned IPv6 DNS (e.g. China Mobile 2409:8a55::).
+                    // Using ::1 (instead of clearing) prevents SLAAC/DHCPv6 from auto-reacquiring DNS.
+                    // Original IPv6 DNS is saved to ni_dns_servers_v6_ for restoration on disconnect.
                     ni_dns_servers_v6_.clear();
                     ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
                     if (NULLPTR != tun_ni) {
                         int tap_if_index = tun_ni->Index;
-                        // Clear IPv6 DNS on non-TAP NICs to prevent DNS leak.
-                        // IPv6 DNS will be set on TAP later by server push via ApplyIPv6Assignment.
                         for (auto& [if_index, _] : ni_dns_servers_v6_) {
                             if (if_index != tap_if_index) {
-                                ppp::win32::network::ClearDnsAddressesV6(if_index);
+                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
                             }
                         }
                     }
@@ -1996,6 +2006,40 @@ namespace ppp {
                     // The VPN is constructed, because the original DNS cache may not be the best destination IP resolution record 
                     // Available in the region where the VPN server is located.
                     ppp::tap::TapWindows::DnsFlushResolverCache();
+
+                    // Start a periodic DNS guard timer to prevent DHCP from re-acquiring ISP DNS servers
+                    // on physical NICs. Windows DHCP client may refresh the lease and restore the original
+                    // DNS servers (e.g. China Mobile 183.234.190.94) at any time. This guard periodically
+                    // re-applies 127.0.0.1/::1 to non-TAP NICs to keep the DNS locked down.
+                    if (NULLPTR != tun_ni) {
+                        int tap_if_index = tun_ni->Index;
+                        auto context = GetContext();
+                        auto self = shared_from_this();
+                        dns_guard_timer_ = make_shared_object<ppp::threading::Timer>(context);
+                        if (NULLPTR != dns_guard_timer_) {
+                            dns_guard_timer_->TickEvent = 
+                                [self, tap_if_index](ppp::threading::Timer* sender, ppp::threading::Timer::TickEventArgs& e) noexcept {
+                                    // Re-apply loopback DNS to all non-TAP NICs
+                                    for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
+                                        if (if_index != tap_if_index) {
+                                            ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                        }
+                                    }
+                                    // Re-apply IPv4 loopback DNS via WMI
+                                    ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                                    if (ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
+                                        for (auto& ni : interfaces) {
+                                            if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
+                                                ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
+                                                ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
+                                            }
+                                        }
+                                    }
+                                };
+                            dns_guard_timer_->SetInterval(30000); // Every 30 seconds
+                            dns_guard_timer_->Start();
+                        }
+                    }
 
                     // Delete the default route of a physical network card in a single attempt without a reason.
                     auto underlying_ni = underlying_ni_; 
@@ -2014,10 +2058,11 @@ namespace ppp {
                 }
 #endif
 #if defined(_WIN32)
-                // For client mode: clear IPv6 DNS on non-TAP NICs to prevent DNS leak.
+                // For client mode: set non-TAP NICs' IPv6 DNS to ::1 to prevent DNS leak.
                 // Windows may query IPv6 DNS servers on physical NICs even when the
                 // TAP interface is the default route. ISP-assigned IPv6 DNS servers
                 // (e.g. 2409:8a55:: China Mobile) can return poisoned results.
+                // Using ::1 (instead of clearing) prevents SLAAC/DHCPv6 auto-reacquisition.
                 if (!tap->IsHostedNetwork()) {
                     auto tun_ni = tun_ni_;
                     if (NULLPTR != tun_ni) {
@@ -2026,10 +2071,10 @@ namespace ppp {
                         if (ni_dns_servers_v6_.empty()) {
                             ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
                         }
-                        // Clear IPv6 DNS on non-TAP NICs.
+                        // Set non-TAP IPv6 DNS to ::1.
                         for (auto& [if_index, _] : ni_dns_servers_v6_) {
                             if (if_index != tap_if_index) {
-                                ppp::win32::network::ClearDnsAddressesV6(if_index);
+                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
                             }
                         }
                     }
@@ -3046,6 +3091,12 @@ namespace ppp {
                 }
 
 #if defined(_WIN32)
+                // Stop the DNS guard timer that prevents DHCP from restoring ISP DNS on physical NICs.
+                if (std::shared_ptr<ppp::threading::Timer> timer = std::move(dns_guard_timer_); NULLPTR != timer) {
+                    timer->Stop();
+                    timer->Dispose();
+                }
+
                 // On Windows platforms, you need to try to turn off the [PaperAirplane NSP/LSP] server-side controller.
                 if (PaperAirplaneControllerPtr controller = std::move(paper_airplane_ctrl_);  NULLPTR != controller) {
                     controller->Dispose();

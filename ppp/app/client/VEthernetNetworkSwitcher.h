@@ -368,6 +368,7 @@ namespace ppp {
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
+                std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
