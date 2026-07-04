@@ -504,7 +504,7 @@ namespace ppp {
                                                                                     pending->DstV6 = dst_v6;
                                                                                     pending->SrcPort = src_port;
                                                                                     pending->DstPort = PPP_DNS_SYS_PORT;
-                                                                                    pending_aaaa_[m.questions[0].mName] = pending;
+                                                                                    pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                                                                 }
                                                                             } else {
                                                                                 size_t new_sz = 0;
@@ -1028,7 +1028,7 @@ namespace ppp {
                                         pending->IsIPv6 = false;
                                         pending->SourceEP = sourceEP;
                                         pending->DestinationEP = destinationEP;
-                                        pending_aaaa_[m.questions[0].mName] = pending;
+                                        pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
                                 }
@@ -1089,7 +1089,7 @@ namespace ppp {
                                         pending->DstV6 = dst_v6;
                                         pending->SrcPort = sourceEP.port();
                                         pending->DstPort = destinationEP.port();
-                                        pending_aaaa_[m.questions[0].mName] = pending;
+                                        pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
                                 }
@@ -3424,7 +3424,7 @@ namespace ppp {
                                             pending->IsIPv6 = false;
                                             pending->SourceEP = sourceEP;
                                             pending->DestinationEP = destinationEP;
-                                            pending_aaaa_[m.questions[0].mName] = pending;
+                                            pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                         }
                                     } else {
                                         size_t new_sz = 0;
