@@ -1982,7 +1982,7 @@ namespace ppp {
 
                         // Restore proper DNS on the TAP NIC so VPN DNS resolution still works.
                         if (!tun_ni->DnsAddresses.empty()) {
-                            ppp::win32::network::SetDnsAddresses(tun_ni->InterfaceIndex, tun_ni->DnsAddresses);
+                            ppp::win32::network::SetDnsAddresses(tun_ni->Index, tun_ni->DnsAddresses);
                         }
                     }
 
@@ -2014,7 +2014,7 @@ namespace ppp {
                     if (NULLPTR != tun_ni) {
                         int tap_if_index = tun_ni->Index;
                         auto context = GetContext();
-                        auto self = shared_from_this();
+                        auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
                         dns_guard_timer_ = make_shared_object<ppp::threading::Timer>(context);
                         if (NULLPTR != dns_guard_timer_) {
                             dns_guard_timer_->TickEvent = 
