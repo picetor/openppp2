@@ -342,14 +342,19 @@ namespace ppp
                 // Assign a default IPv6 ULA address to the TAP interface.
                 // The IPv6 address is derived from the IPv4 IP for consistency:
                 //   IPv4 192.168.12.68 → IPv6 fd00::c0a8:0c44/64
+                // Mark it as SkipAsSource so Windows won't auto-select it for
+                // outbound connections. Only the server-assigned IPv6 address
+                // (applied later via ApplyIPv6Assignment) should be used as source.
                 {
                     uint32_t ip6_a = (ip >> 24) & 0xFF, ip6_b = (ip >> 16) & 0xFF;
                     uint32_t ip6_c = (ip >> 8) & 0xFF, ip6_d = ip & 0xFF;
                     char ipv6_addr[64];
                     const int ipv6_prefix_len = 64;
                     ::snprintf(ipv6_addr, sizeof(ipv6_addr), "fd00::%02x%02x:%02x%02x", ip6_a, ip6_b, ip6_c, ip6_d);
-                    ppp::win32::network::SetIPv6Address(interface_index, ppp::string(ipv6_addr), ipv6_prefix_len);
-                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d\r\n", ipv6_addr, ipv6_prefix_len);
+                    ppp::string ipv6_addr_str(ipv6_addr);
+                    ppp::win32::network::SetIPv6Address(interface_index, ipv6_addr_str, ipv6_prefix_len);
+                    ppp::win32::network::SetIPv6AddressSkipAsSource(interface_index, ipv6_addr_str);
+                    fprintf(stdout, "[TapWindows::Create] Set IPv6 ULA on TAP: %s/%d (SkipAsSource)\r\n", ipv6_addr, ipv6_prefix_len);
                 }
 
                 // Initialize the async I/O stream from the TAP handle.

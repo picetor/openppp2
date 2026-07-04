@@ -4,6 +4,7 @@
 #include <ppp/net/IPEndPoint.h>
 
 #include <Windows.h>
+#include <ws2tcpip.h>
 #include <Iphlpapi.h>
 #include <netioapi.h>
 #include <cstdio>
@@ -108,6 +109,40 @@ namespace ppp
                     interface_index, address.c_str(), prefix_length);
 
                 return ExecuteNetshCommand(command);
+            }
+
+            bool SetIPv6AddressSkipAsSource(int interface_index, const ppp::string& address) noexcept
+            {
+                if (interface_index < 0 || address.empty())
+                {
+                    return false;
+                }
+
+                // Use Win32 Iphlpapi to set SkipAsSource on the IPv6 address.
+                // netsh interface ipv6 set address does NOT support skipassource.
+                // We use GetUnicastIpAddressEntry / SetUnicastIpAddressEntry from netioapi.h.
+                MIB_UNICASTIPADDRESS_ROW row;
+                InitializeUnicastIpAddressEntry(&row);
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                row.Address.si_family = AF_INET6;
+
+                // Parse the IPv6 address string into the sockaddr_in6.
+                if (::inet_pton(AF_INET6, address.c_str(), &row.Address.Ipv6.sin6_addr) != 1) {
+                    return false;
+                }
+
+                // On-link prefix length must be non-zero for GetUnicastIpAddressEntry to work.
+                // Use /64 as default since the auto-generated fd00:: address uses /64.
+                row.OnLinkPrefixLength = 64;
+
+                ULONG result = GetUnicastIpAddressEntry(&row);
+                if (result != NO_ERROR) {
+                    return false;
+                }
+
+                row.SkipAsSource = TRUE;
+                result = SetUnicastIpAddressEntry(&row);
+                return result == NO_ERROR;
             }
 
             bool AddIPv6Neighbor(int interface_index, const ppp::string& address, const ppp::string& mac) noexcept
