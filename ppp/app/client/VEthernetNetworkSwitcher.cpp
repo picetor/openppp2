@@ -251,32 +251,30 @@ namespace ppp {
                 return true;
             }
 
-            // Prefer IPv4 DNS responses: when a DNS response contains both A and AAAA
-            // records, strip out the AAAA records so the client prefers IPv4 connectivity.
+            // Prefer IPv4 DNS: when prefer_ipv4 is enabled, intercept AAAA queries
+            // and return an empty NOERROR response. This forces clients to fall back
+            // to IPv4 (A records), preventing IPv6 DNS leakage through the VPN.
+            // Previously we tried stripping AAAA from combined A+AAAA responses, but
+            // real DNS resolvers send separate A and AAAA queries, so combined
+            // responses never occur. Intercepting at the query stage is the fix.
             // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
-            void VEthernetNetworkSwitcher::PreferIPv4DnsResponse(::dns::Message& m) noexcept {
+            bool SuppressAAAADnsQuery(::dns::Message& m) noexcept {
                 if (!configuration_ || !configuration_->udp.dns.prefer_ipv4) {
-                    return;
+                    return false;
                 }
-                // Only strip if there are A records in the answers
-                bool hasA = false;
-                for (const auto& rr : m.answers) {
-                    if (rr.mType == ::dns::RecordType::kA) {
-                        hasA = true;
-                        break;
-                    }
+                if (m.questions.empty()) {
+                    return false;
                 }
-                if (!hasA) {
-                    return; // No A records, keep AAAA intact
+                if (m.questions[0].mType != ::dns::RecordType::kAAAA) {
+                    return false;
                 }
-
-                // Remove AAAA records from answers and additions
-                m.answers.erase(std::remove_if(m.answers.begin(), m.answers.end(),
-                    [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
-                    m.answers.end());
-                m.additions.erase(std::remove_if(m.additions.begin(), m.additions.end(),
-                    [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
-                    m.additions.end());
+                // Convert query to empty NOERROR response: keep ID and question, flip QR to 1
+                m.mQr = 1;
+                m.mRCode = 0;
+                m.answers.clear();
+                m.authorities.clear();
+                m.additions.clear();
+                return true;
             }
 
             bool VEthernetNetworkSwitcher::OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
@@ -302,11 +300,25 @@ namespace ppp {
                         if (m.decode(reinterpret_cast<uint8_t*>(packet + UDP_PAYLOAD_OFFSET), udp_payload_len) == ::dns::BufferResult::NoError && !m.questions.empty()) {
                             ::dns::QuestionSection& qs = *m.questions.data();
 
+                            // When prefer_ipv4 is enabled, suppress AAAA queries by returning empty response
+                            if (SuppressAAAADnsQuery(m)) {
+                                std::size_t dns_size = 0;
+                                char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
+                                if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, dns_size) == ::dns::BufferResult::NoError && dns_size > 0) {
+                                    boost::asio::ip::address_v6::bytes_type s_src, s_dst;
+                                    memcpy(s_src.data(), ipv6_header->Source, sizeof(s_src));
+                                    memcpy(s_dst.data(), ipv6_header->Destination, sizeof(s_dst));
+                                    return DatagramOutput(
+                                        boost::asio::ip::udp::endpoint(boost::asio::ip::address_v6(s_dst), dst_port),
+                                        boost::asio::ip::udp::endpoint(boost::asio::ip::address_v6(s_src), src_port),
+                                        dns_packet, static_cast<int>(dns_size), false);
+                                }
+                                return false;
+                            }
+
                             // Check local DNS cache (both A and AAAA records)
                             if (!ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m,
                                 qs.mType == ::dns::RecordType::kA ? ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
-
-                                PreferIPv4DnsResponse(m);
 
                                 std::size_t dns_size = 0;
                                 char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
@@ -384,7 +396,6 @@ namespace ppp {
                                                                     if (ec == boost::system::errc::success && sz > 0) {
                                                                         ::dns::Message m;
                                                                         if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
-                                                                            PreferIPv4DnsResponse(m);
                                                                             size_t new_sz = 0;
                                                                             if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
                                                                                 DatagramOutput(
@@ -3242,7 +3253,6 @@ namespace ppp {
                             if (sz > 0) {
                                 ::dns::Message m;
                                 if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
-                                    PreferIPv4DnsResponse(m);
                                     size_t new_sz = 0;
                                     if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
                                         DatagramOutput(sourceEP, destinationEP, buffer.get(), static_cast<int>(new_sz));
@@ -3273,10 +3283,20 @@ namespace ppp {
                 boost::asio::ip::address destinationIP = Ipep::ToAddress(packet->Destination);
                 ::dns::QuestionSection& qs = *m.questions.data();
 
+                // When prefer_ipv4 is enabled, suppress AAAA queries by returning empty response
+                if (SuppressAAAADnsQuery(m)) {
+                    std::size_t dns_size = 0;
+                    char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
+                    if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, dns_size) == ::dns::BufferResult::NoError && dns_size > 0) {
+                        return DatagramOutput(
+                            IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Source),
+                            boost::asio::ip::udp::endpoint(destinationIP, PPP_DNS_SYS_PORT), dns_packet, dns_size, false);
+                    }
+                    return false;
+                }
+
                 if (!ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m, qs.mType == ::dns::RecordType::kA ?
                     ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
-
-                    PreferIPv4DnsResponse(m);
 
                     std::size_t dns_size = 0;
                     char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE]; 
