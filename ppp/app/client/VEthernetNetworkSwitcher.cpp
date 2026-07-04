@@ -1096,6 +1096,11 @@ namespace ppp {
                 //    physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
 #if defined(_WIN32)
                 ppp::vector<ppp::string> dns_servers; // intentionally empty - skip IPv6 DNS on TAP
+                // Clear IPv6 DNS on the TAP interface itself (in case a previous
+                // ApplyClientDns call left stale IPv6 DNS servers behind).
+                ppp::win32::network::ClearDnsAddressesV6(ctx.InterfaceIndex);
+                // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leaks from
+                // physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
                 for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
                     if (if_index != ctx.InterfaceIndex && !servers.empty()) {
                         ppp::win32::network::ClearDnsAddressesV6(if_index);
@@ -1104,7 +1109,7 @@ namespace ppp {
                 state.DnsApplied = true;
                 state.DnsServers = std::move(dns_servers);
                 ppp::tap::TapWindows::DnsFlushResolverCache();
-                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: skipped IPv6 DNS on TAP (prefer IPv4), cleared %d non-TAP NICs IPv6 DNS",
+                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + %d non-TAP NICs IPv6 DNS (prefer IPv4)",
                     (int)state.OriginalAllDnsServers.size());
 #else
                 ppp::vector<ppp::string> dns_servers;
