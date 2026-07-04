@@ -18,21 +18,26 @@
 
 ## 📋 Table of Contents
 
-- [New Features](#-new-features)
+- [IPv6 Feature Overview](#-ipv6-feature-overview)
   - [IPv6 Split Tunneling (--bypass6)](#-ipv6-split-tunneling---bypass6)
-  - [WSS Optimized IP Acceleration](#-wss-optimized-ip-acceleration)
-  - [SOCKS5 Proxy](#-socks5-proxy)
+  - [VPN Server IPv6 Reachability Guarantee](#-vpn-server-ipv6-reachability-guarantee)
   - [Windows IPv6 DNS Leak Prevention](#-windows-ipv6-dns-leak-prevention)
   - [Windows IPv6 Source Address Selection Fix](#-windows-ipv6-source-address-selection-fix)
+  - [Server-Side IPv6 Mode](#-server-side-ipv6-mode)
+  - [Native IPv6 DNS Support](#-native-ipv6-dns-support)
+- [WSS Optimized IP Acceleration](#-wss-optimized-ip-acceleration)
+- [SOCKS5 Proxy](#-socks5-proxy)
 - [Improvements & Bug Fixes](#-improvements--bug-fixes)
 - [CLI Parameters Comparison](#-cli-parameters-comparison)
 - [Build System](#-build-system)
 
 ---
 
-## ✨ New Features
+## 🌐 IPv6 Feature Overview
 
-### 🌐 IPv6 Split Tunneling (`--bypass6`)
+This fork adds comprehensive IPv6 split tunneling, DNS leak prevention, and source address selection fixes, covering **client-side routing** and **Windows platform compatibility**.
+
+### IPv6 Split Tunneling (`--bypass6`)
 
 Pure **route-level** IPv6 split tunneling via the OS routing table — no packet inspection involved.
 
@@ -75,6 +80,88 @@ ppp --mode=client --server=wss://... \
 2401:fa00::/32
 # Comments start with # or ;
 ```
+
+#### Platform Route Commands
+
+| Platform | Route Command |
+|----------|---------------|
+| Windows | `CreateIpForwardEntry2` (IP Helper API) — no popups, not `system("netsh")` |
+| Linux | `ip -6 route add <cidr> via <ngw6> dev <ifname>` |
+| macOS | `route -n add -inet6 <cidr> <ngw6>` |
+
+---
+
+### VPN Server IPv6 Reachability Guarantee
+
+**Problem**: After the VPN client installs the `::/0` default route via TAP, the VPN server's own IPv6 address becomes unreachable (routed into the tunnel) → UDP static echo timeout → reconnection loop.
+
+**Fix**: Before installing the TAP default route, add a `/128` pin route for the VPN server's IPv6 address through the physical NIC. The `/128` is more specific than `::/0`, ensuring the server always stays reachable.
+
+```
+Installed route table:
+  ::/0                    → TAP device (tunnel)
+  <VPN-server-IPv6>/128   → Physical NIC (pin route)
+```
+
+Implemented on all platforms (Windows `netsh` / Linux `ip route` / macOS `route add`).
+
+---
+
+### 🛡️ Windows IPv6 DNS Leak Prevention
+
+**Problem**: When the VPN is connected, physical NICs' IPv6 DNS servers are still reachable, causing IPv6 DNS queries to bypass the VPN tunnel.
+
+**Fix**:
+- On VPN **connect**: Automatically enumerates all physical NICs' IPv6 DNS → clears them temporarily
+- On VPN **disconnect**: Automatically restores all physical NICs' IPv6 DNS
+
+Works automatically — no extra configuration needed.
+
+---
+
+### 🎯 Windows IPv6 Source Address Selection Fix
+
+**Problem**: Windows prefers global unicast addresses (2409::/...) over TAP's ULA addresses (fd42::/...) for outgoing connections, causing IPv6 traffic to bypass the VPN.
+
+**Root Cause**: Windows routing table assigns `::/0` precedence 30, but `fc00::/7` (ULA) has only precedence 3.
+
+**Fix**: Elevates `fd00::/8` prefix precedence to **50** (originally 3) on VPN connect, restores on disconnect.
+
+---
+
+### Server-Side IPv6 Mode
+
+`appsettings.json` supports server-side IPv6 data plane configuration:
+
+```json
+{
+    "server": {
+        "ipv6": {
+            "mode": "nat66"         // "nat66" | "gua" | "" (disabled)
+        }
+    }
+}
+```
+
+| Mode | Description | Platform |
+|------|-------------|----------|
+| `nat66` | ULA↔GUA address translation (similar to IPv4 NAT) | Linux only |
+| `gua` | Global unicast address passthrough | Linux only |
+| empty/disabled | Disable IPv6 data plane | All |
+
+> **Windows compatibility**: The original version refuses to load config when `server.ipv6.mode` is set on Windows. This fork auto-detects and disables the IPv6 data plane, allowing the config to load normally (client unaffected).
+
+---
+
+### Native IPv6 DNS Support
+
+The `--dns=` parameter natively supports IPv6 DNS addresses:
+
+```bash
+ppp --mode=client --server=wss://... --dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
+```
+
+IPv6 DNS is delivered to the TAP adapter via `ApplyIPv6Assignment()` → `ApplyClientDns()`, coexisting with IPv4 DNS (`--dns=`) without conflict.
 
 ---
 
@@ -132,26 +219,6 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | **No CONNECT reply** | Tunnel established but no SOCKS5 success reply sent — client hangs | ✅ Correctly sends `REP=0` reply |
 | **Domain port corruption** | Null terminator overwrites port high byte | ✅ Read port first, then null-terminate |
 | **Auth logic error** | Uses `&&` instead of `\|\|` — only one of username/password needed to pass | ✅ `\|\|` — reject if either credential mismatches |
-
----
-
-### 🛡️ Windows IPv6 DNS Leak Prevention
-
-**Problem**: When the VPN is connected, physical NICs' IPv6 DNS servers are still reachable, causing IPv6 DNS queries to bypass the VPN tunnel.
-
-**Fix**:
-- On VPN **connect**: Automatically enumerates all physical NICs' IPv6 DNS → clears them temporarily
-- On VPN **disconnect**: Automatically restores all physical NICs' IPv6 DNS
-
-Works automatically — no extra configuration needed.
-
----
-
-### 🎯 Windows IPv6 Source Address Selection Fix
-
-**Problem**: Windows prefers global unicast addresses (2409::/...) over TAP's ULA addresses (fd42::/...) for outgoing connections, causing IPv6 traffic to bypass the VPN.
-
-**Fix**: Elevates `fd00::/8` prefix precedence to 50 (originally 3) on VPN connect, restores on disconnect.
 
 ---
 
