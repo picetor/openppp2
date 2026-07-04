@@ -254,7 +254,7 @@ namespace ppp {
             // Prefer IPv4 DNS responses: when a DNS response contains both A and AAAA
             // records, strip out the AAAA records so the client prefers IPv4 connectivity.
             // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
-            void PreferIPv4DnsResponse(::dns::Message& m) noexcept {
+            void VEthernetNetworkSwitcher::PreferIPv4DnsResponse(::dns::Message& m) noexcept {
                 if (!configuration_ || !configuration_->udp.dns.prefer_ipv4) {
                     return;
                 }
