@@ -365,11 +365,25 @@ namespace ppp
                 }
 
                 // Configure IPv6 prefix policy to adjust source address selection.
-                // Using netsh: netsh interface ipv6 add prefixpolicy <prefix> <precedence> <label>
-                // (use "add" not "set" because fd00::/8 is a new entry, not an existing one)
+                // Try "add" first (normal case: entry doesn't exist yet).
+                // If add fails (e.g. entry already exists from a crashed previous run),
+                // fall back to "set" to update the existing entry in-place.
+                // Using netsh: netsh interface ipv6 add|set prefixpolicy <prefix> <precedence> <label>
                 char command[512];
+
+                // 1) Try add (normal first-run path)
                 ::snprintf(command, sizeof(command),
                     "interface ipv6 add prefixpolicy %s %d %d",
+                    prefix.c_str(), precedence, label);
+
+                if (ExecuteNetshCommand(command))
+                {
+                    return true;
+                }
+
+                // 2) add failed — entry likely already exists, try set as fallback
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 set prefixpolicy %s %d %d",
                     prefix.c_str(), precedence, label);
 
                 return ExecuteNetshCommand(command);

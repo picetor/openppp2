@@ -274,15 +274,17 @@ namespace ppp {
 
                         // The physical NIC may have global IPv6 addresses (e.g., 2409:...) 
                         // while the TAP uses ULA addresses (fd42::/...). Windows RFC 6724 
-                        // source address selection prefers global unicast (precedence 30) 
+                        // source address selection prefers global unicast (precedence 40) 
                         // over ULA (precedence 3), so outbound IPv6 traffic would bypass 
                         // the VPN entirely. Elevate the fd00::/8 prefix precedence to 50
-                        // so the ULA source address on TAP is preferred for all IPv6 traffic.
+                        // with label=1 so the ULA source address on TAP is preferred.
                         if (!ppp::win32::network::SetIPv6PrefixPolicyPreferULA()) {
+                            LOG_ERROR("ApplyClientDefaultRoute: SetIPv6PrefixPolicyPreferULA() failed, IPv6 source address selection may prefer physical NIC");
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
 
+                        LOG_DEBUG("ApplyClientDefaultRoute: ULA prefix policy (fd00::/8 precedence=50 label=1) applied successfully");
                         state.PrefixPolicyApplied = true;
                         state.DefaultRouteApplied = true;
                         state.DefaultRouteGateway = gw_str;
@@ -405,10 +407,15 @@ namespace ppp {
                     }
 
                     if (state.PrefixPolicyApplied) {
-                        // Restore the default fd00::/8 prefix policy precedence from 50 back to 3.
-                        // This ensures the physical NIC's global IPv6 addresses regain normal
-                        // priority when the VPN is disconnected.
-                        ppp::win32::network::RestoreIPv6PrefixPolicyULA();
+                        // Remove the fd00::/8 prefix policy entry that was added during connection.
+                        // This restores the original RFC 6724 behavior where physical NIC global
+                        // addresses regain normal priority when the VPN is disconnected.
+                        if (ppp::win32::network::RestoreIPv6PrefixPolicyULA()) {
+                            LOG_DEBUG("RestoreClientConfiguration: ULA prefix policy (fd00::/8) removed successfully");
+                        }
+                        else {
+                            LOG_ERROR("RestoreClientConfiguration: RestoreIPv6PrefixPolicyULA() failed");
+                        }
                     }
 
                     if (state.DefaultRouteApplied && state.DefaultRouteWasPresent) {
