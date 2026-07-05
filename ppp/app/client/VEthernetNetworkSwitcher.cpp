@@ -107,6 +107,9 @@ namespace ppp {
                     return false;
                 }
 
+                // Safety net: flush expired pending AAAA responses even if no DNS traffic triggers it
+                FlushExpiredPendingAAAAResponses();
+
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS> qos = qos_; 
                 if (NULLPTR != qos) {
                     qos->Update(now);
@@ -356,7 +359,9 @@ namespace ppp {
 
                     if (hasA) {
                         domains_strip.emplace_back(domain);
-                    } else if (expired) {
+                    } else if (expired || !cache_result.empty()) {
+                        // A resolved (cache populated) but no A records, or timeout expired.
+                        // Either way, forward AAAA as-is (pure IPv6 site).
                         domains_expired.emplace_back(domain);
                     }
                 }
