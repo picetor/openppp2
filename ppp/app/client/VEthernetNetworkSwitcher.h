@@ -208,6 +208,7 @@ namespace ppp {
                 virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept;
                 bool                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept;
                 void                                                                FlushPendingAAAAResponses() noexcept;
+                void                                                                FlushExpiredPendingAAAAResponses() noexcept;
 
             protected:  
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger() noexcept;
@@ -309,14 +310,15 @@ namespace ppp {
                 TimeoutEventHandlerTable                                            timeouts_;
                 DNSRuleTable                                                        dns_ruless_[3];
 
-                // Prefer IPv4: pending AAAA responses awaiting A-cache population.
+                // Prefer IPv4: pending AAAA responses awaiting A-cache population or timeout.
                 // When an AAAA DNS response arrives before the corresponding A response,
-                // we hold it here. Once the A response is cached, FlushPendingAAAAResponses()
-                // strips and forwards the held AAAA response. If no A record ever arrives
-                // (pure IPv6 site), the pending AAAA stays indefinitely — the domain
-                // will be inaccessible over IPv4-preferring DNS until cache is cleared.
+                // we hold it here with an expire_time. Once the A response is cached,
+                // FlushPendingAAAAResponses() strips and forwards. If the expire_time
+                // elapses (pure IPv6 site where no A will ever arrive), the AAAA is
+                // forwarded as-is.
                 struct PendingAAAAResponse {
                     ppp::string                                                     EncodedPacket;
+                    uint64_t                                                        expire_time = 0; ///< Tick count when this entry expires (0 = not set)
                     // IPv6 path fields:
                     bool                                                            IsIPv6 = false;
                     boost::asio::ip::address_v6                                     SrcV6;

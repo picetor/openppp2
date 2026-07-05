@@ -253,8 +253,9 @@ namespace ppp {
 
             // Prefer IPv4 DNS: when a DNS AAAA response arrives, check if the same
             // domain has cached A records (IPv4). If yes, strip AAAA so the client
-            // prefers IPv4. If no cached A records exist (pure IPv6 site), keep
-            // the AAAA response intact so IPv6 still works as fallback.
+            // prefers IPv4. If no cached A records exist, defer with a timeout:
+            // - If A arrives within the timeout, strip AAAA (prefer IPv4).
+            // - If the timeout expires (pure IPv6 site), forward AAAA as-is.
             // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
             // Returns true if the caller should forward the response now.
             // Returns false if the caller should hold the response (AAAA with no A cache yet).
@@ -269,6 +270,9 @@ namespace ppp {
                     return true;
                 }
 
+                // Flush any expired pending AAAA entries before processing this one.
+                FlushExpiredPendingAAAAResponses();
+
                 const char* domain = m.questions[0].mName.data();
                 int original_aaaa_count = 0;
                 for (const auto& rr : m.answers) {
@@ -282,9 +286,9 @@ namespace ppp {
                 ppp::string cache_result = ppp::net::asio::vdns::QueryCache2(
                     domain, a_check, ppp::net::asio::vdns::AddressFamily::kA);
                 if (cache_result.empty()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, DEFERRING %d AAAA records",
-                        domain, original_aaaa_count);
-                    return false; // Caller must hold this response until A cache is populated
+                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, DEFERRING %d AAAA records (will expire in %ds)",
+                        domain, original_aaaa_count, configuration_->udp.dns.timeout);
+                    return false; // Caller must hold this response until A cache is populated or timeout expires
                 }
                 bool hasA = false;
                 for (const auto& rr : a_check.answers) {
@@ -315,41 +319,54 @@ namespace ppp {
                 return true;
             }
 
-            // Called after A records are written to the DNS cache (via AddCache).
-            // Checks all pending AAAA responses: if the domain now has A records,
-            // strips AAAA and forwards; otherwise forwards as-is (pure IPv6 site).
+            // Called after A records are written to the DNS cache (via AddCache)
+            // or when a DNS response triggers StripAAAADnsResponseIfIPv4Available.
+            // Two flush categories:
+            //   - hasA: the domain's A record arrived → strip AAAA, forward (prefer IPv4)
+            //   - expired: timeout elapsed, no A will come → forward AAAA as-is (pure IPv6 site)
             void VEthernetNetworkSwitcher::FlushPendingAAAAResponses() noexcept {
                 if (pending_aaaa_.empty()) {
                     return;
                 }
 
+                uint64_t now = Executors::GetTickCount();
+
                 // Collect domains to flush (avoid modifying map while iterating)
-                ppp::vector<ppp::string> domains_to_flush;
+                ppp::vector<ppp::string> domains_strip;   // hasA: strip AAAA
+                ppp::vector<ppp::string> domains_expired; // timeout: forward as-is
                 for (auto& pair : pending_aaaa_) {
                     const ppp::string& domain = pair.first;
+                    const auto& pending = pair.second;
+
+                    bool expired = (pending->expire_time > 0 && now >= pending->expire_time);
+
                     ::dns::Message a_check;
                     a_check.questions.resize(1);
                     a_check.questions[0].mName = domain;
                     a_check.questions[0].mType = ::dns::RecordType::kA;
                     ppp::string cache_result = ppp::net::asio::vdns::QueryCache2(
                         domain.data(), a_check, ppp::net::asio::vdns::AddressFamily::kA);
+
+                    bool hasA = false;
                     if (!cache_result.empty()) {
-                        bool hasA = false;
                         for (const auto& rr : a_check.answers) {
                             if (rr.mType == ::dns::RecordType::kA) { hasA = true; break; }
                         }
-                        if (hasA) {
-                            domains_to_flush.emplace_back(domain);
-                        }
+                    }
+
+                    if (hasA) {
+                        domains_strip.emplace_back(domain);
+                    } else if (expired) {
+                        domains_expired.emplace_back(domain);
                     }
                 }
 
-                for (const ppp::string& domain : domains_to_flush) {
+                // Flush: strip AAAA (A records available)
+                for (const ppp::string& domain : domains_strip) {
                     auto it = pending_aaaa_.find(domain);
                     if (it == pending_aaaa_.end()) continue;
 
                     auto& pending = it->second;
-                    // Decode the held response, strip AAAA, re-encode, forward
                     ::dns::Message m;
                     if (m.decode(reinterpret_cast<const uint8_t*>(pending->EncodedPacket.data()),
                         static_cast<int>(pending->EncodedPacket.size())) == ::dns::BufferResult::NoError) {
@@ -366,7 +383,7 @@ namespace ppp {
                             [](const ::dns::ResourceRecord& rr) noexcept { return rr.mType == ::dns::RecordType::kAAAA; }),
                             m.additions.end());
 
-                        LOG_DEBUG("VEthernetNetworkSwitcher::FlushPendingAAAAResponses: STRIPPED %d AAAA for %s (deferred)",
+                        LOG_DEBUG("VEthernetNetworkSwitcher::FlushPendingAAAAResponses: STRIPPED %d AAAA for %s (A records available)",
                             before, domain.data());
 
                         std::size_t new_sz = 0;
@@ -385,6 +402,36 @@ namespace ppp {
                     }
                     pending_aaaa_.erase(it);
                 }
+
+                // Flush: forward as-is (timeout expired, pure IPv6 site)
+                for (const ppp::string& domain : domains_expired) {
+                    auto it = pending_aaaa_.find(domain);
+                    if (it == pending_aaaa_.end()) continue;
+
+                    auto& pending = it->second;
+                    LOG_DEBUG("VEthernetNetworkSwitcher::FlushPendingAAAAResponses: forwarding %s as-is (timeout expired, likely IPv6-only)",
+                        domain.data());
+
+                    if (pending->IsIPv6) {
+                        DatagramOutput(
+                            boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
+                            boost::asio::ip::udp::endpoint(pending->SrcV6, pending->SrcPort),
+                            const_cast<char*>(pending->EncodedPacket.data()),
+                            static_cast<int>(pending->EncodedPacket.size()), false);
+                    } else {
+                        DatagramOutput(pending->SourceEP, pending->DestinationEP,
+                            const_cast<char*>(pending->EncodedPacket.data()),
+                            static_cast<int>(pending->EncodedPacket.size()), false);
+                    }
+                    pending_aaaa_.erase(it);
+                }
+            }
+
+            // Called from StripAAAADnsResponseIfIPv4Available to clean up expired pending
+            // entries on every DNS response. Ensures pure-IPv6 sites' AAAA is forwarded
+            // promptly even if no new A records trigger FlushPendingAAAAResponses.
+            void VEthernetNetworkSwitcher::FlushExpiredPendingAAAAResponses() noexcept {
+                FlushPendingAAAAResponses();
             }
 
             bool VEthernetNetworkSwitcher::OnIPv6UdpPacketInput(Byte* packet, int packet_length, ppp::ipv6::PacketHeader* ipv6_header) noexcept {
@@ -504,6 +551,7 @@ namespace ppp {
                                                                                     pending->DstV6 = dst_v6;
                                                                                     pending->SrcPort = src_port;
                                                                                     pending->DstPort = PPP_DNS_SYS_PORT;
+                                                                                    pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
                                                                                     pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                                                                 }
                                                                             } else {
@@ -1028,6 +1076,7 @@ namespace ppp {
                                         pending->IsIPv6 = false;
                                         pending->SourceEP = sourceEP;
                                         pending->DestinationEP = destinationEP;
+                                        pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
                                         pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
@@ -1089,6 +1138,7 @@ namespace ppp {
                                         pending->DstV6 = dst_v6;
                                         pending->SrcPort = sourceEP.port();
                                         pending->DstPort = destinationEP.port();
+                                        pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
                                         pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
@@ -3479,6 +3529,7 @@ namespace ppp {
                                             pending->IsIPv6 = false;
                                             pending->SourceEP = sourceEP;
                                             pending->DestinationEP = destinationEP;
+                                            pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration->udp.dns.timeout) * 1000;
                                             pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                         }
                                     } else {
