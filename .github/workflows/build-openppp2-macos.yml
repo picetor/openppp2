@@ -1,4 +1,4 @@
-# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
 # Description: Build openppp2 macOS - arm64 + amd64 variants using prebuilt 3rd-party libs.
 # Author     : picetor
 # Date-Time  : 2026/06/24
@@ -8,12 +8,6 @@ name: Build openppp2 (macOS)
 on:
   push:
     branches: [ inet6 ]
-    paths:
-      - '**.cpp'
-      - '**.h'
-      - '**.hpp'
-      - 'CMakeLists.txt'
-      - '.github/workflows/build-openppp2-macos.yml'
   workflow_dispatch:      # 手动触发
     inputs:
       build_macos:

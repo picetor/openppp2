@@ -206,7 +206,8 @@ namespace ppp {
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;
                 virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept;
-                void                                                                PreferIPv4DnsResponse(::dns::Message& m) noexcept;
+                bool                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept;
+                void                                                                FlushPendingAAAAResponses() noexcept;
 
             protected:  
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger() noexcept;
@@ -307,6 +308,26 @@ namespace ppp {
                 VEthernetSocksProxySwitcherPtr                                      socks_proxy_;
                 TimeoutEventHandlerTable                                            timeouts_;
                 DNSRuleTable                                                        dns_ruless_[3];
+
+                // Prefer IPv4: pending AAAA responses awaiting A-cache population.
+                // When an AAAA DNS response arrives before the corresponding A response,
+                // we hold it here. Once the A response is cached, FlushPendingAAAAResponses()
+                // strips and forwards the held AAAA response. If no A arrives within the
+                // timeout, the AAAA response is forwarded as-is (pure IPv6 site).
+                struct PendingAAAAResponse {
+                    ppp::string                                                     EncodedPacket;
+                    // IPv6 path fields:
+                    bool                                                            IsIPv6 = false;
+                    boost::asio::ip::address_v6                                     SrcV6;
+                    boost::asio::ip::address_v6                                     DstV6;
+                    uint16_t                                                        SrcPort = 0;
+                    uint16_t                                                        DstPort = 0;
+                    // IPv4 path fields:
+                    boost::asio::ip::udp::endpoint                                  SourceEP;
+                    boost::asio::ip::udp::endpoint                                  DestinationEP;
+                };
+                std::unordered_map<ppp::string, std::shared_ptr<PendingAAAAResponse>> pending_aaaa_;
+
                 RouteInformationTablePtr                                            rib_;
                 ForwardInformationTablePtr                                          fib_;
                 ppp::string                                                         server_ru_;
@@ -347,6 +368,7 @@ namespace ppp {
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
+                std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;

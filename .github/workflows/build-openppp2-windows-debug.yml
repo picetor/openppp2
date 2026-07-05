@@ -1,4 +1,4 @@
-# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
 # Description: Build openppp2 Windows Debug (LOG_DEBUG) - standalone workflow
 # Author     : picetor
 # Date-Time  : 2026/06/26
@@ -8,12 +8,6 @@ name: Build openppp2 (Windows Debug)
 on:
   push:
     branches: [ inet6 ]
-    paths:
-      - '**.cpp'
-      - '**.h'
-      - '**.hpp'
-      - 'CMakeLists.txt'
-      - '.github/workflows/build-openppp2-windows-debug.yml'
   workflow_dispatch:
 
 jobs:
@@ -40,7 +34,7 @@ jobs:
 
       - name: Cache vcpkg packages
         id: cache-vcpkg
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ github.workspace }}/vcpkg/packages
