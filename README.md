@@ -250,9 +250,8 @@ Socks Proxy           : 127.0.0.1:1080/socks
 
 ## 🏗️ 构建系统
 
-本分支的 CI/CD 包含 9 个工作流（4 Release + 4 Debug + 1 Release 打包），覆盖 Windows / Linux (amd64/aarch64) / macOS (arm64/amd64)。
+本分支的 CI/CD 包含 8 个工作流（4 Release + 4 Debug ），覆盖 Windows / Linux (amd64/aarch64) / macOS (arm64/amd64)。
 
-每次构建会自动清理历史运行记录，每个工作流保留最近 10 条。
 
 | 平台 | 架构 | 构建类型 |
 |------|------|----------|
