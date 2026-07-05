@@ -8,6 +8,11 @@ name: Build openppp2 (Windows Debug)
 on:
   push:
     branches: [ inet6 ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '**.txt'
+      - '**.json'
   workflow_dispatch:
 
 jobs:
@@ -182,5 +187,4 @@ jobs:
           path: |
             ${{ github.workspace }}/openppp2-windows-x64-debug_*.exe
             ${{ github.workspace }}/openppp2-windows-x64-debug_*.pdb
-            ${{ github.workspace }}/ipv6.txt
           if-no-files-found: warn

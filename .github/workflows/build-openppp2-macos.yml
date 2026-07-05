@@ -8,6 +8,11 @@ name: Build openppp2 (macOS)
 on:
   push:
     branches: [ inet6 ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '**.txt'
+      - '**.json'
   workflow_dispatch:      # 手动触发
     inputs:
       build_macos:
@@ -97,18 +102,15 @@ jobs:
           cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"
-          cd "${PKG_DIR}" && zip -r "../${ZIP_NAME}.zip" . && cd ..
-          ls -la "${ZIP_NAME}.zip"
-
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
-          echo "ZIP_NAME=${ZIP_NAME}.zip" >> $GITHUB_ENV
+          echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
-          path: build/${{ env.ZIP_NAME }}
+          path: build/${{ env.PKG_DIR }}/
           if-no-files-found: error
 
   # Debug build moved to build-openppp2-macos-debug.yml

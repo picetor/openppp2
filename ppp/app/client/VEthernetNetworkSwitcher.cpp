@@ -141,6 +141,51 @@ namespace ppp {
                     break;
                 }
 
+                // Flush pending AAAA responses that have timed out (pure IPv6 sites).
+                // When prefer_ipv4 is enabled, AAAA responses for IPv6-only domains
+                // are deferred awaiting A cache. If no A record arrives within the
+                // timeout, forward the AAAA response as-is so IPv6 still works.
+                if (!pending_aaaa_.empty()) {
+                    ppp::vector<ppp::string> stale_domains;
+                    for (auto& pair : pending_aaaa_) {
+                        auto& pending = pair.second;
+                        if (pending && (now - pending->Timestamp) >= PENDING_AAAA_TIMEOUT_MS) {
+                            stale_domains.emplace_back(pair.first);
+                        }
+                    }
+                    for (const ppp::string& domain : stale_domains) {
+                        auto it = pending_aaaa_.find(domain);
+                        if (it == pending_aaaa_.end()) continue;
+                        auto& pending = it->second;
+                        // Decode the held response and forward as-is
+                        ::dns::Message m;
+                        if (m.decode(reinterpret_cast<const uint8_t*>(pending->EncodedPacket.data()),
+                            static_cast<int>(pending->EncodedPacket.size())) == ::dns::BufferResult::NoError) {
+
+                            LOG_DEBUG("VEthernetNetworkSwitcher::OnTick: forwarding timed-out AAAA for %s (pure IPv6 site)",
+                                domain.data());
+
+                            std::size_t new_sz = 0;
+                            char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE];
+                            if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
+                                // Also add to cache so subsequent queries hit immediately
+                                ppp::net::asio::vdns::AddCache(reinterpret_cast<Byte*>(dns_packet), static_cast<int>(new_sz));
+
+                                if (pending->IsIPv6) {
+                                    DatagramOutput(
+                                        boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
+                                        boost::asio::ip::udp::endpoint(pending->SrcV6, pending->SrcPort),
+                                        dns_packet, static_cast<int>(new_sz), false);
+                                } else {
+                                    DatagramOutput(pending->SourceEP, pending->DestinationEP,
+                                        dns_packet, static_cast<int>(new_sz), false);
+                                }
+                            }
+                        }
+                        pending_aaaa_.erase(it);
+                    }
+                }
+
                 VEthernetTickEventHandler tick_event = TickEvent; 
                 if (tick_event) {
                     tick_event(this, now);
@@ -504,6 +549,7 @@ namespace ppp {
                                                                                     pending->DstV6 = dst_v6;
                                                                                     pending->SrcPort = src_port;
                                                                                     pending->DstPort = PPP_DNS_SYS_PORT;
+                                                                                    pending->Timestamp = Executors::GetTickCount();
                                                                                     pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                                                                 }
                                                                             } else {
@@ -1028,6 +1074,7 @@ namespace ppp {
                                         pending->IsIPv6 = false;
                                         pending->SourceEP = sourceEP;
                                         pending->DestinationEP = destinationEP;
+                                        pending->Timestamp = Executors::GetTickCount();
                                         pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
@@ -1089,6 +1136,7 @@ namespace ppp {
                                         pending->DstV6 = dst_v6;
                                         pending->SrcPort = sourceEP.port();
                                         pending->DstPort = destinationEP.port();
+                                        pending->Timestamp = Executors::GetTickCount();
                                         pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                     }
                                     return true; // Held, don't forward to client yet
@@ -3479,6 +3527,7 @@ namespace ppp {
                                             pending->IsIPv6 = false;
                                             pending->SourceEP = sourceEP;
                                             pending->DestinationEP = destinationEP;
+                                            pending->Timestamp = Executors::GetTickCount();
                                             pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                         }
                                     } else {

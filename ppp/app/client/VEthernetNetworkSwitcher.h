@@ -325,7 +325,12 @@ namespace ppp {
                     // IPv4 path fields:
                     boost::asio::ip::udp::endpoint                                  SourceEP;
                     boost::asio::ip::udp::endpoint                                  DestinationEP;
+                    // Timestamp (milliseconds) when this response was deferred.
+                    // Used by OnTick() to detect stale entries: if no A cache appears
+                    // within PENDING_AAAA_TIMEOUT_MS, the response is forwarded as-is.
+                    uint64_t                                                        Timestamp = 0;
                 };
+                static constexpr uint64_t                                           PENDING_AAAA_TIMEOUT_MS = 3000;
                 std::unordered_map<ppp::string, std::shared_ptr<PendingAAAAResponse>> pending_aaaa_;
 
                 RouteInformationTablePtr                                            rib_;

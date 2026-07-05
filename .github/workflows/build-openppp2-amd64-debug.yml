@@ -8,6 +8,11 @@ name: Build openppp2 (Linux amd64 Debug)
 on:
   push:
     branches: [ inet6 ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '**.txt'
+      - '**.json'
   workflow_dispatch:
 
 jobs:
@@ -63,19 +68,6 @@ jobs:
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
-          # Package into complete release zip
-          echo "=== Packaging openppp2-linux-amd64-debug.zip ==="
-          PKG_DIR="openppp2-linux-amd64-debug"
-          mkdir -p "${PKG_DIR}"
-          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
-          cp "${GITHUB_WORKSPACE}/appsettings.json" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"
-          cd "${PKG_DIR}" && zip -r "../openppp2-linux-amd64-debug.zip" . && cd ..
-          ls -la "openppp2-linux-amd64-debug.zip"
-
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
@@ -83,5 +75,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: openppp2-linux-amd64-debug
-          path: build/openppp2-linux-amd64-debug.zip
+          path: build/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
