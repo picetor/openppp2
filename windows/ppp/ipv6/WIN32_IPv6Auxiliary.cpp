@@ -375,6 +375,43 @@ namespace ppp {
                     return true;
                 }
 
+                bool DisableClientTemporaryAddress(const ::ppp::ipv6::auxiliary::ClientContext& context) noexcept {
+                    if (context.InterfaceIndex < 0) {
+                        return false;
+                    }
+
+                    PMIB_UNICASTIPADDRESS_TABLE table = NULLPTR;
+                    if (::GetUnicastIpAddressTable(AF_INET6, &table) != NO_ERROR || NULLPTR == table) {
+                        return false;
+                    }
+
+                    bool any_removed = false;
+                    for (ULONG i = 0; i < table->NumEntries; ++i) {
+                        MIB_UNICASTIPADDRESS_ROW& row = table->Table[i];
+                        if (row.InterfaceIndex != static_cast<ULONG>(context.InterfaceIndex)) {
+                            continue;
+                        }
+
+                        // Temporary addresses (RFC 4941) have finite PreferredLifetime.
+                        // Permanent/static addresses have INFINITE (0xFFFFFFFF) lifetime.
+                        if (row.PreferredLifetime == INFINITE || row.PreferredLifetime == 0xFFFFFFFF) {
+                            continue;
+                        }
+
+                        if (::DeleteUnicastIpAddressEntry(&row) == NO_ERROR) {
+                            any_removed = true;
+                            LOG_DEBUG("DisableClientTemporaryAddress: deleted temporary IPv6 address on ifIndex=%d", (int)context.InterfaceIndex);
+                        }
+                    }
+
+                    ::FreeMibTable(table);
+
+                    if (any_removed) {
+                        ppp::tap::TapWindows::DnsFlushResolverCache();
+                    }
+                    return any_removed;
+                }
+
                 void RestoreClientConfiguration(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& address, int prefix_length, bool nat_mode, ::ppp::ipv6::auxiliary::ClientState& state) noexcept {
                     if (NULLPTR == context.Tap || context.InterfaceIndex < 0 || context.InterfaceName.empty()) {
                         return;

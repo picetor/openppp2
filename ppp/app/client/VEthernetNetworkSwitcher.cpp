@@ -396,8 +396,8 @@ namespace ppp {
                         if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
                             if (pending->IsIPv6) {
                                 DatagramOutput(
-                                    boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
                                     boost::asio::ip::udp::endpoint(pending->SrcV6, pending->SrcPort),
+                                    boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
                                     dns_packet, static_cast<int>(new_sz), false);
                             } else {
                                 DatagramOutput(pending->SourceEP, pending->DestinationEP,
@@ -419,8 +419,8 @@ namespace ppp {
 
                     if (pending->IsIPv6) {
                         DatagramOutput(
-                            boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
                             boost::asio::ip::udp::endpoint(pending->SrcV6, pending->SrcPort),
+                            boost::asio::ip::udp::endpoint(pending->DstV6, pending->DstPort),
                             const_cast<char*>(pending->EncodedPacket.data()),
                             static_cast<int>(pending->EncodedPacket.size()), false);
                     } else {
@@ -486,8 +486,8 @@ namespace ppp {
 
                                     // Send DNS response back to the source (swap src/dst)
                                     return DatagramOutput(
-                                        boost::asio::ip::udp::endpoint(dst_v6, dst_port),
                                         boost::asio::ip::udp::endpoint(src_v6, src_port),
+                                        boost::asio::ip::udp::endpoint(dst_v6, dst_port),
                                         dns_packet, static_cast<int>(dns_size), false);
                                 }
                             }
@@ -563,8 +563,8 @@ namespace ppp {
                                                                                 size_t new_sz = 0;
                                                                                 if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
                                                                                     DatagramOutput(
-                                                                                        boost::asio::ip::udp::endpoint(dst_v6, PPP_DNS_SYS_PORT),
                                                                                         boost::asio::ip::udp::endpoint(src_v6, src_port),
+                                                                                        boost::asio::ip::udp::endpoint(dst_v6, PPP_DNS_SYS_PORT),
                                                                                         buffer.get(), static_cast<int>(new_sz), false);
                                                                                 }
                                                                             }
@@ -1352,7 +1352,16 @@ namespace ppp {
                         state);
                 }
 
-                // 4. DNS: Windows RFC 6724 prefers IPv6 DNS over IPv4 DNS, which forces all
+                // 4. Disable IPv6 temporary (privacy) addresses on the TAP interface.
+                //    Windows generates temporary addresses (RFC 4941) for /64 prefixes.
+                //    These cause source address mismatch with the server's NAT66 /128 route,
+                //    breaking return traffic (Echo Reply, DNS responses, etc.) because the
+                //    server's FindIPv6Exchanger() lookup fails for unregistered temp addresses.
+#if defined(_WIN32)
+                ppp::win32::ipv6::auxiliary::DisableClientTemporaryAddress(ctx);
+#endif
+
+                // 5. DNS: Windows RFC 6724 prefers IPv6 DNS over IPv4 DNS, which forces all
                 //    queries through the IPv6 UDP path (OnIPv6UdpPacketInput). The IPv4
                 //    path has mature dns-rules.txt redirection via RedirectDnsServer.
                 //    To prioritize IPv4 DNS, we skip IPv6 DNS assignment on TAP so the
