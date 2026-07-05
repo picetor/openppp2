@@ -668,6 +668,24 @@ namespace ppp {
 
                     CleanupServerRules(mode, prefix, prefix_length, preferred_nic, transit_ifname);
 
+                    // Re-apply the transit TAP IPv6 address that CleanupServerRules flushed.
+                    // CleanupServerRules runs "ip -6 addr flush dev <transit_ifname>" to remove
+                    // stale addresses from prior runs, but this also destroys the address that
+                    // OpenIPv6TransitIfneed() just assigned.  Restore it now so the transit TAP
+                    // has an IPv6 address before ip6tables rules are installed.
+                    if (!transit_ifname.empty() && IsSafeShellToken(transit_ifname)) {
+                        ppp::string transit_gateway = configuration->server.ipv6.gateway;
+                        if (transit_gateway.empty() && !prefix.empty()) {
+                            transit_gateway = prefix;
+                            if (!transit_gateway.empty() && transit_gateway.back() == ':') {
+                                transit_gateway += '1';
+                            }
+                        }
+                        if (!transit_gateway.empty() && IsSafeShellToken(transit_gateway)) {
+                            ppp::tap::TapLinux::SetIPv6Address(transit_ifname, transit_gateway, prefix_length);
+                        }
+                    }
+
                     ppp::string uplink_name = ResolveIpv6UplinkInterface(preferred_nic);
                     char ip6tables_command[3072];
                     if (!uplink_name.empty() && !IsSafeShellToken(uplink_name)) {
