@@ -56,15 +56,15 @@
 
 ```bash
 # 基本用法（使用默认 ipv6.txt）
-ppp --mode=client --server=wss://... --bypass-ngw6=fe80::1
+ipv6.txt 在启动目录，可以自动加载，另外可以指定网关，网卡
 
 # 自定义分流文件 + 网关
-ppp --mode=client --server=wss://... \
+ppp --mode=client \
      --bypass6=./ipv6.txt \
      --bypass-ngw6=fe80::1
 
 # Linux 指定物理网卡
-ppp --mode=client --server=wss://... \
+ppp --mode=client \
      --bypass6=./ipv6.txt \
      --bypass-nic6=eth0 \
      --bypass-ngw6=fe80::1
@@ -165,7 +165,7 @@ ppp --mode=client --server=wss://... \
 `--dns=` 参数原生支持 IPv6 DNS 地址：
 
 ```bash
-ppp --mode=client --server=wss://... --dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
+--dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
 ```
 
 IPv6 DNS 通过 `ApplyIPv6Assignment()` → `ApplyClientDns()` 路径下发到 TAP 适配器，与 IPv4 DNS (`--dns=`) 互不冲突。
@@ -188,7 +188,7 @@ IPv6 DNS 通过 `ApplyIPv6Assignment()` → `ApplyClientDns()` 路径下发到 T
 ```json
 {
     "client": {
-        "server": "wss://优选IP:20443/tun",
+        "server": "wss://优选IP:port/tun",
         "websocket": {
             "host": "your-domain.com",
             "sni": "your-domain.com"
@@ -199,7 +199,7 @@ IPv6 DNS 通过 `ApplyIPv6Assignment()` → `ApplyClientDns()` 路径下发到 T
 
 | 字段 | 说明 |
 |------|------|
-| `server` | 填写优选 IP，而非真实域名 |
+| `server` | 填写优选IP和端口或域名，而非真实域名 |
 | `websocket.host` | WebSocket Host 头，设为真实域名 |
 | `websocket.sni` | TLS SNI 字段，设为真实域名 |
 
@@ -394,11 +394,11 @@ start ppp.exe --mode=client --config=./config/HKBN.json --tun-mux=0 --tun-host=y
 ### 服务端模式
 
 ```bash
-# mode 默认 server，可不写
-./ppp
+# mode 默认 server
+./ppp --mode=server
 
 # 指定配置文件
-./ppp --config=./my-server.json
+./ppp --mode=server --config=./server.json
 ```
 
 ### 通用参数
@@ -485,19 +485,36 @@ openppp2 支持三种隧道传输协议：**PPP**（原生 TCP）、**WS**（Web
 WebSocket 隧道，可配合 CDN / 反向代理，无 TLS 加密。
 
 **appsettings.json**：
+原始域名
 ```json
 {
     "websocket": {
-        "host": "你的域名",
+        "host": "your-domain.com",
         "path": "/tun",
         "listen": { "ws": 20080 }
     },
     "client": {
-        "server": "ws://你的域名:20080/tun"
+        "server": "ws://your-domain.com:20080/tun"
     }
 }
 ```
-
+---
+优选域名/IP
+```json
+{
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": { "ws": 20080 }
+    },
+    "client": {
+        "server": "ws://IP:port/tun",
+        "websocket": {
+            "host": "your-domain.com"
+        }
+    }
+}
+```
 ### WSS（WebSocket over TLS）
 
 生产推荐方案，加密传输，支持 CDN 优选 IP 加速。
@@ -506,32 +523,32 @@ WebSocket 隧道，可配合 CDN / 反向代理，无 TLS 加密。
 ```json
 {
     "websocket": {
-        "host": "你的域名",
+        "host": "your-domain.com",
         "path": "/tun",
         "listen": {
             "ws": 20080,
             "wss": 20443
         },
         "ssl": {
-            "certificate-file": "你的域名.pem",
-            "certificate-key-file": "你的域名.key",
+            "certificate-file": "your-domain.com.pem",
+            "certificate-key-file": "your-domain.com.key",
             "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
         }
     },
     "client": {
-        "server": "wss://你的域名:20443/tun"
+        "server": "wss://your-domain.com:20443/tun"
     }
 }
 ```
-
+---
 CDN 优选 IP 场景需额外配置 `client.websocket`：
 ```json
 {
     "client": {
-        "server": "wss://优选IP:20443/tun",
+        "server": "wss://IP:port/tun",
         "websocket": {
-            "host": "你的真实域名",
-            "sni": "你的真实域名"
+            "host": "your-domain.com",
+            "sni": "your-domain.com"
         }
     }
 }

@@ -29,7 +29,12 @@
 - [SOCKS5 Proxy](#-socks5-proxy)
 - [Improvements & Bug Fixes](#-improvements--bug-fixes)
 - [CLI Parameters Comparison](#-cli-parameters-comparison)
+- [CLI Reference (Original)](#-cli-reference-original)
+- [CLI Startup Examples](#-cli-startup-examples)
+- [Debug Build](#-debug-build)
+- [Tunnel Protocol Configuration](#-tunnel-protocol-configuration)
 - [Build System](#-build-system)
+- [Related Projects](#-related-projects)
 
 ---
 
@@ -50,20 +55,14 @@ Traffic flow:
 #### Usage
 
 ```bash
-# Basic (uses default ipv6.txt)
-ppp --mode=client --server=wss://... --bypass-ngw6=fe80::1
+# Client side — same as IPv4 bypass, no separate mode needed
+ppp --mode=client --bypass6=./ipv6.txt
 
-# Custom bypass list + gateway
-ppp --mode=client --server=wss://... \
-     --bypass6=./ipv6.txt \
-     --bypass-ngw6=fe80::1
-
-# Linux: specify physical NIC
-ppp --mode=client --server=wss://... \
-     --bypass6=./ipv6.txt \
-     --bypass-nic6=eth0 \
-     --bypass-ngw6=fe80::1
+# Server side — broadcast RA to assign ULA prefix to client virtual NICs
+ppp --bypass6=./ipv6.txt
 ```
+
+> IPv6 bypass loads automatically when `./ipv6.txt` exists, even without the `--bypass6` parameter. IPv6 bypass shares the route bypass mechanism with `--bypass`.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -158,7 +157,7 @@ Works automatically — no extra configuration needed.
 The `--dns=` parameter natively supports IPv6 DNS addresses:
 
 ```bash
-ppp --mode=client --server=wss://... --dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
+ppp --mode=client --dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
 ```
 
 IPv6 DNS is delivered to the TAP adapter via `ApplyIPv6Assignment()` → `ApplyClientDns()`, coexisting with IPv4 DNS (`--dns=`) without conflict.
@@ -176,12 +175,21 @@ Client → Optimized IP (CDN Edge) → CDN Internal Routing → Your Origin Serv
                └─ SNI:  your-domain.com  (TLS handshake)
 ```
 
-#### Usage
+#### Configuration — original domain
 
 ```json
 {
     "client": {
-        "server": "wss://optimized-ip:20443/tun",
+        "server": "wss://your-domain.com:20443/tun"
+    }
+}
+```
+---
+CDN optimized IP scenario — add `client.websocket`:
+```json
+{
+    "client": {
+        "server": "wss://IP:port/tun",
         "websocket": {
             "host": "your-domain.com",
             "sni": "your-domain.com"
@@ -239,11 +247,328 @@ Socks Proxy           : 127.0.0.1:1080/socks
 
 New CLI parameters (compared to the original):
 
-| Parameter | Platform | Description |
-|-----------|----------|-------------|
-| `--bypass6=<file1\|file2>` | All | IPv6 bypass list file |
-| `--bypass-nic6=<interface>` | Linux | Physical NIC for IPv6 bypass |
-| `--bypass-ngw6=<ip>` | All | IPv6 bypass next-hop gateway |
+| Parameter | Platform | Description | Default |
+|-----------|----------|-------------|:------:|
+| `--bypass6=<file1\|file2>` | All | IPv6 bypass list file | `./ipv6.txt` |
+| `--bypass-nic6=<interface>` | Linux | Physical NIC for IPv6 bypass | auto-select |
+| `--bypass-ngw6=<ip>` | All | IPv6 bypass next-hop gateway | `::` (disabled) |
+
+---
+
+## 📖 CLI Reference (Original)
+
+The complete upstream CLI reference — fully compatible with this fork.
+
+### ⚙️ General Commands
+
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--rt` | Real-time mode | `--rt=[yes｜no]` | `yes` |
+| `--dns` | Set DNS servers | `--dns <IP list>` | `8.8.8.8,8.8.4.4` |
+| `--tun-flash` | Advanced QoS control | `--tun-flash=[yes｜no]` | `no` |
+| `--pull-iplist` | Download country IP list | `--pull-iplist [file]/[country]` | `./ip.txt/CN` |
+| `--config` | Config file path | `--config <path>` | `./appsettings.json` |
+| `--mode` | Run mode | `--mode=[client｜server]` | `server` |
+
+> 🔗 **IP list source**: [APNIC official](http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest)
+
+---
+
+### 🖥️ Server Commands
+
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--firewall-rules` | Firewall rules file | `--firewall-rules <file>` | `./firewall-rules.txt` |
+
+---
+
+### 💻 Client Commands
+
+#### Core Settings
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--lwip` | Protocol stack selection | `--lwip=[yes｜no]` | Win: `yes`<br>Other: `no` |
+| `--vbgp` | Smart route split | `--vbgp=[yes｜no]` | `yes` |
+| `--nic` | Specify physical NIC | `--nic <name>` | auto-select |
+| `--ngw` | Force gateway address | `--ngw <IP>` | auto-detect |
+
+#### Virtual NIC
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--tun` | NIC name | `--tun <name>` | platform-specific |
+| `--tun-ip` | IP address | `--tun-ip <IP>` | `10.0.0.2` |
+| `--tun-gw` | Gateway address | `--tun-gw <IP>` | `10.0.0.1` |
+| `--tun-mask` | Subnet mask | `--tun-mask <bits>` | `30` |
+| `--tun-host` | Preferred network | `--tun-host=[yes｜no]` | `yes` |
+
+#### Advanced Features
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--tun-mux` | MUX connections | `--tun-mux <count>` | `0` |
+| `--tun-mux-acceleration` | MUX acceleration | `--tun-mux-acceleration <mode>` | `0` |
+| `--tun-vnet` | Subnet forwarding | `--tun-vnet=[yes｜no]` | `yes` |
+| `--tun-ssmt` | Hyper-threading optimization | `--tun-ssmt=[threads]/[mode]` | `4/st` |
+| `--tun-static` | Static tunnel | `--tun-static=[yes｜no]` | `no` |
+| `--link-restart` | Link restart count | `--link-restart=[count]` | `0` |
+| `--block-quic` | Block QUIC traffic | `--block-quic=[yes\|no]` | `no` |
+| `--auto-restart` | Auto-restart program | `--auto-restart=[seconds]` | `0` |
+
+#### Route Settings
+| Command | Description | Format | Default |
+|---------|-------------|--------|:------:|
+| `--bypass` | Bypass list | `--bypass <file1\|file2>` | `./ip.txt` |
+| `--bypass-nic` | Bypass list NIC | `--bypass-nic <NIC>` | |
+| `--bypass-ngw` | Bypass list gateway | `--bypass-ngw <IP>` | `0.0.0.0` |
+| `--virr` | Auto-update & apply | `--virr [file]/[country]` | `./ip.txt/CN` |
+| `--dns-rules` | DNS rules | `--dns-rules <file>` | `./dns-rules.txt` |
+
+#### Platform-Specific
+| Command | Platform | Description | Format | Default |
+|---------|:------:|-------------|--------|:------:|
+| `--tun-route` | Linux | Route compatibility | `--tun-route=[yes｜no]` | `no` |
+| `--tun-protect` | Linux | Route protection | `--tun-protect=[yes｜no]` | `yes` |
+| `--tun-promisc` | macOS / Linux | Promiscuous mode | `--tun-promisc=[yes｜no]` | `yes` |
+
+---
+
+### 🪟 Windows Commands
+
+| Command | Description | Format |
+|---------|-------------|--------|
+| `--system-network-reset` | Network reset | `--system-network-reset` |
+| `--system-network-optimization` | Performance optimization | `--system-network-optimization` |
+| `--system-network-preferred-ipv4` | Prefer IPv4 | `--system-network-preferred-ipv4` |
+| `--system-network-preferred-ipv6` | Prefer IPv6 | `--system-network-preferred-ipv6` |
+| `--no-lsp` | Disable LSP | `--no-lsp` |
+
+---
+
+### 📚 Global Parameters
+
+#### MUX Acceleration Modes
+| Value | Mode | Use Case |
+|:--:|------|----------|
+| 0 | Standard | Normal usage |
+| 1 | Server acceleration | Download-intensive |
+| 2 | Client acceleration | Upload-intensive |
+| 3 | Bidirectional | High performance |
+
+#### Virtual NIC Defaults
+| Platform | Default |
+|----------|--------|
+| Windows | `PPP` |
+| Linux | `ppp` |
+| macOS | `utun0` |
+
+#### SSMT Optimization Modes
+| Mode | Direction |
+|------|-----------|
+| st | Single-connection high throughput |
+| mq | Multi-connection high concurrency |
+
+#### Network Protocol Stacks
+| Type | Description |
+|:----:|-------------|
+| `lwip` | For Windows |
+| `ctcp` | For non-Windows |
+
+---
+
+## 📋 CLI Startup Examples
+
+Core settings (tunnel type, server address, encryption keys) go in `appsettings.json`. DNS, gateway, and bypass files have automatic defaults. CLI parameters only override on demand.
+
+### Client Mode
+
+```bash
+# Minimal — all settings in appsettings.json
+ppp --mode=client
+```
+
+A real-world client startup example:
+
+```bash
+start ppp.exe --mode=client --config=./config/HKBN.json --tun-mux=0 --tun-host=yes --tun-vnet=yes --tun-gw=192.168.12.0 --tun-ip=192.168.12.25 --tun-flash=yes --tun-mask=24 --link-restart=3 --tun-static=no --block-quic=yes
+```
+
+> `--tun-gw`, `--tun-ip`, `--tun-mask` override server-assigned IPs for a fixed intranet address. `--link-restart=3` auto-reconnects up to 3 times on disconnect. Bypass/DNS parameters (`--bypass` / `--bypass6` / `--dns-rules` / `--dns`) use defaults from `appsettings.json` and are normally omitted from the CLI.
+
+### Server Mode
+
+```bash
+# mode defaults to server
+./ppp --mode=server
+
+# Custom config
+./ppp --mode=server --config=./server.json
+```
+
+### General Parameters
+
+```bash
+# Custom config file
+ppp --mode=client --config=./my-config.json
+
+# Auto-restart on crash/disconnect
+ppp --mode=client --auto-restart=300
+
+# Show help
+ppp --help
+```
+
+> **Note**: The `client.server` field in `appsettings.json` supports `ppp://`, `ws://`, and `wss://` protocols. To switch tunnel types, just change this field — no CLI changes needed. For more parameters, see the upstream [CLI reference](https://github.com/liulilittle/openppp2/blob/main/README_CN.md#-%E5%91%BD%E4%BB%A4%E8%A1%8C%E6%8E%A5%E5%8F%A3).
+
+---
+
+## 🔍 Debug Build
+
+The Release build (default) only outputs the TUI dashboard — no debug logs. The **Debug build** enables the `PPP_LOG_VERBOSE` macro, producing detailed `LOG_DEBUG` / `LOG_INFO` output for troubleshooting connections, routing, DNS, etc.
+
+### Release vs Debug
+
+| | Release | Debug |
+|---|---|---|
+| Compile flags | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3` |
+| Optimization | Full | None |
+| Log output | TUI dashboard only | Dashboard + detail logs |
+| Binary size | Smaller | Larger (with debug symbols) |
+| Use case | Production | Troubleshooting |
+
+### Getting Debug Builds
+
+GitHub Actions builds both Release and Debug for every platform. In the [Releases](https://github.com/picetor/openppp2/releases) page, files with `debug` in the name are Debug builds:
+
+```
+openppp2-windows-x64.zip          ← Release
+openppp2-windows-x64-debug.zip    ← Debug
+openppp2-linux-amd64.zip          ← Release
+openppp2-linux-amd64-debug.zip    ← Debug
+...
+```
+
+### `--log-file` Usage
+
+The Debug build supports `--log-file` to redirect debug logs to a file (no effect in Release):
+
+```bash
+# Debug build: write logs to file
+./ppp --mode=client --log-file ./ppp_debug.log
+
+# Live tail
+tail -f ./ppp_debug.log
+```
+
+> **Note**: The TUI dashboard always prints to the console. `--log-file` only redirects `LOG_DEBUG` / `LOG_INFO` entries. The two are independent.
+
+---
+
+## 🔗 Tunnel Protocol Configuration
+
+openppp2 supports three tunnel transport protocols: **PPP** (raw TCP), **WS** (WebSocket), and **WSS** (WebSocket over TLS). To switch protocols, just change `client.server` in `appsettings.json` — the CLI always uses `--mode=client`.
+
+### PPP (Raw TCP)
+
+Simplest deployment. Best for LAN or direct-connect scenarios.
+
+**appsettings.json**:
+```json
+{
+    "tcp": {
+        "listen": { "port": 20000 }
+    },
+    "client": {
+        "server": "ppp://server-ip:20000/"
+    }
+}
+```
+
+### WS (WebSocket, no encryption)
+
+WebSocket tunnel, compatible with CDN / reverse proxies. No TLS.
+
+**appsettings.json** — original domain:
+```json
+{
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": { "ws": 20080 }
+    },
+    "client": {
+        "server": "ws://your-domain.com:20080/tun"
+    }
+}
+```
+---
+Optimized IP:
+```json
+{
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": { "ws": 20080 }
+    },
+    "client": {
+        "server": "ws://IP:port/tun",
+        "websocket": {
+            "host": "your-domain.com"
+        }
+    }
+}
+```
+
+### WSS (WebSocket over TLS)
+
+Production recommended. Encrypted transport with CDN optimized IP support.
+
+**appsettings.json**:
+```json
+{
+    "websocket": {
+        "host": "your-domain.com",
+        "path": "/tun",
+        "listen": {
+            "ws": 20080,
+            "wss": 20443
+        },
+        "ssl": {
+            "certificate-file": "your-domain.com.pem",
+            "certificate-key-file": "your-domain.com.key",
+            "ciphersuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+        }
+    },
+    "client": {
+        "server": "wss://your-domain.com:20443/tun"
+    }
+}
+```
+---
+CDN optimized IP scenario — add `client.websocket`:
+```json
+{
+    "client": {
+        "server": "wss://IP:port/tun",
+        "websocket": {
+            "host": "your-domain.com",
+            "sni": "your-domain.com"
+        }
+    }
+}
+```
+
+> Regardless of protocol, the client command is always `ppp --mode=client`, server is `./ppp`.
+
+### Protocol Comparison
+
+| | PPP | WS | WSS |
+|---|---|---|---|
+| Encryption | AES app-layer | AES app-layer | TLS + AES dual |
+| Port | Custom | 80/custom | 443/custom |
+| CDN | ❌ | ✅ | ✅ |
+| Disguise | ❌ | HTTP header disguise | HTTPS disguise |
+| Recommended | LAN/direct | NAT traversal | Production/public |
+
+> PPP mode doesn't use TLS but data is still encrypted at the application layer (controlled by `key.protocol` / `key.transport`). WSS adds TLS transport encryption on top.
 
 ---
 
@@ -261,3 +586,61 @@ Each build automatically cleans up old workflow runs, keeping only the last 10 p
 | macOS | arm64 + amd64 | Release / Debug |
 
 > All other features (tunnel protocols, routing policies, MUX multiplexing, PaperAirplane acceleration, etc.) are identical to the original. Please refer to the upstream documentation.
+
+---
+
+## 🔗 Related Projects
+
+These projects work alongside this repo, covering rule generation, one-click deployment, and IP data sources.
+
+### DNS Rule Generator — `dns-rules_geosite_generator`
+
+[dns-rules_geosite_generator](https://github.com/picetor/dns-rules_geosite_generator) converts [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) geosite classifications into `dns-rules.txt` bypass lists for this project.
+
+```
+geosite classifications (MetaCubeX)  ──→  geosite2dns.py  ──→  dns-rules.txt
+```
+
+- Supports 3 data sources: GitHub source files, geosite.dat Protobuf, mosdns unpack
+- YAML mapping config defines classification → DNS relationships
+- Output format fully compatible with openppp2 (83-byte fixed-length records)
+
+```bash
+# Recommended: direct GitHub source files (supports @cn sub-classifications)
+python geosite2dns.py -m geosite-mapping.yaml -o dns-rules.txt --from-source
+```
+
+### One-Click Install — `openppp2_install`
+
+[openppp2_install](https://github.com/picetor/openppp2_install) provides two deployment scripts:
+
+| Script | Purpose |
+|--------|---------|
+| `ppp_install.sh` | Single mode — server OR client per machine |
+| `ppp_dual.sh` | Dual mode — server AND client on the same machine |
+
+Built-in systemd service management, tmux TUI status panel, smart arch/version detection. Run `ppp` after install to enter the management menu.
+
+```bash
+# One-click install (single mode)
+wget -4 -O ppp_install.sh https://raw.githubusercontent.com/picetor/openppp2_install/main/ppp_install.sh && chmod +x ppp_install.sh && ./ppp_install.sh
+```
+
+### IP Bypass List Sources
+
+`ip.txt` (IPv4) and `ipv6.txt` (IPv6) bypass lists are sourced from [mayaxcn/china-ip-list](https://github.com/mayaxcn/china-ip-list):
+
+| File | Source | Purpose |
+|------|--------|---------|
+| `ip.txt` | [APNIC](http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest) | IPv4 domestic addresses, `--bypass` / `--pull-iplist` auto-generation |
+| `ipv6.txt` | [chnroute_v6.txt](https://github.com/mayaxcn/china-ip-list/blob/master/chnroute_v6.txt) | IPv6 domestic addresses, `--bypass6` |
+
+> To update bypass lists, download from the links above and replace the files in the repo.
+
+### IPv6 Reference — `openppp2_Miaocchi`
+
+Some IPv6 features in this fork draw from [Miaocchi/openppp2](https://github.com/Miaocchi/openppp2):
+
+- **IPv6 Fix Summary**: [`docs/IPV6_FIXES.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/IPV6_FIXES.md) — systematically reviewed all IPv6-related code across `ppp/` core and platform directories (socket creation, address resolution, VNetstack processing, IPv6Auxiliary layer), clarifying the boundary between VPN transport and virtual Ethernet planes
+- **Windows IPv6 DNS Leak Prevention** & **Source Address Selection Fix** drew on that fork's analysis of Windows IPv6 behavior
+- **IPv6 Lease Management** & **NDP Proxy** server-side design docs provided reference for the IPv6 data plane implementation
