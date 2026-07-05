@@ -3529,7 +3529,7 @@ namespace ppp {
                                             pending->IsIPv6 = false;
                                             pending->SourceEP = sourceEP;
                                             pending->DestinationEP = destinationEP;
-                                            pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration->udp.dns.timeout) * 1000;
+                                            pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
                                             pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
                                         }
                                     } else {
