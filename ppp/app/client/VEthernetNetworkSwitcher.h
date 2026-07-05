@@ -312,8 +312,9 @@ namespace ppp {
                 // Prefer IPv4: pending AAAA responses awaiting A-cache population.
                 // When an AAAA DNS response arrives before the corresponding A response,
                 // we hold it here. Once the A response is cached, FlushPendingAAAAResponses()
-                // strips and forwards the held AAAA response. If no A arrives within the
-                // timeout, the AAAA response is forwarded as-is (pure IPv6 site).
+                // strips and forwards the held AAAA response. If no A record ever arrives
+                // (pure IPv6 site), the pending AAAA stays indefinitely — the domain
+                // will be inaccessible over IPv4-preferring DNS until cache is cleared.
                 struct PendingAAAAResponse {
                     ppp::string                                                     EncodedPacket;
                     // IPv6 path fields:
@@ -325,12 +326,7 @@ namespace ppp {
                     // IPv4 path fields:
                     boost::asio::ip::udp::endpoint                                  SourceEP;
                     boost::asio::ip::udp::endpoint                                  DestinationEP;
-                    // Timestamp (milliseconds) when this response was deferred.
-                    // Used by OnTick() to detect stale entries: if no A cache appears
-                    // within PENDING_AAAA_TIMEOUT_MS, the response is forwarded as-is.
-                    uint64_t                                                        Timestamp = 0;
                 };
-                static constexpr uint64_t                                           PENDING_AAAA_TIMEOUT_MS = 3000;
                 std::unordered_map<ppp::string, std::shared_ptr<PendingAAAAResponse>> pending_aaaa_;
 
                 RouteInformationTablePtr                                            rib_;

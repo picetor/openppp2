@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           repository: picetor/openppp2
           ref: inet6
@@ -72,7 +72,7 @@ jobs:
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload Debug artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: openppp2-linux-amd64-debug
           path: build/${{ env.ARTIFACT_NAME }}
