@@ -673,8 +673,11 @@ namespace ppp {
                         new_src_v6, new_dst_v6,
                         IPPROTO_ICMPV6);
 
-                    icmp_start[2] = static_cast<Byte>((cksum >> 8) & 0xFF);
-                    icmp_start[3] = static_cast<Byte>(cksum & 0xFF);
+                    // ComputePseudoChecksum returns value in host byte order.
+                    // Convert to network byte order for wire format using htons().
+                    uint16_t cksum_be = htons(cksum);
+                    icmp_start[2] = static_cast<Byte>((cksum_be >> 8) & 0xFF);
+                    icmp_start[3] = static_cast<Byte>(cksum_be & 0xFF);
 
                     // Output the modified echo reply back to TAP
                     return Output(packet, packet_length);
