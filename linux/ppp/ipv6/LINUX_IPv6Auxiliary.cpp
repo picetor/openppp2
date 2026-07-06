@@ -322,7 +322,7 @@ namespace {
         keys.emplace_back("net.ipv6.conf.all.forwarding");
         keys.emplace_back("net.ipv6.conf.default.forwarding");
 
-        if (mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua && !uplink_name.empty()) {
+        if ((mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua || mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66) && !uplink_name.empty()) {
             keys.emplace_back("net.ipv6.conf." + uplink_name + ".accept_ra");
         }
 
@@ -711,7 +711,7 @@ namespace ppp {
                         return false;
                     }
 
-                    if (mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua && !uplink_name.empty()) {
+                    if ((mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua || mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66) && !uplink_name.empty()) {
                         char accept_ra_command[512];
                         snprintf(accept_ra_command, sizeof(accept_ra_command), "sysctl -w net.ipv6.conf.%s.accept_ra=2 > /dev/null 2>&1", uplink_name.data());
                         if (!LinuxExecuteCommand(accept_ra_command)) {
@@ -892,6 +892,20 @@ namespace ppp {
                     if (!ppp::tap::TapLinux::AddRoute6(context.InterfaceName, "8000::", 1, gateway_string)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
+                    }
+
+                    // Linux TAP is an L2 driver — the kernel needs NDP to resolve
+                    // the gateway's MAC address before sending any packet through
+                    // the via-gateway route.  Since the virtual gateway exists only
+                    // in user space, no physical device will respond to Neighbor
+                    // Solicitations.  Install a static NUD_PERMANENT entry with a
+                    // well-known dummy MAC (00:00:00:00:00:01) so the kernel can
+                    // construct the Ethernet frame immediately without NDP.
+                    if (!gateway_string.empty()) {
+                        if (!ppp::tap::TapLinux::AddIPv6TransitNeighbor(context.InterfaceName, gateway_string)) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
+                            return false;
+                        }
                     }
 
                     state.DefaultRouteApplied = true;

@@ -324,10 +324,18 @@ namespace ppp {
                     ppp::string prefix_str(prefix_std.data(), prefix_std.size());
                     prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
 
-                    // On-link subnet route (no gateway): Wintun L3 driver does not
-                    // support NDP, so all routes directed to the TAP interface must
-                    // be on-link to avoid failed neighbor resolution.
-                    // The user-mode NAT stack handles all forwarding logic.
+                    // Use via-gateway route for Wintun L3 compatibility.  Although Wintun
+                    // is an L3-only driver that cannot perform NDP, the gateway's MAC is
+                    // already installed as a static NUD_PERMANENT neighbor entry by
+                    // ApplyClientDefaultRoute() before this function is called.  A
+                    // via-gateway route allows the kernel to resolve the gateway MAC
+                    // from the static neighbor entry and deliver all subnet traffic to
+                    // the user-mode NAT66 stack, which handles East-West client-to-client
+                    // forwarding on the server.
+                    //
+                    // An on-link route would require kernel NDP for EVERY destination in
+                    // the /64 prefix — including other clients — and Wintun cannot satisfy
+                    // those solicitations, causing silent East-West communication failure.
                     ppp::string gateway_str;
                     if (gateway.is_v6()) {
                         std::string gw_std = gateway.to_string();
@@ -337,8 +345,7 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6GatewayMissing);
                     }
 
-                    // Use on-link route (empty gateway) for Wintun L3 compatibility.
-                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, ppp::string(), 0)) {
+                    if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, gateway_str, 0)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }

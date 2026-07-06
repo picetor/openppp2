@@ -2234,10 +2234,11 @@ namespace ppp {
                             return false;
                         }
 
-                        if (AppConfiguration::IPv6Mode_Nat66 == mode && !configuration_->server.subnet) {
-                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6SubnetForwardFailed);
-                            return false;
-                        }
+                        // Allow East-West client-to-client traffic in NAT66 mode: the source
+                        // has already been verified as a legitimate client by the preceding
+                        // FindIPv6Exchanger(source) lookup.  The !server.subnet gate was
+                        // overly restrictive — IPv4 subnet forwarding has no equivalent
+                        // barrier and works correctly without it.
                     }
                 }
 
