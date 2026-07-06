@@ -345,6 +345,18 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6GatewayMissing);
                     }
 
+                    // Remove the implicit on-link route that Windows auto-created
+                    // when the /64 address was assigned via ApplyClientAddress().
+                    // This on-link route conflicts with the via-gateway route we are
+                    // about to install — both cover fd42:4242:4242::/64 with the same
+                    // metric (256), and Windows prefers on-link (link scope < subnet
+                    // scope).  With the on-link route, the kernel needs NDP resolution
+                    // for every destination including the virtual gateway itself, which
+                    // fails on Wintun L3 and causes "Request timed out." on ping.
+                    // Suppress errors: if the on-link route was already removed by a
+                    // previous invocation, the delete is a harmless no-op.
+                    ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, ppp::string());
+
                     if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, prefix_str, prefix_length, gateway_str, 0)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
