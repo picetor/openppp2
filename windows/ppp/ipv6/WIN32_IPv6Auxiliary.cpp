@@ -375,7 +375,7 @@ namespace ppp {
                     return true;
                 }
 
-                bool DisableClientTemporaryAddress(const ::ppp::ipv6::auxiliary::ClientContext& context) noexcept {
+                bool DisableClientTemporaryAddress(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& assigned_address) noexcept {
                     if (context.InterfaceIndex < 0) {
                         return false;
                     }
@@ -392,15 +392,45 @@ namespace ppp {
                             continue;
                         }
 
-                        // Temporary addresses (RFC 4941) have finite PreferredLifetime.
-                        // Permanent/static addresses have INFINITE (0xFFFFFFFF) lifetime.
-                        if (row.PreferredLifetime == INFINITE || row.PreferredLifetime == 0xFFFFFFFF) {
+                        // Build the address bytes for comparison.
+                        IN6_ADDR addr = row.Address.Ipv6.sin6_addr;
+                        char text[INET6_ADDRSTRLEN] = { 0 };
+                        if (NULLPTR == ::inet_ntop(AF_INET6, &addr, text, sizeof(text))) {
+                            continue;
+                        }
+                        ppp::string addr_str(text);
+
+                        // Skip link-local addresses (fe80::/10).
+                        if (addr_str.size() >= 4 && addr_str[0] == 'f' && addr_str[1] == 'e' &&
+                            addr_str[2] == '8' && addr_str[3] == '0') {
                             continue;
                         }
 
+                        // Keep the address that matches our assigned address.
+                        if (assigned_address.is_v6()) {
+                            ppp::string assigned_str = ppp::string(assigned_address.to_string().c_str());
+                            // Normalize: lowercase comparison.
+                            bool match = true;
+                            if (addr_str.size() != assigned_str.size()) {
+                                match = false;
+                            } else {
+                                for (std::size_t j = 0; j < addr_str.size(); ++j) {
+                                    if (std::tolower(addr_str[j]) != std::tolower(assigned_str[j])) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (match) {
+                                continue;
+                            }
+                        }
+
+                        // Delete any other IPv6 address on the TAP interface.
                         if (::DeleteUnicastIpAddressEntry(&row) == NO_ERROR) {
                             any_removed = true;
-                            LOG_DEBUG("DisableClientTemporaryAddress: deleted temporary IPv6 address on ifIndex=%d", (int)context.InterfaceIndex);
+                            LOG_DEBUG("DisableClientTemporaryAddress: deleted extra IPv6 address %s on ifIndex=%d",
+                                text, (int)context.InterfaceIndex);
                         }
                     }
 

@@ -1352,13 +1352,14 @@ namespace ppp {
                         state);
                 }
 
-                // 4. Disable IPv6 temporary (privacy) addresses on the TAP interface.
-                //    Windows generates temporary addresses (RFC 4941) for /64 prefixes.
-                //    These cause source address mismatch with the server's NAT66 /128 route,
-                //    breaking return traffic (Echo Reply, DNS responses, etc.) because the
-                //    server's FindIPv6Exchanger() lookup fails for unregistered temp addresses.
+                // 4. Remove all IPv6 addresses on the TAP interface except the assigned one.
+                //    Windows generates temporary addresses (RFC 4941) for /64 prefixes, and
+                //    stale addresses from previous sessions may persist with infinite lifetime.
+                //    Any extra address causes source address mismatch with the server's NAT66
+                //    /128 route, breaking return traffic (Echo Reply, DNS responses, etc.)
+                //    because the server's FindIPv6Exchanger() lookup fails for unregistered addresses.
 #if defined(_WIN32)
-                ppp::win32::ipv6::auxiliary::DisableClientTemporaryAddress(ctx);
+                ppp::win32::ipv6::auxiliary::DisableClientTemporaryAddress(ctx, extensions.AssignedIPv6Address);
 #endif
 
                 // 5. DNS: Windows RFC 6724 prefers IPv6 DNS over IPv4 DNS, which forces all
