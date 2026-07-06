@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: picetor/openppp2
           ref: inet6
@@ -107,7 +107,7 @@ jobs:
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.PKG_DIR }}/
