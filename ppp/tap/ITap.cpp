@@ -284,8 +284,21 @@ namespace ppp
 
         std::shared_ptr<ITap> ITap::Create(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& dev, const ppp::string& ip, const ppp::string& gw, const ppp::string& mask, bool promisc, bool hosted_network, const ppp::vector<ppp::string>& dns_addresses) noexcept
         {
+            // Filter out IPv6 DNS: TAP DHCP Option 6 only supports IPv4, and
+            // IPv6 DNS cannot be represented as uint32_t (inet_addr returns INADDR_NONE).
+            // IPv6 DNS is configured by the server via protocol extensions
+            // (AssignedIPv6Dns1/2 → ApplyClientDns).
+            ppp::vector<ppp::string> dns_v4;
+            for (const auto& addr : dns_addresses) {
+                boost::system::error_code ec;
+                auto ip_addr = boost::asio::ip::make_address(addr, ec);
+                if (!ec && ip_addr.is_v4()) {
+                    dns_v4.emplace_back(addr);
+                }
+            }
+
             ppp::vector<uint32_t> dns_addresses_stloc;
-            Ipep::ToAddresses(dns_addresses, dns_addresses_stloc);
+            Ipep::ToAddresses(dns_v4, dns_addresses_stloc);
 
             return ITap::Create(context, 
                 dev, 

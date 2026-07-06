@@ -1365,6 +1365,10 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         }
     }
 
+    // Store configuration (before GetNetworkInterface so GetDnsAddresses can access it)
+    configuration_path_ = path;
+    configuration_ = configuration;
+
     // Parse network interface configuration
     std::shared_ptr<NetworkInterface> network_interface = GetNetworkInterface(argc, argv);
     if (NULLPTR == network_interface)
@@ -1372,9 +1376,6 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         return -1;
     }
 
-    // Store configuration
-    configuration_path_ = path;
-    configuration_ = configuration;
     network_interface_ = network_interface;
     
     // Configure DNS settings
@@ -1731,10 +1732,6 @@ void PppApplication::PrintHelpInformation() noexcept
 
     printf("└──────────────────────────────────────────┴──────────────────────────────────────────────────┴─────────────────────────┘\n\n");
     
-    // Contact information
-    printf("CONTACT:\n");
-    printf("    Telegram: https://t.me/supersocksr_group\n\n");
-    
     // Dependencies information
     printf("DEPENDENCIES:\n");
     printf("    boost@%s", GetBoostVersionString().c_str());
@@ -1854,8 +1851,25 @@ void PppApplication::GetDnsAddresses(ppp::vector<boost::asio::ip::address>& addr
         boost::system::error_code ec;
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_1, ec));
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_2, ec));
-        addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_1_V6, ec));
-        addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_2_V6, ec));
+
+        // Read IPv6 DNS from config file instead of hardcoded defaults,
+        // avoiding INADDR_NONE (255.255.255.255) in TAP display.
+        if (configuration_ != NULLPTR) {
+            if (!configuration_->server.ipv6.dns1.empty()) {
+                boost::system::error_code ec6;
+                auto addr6 = ppp::StringToAddress(configuration_->server.ipv6.dns1, ec6);
+                if (!ec6 && addr6.is_v6()) {
+                    addresses.emplace_back(addr6);
+                }
+            }
+            if (!configuration_->server.ipv6.dns2.empty()) {
+                boost::system::error_code ec6;
+                auto addr6 = ppp::StringToAddress(configuration_->server.ipv6.dns2, ec6);
+                if (!ec6 && addr6.is_v6()) {
+                    addresses.emplace_back(addr6);
+                }
+            }
+        }
     }
 }
 
@@ -2668,7 +2682,13 @@ int main(int argc, const char* argv[]) noexcept
 {
     // Configure real-time mode
     ppp::RT = ppp::ToBoolean(ppp::GetCommandArgument("--rt", argc, argv, "y").data());
-    
+
+#if defined(_WIN32)
+    // Switch console to UTF-8 code page so Unicode box-drawing characters
+    // (├ ─ │ └ ┬ ┐ ┘ ┤ etc.) render correctly instead of showing as '?'.
+    ::SetConsoleOutputCP(65001);
+#endif
+
     // Initialize global state
     ppp::global::cctor();
 
