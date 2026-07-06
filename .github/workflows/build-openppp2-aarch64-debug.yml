@@ -270,7 +270,7 @@ jobs:
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload Debug artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: openppp2-linux-aarch64-debug
           path: build/${{ env.ARTIFACT_NAME }}

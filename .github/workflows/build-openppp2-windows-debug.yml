@@ -181,7 +181,7 @@ jobs:
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload Debug artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: openppp2-windows-x64-debug
           path: |

@@ -107,7 +107,7 @@ jobs:
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.PKG_DIR }}/
