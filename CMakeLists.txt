@@ -113,6 +113,11 @@ IF(PLATFORM_SYSTEM_DARWIN)
     # The mandatory version is C++17.
     SET(CMAKE_CXX_STANDARD 17)
 
+    # Set macOS deployment target to ensure the binary runs on older macOS versions.
+    # Without this, the compiler may reference libc++ symbols only available on the
+    # latest SDK (e.g. __from_native_exception_pointer), causing dyld crashes.
+    SET(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+
     ADD_DEFINITIONS(-D_GNU_SOURCE)
     ADD_DEFINITIONS(-DBOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED)
 ELSE()

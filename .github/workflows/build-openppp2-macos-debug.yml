@@ -65,6 +65,9 @@ jobs:
 
           # Build with Debug configuration (enables PPP_LOG_VERBOSE)
           rm -rf build && mkdir build && cd build
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          export CXXFLAGS="-mmacosx-version-min=11.0"
+          export CFLAGS="-mmacosx-version-min=11.0"
           cmake .. \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_OSX_ARCHITECTURES=${ARCH} \
