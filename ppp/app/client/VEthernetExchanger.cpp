@@ -315,27 +315,10 @@ namespace ppp {
                     }
                 }
 #elif defined(_WIN32)
-                // On Windows, use IP_UNICAST_IF to bind the socket to the physical NIC interface.
-                // This prevents routing loops when the TAP adapter becomes the default gateway.
-                // IPv6 connections do NOT need interface binding (same as Linux behavior),
-                // because the VPN operates at IPv4 layer and IPv6 routing is independent.
-                if (!remoteIP.is_loopback() && remoteIP.is_v4()) {
-                    auto underlying_ni = switcher_->GetUnderlyingNetworkInterface();
-                    if (NULLPTR != underlying_ni && underlying_ni->Index > 0) {
-                        int if_index = underlying_ni->Index;
-                        LOG_DEBUG("VEthernetExchanger::OpenTransmission: binding to NIC if_index=%d", if_index);
-                        // IP_UNICAST_IF = 31 (IPPROTO_IP level)
-                        // The value is the interface index in network byte order (ULONG)
-                        ULONG index = htonl((ULONG)if_index);
-                        int rc = ::setsockopt(socket->native_handle(), IPPROTO_IP, 31, (const char*)&index, sizeof(index));
-                        if (rc < 0) {
-                            LOG_DEBUG("VEthernetExchanger::OpenTransmission: IP_UNICAST_IF(v4) failed, if_index=%d, error=%d", if_index, WSAGetLastError());
-                        }
-                    }
-                    else {
-                        LOG_DEBUG("VEthernetExchanger::OpenTransmission: underlying NIC not found, Index=%d", underlying_ni ? underlying_ni->Index : -1);
-                    }
-                }
+                // Windows 不绑定物理网卡接口索引，依赖路由表防止环路。
+                // 原版 openppp2_main 没有 IP_UNICAST_IF 也能正常工作，
+                // 因为 AddRoute() 机制已经将 VPN 服务器 IP 通过物理网卡添加了特定路由。
+                // 移除 IP_UNICAST_IF 避免物理网卡索引变化（WiFi 重连、睡眠唤醒等）导致断流。
 #endif
 
                 bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y);
