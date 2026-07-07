@@ -728,16 +728,16 @@ namespace ppp {
                 if (static_mode_) {
                     auto& static_ = configuration_->udp.static_;
                     if (static_.quic && destinationPort == PPP_HTTPS_SYS_PORT) {
-                        if (exchanger->StaticEchoAllocated()) {
+                        if (exchanger->StaticEchoReady()) {
                             return exchanger->StaticEchoPacketToRemoteExchanger(frame);
                         }
                     }
                     elif(static_.dns && destinationPort == PPP_DNS_SYS_PORT) {
-                        if (exchanger->StaticEchoAllocated()) {
+                        if (exchanger->StaticEchoReady()) {
                             return exchanger->StaticEchoPacketToRemoteExchanger(frame);
                         }
                     }
-                    elif(exchanger->StaticEchoAllocated()) {
+                    elif(exchanger->StaticEchoReady()) {
                         return exchanger->StaticEchoPacketToRemoteExchanger(frame);
                     }
                 }
@@ -854,7 +854,7 @@ namespace ppp {
                 }
 
                 auto& static_ = configuration_->udp.static_;
-                if ((static_mode_ && static_.icmp) && exchanger->StaticEchoAllocated()) {
+                if ((static_mode_ && static_.icmp) && exchanger->StaticEchoReady()) {
                     return exchanger->StaticEchoPacketToRemoteExchanger(packet.get());
                 }
 
@@ -898,7 +898,7 @@ namespace ppp {
                         }
 
                         auto& static_ = configuration_->udp.static_;
-                        if ((static_mode_ && static_.icmp) && exchanger->StaticEchoAllocated()) {
+                        if ((static_mode_ && static_.icmp) && exchanger->StaticEchoReady()) {
                             static_exchange = true;
                             break;
                         }
