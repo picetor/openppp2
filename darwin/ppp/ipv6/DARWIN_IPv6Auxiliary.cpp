@@ -411,7 +411,9 @@ namespace ppp {
                     }
 
                     if (state.DefaultRouteApplied) {
-                        DeleteRoute(context.InterfaceName, "::", 0, state.DefaultRouteGateway);
+                        // Match the ::/1 + 8000::/1 split added in ApplyClientDefaultRoute
+                        DeleteRoute(context.InterfaceName, "::", 1, state.DefaultRouteGateway);
+                        DeleteRoute(context.InterfaceName, "8000::", 1, state.DefaultRouteGateway);
                     }
 
                     if (state.AddressApplied && address.is_v6() && !state.Address.empty()) {

@@ -113,7 +113,7 @@ namespace ppp {
                     length,
                     socket ? (int)socket->is_open() : -1,
                     (int)disposed_,
-                    socket && socket->is_open() ? socket->remote_endpoint().address().to_string().c_str() : "n/a");
+                    socket && socket->is_open() ? [&]() -> std::string { boost::system::error_code ec_; auto ep = socket->remote_endpoint(ec_); return ec_ ? "n/a" : ep.address().to_string(); }().c_str() : "n/a");
 #else
                 LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d", length);
 #endif

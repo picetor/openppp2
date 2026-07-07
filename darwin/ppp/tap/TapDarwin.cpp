@@ -567,13 +567,13 @@ namespace ppp
                 return NULLPTR;
             }
 
-            IPEndPoint gwEP(ip, 0);
+            IPEndPoint gwEP(gw, 0);
             if (IPEndPoint::IsInvalid(gwEP))
             {
                 return NULLPTR;
             }
 
-            IPEndPoint maskEP(ip, 0);
+            IPEndPoint maskEP(mask, 0);
             if (IPEndPoint::IsInvalid(maskEP))
             {
                 return NULLPTR;
