@@ -2096,12 +2096,6 @@ bool PppApplication::OnTick(uint64_t now) noexcept
     // Update console display
     PrintEnvironmentInformation();
 
-#if defined(_WIN32)
-    // Windows platform calls system functions to optimize the size of the working memory used by the program in order to minimize 
-    // The use of physical memory resources on low memory desktop platforms.
-    ppp::win32::Win32Native::OptimizedProcessWorkingSize();
-#endif
-
     // Check auto-restart timer
     if (GLOBAL_.auto_restart > 0)
     {
