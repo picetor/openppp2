@@ -78,6 +78,8 @@ namespace ppp {
                 virtual bool                                                            Open()                  noexcept;
                 virtual void                                                            Dispose()               noexcept;
                 virtual ITransmissionPtr                                                ConnectTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y) noexcept;
+                bool                                                                    AcquireActiveTransmission(const ContextPtr& context, YieldContext& y) noexcept;
+                void                                                                    ReleaseActiveTransmission() noexcept;
                 
             public:
                 template <typename F>
@@ -266,6 +268,7 @@ namespace ppp {
                 std::shared_ptr<vmux::vmux_net>                                         mux_;
                 uint16_t                                                                mux_vlan_           = 0;
                 std::atomic<int>                                                        connecting_transmissions_ = 0;
+                std::atomic<int>                                                        active_transmissions_ = 0;
                 
                 int                                                                     reconnection_count_ = 0;
 

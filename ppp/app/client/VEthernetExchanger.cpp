@@ -471,6 +471,47 @@ namespace ppp {
                 }
             }
 
+            bool VEthernetExchanger::AcquireActiveTransmission(const ContextPtr& context, YieldContext& y) noexcept {
+                if (NULLPTR == context) {
+                    return false;
+                }
+
+                if (disposed_) {
+                    return false;
+                }
+
+                AppConfigurationPtr configuration = GetConfiguration();
+                int max_active_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
+                uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
+                    static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
+                int active_transmissions = active_transmissions_.load();
+                for (;;) {
+                    if (active_transmissions >= max_active_transmissions) {
+                        if (disposed_ || ppp::threading::Executors::GetTickCount() >= connect_deadline || !Sleep(10, context, y)) {
+                            LOG_DEBUG("VEthernetExchanger::AcquireActiveTransmission: too many active sub-transmissions, active=%d, limit=%d",
+                                active_transmissions, max_active_transmissions);
+                            return false;
+                        }
+
+                        active_transmissions = active_transmissions_.load();
+                        continue;
+                    }
+
+                    if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions + 1)) {
+                        return true;
+                    }
+                }
+            }
+
+            void VEthernetExchanger::ReleaseActiveTransmission() noexcept {
+                int active_transmissions = active_transmissions_.load();
+                while (active_transmissions > 0) {
+                    if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions - 1)) {
+                        break;
+                    }
+                }
+            }
+
 #if defined(_ANDROID)
             bool VEthernetExchanger::AwaitJniAttachThread(const ContextPtr& context, YieldContext& y) noexcept {
                 // On the Android platform, when the VPN tunnel transport layer is enabled, 

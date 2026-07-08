@@ -204,6 +204,7 @@ namespace ppp {
 
             private:
                 void                                                        Finalize() noexcept;
+                void                                                        ReleaseActiveTransmission() noexcept;
                 bool                                                        Loopback(ppp::coroutines::YieldContext& y) noexcept;
                 bool                                                        ConnectToPeer(ppp::coroutines::YieldContext& y) noexcept;
                 bool                                                        Spawn(const ppp::function<bool(ppp::coroutines::YieldContext&)>& coroutine) noexcept;
@@ -213,6 +214,7 @@ namespace ppp {
                 std::shared_ptr<VirtualEthernetTcpipConnection>             connection_;
                 std::shared_ptr<RinetdConnection>                           connection_rinetd_;
                 std::shared_ptr<vmux::vmux_skt>                             connection_mux_;                       
+                bool                                                        active_transmission_acquired_ = false;
             };
         }
     }
