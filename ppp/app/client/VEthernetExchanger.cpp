@@ -445,12 +445,17 @@ namespace ppp {
                     }
                 }
 
+                LOG_DEBUG("VEthernetExchanger::ConnectTransmission: pending acquired, pending=%d, limit=%d, active=%d",
+                    connecting_transmissions_.load(), max_connecting_transmissions, active_transmissions_.load());
+
 #if defined(_WIN32)
                 for (;;) {
                     UInt64 now = ppp::threading::Executors::GetTickCount();
                     UInt64 next_tick = next_direct_transmission_tick_.load();
                     if (now < next_tick) {
                         UInt64 wait = std::min<UInt64>(next_tick - now, 50);
+                        LOG_DEBUG("VEthernetExchanger::ConnectTransmission: pacing direct sub-transmission, wait=%llu, pending=%d, active=%d",
+                            (unsigned long long)wait, connecting_transmissions_.load(), active_transmissions_.load());
                         if (disposed_ || now >= connect_deadline || !Sleep(static_cast<int>(wait), context, y)) {
                             return NULLPTR;
                         }
@@ -484,6 +489,8 @@ namespace ppp {
                     }
                 }
                 if (noerror) {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: handshake success, this=%p, pending=%d, active=%d",
+                        (void*)transmission.get(), connecting_transmissions_.load(), active_transmissions_.load());
                     return transmission;
                 }
                 else {
@@ -524,6 +531,8 @@ namespace ppp {
                     }
 
                     if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions + 1)) {
+                        LOG_DEBUG("VEthernetExchanger::AcquireActiveTransmission: acquired, active=%d, limit=%d, pending=%d",
+                            active_transmissions + 1, max_active_transmissions, connecting_transmissions_.load());
                         return true;
                     }
                 }
@@ -533,6 +542,8 @@ namespace ppp {
                 int active_transmissions = active_transmissions_.load();
                 while (active_transmissions > 0) {
                     if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions - 1)) {
+                        LOG_DEBUG("VEthernetExchanger::ReleaseActiveTransmission: released, active=%d, pending=%d",
+                            active_transmissions - 1, connecting_transmissions_.load());
                         break;
                     }
                 }
@@ -626,15 +637,18 @@ namespace ppp {
                 while (!disposed_) {
                     uint16_t max_connections = switcher_->mux_;
                     if (max_connections == 0) {
+                        LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux disabled by switcher");
                         break;
                     }
 
                     if (network_state_.load() != NetworkState_Established) {
+                        LOG_DEBUG("VEthernetExchanger::DoMuxEvents: network not established, state=%d", (int)network_state_.load());
                         break;
                     }
 
                     AppConfigurationPtr configuration = GetConfiguration();
                     if (NULLPTR == configuration) {
+                        LOG_DEBUG("VEthernetExchanger::DoMuxEvents: configuration missing");
                         break;
                     }
 
@@ -664,6 +678,8 @@ namespace ppp {
                         }
 
                         if (breaking) {
+                            LOG_DEBUG("VEthernetExchanger::DoMuxEvents: keeping existing mux, state=%d, established=%d, disposed=%d",
+                                (int)GetMuxNetworkState(), (int)mux->is_established(), (int)mux->is_disposed());
                             break;
                         }
                     }
@@ -715,6 +731,8 @@ namespace ppp {
                             bool ok = false;
                             if (!disposed_) {
                                 uint16_t max_connections = mux->get_max_connections();
+                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: sending mux request, vlan=%u, max_connections=%u, acceleration=%d",
+                                    mux->Vlan, max_connections, (int)((switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0));
                                 ok = DoMux(vnet_transmission, mux->Vlan, max_connections, (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0, 0, y);
                             }
 
@@ -965,6 +983,8 @@ namespace ppp {
             }
 
             bool VEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
+                LOG_DEBUG("VEthernetExchanger::OnMux: vlan=%u, max_connections=%u, acceleration=%d, ordering_caps=%u",
+                    vlan, max_connections, (int)acceleration, (unsigned int)ordering_caps);
                 std::shared_ptr<vmux::vmux_net> mux = mux_;
                 if (NULLPTR != mux) {
                     bool successed = false;
@@ -981,8 +1001,13 @@ namespace ppp {
                     }
                     
                     if (!successed) {
+                        LOG_DEBUG("VEthernetExchanger::OnMux: mux rejected, local_vlan=%u, local_max=%u, disposed=%d",
+                            mux->Vlan, mux->get_max_connections(), (int)mux->is_disposed());
                         mux->close_exec();
                     }
+                }
+                else {
+                    LOG_DEBUG("VEthernetExchanger::OnMux: no local mux exists");
                 }
 
                 return true;

@@ -137,9 +137,12 @@ namespace ppp {
 
                     if (auto mux = exchanger->GetMux(); NULLPTR != mux) {
                         auto network_state = exchanger->GetMuxNetworkState();
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: mux present, state=%d, established=%d, disposed=%d, host=%s, port=%d",
+                            (int)network_state, (int)mux->is_established(), (int)mux->is_disposed(), host.data(), port);
                         if (network_state == NetworkState::NetworkState_Established) {
                             std::shared_ptr<VmuxSktPtr> pmux_connection = make_shared_object<VmuxSktPtr>();
                             if (NULLPTR == pmux_connection) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: allocation failed, host=%s, port=%d", host.data(), port);
                                 return -1;
                             }
 
@@ -151,6 +154,7 @@ namespace ppp {
                                 host,
                                 port,
                                 pmux_connection)) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: connect_yield failed, host=%s, port=%d", host.data(), port);
                                 return -1;
                             }
                             else {
@@ -159,6 +163,7 @@ namespace ppp {
                             
                             VmuxSktPtr mux_connection = *pmux_connection;
                             if (NULLPTR == mux_connection) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: connect_yield returned null, host=%s, port=%d", host.data(), port);
                                 return -1;
                             }
 
@@ -177,8 +182,12 @@ namespace ppp {
                                 };
 
                             out = mux_connection;
+                            LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: connected, host=%s, port=%d", host.data(), port);
                             return 0;
                         }
+                    }
+                    else {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: no mux, host=%s, port=%d", host.data(), port);
                     }
 
                     return 1;

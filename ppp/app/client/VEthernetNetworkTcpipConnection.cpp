@@ -144,19 +144,31 @@ namespace ppp {
                     auto self = shared_from_this();
                     auto strand = GetStrand();
                     boost::asio::ip::tcp::endpoint remoteEP = GetRemoteEndPoint();
+                    ppp::string remote_host = ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP);
+                    LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: begin, host=%s, port=%d",
+                        remote_host.data(), remoteEP.port());
 
                     int rinetd_status = Rinetd(self, exchanger, context, strand, configuration, socket, remoteEP, connection_rinetd_, y);
                     if (rinetd_status < 1) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: rinetd selected, status=%d, host=%s, port=%d",
+                            rinetd_status, remote_host.data(), remoteEP.port());
                         return rinetd_status == 0;
                     }
 
                     int mux_status = Mux(self, exchanger, remoteEP, socket, connection_mux_, y);
                     if (mux_status < 1) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: mux selected, status=%d, host=%s, port=%d",
+                            mux_status, remote_host.data(), remoteEP.port());
                         return mux_status == 0;
                     }
 
+                    LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: using direct sub-transmission, host=%s, port=%d, mux_status=%d",
+                        remote_host.data(), remoteEP.port(), mux_status);
+
                     bool active_acquired = exchanger->AcquireActiveTransmission(context, y);
                     if (!active_acquired) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: active slot denied, host=%s, port=%d",
+                            remote_host.data(), remoteEP.port());
                         return false;
                     }
                     active_transmission_acquired_ = true;
@@ -182,6 +194,8 @@ namespace ppp {
 
                     std::shared_ptr<ppp::transmissions::ITransmission> transmission = exchanger->ConnectTransmission(context, strand, y);
                     if (NULLPTR == transmission) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: ConnectTransmission failed, host=%s, port=%d",
+                            remote_host.data(), remoteEP.port());
                         return false;
                     }
 
@@ -201,12 +215,16 @@ namespace ppp {
 
                     bool ok = connection->Connect(y, transmission, ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP), remoteEP.port());
                     if (!ok) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: remote CONNECT failed, host=%s, port=%d",
+                            remote_host.data(), remoteEP.port());
                         IDisposable::DisposeReferences(connection, transmission);
                         return false;
                     }
 
                     connection_ = std::move(connection);
                     active_guard.Detach();
+                    LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: direct connected, host=%s, port=%d",
+                        remote_host.data(), remoteEP.port());
                 } while (false);
                 return true;
             }
