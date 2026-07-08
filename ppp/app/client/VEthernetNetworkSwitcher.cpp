@@ -1958,6 +1958,7 @@ namespace ppp {
                 // New the beast network bandwidth aggregator.
                 if (static_mode_ && configuration_->udp.static_.aggligator > 0) {
                     if (!PreparedAggregator()) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: PreparedAggregator failed");
                         return false;
                     }
                 }
@@ -1983,6 +1984,7 @@ namespace ppp {
 
                     // Add VPN remote server to IPList bypass route table iplist.
                     if (!AddRemoteEndPointToIPList(underlying_ni->GatewayServer)) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: AddRemoteEndPointToIPList failed");
                         return false;
                     }
                 }
@@ -2026,6 +2028,7 @@ namespace ppp {
 #if defined(_WIN32)
                     // Use the Paper-Airplane NSP/LSP session layer forwarding plugins!
                     if (!UsePaperAirplaneController()) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: UsePaperAirplaneController failed");
                         return false;
                     }
 #endif
@@ -3275,6 +3278,7 @@ namespace ppp {
                 // Initialize and try the proxy forwarding object if the link does require proxy forwarding services.
                 IForwardingPtr forwarding = make_shared_object<IForwarding>(GetContext(), configuration_);
                 if (NULLPTR == forwarding) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: forwarding is null");
                     return false;
                 }
                 elif(forwarding->Open()) {
@@ -3300,6 +3304,7 @@ namespace ppp {
                 static constexpr ppp::coroutines::YieldContext* y = NULLPTR;
                 
                 if (!exchanger->GetRemoteEndPoint(y, hostname, address, path, port, protocol_type, server, remoteEP)) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: GetRemoteEndPoint failed");
                     return false;
                 }
                 else {
@@ -3345,6 +3350,7 @@ namespace ppp {
                 boost::asio::ip::address remoteIP = remoteEP.address();
                 IPEndPoint serverEP = IPEndPoint::ToEndPoint(remoteEP);
                 if (IPEndPoint::IsInvalid(serverEP)) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: serverEP is invalid");
                     return false;
                 }
 
@@ -3413,6 +3419,7 @@ namespace ppp {
 
                 for (const ppp::string& server_string : configuration_->udp.static_.servers) {
                     if (!StaticEchoAddRemoteEndPoint(server_string)) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: StaticEchoAddRemoteEndPoint failed");
                         return false;
                     }
                 }
@@ -3424,6 +3431,7 @@ namespace ppp {
                         aggligator->close();
                     }
                     elif(!aggligator->client_open(configuration_->udp.static_.aggligator, servers)) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: aggligator client_open failed");
                         return false;
                     }
                 }
