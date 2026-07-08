@@ -420,7 +420,11 @@ namespace ppp {
                 }
 
                 AppConfigurationPtr configuration = GetConfiguration();
+#if defined(_WIN32)
+                int max_connecting_transmissions = configuration ? std::max<int>(2, configuration->concurrent * 2) : 2;
+#else
                 int max_connecting_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
+#endif
                 uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
                     static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
                 int connecting_transmissions = connecting_transmissions_.load();
@@ -440,6 +444,24 @@ namespace ppp {
                         break;
                     }
                 }
+
+#if defined(_WIN32)
+                for (;;) {
+                    UInt64 now = ppp::threading::Executors::GetTickCount();
+                    UInt64 next_tick = next_direct_transmission_tick_.load();
+                    if (now < next_tick) {
+                        UInt64 wait = std::min<UInt64>(next_tick - now, 50);
+                        if (disposed_ || now >= connect_deadline || !Sleep(static_cast<int>(wait), context, y)) {
+                            return NULLPTR;
+                        }
+                        continue;
+                    }
+
+                    if (next_direct_transmission_tick_.compare_exchange_weak(next_tick, now + 75)) {
+                        break;
+                    }
+                }
+#endif
 
                 struct PendingTransmissionGuard final {
                     std::atomic<int>& value;
@@ -481,7 +503,11 @@ namespace ppp {
                 }
 
                 AppConfigurationPtr configuration = GetConfiguration();
+#if defined(_WIN32)
+                int max_active_transmissions = configuration ? std::max<int>(4, configuration->concurrent * 4) : 4;
+#else
                 int max_active_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
+#endif
                 uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
                     static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
                 int active_transmissions = active_transmissions_.load();
