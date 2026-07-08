@@ -1734,7 +1734,9 @@ namespace ppp {
                 if (!socket->is_v6 && serverEP.address().is_v6()) {
                     boost::asio::ip::address_v6 address_v6 = serverEP.address().to_v6();
                     if (address_v6.is_v4_mapped()) {
-                        serverEP = boost::asio::ip::udp::endpoint(address_v6.to_v4(), serverEP.port());
+                        boost::asio::ip::address_v6::bytes_type bytes = address_v6.to_bytes();
+                        boost::asio::ip::address_v4::bytes_type v4_bytes = { bytes[12], bytes[13], bytes[14], bytes[15] };
+                        serverEP = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4(v4_bytes), serverEP.port());
                     }
                 }
                 if (int serverPort = serverEP.port(); serverPort > IPEndPoint::MinPort && serverPort <= IPEndPoint::MaxPort) {
