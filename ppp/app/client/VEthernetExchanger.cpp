@@ -1451,10 +1451,6 @@ namespace ppp {
                 return socket->is_open() && static_echo_timeout_ != 0 && static_echo_session_id_ != 0 && static_echo_remote_port_ != 0;
             }
 
-            bool VEthernetExchanger::StaticEchoReady() noexcept {
-                return StaticEchoAllocated() && static_echo_input_;
-            }
-
             bool VEthernetExchanger::StaticEchoSwapAsynchronousSocket() noexcept {
                 if (disposed_) {
                     return false;

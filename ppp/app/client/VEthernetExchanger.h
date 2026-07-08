@@ -103,7 +103,6 @@ namespace ppp {
                 virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
                 virtual bool                                                            Update() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;
-                bool                                                                    StaticEchoReady() noexcept;
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP) noexcept;
 
             public:
