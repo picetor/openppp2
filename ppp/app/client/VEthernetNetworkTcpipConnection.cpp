@@ -34,7 +34,6 @@ namespace ppp {
                 std::shared_ptr<VirtualEthernetTcpipConnection> connection = std::move(connection_); 
                 std::shared_ptr<RinetdConnection> connection_rinetd = std::move(connection_rinetd_); 
                 std::shared_ptr<vmux::vmux_skt> connection_mux = std::move(connection_mux_);
-                ReleaseActiveTransmission();
 
                 if (NULLPTR != connection) {
                     connection->Dispose();
@@ -46,17 +45,6 @@ namespace ppp {
 
                 if (NULLPTR != connection_mux) {
                     connection_mux->close();
-                }
-            }
-
-            void VEthernetNetworkTcpipConnection::ReleaseActiveTransmission() noexcept {
-                if (!active_transmission_acquired_) {
-                    return;
-                }
-
-                active_transmission_acquired_ = false;
-                if (std::shared_ptr<VEthernetExchanger> exchanger = exchanger_; NULLPTR != exchanger) {
-                    exchanger->ReleaseActiveTransmission();
                 }
             }
 
@@ -100,7 +88,6 @@ namespace ppp {
                 if (std::shared_ptr<VirtualEthernetTcpipConnection> connection = connection_; NULLPTR != connection) {
                     bool ok = connection->Run(y);
                     IDisposable::DisposeReferences(connection);
-                    ReleaseActiveTransmission();
                     return ok;
                 }
 
@@ -165,33 +152,6 @@ namespace ppp {
                     LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: using direct sub-transmission, host=%s, port=%d, mux_status=%d",
                         remote_host.data(), remoteEP.port(), mux_status);
 
-                    bool active_acquired = exchanger->AcquireActiveTransmission(context, y);
-                    if (!active_acquired) {
-                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: active slot denied, host=%s, port=%d",
-                            remote_host.data(), remoteEP.port());
-                        return false;
-                    }
-                    active_transmission_acquired_ = true;
-
-                    struct ActiveTransmissionGuard final {
-                        VEthernetNetworkTcpipConnection* owner;
-                        bool detached = false;
-
-                        ~ActiveTransmissionGuard() noexcept {
-                            Release();
-                        }
-
-                        void Release() noexcept {
-                            if (!detached && NULLPTR != owner) {
-                                owner->ReleaseActiveTransmission();
-                            }
-                        }
-
-                        void Detach() noexcept {
-                            detached = true;
-                        }
-                    } active_guard{ this };
-
                     std::shared_ptr<ppp::transmissions::ITransmission> transmission = exchanger->ConnectTransmission(context, strand, y);
                     if (NULLPTR == transmission) {
                         LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: ConnectTransmission failed, host=%s, port=%d",
@@ -222,7 +182,6 @@ namespace ppp {
                     }
 
                     connection_ = std::move(connection);
-                    active_guard.Detach();
                     LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: direct connected, host=%s, port=%d",
                         remote_host.data(), remoteEP.port());
                 } while (false);

@@ -419,63 +419,6 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                AppConfigurationPtr configuration = GetConfiguration();
-#if defined(_WIN32)
-                int max_connecting_transmissions = configuration ? std::max<int>(2, configuration->concurrent * 2) : 2;
-#else
-                int max_connecting_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
-#endif
-                uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
-                    static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
-                int connecting_transmissions = connecting_transmissions_.load();
-                for (;;) {
-                    if (connecting_transmissions >= max_connecting_transmissions) {
-                        if (disposed_ || ppp::threading::Executors::GetTickCount() >= connect_deadline || !Sleep(10, context, y)) {
-                            LOG_DEBUG("VEthernetExchanger::ConnectTransmission: too many pending sub-transmissions, pending=%d, limit=%d",
-                                connecting_transmissions, max_connecting_transmissions);
-                            return NULLPTR;
-                        }
-
-                        connecting_transmissions = connecting_transmissions_.load();
-                        continue;
-                    }
-
-                    if (connecting_transmissions_.compare_exchange_weak(connecting_transmissions, connecting_transmissions + 1)) {
-                        break;
-                    }
-                }
-
-                LOG_DEBUG("VEthernetExchanger::ConnectTransmission: pending acquired, pending=%d, limit=%d, active=%d",
-                    connecting_transmissions_.load(), max_connecting_transmissions, active_transmissions_.load());
-
-#if defined(_WIN32)
-                for (;;) {
-                    UInt64 now = ppp::threading::Executors::GetTickCount();
-                    UInt64 next_tick = next_direct_transmission_tick_.load();
-                    if (now < next_tick) {
-                        UInt64 wait = std::min<UInt64>(next_tick - now, 50);
-                        LOG_DEBUG("VEthernetExchanger::ConnectTransmission: pacing direct sub-transmission, wait=%llu, pending=%d, active=%d",
-                            (unsigned long long)wait, connecting_transmissions_.load(), active_transmissions_.load());
-                        if (disposed_ || now >= connect_deadline || !Sleep(static_cast<int>(wait), context, y)) {
-                            return NULLPTR;
-                        }
-                        continue;
-                    }
-
-                    if (next_direct_transmission_tick_.compare_exchange_weak(next_tick, now + 75)) {
-                        break;
-                    }
-                }
-#endif
-
-                struct PendingTransmissionGuard final {
-                    std::atomic<int>& value;
-
-                    ~PendingTransmissionGuard() noexcept {
-                        --value;
-                    }
-                } pending_guard{ connecting_transmissions_ };
-
                 ITransmissionPtr transmission = OpenTransmission(context, strand, y);
                 if (NULLPTR == transmission) {
                     return NULLPTR;
@@ -489,64 +432,19 @@ namespace ppp {
                     }
                 }
                 if (noerror) {
-                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: handshake success, this=%p, pending=%d, active=%d",
-                        (void*)transmission.get(), connecting_transmissions_.load(), active_transmissions_.load());
                     return transmission;
                 }
                 else {
-                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: handshake failed, disposing sub-transmission, this=%p", (void*)transmission.get());
                     transmission->Dispose();
                     return NULLPTR;
                 }
             }
 
             bool VEthernetExchanger::AcquireActiveTransmission(const ContextPtr& context, YieldContext& y) noexcept {
-                if (NULLPTR == context) {
-                    return false;
-                }
-
-                if (disposed_) {
-                    return false;
-                }
-
-                AppConfigurationPtr configuration = GetConfiguration();
-#if defined(_WIN32)
-                int max_active_transmissions = configuration ? std::max<int>(4, configuration->concurrent * 4) : 4;
-#else
-                int max_active_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
-#endif
-                uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
-                    static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
-                int active_transmissions = active_transmissions_.load();
-                for (;;) {
-                    if (active_transmissions >= max_active_transmissions) {
-                        if (disposed_ || ppp::threading::Executors::GetTickCount() >= connect_deadline || !Sleep(10, context, y)) {
-                            LOG_DEBUG("VEthernetExchanger::AcquireActiveTransmission: too many active sub-transmissions, active=%d, limit=%d",
-                                active_transmissions, max_active_transmissions);
-                            return false;
-                        }
-
-                        active_transmissions = active_transmissions_.load();
-                        continue;
-                    }
-
-                    if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions + 1)) {
-                        LOG_DEBUG("VEthernetExchanger::AcquireActiveTransmission: acquired, active=%d, limit=%d, pending=%d",
-                            active_transmissions + 1, max_active_transmissions, connecting_transmissions_.load());
-                        return true;
-                    }
-                }
+                return true;
             }
 
             void VEthernetExchanger::ReleaseActiveTransmission() noexcept {
-                int active_transmissions = active_transmissions_.load();
-                while (active_transmissions > 0) {
-                    if (active_transmissions_.compare_exchange_weak(active_transmissions, active_transmissions - 1)) {
-                        LOG_DEBUG("VEthernetExchanger::ReleaseActiveTransmission: released, active=%d, pending=%d",
-                            active_transmissions - 1, connecting_transmissions_.load());
-                        break;
-                    }
-                }
             }
 
 #if defined(_ANDROID)

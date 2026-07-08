@@ -267,9 +267,6 @@ namespace ppp {
 
                 std::shared_ptr<vmux::vmux_net>                                         mux_;
                 uint16_t                                                                mux_vlan_           = 0;
-                std::atomic<int>                                                        connecting_transmissions_ = 0;
-                std::atomic<int>                                                        active_transmissions_ = 0;
-                std::atomic<UInt64>                                                     next_direct_transmission_tick_ = 0;
                 
                 int                                                                     reconnection_count_ = 0;
 

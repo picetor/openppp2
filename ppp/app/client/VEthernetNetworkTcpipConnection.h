@@ -250,7 +250,6 @@ namespace ppp {
                 std::shared_ptr<VirtualEthernetTcpipConnection>             connection_;
                 std::shared_ptr<RinetdConnection>                           connection_rinetd_;
                 std::shared_ptr<vmux::vmux_skt>                             connection_mux_;                       
-                bool                                                        active_transmission_acquired_ = false;
             };
         }
     }
