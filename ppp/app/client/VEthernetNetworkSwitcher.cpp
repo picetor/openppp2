@@ -222,9 +222,6 @@ namespace ppp {
                 // Protocol dispatch based on IPv6 Next Header field
                 Byte next_header = ipv6_header->NextHeader;
 
-                LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: processing, next_header=%d (TCP=%d,UDP=%d,ICMPv6=%d), len=%d",
-                    (int)next_header, IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMPV6, packet_length);
-
                 // TCP (6): forward blindly via NAT (same as existing behavior)
                 if (next_header == IPPROTO_TCP) {
                     std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;

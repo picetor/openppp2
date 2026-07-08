@@ -158,7 +158,6 @@ namespace ppp {
                 }
 
                 if (NULLPTR != packet) {
-                    LOG_DEBUG("ITransmission::Read: success, outlen=%d, handshaked=%d", outlen, transmission->handshaked_);
                     return packet;
                 }
                 else {
@@ -249,8 +248,6 @@ namespace ppp {
                     return false;
                 }
 
-                LOG_DEBUG("ITransmission::Write: encrypt ok, packet_length=%d, messages_size=%d, handshaked=%d",
-                    packet_length, messages_size, transmission->handshaked_);
                 return transmission->WriteBytes(messages, messages_size, cb);
             }
 
