@@ -139,6 +139,33 @@ namespace ppp {
                         auto network_state = exchanger->GetMuxNetworkState();
                         LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: mux present, state=%d, established=%d, disposed=%d, host=%s, port=%d",
                             (int)network_state, (int)mux->is_established(), (int)mux->is_disposed(), host.data(), port);
+                        if (network_state != NetworkState::NetworkState_Established && !mux->is_disposed()) {
+                            int64_t deadline = ppp::threading::Executors::GetTickCount() + std::max<int>(1000, exchanger->GetConfiguration()->mux.connect.timeout);
+                            for (;;) {
+                                if (exchanger->GetMux().get() != mux.get() || mux->is_disposed()) {
+                                    LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: mux changed while waiting, host=%s, port=%d", host.data(), port);
+                                    return 1;
+                                }
+
+                                network_state = exchanger->GetMuxNetworkState();
+                                if (network_state == NetworkState::NetworkState_Established) {
+                                    LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: mux became established, host=%s, port=%d", host.data(), port);
+                                    break;
+                                }
+
+                                if (ppp::threading::Executors::GetTickCount() >= deadline) {
+                                    LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: wait established timeout, state=%d, host=%s, port=%d",
+                                        (int)network_state, host.data(), port);
+                                    return 1;
+                                }
+
+                                if (!exchanger->Sleep(10, reference->GetContext(), y)) {
+                                    LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: wait interrupted, host=%s, port=%d", host.data(), port);
+                                    return -1;
+                                }
+                            }
+                        }
+
                         if (network_state == NetworkState::NetworkState_Established) {
                             std::shared_ptr<VmuxSktPtr> pmux_connection = make_shared_object<VmuxSktPtr>();
                             if (NULLPTR == pmux_connection) {
