@@ -1582,11 +1582,7 @@ void PppApplication::PrintHelpInformation() noexcept
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--tun-mux=<connections>", 
         col_description_width, "MUX connection count (0=disabled)", 
-#if defined(_WIN32)
-        col_default_width, "2");
-#else
         col_default_width, "0");
-#endif
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--tun-mux-acceleration=<mode>", 
@@ -1943,11 +1939,7 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         ni->FirewallRules = ppp::GetCommandArgument("--firewall-rules", argc, argv, "./firewall-rules.txt");
         
         // Parse MUX settings
-#if defined(_WIN32)
-        ni->Mux = (uint16_t)std::max<int>(0, atoi(ppp::GetCommandArgument("--tun-mux", argc, argv, "2").data()));
-#else
         ni->Mux = (uint16_t)std::max<int>(0, atoi(ppp::GetCommandArgument("--tun-mux", argc, argv).data()));
-#endif
         ni->MuxAcceleration = (uint8_t)std::max<int>(0, atoi(ppp::GetCommandArgument("--tun-mux-acceleration", argc, argv).data()));
         if (ni->MuxAcceleration > PPP_MUX_ACCELERATION_MAX) 
         {
