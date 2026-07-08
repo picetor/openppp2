@@ -143,10 +143,14 @@ namespace ppp {
                     }
 
                     int mux_status = Mux(self, exchanger, remoteEP, socket, connection_mux_, y);
-                    if (mux_status < 1) {
+                    if (mux_status == 0) {
                         LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: mux selected, status=%d, host=%s, port=%d",
                             mux_status, remote_host.data(), remoteEP.port());
-                        return mux_status == 0;
+                        return true;
+                    }
+                    if (mux_status < 0) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: mux connect_yield failed, fallback to direct, host=%s, port=%d",
+                            remote_host.data(), remoteEP.port());
                     }
 
                     LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: using direct sub-transmission, host=%s, port=%d, mux_status=%d",
