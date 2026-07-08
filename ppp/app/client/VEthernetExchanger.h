@@ -80,6 +80,7 @@ namespace ppp {
                 virtual ITransmissionPtr                                                ConnectTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y) noexcept;
                 bool                                                                    AcquireActiveTransmission(const ContextPtr& context, YieldContext& y) noexcept;
                 void                                                                    ReleaseActiveTransmission() noexcept;
+                bool                                                                    Sleep(int64_t timeout, const ContextPtr& context, YieldContext& y) noexcept;
                 
             public:
                 template <typename F>
@@ -192,7 +193,6 @@ namespace ppp {
                 bool                                                                    RegisterAllMappingPorts() noexcept;
                 bool                                                                    ReleaseDeadlineTimer(const boost::asio::deadline_timer* deadline_timer) noexcept;
                 bool                                                                    NewDeadlineTimer(const ContextPtr& context, int64_t timeout, const ppp::function<void(bool)>& event) noexcept;
-                bool                                                                    Sleep(int64_t timeout, const ContextPtr& context, YieldContext& y) noexcept;
 #if defined(_ANDROID)
                 bool                                                                    AwaitJniAttachThread(const ContextPtr& context, YieldContext& y) noexcept;
 #endif
