@@ -419,6 +419,36 @@ namespace ppp {
                     return NULLPTR;
                 }
 
+                AppConfigurationPtr configuration = GetConfiguration();
+                int max_connecting_transmissions = configuration ? std::max<int>(8, configuration->concurrent * 8) : 8;
+                uint64_t connect_deadline = ppp::threading::Executors::GetTickCount() +
+                    static_cast<uint64_t>(std::max<int>(1, configuration ? configuration->tcp.connect.timeout : 5)) * 1000ULL;
+                int connecting_transmissions = connecting_transmissions_.load();
+                for (;;) {
+                    if (connecting_transmissions >= max_connecting_transmissions) {
+                        if (disposed_ || ppp::threading::Executors::GetTickCount() >= connect_deadline || !Sleep(10, context, y)) {
+                            LOG_DEBUG("VEthernetExchanger::ConnectTransmission: too many pending sub-transmissions, pending=%d, limit=%d",
+                                connecting_transmissions, max_connecting_transmissions);
+                            return NULLPTR;
+                        }
+
+                        connecting_transmissions = connecting_transmissions_.load();
+                        continue;
+                    }
+
+                    if (connecting_transmissions_.compare_exchange_weak(connecting_transmissions, connecting_transmissions + 1)) {
+                        break;
+                    }
+                }
+
+                struct PendingTransmissionGuard final {
+                    std::atomic<int>& value;
+
+                    ~PendingTransmissionGuard() noexcept {
+                        --value;
+                    }
+                } pending_guard{ connecting_transmissions_ };
+
                 ITransmissionPtr transmission = OpenTransmission(context, strand, y);
                 if (NULLPTR == transmission) {
                     return NULLPTR;
