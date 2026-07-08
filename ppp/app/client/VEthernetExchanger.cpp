@@ -1459,6 +1459,11 @@ namespace ppp {
                 if (static_echo_timeout_ != UINT64_MAX && switcher_->StaticMode(NULLPTR)) {
                     UInt64 now = ppp::threading::Executors::GetTickCount();
                     if (now >= static_echo_timeout_) {
+                        if (static_echo_input_) {
+                            static_echo_input_ = false;
+                            return StaticEchoNextTimeout();
+                        }
+
                         std::shared_ptr<StaticEchoDatagarmSocket> socket = std::move(static_echo_sockets_[0]);
                         static_echo_sockets_[0] = std::move(static_echo_sockets_[1]);
                         static_echo_sockets_[1] = NULLPTR;
