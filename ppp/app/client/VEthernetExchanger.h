@@ -203,7 +203,8 @@ namespace ppp {
                 public:
                     StaticEchoDatagarmSocket(boost::asio::io_context& context) noexcept 
                         : basic_datagram_socket(context)
-                        , opened(false) {
+                        , opened(false)
+                        , is_v6(false) {
 
                     }
                     virtual ~StaticEchoDatagarmSocket() noexcept {
@@ -216,6 +217,7 @@ namespace ppp {
 
                 public:
                     bool                                                                opened = false;
+                    bool                                                                is_v6 = false;
                 };
                 bool                                                                    StaticEchoAddRemoteEndPoint(boost::asio::ip::udp::endpoint& remoteEP) noexcept;
                 boost::asio::ip::udp::endpoint                                          StaticEchoGetRemoteEndPoint() noexcept;

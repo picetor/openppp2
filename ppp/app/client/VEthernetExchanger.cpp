@@ -1731,6 +1731,12 @@ namespace ppp {
                 }
 
                 boost::asio::ip::udp::endpoint serverEP = StaticEchoGetRemoteEndPoint();
+                if (!socket->is_v6 && serverEP.address().is_v6()) {
+                    boost::asio::ip::address_v6 address_v6 = serverEP.address().to_v6();
+                    if (address_v6.is_v4_mapped()) {
+                        serverEP = boost::asio::ip::udp::endpoint(address_v6.to_v4(), serverEP.port());
+                    }
+                }
                 if (int serverPort = serverEP.port(); serverPort > IPEndPoint::MinPort && serverPort <= IPEndPoint::MaxPort) {
                     std::shared_ptr<ppp::transmissions::ITransmissionStatistics> statistics = switcher_->GetStatistics();
                     boost::asio::post(socket->get_executor(),
@@ -2027,6 +2033,7 @@ namespace ppp {
 #endif
                     // Mark that the socket has been opened.
                     socket.opened = opened;
+                    socket.is_v6 = is_v6;
 
                     // Set the timeout period for closing and re-opening the socket next-timed.
                     ok = StaticEchoNextTimeout();
