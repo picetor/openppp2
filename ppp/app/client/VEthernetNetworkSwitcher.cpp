@@ -2091,22 +2091,37 @@ namespace ppp {
                         if (NULLPTR != dns_guard_timer_) {
                             dns_guard_timer_->TickEvent = 
                                 [self, tap_if_index](ppp::threading::Timer* sender, ppp::threading::Timer::TickEventArgs& e) noexcept {
-                                    // Re-apply loopback DNS to all non-TAP NICs
-                                    for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
-                                        if (if_index != tap_if_index) {
-                                            ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
-                                        }
-                                    }
-                                    // Re-apply IPv4 loopback DNS via WMI
-                                    ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
-                                    if (ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
-                                        for (auto& ni : interfaces) {
-                                            if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
-                                                ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
-                                                ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
+                                    // Run DNS guard on a background thread to avoid blocking the main io_context.
+                                    // SetDnsAddressesV6 uses ::system("netsh ...") and GetAllNetworkInterfaces uses
+                                    // WMI COM calls — both are synchronous and can block for 100ms~2000ms+.
+                                    // Blocking the main io_context would freeze all network I/O (TAP reads,
+                                    // keepalive, mux heartbeat, TCP forwarding), causing the entire tunnel to stall.
+                                    std::thread([self, tap_if_index]() noexcept {
+                                        // This thread runs blocking DNS guard operations (netsh + WMI) that would
+                                        // freeze the main io_context if executed inline. Each call to netsh or WMI
+                                        // can block for 100ms~2000ms+, which would stall all network I/O.
+                                        HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
+                                        if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE)
+                                        {
+                                            // Re-apply loopback DNS to all non-TAP NICs
+                                            for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
+                                                if (if_index != tap_if_index) {
+                                                    ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                                }
                                             }
+                                            // Re-apply IPv4 loopback DNS via WMI
+                                            ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                                            if (ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
+                                                for (auto& ni : interfaces) {
+                                                    if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
+                                                        ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
+                                                        ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
+                                                    }
+                                                }
+                                            }
+                                            CoUninitialize();
                                         }
-                                    }
+                                    }).detach();
                                 };
                             dns_guard_timer_->SetInterval(30000); // Every 30 seconds
                             dns_guard_timer_->Start();
