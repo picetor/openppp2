@@ -38,6 +38,7 @@
 #include <windows/ppp/win32/network/Router.h>
 #include <windows/ppp/net/proxies/HttpProxy.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
+#include <objbase.h>
 #include <netioapi.h>
 #include <ws2tcpip.h>
 #else
