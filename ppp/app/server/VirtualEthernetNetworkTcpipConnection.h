@@ -40,7 +40,12 @@ namespace ppp {
                 virtual bool                                                Run(ppp::coroutines::YieldContext& y) noexcept;
                 virtual void                                                Update() noexcept;
                 virtual void                                                Dispose() noexcept;
-                bool                                                        IsPortAging(uint64_t now) noexcept { return disposed_ || (!mux_ && now >= timeout_); }
+                bool                                                        IsPortAging(uint64_t now) noexcept { 
+                    if (disposed_) return true;
+                    if (mux_) return false;
+                    if (connection_ && connection_->IsLinked()) return false;
+                    return now >= timeout_; 
+                }
 
             private:
                 void                                                        Finalize() noexcept;
