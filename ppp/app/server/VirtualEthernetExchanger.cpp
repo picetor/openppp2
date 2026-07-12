@@ -85,6 +85,10 @@ namespace ppp {
             }
 
             void VirtualEthernetExchanger::Finalize() noexcept {
+                LOG_DEBUG("VirtualEthernetExchanger::Finalize: session ending, session_id=%s, tcp_connections_count=%u, disposed=%d",
+                    ppp::auxiliary::StringAuxiliary::Int128ToGuidString(GetId()).data(),
+                    (unsigned int)tcp_connections_.size(),
+                    (int)disposed_);
                 static_echo_source_ep_ = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4::any(), 0);
                 for (;;) {
                     Dictionary::ReleaseAllObjects(datagrams_);
@@ -1189,13 +1193,20 @@ namespace ppp {
                 if (disposed_) {
                     return false;
                 }
-                
+
+                // Original version does NOT kill the session on idle timeout.
+                // Keepalive only checks liveness; the real session lifetime is
+                // determined by the read loop in VirtualEthernetLinklayer::Run().
                 if (VirtualEthernetLinklayer::DoKeepAlived(transmission, now)) {
                     return true;
                 }
 
-                IDisposable::Dispose(this);
-                return false;
+                // Return true so Update() does not erase this exchanger from the map.
+                // The session stays alive; disposal happens naturally when the
+                // read loop exits (EOF or error), not on idle timeout.
+                LOG_DEBUG("VirtualEthernetExchanger::DoKeepAlived: base DoKeepAlived returned false (LOG ONLY), session stays alive, session_id=%s",
+                    ppp::auxiliary::StringAuxiliary::Int128ToGuidString(GetId()).data());
+                return true;
             }
 
             bool VirtualEthernetExchanger::StaticEchoEchoToDestination(const std::shared_ptr<ppp::app::protocol::VirtualEthernetPacket>& packet, const boost::asio::ip::udp::endpoint& sourceEP) noexcept {

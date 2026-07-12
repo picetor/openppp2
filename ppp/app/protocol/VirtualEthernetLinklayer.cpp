@@ -804,9 +804,13 @@ namespace ppp {
 
                 uint64_t deadline = last_ + static_cast<uint64_t>(max_timeout_ms + EXTRA_FAULT_TOLERANT_TIME);
                 if (now >= deadline) {
-                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: idle timeout, now=%llu, deadline=%llu, last=%llu",
-                        (unsigned long long)now, (unsigned long long)deadline, (unsigned long long)last_);
-                    return false;   // idle timeout exceeded -> dead connection
+                    // Original version has no idle-timeout death logic.
+                    // Keepalive is for liveness check only; the session is kept alive
+                    // by the read loop in VirtualEthernetLinklayer::Run().
+                    // We log but do NOT return false — the connection survives.
+                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: idle timeout exceeded (LOG ONLY, not killing session), now=%llu, deadline=%llu, last=%llu, elapsed_ms=%llu",
+                        (unsigned long long)now, (unsigned long long)deadline, (unsigned long long)last_,
+                        (unsigned long long)(now - last_));
                 }
 
                 uint64_t next_ka = next_ka_;
