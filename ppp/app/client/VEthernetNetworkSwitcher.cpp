@@ -794,7 +794,9 @@ namespace ppp {
 
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
                 if (IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
-                    int ttl = std::max<int>(1, static_cast<int>(frame->Ttl) - 1);
+                    int ttl = static_cast<int>(IPFrame::DefaultTtl);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ERORTE: local IPv4 echo reply via TAP gateway, request_ttl=%u, reply_ttl=%d, src=%u, dst=%u",
+                        static_cast<unsigned int>(frame->Ttl), ttl, frame->Source, frame->Destination);
                     return ER(packet, frame, ttl, allocator);
                 }
                 else {
@@ -3537,7 +3539,9 @@ namespace ppp {
                     });
                 if (NULLPTR == cb) {
                     return false;
-                }
+                            LOG_DEBUG("VEthernetNetworkSwitcher::OnIcmpPacketInput: local IPv4 echo reply via TAP gateway, request_ttl=%u, reply_ttl=%u, src=%u, dst=%u",
+                                static_cast<unsigned int>(frame->Ttl), static_cast<unsigned int>(IPFrame::DefaultTtl), frame->Source, frame->Destination);
+                            int ttl = static_cast<int>(IPFrame::DefaultTtl);
 
                 const auto timeout = Timer::Timeout(context, (uint64_t)configuration->udp.dns.timeout * 1000, *cb);
                 if (NULLPTR == timeout) {
