@@ -1887,6 +1887,24 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
     if (NULLPTR != ni)
     {
 #if defined(_WIN32)
+        ppp::string tun_driver = ToLower(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--tun-driver", argc, argv, "auto"))));
+        if (tun_driver == "wintun")
+        {
+            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Wintun);
+        }
+        elif(tun_driver == "tap")
+        {
+            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Tap);
+        }
+        else
+        {
+            if (tun_driver != "auto")
+            {
+                fprintf(stdout, "Unknown --tun-driver value '%s'; using auto.\r\n", tun_driver.data());
+            }
+            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Auto);
+        }
+
         ni->Lwip = ppp::ToBoolean(ppp::GetCommandArgument("--lwip", argc, argv, ppp::tap::TapWindows::IsWintun() ? ppp::string() : "y").data());
 #else
         ni->Lwip = ppp::ToBoolean(ppp::GetCommandArgument("--lwip", argc, argv).data());
@@ -1955,24 +1973,6 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
 
 #if defined(_WIN32)
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
-        ppp::string tun_driver = ToLower(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--tun-driver", argc, argv, "auto"))));
-        if (tun_driver == "wintun")
-        {
-            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Wintun);
-        }
-        elif(tun_driver == "tap")
-        {
-            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Tap);
-        }
-        else
-        {
-            if (tun_driver != "auto")
-            {
-                fprintf(stdout, "Unknown --tun-driver value '%s'; using auto.\r\n", tun_driver.data());
-            }
-            ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Auto);
-        }
-
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
         ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
 #else
