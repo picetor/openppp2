@@ -1226,15 +1226,6 @@ namespace ppp {
                     return;
                 }
 
-#if defined(_WIN32)
-                if (ipv6_block_routes_added_) {
-                    int interface_index = tap->GetInterfaceIndex();
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                    ipv6_block_routes_added_ = false;
-                }
-#endif
-
                 // Build the client context using TAP interface info.
                 ppp::ipv6::auxiliary::ClientContext ctx;
                 ctx.Tap = tap.get();
@@ -1345,10 +1336,33 @@ namespace ppp {
                 if (extensions.AssignedIPv6Gateway.is_v6()) {
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying default route via gateway=%s nat_mode=%d",
                         extensions.AssignedIPv6Gateway.to_string().c_str(), (int)nat_mode);
-                    ppp::ipv6::auxiliary::ApplyClientDefaultRoute(ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
+
+#if defined(_WIN32)
+                    bool had_block_routes = ipv6_block_routes_added_;
+                    if (had_block_routes) {
+                        ppp::win32::network::DeleteIPv6Route(ctx.InterfaceIndex, "::", 1, ppp::string());
+                        ppp::win32::network::DeleteIPv6Route(ctx.InterfaceIndex, "8000::", 1, ppp::string());
+                        ipv6_block_routes_added_ = false;
+                    }
+#endif
+
+                    bool route_applied = ppp::ipv6::auxiliary::ApplyClientDefaultRoute(
+                        ctx, extensions.AssignedIPv6Gateway, nat_mode, state);
+
+#if defined(_WIN32)
+                    if (!route_applied && had_block_routes) {
+                        bool left = ppp::win32::network::AddIPv6Route(ctx.InterfaceIndex, "::", 1, ppp::string(), 0);
+                        bool right = ppp::win32::network::AddIPv6Route(ctx.InterfaceIndex, "8000::", 1, ppp::string(), 0);
+                        ipv6_block_routes_added_ = left && right;
+                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Assignment: managed IPv6 route failed, leak-block routes restored=%d",
+                            (int)ipv6_block_routes_added_);
+                    }
+#endif
 
                     // Update the tap object so the console display can show the IPv6 gateway.
-                    tap->IPv6GatewayServer = extensions.AssignedIPv6Gateway;
+                    if (route_applied) {
+                        tap->IPv6GatewayServer = extensions.AssignedIPv6Gateway;
+                    }
                 }
 
                 // 3. Apply an optional routed subnet prefix.
