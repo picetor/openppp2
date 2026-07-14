@@ -1226,6 +1226,15 @@ namespace ppp {
                     return;
                 }
 
+#if defined(_WIN32)
+                if (ipv6_block_routes_added_) {
+                    int interface_index = tap->GetInterfaceIndex();
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                    ipv6_block_routes_added_ = false;
+                }
+#endif
+
                 // Build the client context using TAP interface info.
                 ppp::ipv6::auxiliary::ClientContext ctx;
                 ctx.Tap = tap.get();
@@ -2244,46 +2253,24 @@ namespace ppp {
                 // Also add IPv6 bypass routes (ipv6.txt / --bypass6).
                 AddIPv6Route();
 
-                // An IPv4-only server does not install managed IPv6 routes. Without
-                // removing the underlying ::/0 route, Windows sends IPv6 traffic
-                // directly through the ISP and leaks the physical IPv6 address.
-                if (default_routes_v6_.empty()) {
-                    if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
-                        if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
-                            PMIB_IPFORWARD_TABLE2 table = NULLPTR;
-                            if (::GetIpForwardTable2(AF_INET6, &table) == NO_ERROR && NULLPTR != table) {
-                                for (ULONG i = 0; i < table->NumEntries; ++i) {
-                                    const MIB_IPFORWARD_ROW2& row = table->Table[i];
-                                    if (row.DestinationPrefix.PrefixLength != 0 ||
-                                        row.DestinationPrefix.Prefix.si_family != AF_INET6 ||
-                                        (int)row.InterfaceIndex != underlying_ni->Index) {
-                                        continue;
-                                    }
-
-                                    const IN6_ADDR& prefix = row.DestinationPrefix.Prefix.Ipv6.sin6_addr;
-                                    if (memcmp(&prefix, &in6addr_any, sizeof(prefix)) != 0) {
-                                        continue;
-                                    }
-
-                                    IPv6DefaultRouteRecord record;
-                                    record.InterfaceIndex = (int)row.InterfaceIndex;
-                                    record.Metric = (int)row.Metric;
-
-                                    const IN6_ADDR& next_hop = row.NextHop.Ipv6.sin6_addr;
-                                    if (memcmp(&next_hop, &in6addr_any, sizeof(next_hop)) != 0) {
-                                        char gateway[INET6_ADDRSTRLEN] = { 0 };
-                                        if (NULLPTR != ::inet_ntop(AF_INET6, &next_hop, gateway, sizeof(gateway))) {
-                                            record.Gateway = gateway;
-                                        }
-                                    }
-
-                                    if (ppp::win32::network::DeleteIPv6DefaultGateway(record.InterfaceIndex, record.Gateway)) {
-                                        default_routes_v6_.emplace_back(std::move(record));
-                                    }
-                                }
-                                ::FreeMibTable(table);
-                            }
-                        }
+                // Capture all IPv6 traffic on the VPN interface until the server
+                // supplies managed IPv6 routes. These /1 routes outrank an ISP ::/0
+                // even when Router Advertisement recreates it. More-specific China
+                // bypass routes still use the underlying interface.
+                if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
+                    int interface_index = tap->GetInterfaceIndex();
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                    bool left = ppp::win32::network::AddIPv6Route(interface_index, "::", 1, ppp::string(), 0);
+                    bool right = ppp::win32::network::AddIPv6Route(interface_index, "8000::", 1, ppp::string(), 0);
+                    ipv6_block_routes_added_ = left && right;
+                    if (!ipv6_block_routes_added_) {
+                        ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                        ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                        LOG_ERROR("VEthernetNetworkSwitcher::AddRoute: failed to install IPv6 leak-block routes, ifindex=%d", interface_index);
+                    }
+                    else {
+                        LOG_INFO("VEthernetNetworkSwitcher::AddRoute: installed IPv6 leak-block routes on ifindex=%d", interface_index);
                     }
                 }
 #elif defined(_MACOS)
@@ -2372,18 +2359,14 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
 #if defined(_WIN32)
-                // Restore IPv6 default routes removed while an IPv4-only VPN was active.
-                for (const IPv6DefaultRouteRecord& record : default_routes_v6_) {
-                    if (!record.Gateway.empty()) {
-                        ppp::win32::network::SetIPv6DefaultGateway(
-                            record.InterfaceIndex, record.Gateway, record.Metric);
+                if (ipv6_block_routes_added_) {
+                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                        int interface_index = tap->GetInterfaceIndex();
+                        ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                        ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
                     }
-                    else {
-                        ppp::win32::network::SetIPv6DefaultRoute(
-                            record.InterfaceIndex, record.Metric);
-                    }
+                    ipv6_block_routes_added_ = false;
                 }
-                default_routes_v6_.clear();
 
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);

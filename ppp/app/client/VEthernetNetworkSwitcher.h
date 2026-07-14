@@ -367,15 +367,9 @@ namespace ppp {
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
                 
 #if defined(_WIN32)
-                struct IPv6DefaultRouteRecord {
-                    int                                                         InterfaceIndex = -1;
-                    int                                                         Metric = 0;
-                    ppp::string                                                 Gateway;
-                };
-
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
-                ppp::vector<IPv6DefaultRouteRecord>                                 default_routes_v6_;
+                bool                                                                ipv6_block_routes_added_ = false;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
