@@ -2231,8 +2231,10 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::AddRoute() noexcept {
 #if defined(_WIN32)
+                std::shared_ptr<ITap> tap = GetTap();
+
                 // Find and delete all default route information!
-                if (auto tap = GetTap(); NULLPTR != tap) {
+                if (NULLPTR != tap) {
                     ppp::win32::network::DeleteAllDefaultGatewayRoutes(default_routes_, { tap->GatewayServer });
                 }
 
