@@ -335,6 +335,17 @@ namespace ppp
                 }
             }
 
+            if ((NULLPTR == tun || tun == INVALID_HANDLE_VALUE) && driver_mode == DriverMode::Auto)
+            {
+                ppp::string driver_path = ppp::io::File::GetFullPath(
+                    (ppp::GetApplicationStartupPath() + "\\Driver\\").data());
+                tap_component_id = InstallDriver(driver_path.data(), componentId);
+                if (!tap_component_id.empty())
+                {
+                    tun = OpenDriver(tap_component_id.data());
+                }
+            }
+
             fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", tap_component_id.data(), tun);
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {

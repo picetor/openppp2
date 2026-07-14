@@ -2384,8 +2384,18 @@ bool PppApplication::AddShutdownApplicationEventHandler() noexcept
 #if defined(_WIN32)
 static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInterface>& network_interface) noexcept
 {
-    // Install TAP-Windows driver if not present
     fprintf(stdout, "[PrepEth] ComponentId='%s' Wintun='%s'\r\n", network_interface->ComponentId.data(), network_interface->Wintun.data());
+
+    ppp::tap::TapWindows::DriverMode driver_mode = ppp::tap::TapWindows::GetDriverMode();
+    bool use_wintun = driver_mode == ppp::tap::TapWindows::DriverMode::Wintun ||
+        (driver_mode == ppp::tap::TapWindows::DriverMode::Auto && ppp::tap::TapWindows::IsWintun());
+    if (use_wintun)
+    {
+        network_interface->ComponentId = network_interface->Wintun;
+        fprintf(stdout, "[PrepEth] Wintun selected, preserving adapter name '%s' and skipping TAP installation\r\n",
+            network_interface->ComponentId.data());
+        return !network_interface->ComponentId.empty();
+    }
     
     // Determine if we need to install: empty ComponentId, or raw name (not GUID) that needs TAP fallback
     bool is_guid = (network_interface->ComponentId.size() == 38 && network_interface->ComponentId[0] == '{');
