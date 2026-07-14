@@ -339,6 +339,7 @@ The complete upstream CLI reference — fully compatible with this fork.
 | `--system-network-optimization` | Performance optimization | `--system-network-optimization` |
 | `--system-network-preferred-ipv4` | Prefer IPv4 | `--system-network-preferred-ipv4` |
 | `--system-network-preferred-ipv6` | Prefer IPv6 | `--system-network-preferred-ipv6` |
+| `--tun-driver` | Select adapter driver; use `tap` for layer-2 bridging | `--tun-driver=[auto\|wintun\|tap]` |
 | `--no-lsp` | Disable LSP | `--no-lsp` |
 
 ---

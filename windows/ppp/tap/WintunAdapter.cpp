@@ -169,6 +169,7 @@ bool WintunAdapter::Start() noexcept {
             [self, this, awaitable_weak]() {
                 ppp::SetThreadPriorityToMaxLevel();
                 ppp::SetThreadName("wintun");
+                receive_thread_id_.store(GetCurrentThreadId(), std::memory_order_release);
 
                 // Signal that the thread has started
                 if (std::shared_ptr<Awaitable> a = awaitable_weak.lock(); a) {
@@ -176,6 +177,12 @@ bool WintunAdapter::Start() noexcept {
                 }
 
                 ReceiveLoop();
+                receive_thread_id_.store(0, std::memory_order_release);
+
+                int expected = 0;
+                if (finalized_.compare_exchange_strong(expected, 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    Finalize();
+                }
             }).detach();
     }
     catch (...) {
@@ -191,7 +198,7 @@ void WintunAdapter::Finalize() noexcept {
     if (quit_event_) SetEvent(quit_event_);
 
     // 2. Wait for the receive thread to exit
-    while (running_flag_.load(std::memory_order_acquire) >= WINTUN_RUNING_STATE_RUNNING) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    while (receive_thread_id_.load(std::memory_order_acquire) != 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     // 3. Nullify the callback to prevent further calls
     PacketInput.reset();
@@ -226,9 +233,15 @@ void WintunAdapter::Stop() noexcept {
         std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
     }
 
+    if (receive_thread_id_.load(std::memory_order_acquire) == GetCurrentThreadId()) {
+        running_flag_.store(WINTUN_RUNING_STATE_STOP, std::memory_order_release);
+        if (quit_event_) SetEvent(quit_event_);
+        return;
+    }
+
     // Ensure Finalize runs only once (multiple Stop calls are harmless)
     int excepted = 0;
-    if (finalized_.compare_exchange_weak(excepted, 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    if (finalized_.compare_exchange_strong(excepted, 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
         Finalize();
     }
     else {
@@ -268,6 +281,20 @@ bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len) noexcept {
     // Decrement the in‑flight counter (release order pairs with acquire in Stop)
     state_.fetch_sub(1, std::memory_order_release);
     return success;
+}
+
+int WintunAdapter::GetInterfaceIndex() noexcept {
+    if (!adapter_handle_) return -1;
+
+    NET_LUID luid{};
+    WintunGetAdapterLUID(adapter_handle_, &luid);
+
+    NET_IFINDEX interface_index = 0;
+    if (ConvertInterfaceLuidToIndex(&luid, &interface_index) != NO_ERROR) {
+        return -1;
+    }
+
+    return static_cast<int>(interface_index);
 }
 
 bool WintunAdapter::Ready() noexcept {
@@ -325,6 +352,7 @@ void WintunAdapter::ReceiveLoop() noexcept {
         running_flag_.store(WINTUN_RUNING_STATE_STOP, std::memory_order_release);
         break;
     }
+
 }
 
 WintunAdapter::WintunAdapter(const std::wstring& adapter_name, const std::wstring& adapter_desc, const GUID* adapter_guid, uint32_t ring_buffer_size) noexcept

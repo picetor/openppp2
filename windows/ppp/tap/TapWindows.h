@@ -12,6 +12,13 @@ namespace ppp
             friend struct                           WintunAdapterDriver;
 
         public:
+            enum class DriverMode
+            {
+                Auto,
+                Wintun,
+                Tap
+            };
+
             TapWindows(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t address, uint32_t gw, uint32_t mask, bool hosted_network);
             virtual ~TapWindows() noexcept = default;
 
@@ -30,6 +37,8 @@ namespace ppp
 
         public:
             static bool                             IsWintun() noexcept;
+            static void                             SetDriverMode(DriverMode mode) noexcept;
+            static DriverMode                       GetDriverMode() noexcept;
             static ppp::string                      FindComponentId() noexcept;
             static ppp::string                      FindComponentId(const ppp::string& key) noexcept;
             static bool                             FindAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept;

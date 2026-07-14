@@ -337,6 +337,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | `--system-network-optimization` | 性能优化 | `--system-network-optimization` |
 | `--system-network-preferred-ipv4` | 设置IPV4网络优先 | `--system-network-preferred-ipv4` |
 | `--system-network-preferred-ipv6` | 设置IPV6网络优先 | `--system-network-preferred-ipv6` |
+| `--tun-driver` | 选择虚拟网卡驱动；需要二层桥接时使用 `tap` | `--tun-driver=[auto\|wintun\|tap]` |
 | `--no-lsp` | 禁用LSP | `--no-lsp` |
 
 ---

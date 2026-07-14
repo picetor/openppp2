@@ -57,6 +57,7 @@ public:
     bool                                Start() noexcept;                       // Start receive thread
     void                                Stop() noexcept;                        // Graceful shutdown
     bool                                SendPacket(const uint8_t* data, uint32_t len) noexcept;
+    int                                 GetInterfaceIndex() noexcept;
 
     bool                                IsOpen() noexcept {
         return NULL != session_handle_ && NULL != adapter_handle_ && NULL != quit_event_;
@@ -94,4 +95,5 @@ private:
     std::atomic<int >                   running_flag_{ 0 };                     // Controls receive loop
     std::atomic<int>                    finalized_{ 0 };                        // Ensures Finalize() runs once
     std::atomic<uint32_t>               state_{ 0 };                            // Combined stop flag + in‑flight count
+    std::atomic<DWORD>                  receive_thread_id_{ 0 };                // Prevents receive-thread self-wait
 };

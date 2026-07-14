@@ -25,6 +25,7 @@ namespace ppp
     namespace tap
     {
         static ppp::string TapWindows_FindComponentId(const ppp::string& key, ppp::win32::network::NetworkInterfacePtr& network_interface) noexcept;
+        static std::atomic<TapWindows::DriverMode> TAP_WINDOWS_DRIVER_MODE(TapWindows::DriverMode::Auto);
 
         TapWindows::TapWindows(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t address, uint32_t gw, uint32_t mask, bool hosted_network)
             : ITap(context, id, tun, address, gw, mask, hosted_network)
@@ -223,8 +224,8 @@ namespace ppp
                     return NULLPTR;
                 }
 
-                int interface_index = TapWindows::GetNetworkInterfaceIndex(nic);
-                if (interface_index < -1)
+                int interface_index = wintun->GetInterfaceIndex();
+                if (interface_index < 0)
                 {
                     wintun->Stop();
                     return NULLPTR;
@@ -294,19 +295,59 @@ namespace ppp
                 lease_time_in_seconds = 86400;
             }
 
-            int interface_index = GetNetworkInterfaceIndex(componentId);
-            fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
-            if (interface_index < -1)
+            DriverMode driver_mode = GetDriverMode();
+            if (driver_mode != DriverMode::Tap && WintunAdapter::Ready())
             {
-                fprintf(stdout, "[TapWindows::Create] FAIL: interface_index < -1\r\n");
+                std::shared_ptr<ITap> wintun = WintunAdapterDriver::CreateWintunAdapter(
+                    context, componentId, ip, gw, mask, hosted_network, dns_addresses);
+                if (wintun)
+                {
+                    return wintun;
+                }
+
+                if (driver_mode == DriverMode::Wintun)
+                {
+                    return NULLPTR;
+                }
+            }
+            elif(driver_mode == DriverMode::Wintun)
+            {
                 return NULLPTR;
             }
 
-            void* tun = OpenDriver(componentId.data());
-            fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", componentId.data(), tun);
+            ppp::win32::network::NetworkInterfacePtr tap_network_interface;
+            ppp::string tap_component_id = TapWindows_FindComponentId(componentId, tap_network_interface);
+            void* tun = tap_component_id.empty() ? NULLPTR : OpenDriver(tap_component_id.data());
+            if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
+            {
+                ppp::unordered_set<ppp::string> component_ids;
+                if (FindAllComponentIds(component_ids))
+                {
+                    for (const ppp::string& candidate : component_ids)
+                    {
+                        tun = OpenDriver(candidate.data());
+                        if (NULLPTR != tun && tun != INVALID_HANDLE_VALUE)
+                        {
+                            tap_component_id = candidate;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            fprintf(stdout, "[TapWindows::Create] OpenDriver('%s')=%p\r\n", tap_component_id.data(), tun);
             if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
             {
                 fprintf(stdout, "[TapWindows::Create] FAIL: OpenDriver failed (err=%d)\r\n", GetLastError());
+                return NULLPTR;
+            }
+
+            int interface_index = GetNetworkInterfaceIndex(tap_component_id);
+            fprintf(stdout, "[TapWindows::Create] GetNetworkInterfaceIndex=%d\r\n", interface_index);
+            if (interface_index < 0)
+            {
+                fprintf(stdout, "[TapWindows::Create] FAIL: invalid interface index\r\n");
+                CloseHandle(tun);
                 return NULLPTR;
             }
 
@@ -323,7 +364,7 @@ namespace ppp
                 return NULLPTR;
             }
 
-            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, componentId, tun, ip, gw, mask, hosted_network);
+            std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, tap_component_id, tun, ip, gw, mask, hosted_network);
             if (NULLPTR == tap)
             {
                 CloseHandle(tun);
@@ -657,7 +698,17 @@ namespace ppp
 
         bool TapWindows::IsWintun() noexcept
         {
-            return WintunAdapter::Ready();
+            return GetDriverMode() != DriverMode::Tap && WintunAdapter::Ready();
+        }
+
+        void TapWindows::SetDriverMode(DriverMode mode) noexcept
+        {
+            TAP_WINDOWS_DRIVER_MODE.store(mode, std::memory_order_release);
+        }
+
+        TapWindows::DriverMode TapWindows::GetDriverMode() noexcept
+        {
+            return TAP_WINDOWS_DRIVER_MODE.load(std::memory_order_acquire);
         }
 
         ppp::string TapWindows::FindComponentId() noexcept
@@ -738,7 +789,7 @@ namespace ppp
 
         ppp::string TapWindows::FindComponentId(const ppp::string& key) noexcept
         {
-            if (WintunAdapter::Ready())
+            if (GetDriverMode() != DriverMode::Tap && WintunAdapter::Ready())
             {
                 return key;
             }
