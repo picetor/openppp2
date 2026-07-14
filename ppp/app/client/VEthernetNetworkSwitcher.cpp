@@ -2241,6 +2241,49 @@ namespace ppp {
 
                 // Also add IPv6 bypass routes (ipv6.txt / --bypass6).
                 AddIPv6Route();
+
+                // An IPv4-only server does not install managed IPv6 routes. Without
+                // removing the underlying ::/0 route, Windows sends IPv6 traffic
+                // directly through the ISP and leaks the physical IPv6 address.
+                if (default_routes_v6_.empty()) {
+                    if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
+                        if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
+                            PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                            if (::GetIpForwardTable2(AF_INET6, &table) == NO_ERROR && NULLPTR != table) {
+                                for (ULONG i = 0; i < table->NumEntries; ++i) {
+                                    const MIB_IPFORWARD_ROW2& row = table->Table[i];
+                                    if (row.DestinationPrefix.PrefixLength != 0 ||
+                                        row.DestinationPrefix.Prefix.si_family != AF_INET6 ||
+                                        (int)row.InterfaceIndex != underlying_ni->Index) {
+                                        continue;
+                                    }
+
+                                    const IN6_ADDR& prefix = row.DestinationPrefix.Prefix.Ipv6.sin6_addr;
+                                    if (memcmp(&prefix, &in6addr_any, sizeof(prefix)) != 0) {
+                                        continue;
+                                    }
+
+                                    IPv6DefaultRouteRecord record;
+                                    record.InterfaceIndex = (int)row.InterfaceIndex;
+                                    record.Metric = (int)row.Metric;
+
+                                    const IN6_ADDR& next_hop = row.NextHop.Ipv6.sin6_addr;
+                                    if (memcmp(&next_hop, &in6addr_any, sizeof(next_hop)) != 0) {
+                                        char gateway[INET6_ADDRSTRLEN] = { 0 };
+                                        if (NULLPTR != ::inet_ntop(AF_INET6, &next_hop, gateway, sizeof(gateway))) {
+                                            record.Gateway = gateway;
+                                        }
+                                    }
+
+                                    if (ppp::win32::network::DeleteIPv6DefaultGateway(record.InterfaceIndex, record.Gateway)) {
+                                        default_routes_v6_.emplace_back(std::move(record));
+                                    }
+                                }
+                                ::FreeMibTable(table);
+                            }
+                        }
+                    }
+                }
 #elif defined(_MACOS)
                 // Delete all found default gateway routes.
                 if (auto underlying_ni = GetUnderlyingNetworkInterface(); NULLPTR != underlying_ni) {
@@ -2327,6 +2370,19 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
 #if defined(_WIN32)
+                // Restore IPv6 default routes removed while an IPv4-only VPN was active.
+                for (const IPv6DefaultRouteRecord& record : default_routes_v6_) {
+                    if (!record.Gateway.empty()) {
+                        ppp::win32::network::SetIPv6DefaultGateway(
+                            record.InterfaceIndex, record.Gateway, record.Metric);
+                    }
+                    else {
+                        ppp::win32::network::SetIPv6DefaultRoute(
+                            record.InterfaceIndex, record.Metric);
+                    }
+                }
+                default_routes_v6_.clear();
+
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);
 
