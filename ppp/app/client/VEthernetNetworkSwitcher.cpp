@@ -3539,9 +3539,7 @@ namespace ppp {
                     });
                 if (NULLPTR == cb) {
                     return false;
-                            LOG_DEBUG("VEthernetNetworkSwitcher::OnIcmpPacketInput: local IPv4 echo reply via TAP gateway, request_ttl=%u, reply_ttl=%u, src=%u, dst=%u",
-                                static_cast<unsigned int>(frame->Ttl), static_cast<unsigned int>(IPFrame::DefaultTtl), frame->Source, frame->Destination);
-                            int ttl = static_cast<int>(IPFrame::DefaultTtl);
+                }
 
                 const auto timeout = Timer::Timeout(context, (uint64_t)configuration->udp.dns.timeout * 1000, *cb);
                 if (NULLPTR == timeout) {
