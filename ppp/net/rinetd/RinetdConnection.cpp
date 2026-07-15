@@ -100,8 +100,11 @@ namespace ppp {
                     return false;
                 }
 
-                bool opened = ppp::coroutines::asio::async_open(y, *socket, remoteEP.protocol());
+                boost::system::error_code open_ec;
+                bool opened = ppp::coroutines::asio::async_open(y, *socket, remoteEP.protocol(), &open_ec);
                 if (!opened) {
+                    LOG_DEBUG("RinetdConnection::Open: async_open failed, remote=%s:%d, ec=%d, category=%s, message=%s",
+                        remoteIP.to_string().data(), remotePort, open_ec.value(), open_ec.category().name(), open_ec.message().data());
                     return false;
                 }
 
@@ -127,10 +130,16 @@ namespace ppp {
                 ppp::net::Socket::SetWindowSizeIfNotZero(socket->native_handle(), configuration->tcp.cwnd, configuration->tcp.rwnd);
                 ppp::net::Socket::AdjustSocketOptional(*socket, remoteIP.is_v4(), configuration->tcp.fast_open, configuration->tcp.turbo);
 
-                bool connect_ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y);
+                boost::system::error_code connect_ec;
+                bool connect_ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y, &connect_ec);
                 if (connect_ok) {
                     connected_ = true;
                     Update();
+                }
+                else {
+                    LOG_DEBUG("RinetdConnection::Open: async_connect failed, remote=%s:%d, native=%lld, ec=%d, category=%s, message=%s",
+                        remoteIP.to_string().data(), remotePort, (long long)socket->native_handle(), connect_ec.value(),
+                        connect_ec.category().name(), connect_ec.message().data());
                 }
 
                 return connect_ok;

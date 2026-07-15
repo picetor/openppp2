@@ -417,6 +417,14 @@ namespace ppp {
             return 72000;
         }
 
+#if defined(PPP_LOG_VERBOSE)
+        void VNetstack::GetDebugConnectionCounts(size_t& lan2wan, size_t& wan2lan) noexcept {
+            SynchronizedObjectScope scope(syncobj_);
+            lan2wan = lan2wan_.size();
+            wan2lan = wan2lan_.size();
+        }
+#endif
+
         bool VNetstack::Update(uint64_t now) noexcept {
             const uint64_t MaxEstablishedTimeout = GetMaxEstablishedTimeout();
             const uint64_t MaxFinalizeTimeout = GetMaxFinalizeTimeout();
@@ -842,9 +850,14 @@ namespace ppp {
             try {
                 socket->assign(remoteEP.protocol(), sockfd, ec);
             }
-            catch (const std::exception&) {}
+            catch (const std::exception& e) {
+                LOG_DEBUG("VNetstack::TapTcpClient::NewAsynchronousSocket: assign threw, fd=%d, remote=%s:%d, exception=%s",
+                    sockfd, remoteEP.address().to_string().data(), remoteEP.port(), e.what());
+            }
 
             if (ec) {
+                LOG_DEBUG("VNetstack::TapTcpClient::NewAsynchronousSocket: assign failed, fd=%d, remote=%s:%d, ec=%d, category=%s, message=%s",
+                    sockfd, remoteEP.address().to_string().data(), remoteEP.port(), ec.value(), ec.category().name(), ec.message().data());
                 return NULLPTR;
             }
             else {

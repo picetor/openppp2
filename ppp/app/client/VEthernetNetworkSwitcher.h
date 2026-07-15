@@ -278,6 +278,9 @@ namespace ppp {
                 void                                                                AddIPv6Route() noexcept;
 #endif
                 void                                                                Finalize() noexcept;
+#if defined(PPP_LOG_VERBOSE)
+                void                                                                StopDebugWatchdog() noexcept;
+#endif
                 bool                                                                AddRemoteEndPointToIPList(const boost::asio::ip::address& gw) noexcept;
                 
             private:    
@@ -297,6 +300,12 @@ namespace ppp {
                 std::shared_ptr<ppp::configurations::AppConfiguration>              configuration_;
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               qos_;
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        statistics_;
+#if defined(PPP_LOG_VERBOSE)
+                uint64_t                                                            debug_diagnostics_next_ = 0;
+                std::atomic<uint64_t>                                               debug_last_tick_ = 0;
+                std::atomic<bool>                                                   debug_watchdog_stop_ = false;
+                std::thread                                                         debug_watchdog_;
+#endif
                 VEthernetIcmpPacketTable                                            icmppackets_;
                 struct {
                     int                                                             icmppackets_aid_  = 0;

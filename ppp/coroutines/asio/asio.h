@@ -136,22 +136,31 @@ namespace ppp {
                 return ppp::threading::Timer::Timeout(milliseconds, y);
             }
 
-            inline bool                                                         async_connect(boost::asio::ip::tcp::socket& socket, const boost::asio::ip::tcp::endpoint& remoteEP, YieldContext& y) noexcept {
+            inline bool                                                         async_connect(boost::asio::ip::tcp::socket& socket, const boost::asio::ip::tcp::endpoint& remoteEP, YieldContext& y, boost::system::error_code* error = NULLPTR) noexcept {
                 boost::asio::ip::address address = remoteEP.address();
                 if (ppp::net::IPEndPoint::IsInvalid(address)) {
+                    if (error) {
+                        *error = boost::asio::error::invalid_argument;
+                    }
                     return false;
                 }
 
                 int port = remoteEP.port();
                 if (port <= ppp::net::IPEndPoint::MinPort || port > ppp::net::IPEndPoint::MaxPort) {
+                    if (error) {
+                        *error = boost::asio::error::invalid_argument;
+                    }
                     return false;
                 }
 
                 bool ok = false;
                 boost::asio::post(socket.get_executor(), 
-                    [&socket, &remoteEP, &y, &ok]() noexcept {
+                    [&socket, &remoteEP, &y, &ok, error]() noexcept {
                         socket.async_connect(remoteEP,
-                            [&y, &ok](const boost::system::error_code& ec) noexcept {
+                            [&y, &ok, error](const boost::system::error_code& ec) noexcept {
+                                if (error) {
+                                    *error = ec;
+                                }
                                 ok = ec == boost::system::errc::success; /* b is boost::system::errc::success. */
                                 y.R();
                             });
@@ -162,7 +171,7 @@ namespace ppp {
             }
 
             template <class AsyncSocket, class TProtocol>
-            bool                                                                async_open(YieldContext& y, AsyncSocket& socket, const TProtocol& protocol) noexcept {
+            bool                                                                async_open(YieldContext& y, AsyncSocket& socket, const TProtocol& protocol, boost::system::error_code* error = NULLPTR) noexcept {
                 // Android platform fatal system network underlying library bug, if in stackful coroutine, call socket, connect function will crash directly, 
                 // In order to solve this problem, need to delegate to the android framework thread (Fwmark) to call, 
                 // Will ensure that the program does not crash. It's just... Inexplicable.
@@ -173,9 +182,13 @@ namespace ppp {
 #if defined(_ANDROID)
                 bool ok = false;
                 boost::asio::post(socket.get_executor(),
-                    [&socket, &protocol, &ok, &y]() noexcept {
+                    [&socket, &protocol, &ok, &y, error]() noexcept {
                         boost::system::error_code ec;
                         socket.open(protocol, ec);
+
+                        if (error) {
+                            *error = ec;
+                        }
 
                         if (ec == boost::system::errc::success) {
                             ok = true;
@@ -189,6 +202,10 @@ namespace ppp {
 #else
                 boost::system::error_code ec;
                 socket.open(protocol, ec);
+
+                if (error) {
+                    *error = ec;
+                }
 
                 return ec == boost::system::errc::success;
 #endif

@@ -181,7 +181,10 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                if (!ppp::coroutines::asio::async_open(y, *socket, protocol)) {
+                boost::system::error_code open_ec;
+                if (!ppp::coroutines::asio::async_open(y, *socket, protocol, &open_ec)) {
+                    LOG_DEBUG("VEthernetExchanger::NewAsynchronousSocket: async_open failed, protocol=%d, ec=%d, category=%s, message=%s",
+                        protocol.family(), open_ec.value(), open_ec.category().name(), open_ec.message().data());
                     return NULLPTR;
                 }
 
@@ -321,9 +324,12 @@ namespace ppp {
                 // 移除 IP_UNICAST_IF 避免物理网卡索引变化（WiFi 重连、睡眠唤醒等）导致断流。
 #endif
 
-                bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y);
+                boost::system::error_code connect_ec;
+                bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y, &connect_ec);
                 if (!ok) {
-                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: async_connect to %s:%d failed", address.data(), remotePort);
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: async_connect failed, remote=%s:%d, native=%lld, ec=%d, category=%s, message=%s",
+                        address.data(), remotePort, (long long)socket->native_handle(), connect_ec.value(),
+                        connect_ec.category().name(), connect_ec.message().data());
                     return NULLPTR;
                 }
 
@@ -384,6 +390,15 @@ namespace ppp {
                     });
                 return true;
             }
+
+#if defined(PPP_LOG_VERBOSE)
+            void VEthernetExchanger::GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept {
+                SynchronizedObjectScope scope(syncobj_);
+                mappings = mappings_.size();
+                datagrams = datagrams_.size();
+                timers = deadline_timers_.size();
+            }
+#endif
 
             bool VEthernetExchanger::DoKeepAlived(const ITransmissionPtr& transmission, uint64_t now) noexcept {
                 if (disposed_) {

@@ -33,6 +33,15 @@
 #include <darwin/ppp/ipv6/IPv6Auxiliary.h>
 #endif
 
+#if defined(_MACOS) && defined(PPP_LOG_VERBOSE)
+#include <dirent.h>
+#include <errno.h>
+#include <sys/resource.h>
+#endif
+#if defined(PPP_LOG_VERBOSE)
+#include <chrono>
+#endif
+
 #if defined(_WIN32)
 #include <windows/ppp/tap/TapWindows.h>
 #include <windows/ppp/win32/network/Router.h>
@@ -72,6 +81,29 @@ using ppp::transmissions::ITransmission;
 namespace ppp {
     namespace app {
         namespace client {
+#if defined(_MACOS) && defined(PPP_LOG_VERBOSE)
+            static int GetOpenFileDescriptorCount(int& error) noexcept {
+                error = 0;
+                DIR* directory = opendir("/dev/fd");
+                if (!directory) {
+                    error = errno;
+                    return -1;
+                }
+
+                int count = 0;
+                while (struct dirent* entry = readdir(directory)) {
+                    if (entry->d_name[0] == '.' &&
+                        (entry->d_name[1] == '\0' || (entry->d_name[1] == '.' && entry->d_name[2] == '\0'))) {
+                        continue;
+                    }
+                    count++;
+                }
+
+                closedir(directory);
+                return std::max(0, count - 1); // Exclude the descriptor opened by opendir itself.
+            }
+#endif
+
             VEthernetNetworkSwitcher::VEthernetNetworkSwitcher(const std::shared_ptr<boost::asio::io_context>& context, bool lwip, bool vnet, bool mta, const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration) noexcept
                 : VEthernet(context, lwip, vnet, mta)
                 , configuration_(configuration)
@@ -86,6 +118,48 @@ namespace ppp {
                 static_mode_     = false;
                 block_quic_      = false;
                 icmppackets_aid_ = RandomNext();
+
+#if defined(PPP_LOG_VERBOSE)
+                std::shared_ptr<boost::asio::io_context> debug_context = context;
+                try {
+                    debug_watchdog_ = std::thread([this, debug_context]() noexcept {
+                        uint64_t last_report = 0;
+                        while (!debug_watchdog_stop_.load()) {
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                            if (debug_watchdog_stop_.load()) {
+                                break;
+                            }
+
+                            uint64_t last_tick = debug_last_tick_.load();
+                            uint64_t current = ppp::threading::Executors::GetTickCount();
+                            if (last_tick == 0 || current - last_tick < 10000 || current - last_report < 5000) {
+                                continue;
+                            }
+                            last_report = current;
+
+#if defined(_MACOS)
+                            int fd_error = 0;
+                            int fd_count = GetOpenFileDescriptorCount(fd_error);
+                            struct rlimit fd_limit = {};
+                            int rlimit_status = getrlimit(RLIMIT_NOFILE, &fd_limit);
+                            LOG_DEBUG("VEthernetNetworkSwitcher::Watchdog: EVENT_LOOP_STALL, stalled_ms=%llu, io_stopped=%d, fd_count=%d, fd_soft=%llu, fd_hard=%llu, fd_errno=%d, rlimit_status=%d",
+                                (unsigned long long)(current - last_tick), debug_context ? (int)debug_context->stopped() : -1,
+                                fd_count,
+                                rlimit_status == 0 ? (unsigned long long)fd_limit.rlim_cur : 0,
+                                rlimit_status == 0 ? (unsigned long long)fd_limit.rlim_max : 0,
+                                fd_error, rlimit_status);
+                            ::fflush(ppp::g_log_stream);
+#else
+                            LOG_DEBUG("VEthernetNetworkSwitcher::Watchdog: EVENT_LOOP_STALL, stalled_ms=%llu, io_stopped=%d",
+                                (unsigned long long)(current - last_tick), debug_context ? (int)debug_context->stopped() : -1);
+#endif
+                        }
+                    });
+                }
+                catch (const std::exception& e) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Watchdog: thread creation failed, exception=%s", e.what());
+                }
+#endif
             }
 
             VEthernetNetworkSwitcher::~VEthernetNetworkSwitcher() noexcept {
@@ -104,9 +178,69 @@ namespace ppp {
             }
 
             bool VEthernetNetworkSwitcher::OnTick(uint64_t now) noexcept {
+#if defined(PPP_LOG_VERBOSE)
+                debug_last_tick_ = now;
+#endif
                 if (!VEthernet::OnTick(now)) {
                     return false;
                 }
+
+#if defined(PPP_LOG_VERBOSE)
+                if (now >= debug_diagnostics_next_) {
+                    debug_diagnostics_next_ = now + 5000;
+
+                    size_t lan2wan = 0;
+                    size_t wan2lan = 0;
+                    std::shared_ptr<ppp::ethernet::VNetstack> netstack = GetNetstack();
+                    if (netstack) {
+                        netstack->GetDebugConnectionCounts(lan2wan, wan2lan);
+                    }
+
+                    size_t mappings = 0;
+                    size_t datagrams = 0;
+                    size_t timers = 0;
+                    std::shared_ptr<VEthernetExchanger> debug_exchanger = exchanger_;
+                    if (debug_exchanger) {
+                        debug_exchanger->GetDebugObjectCounts(mappings, datagrams, timers);
+                    }
+
+                    uint64_t incoming = 0;
+                    uint64_t outgoing = 0;
+                    std::shared_ptr<ppp::transmissions::ITransmissionStatistics> statistics = statistics_;
+                    if (statistics) {
+                        incoming = statistics->IncomingTraffic.load();
+                        outgoing = statistics->OutgoingTraffic.load();
+                    }
+
+                    std::shared_ptr<boost::asio::io_context> debug_context = GetContext();
+#if defined(_MACOS)
+                    int fd_error = 0;
+                    int fd_count = GetOpenFileDescriptorCount(fd_error);
+                    struct rlimit fd_limit = {};
+                    int rlimit_status = getrlimit(RLIMIT_NOFILE, &fd_limit);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Diagnostics: tick=%llu, io_stopped=%d, state=%d, reconnects=%d, tcp_lan2wan=%llu, tcp_wan2lan=%llu, mappings=%llu, datagrams=%llu, timers=%llu, incoming=%llu, outgoing=%llu, fd_count=%d, fd_soft=%llu, fd_hard=%llu, fd_errno=%d, rlimit_status=%d",
+                        (unsigned long long)now, debug_context ? (int)debug_context->stopped() : -1,
+                        debug_exchanger ? (int)debug_exchanger->GetNetworkState() : -1,
+                        debug_exchanger ? debug_exchanger->GetReconnectionCount() : -1,
+                        (unsigned long long)lan2wan, (unsigned long long)wan2lan,
+                        (unsigned long long)mappings, (unsigned long long)datagrams, (unsigned long long)timers,
+                        (unsigned long long)incoming, (unsigned long long)outgoing,
+                        fd_count,
+                        rlimit_status == 0 ? (unsigned long long)fd_limit.rlim_cur : 0,
+                        rlimit_status == 0 ? (unsigned long long)fd_limit.rlim_max : 0,
+                        fd_error, rlimit_status);
+                    ::fflush(ppp::g_log_stream);
+#else
+                    LOG_DEBUG("VEthernetNetworkSwitcher::Diagnostics: tick=%llu, io_stopped=%d, state=%d, reconnects=%d, tcp_lan2wan=%llu, tcp_wan2lan=%llu, mappings=%llu, datagrams=%llu, timers=%llu, incoming=%llu, outgoing=%llu",
+                        (unsigned long long)now, debug_context ? (int)debug_context->stopped() : -1,
+                        debug_exchanger ? (int)debug_exchanger->GetNetworkState() : -1,
+                        debug_exchanger ? debug_exchanger->GetReconnectionCount() : -1,
+                        (unsigned long long)lan2wan, (unsigned long long)wan2lan,
+                        (unsigned long long)mappings, (unsigned long long)datagrams, (unsigned long long)timers,
+                        (unsigned long long)incoming, (unsigned long long)outgoing);
+#endif
+                }
+#endif
 
                 // Safety net: flush expired pending AAAA responses even if no DNS traffic triggers it
                 FlushExpiredPendingAAAAResponses();
@@ -940,11 +1074,23 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::Finalize() noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Finalize: releasing all objects");
+#if defined(PPP_LOG_VERBOSE)
+                StopDebugWatchdog();
+#endif
                 IDisposable::Dispose(logger_);
                 ReleaseAllObjects();
                 ReleaseAllPackets();
                 ReleaseAllTimeouts();
             }
+
+#if defined(PPP_LOG_VERBOSE)
+            void VEthernetNetworkSwitcher::StopDebugWatchdog() noexcept {
+                debug_watchdog_stop_ = true;
+                if (debug_watchdog_.joinable() && debug_watchdog_.get_id() != std::this_thread::get_id()) {
+                    debug_watchdog_.join();
+                }
+            }
+#endif
 
             bool VEthernetNetworkSwitcher::OpenLogger() noexcept {
                 ppp::string& log = configuration_->client.log;

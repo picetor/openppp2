@@ -105,6 +105,9 @@ namespace ppp {
                 virtual bool                                                            Echo(const void* packet, int packet_size) noexcept;
                 virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
                 virtual bool                                                            Update() noexcept;
+#if defined(PPP_LOG_VERBOSE)
+                void                                                                    GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept;
+#endif
                 bool                                                                    StaticEchoAllocated() noexcept;
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP) noexcept;
 

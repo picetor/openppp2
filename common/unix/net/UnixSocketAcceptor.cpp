@@ -8,6 +8,18 @@ namespace ppp
 {
     namespace net
     {
+        static bool ShouldLogSocketAcceptorError() noexcept
+        {
+#if defined(PPP_LOG_VERBOSE)
+            static std::atomic<uint64_t> next_log_time = 0;
+            uint64_t now = ppp::threading::Executors::GetTickCount();
+            uint64_t expected = next_log_time.load();
+            return now >= expected && next_log_time.compare_exchange_strong(expected, now + 1000);
+#else
+            return false;
+#endif
+        }
+
         UnixSocketAcceptor::UnixSocketAcceptor() noexcept
             : server_(NULLPTR)
             , context_(ppp::threading::Executors::GetDefault())
@@ -155,6 +167,11 @@ namespace ppp
                         return;
                     }
 
+                    if (ec && ShouldLogSocketAcceptorError()) {
+                        LOG_DEBUG("UnixSocketAcceptor::Next: async_accept failed, native=%lld, ec=%d, category=%s, message=%s",
+                            (long long)server->native_handle(), ec.value(), ec.category().name(), ec.message().data());
+                    }
+
                     /* This function always fails with operation_not_supported when used on Windows versions prior to Windows 8.1. */
 #if defined(_WIN32)
 #pragma warning(push)
@@ -167,6 +184,10 @@ namespace ppp
 #endif
                     if (ec)
                     {
+                        if (ShouldLogSocketAcceptorError()) {
+                            LOG_DEBUG("UnixSocketAcceptor::Next: socket release failed, ec=%d, category=%s, message=%s",
+                                ec.value(), ec.category().name(), ec.message().data());
+                        }
                         sockfd = -1;
                     }
                     else
