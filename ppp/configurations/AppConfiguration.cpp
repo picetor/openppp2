@@ -110,20 +110,8 @@ namespace {
         }
 
         ppp::string value = ToLower(LTrim(RTrim(mode)));
-        if (value == "flow" || value == "flow-v1" || value == "primary" || value == "primary-link") {
-            return "flow";
-        }
-
         if (value == "compat" || value == "legacy" || value == "default") {
             return "compat";
-        }
-
-        if (value == "balance" || value == "balanced" || value == "lb" || value == "load-balance") {
-            return "balance";
-        }
-
-        if (value == "stripe" || value == "striped" || value == "striping") {
-            return "stripe";
         }
 
         if (value.empty()) {
@@ -132,7 +120,7 @@ namespace {
         }
 
         if (NULLPTR != note) {
-            *note = "mux.mode '" + value + "' is not a recognized scheduler; falling back to 'compat'";
+            *note = "mux.mode '" + value + "' is not available in MUX merge phase 1; falling back to 'compat'";
         }
         return "compat";
     }
@@ -628,6 +616,13 @@ namespace ppp {
             }
 
             config.mux.mode = NormalizeMuxMode(config.mux.mode, &config._mux_mode_diagnostic);
+            if (config.mux.turbo) {
+                config.mux.turbo = false;
+                if (!config._mux_mode_diagnostic.empty()) {
+                    config._mux_mode_diagnostic += "; ";
+                }
+                config._mux_mode_diagnostic += "mux.turbo is not available in MUX merge phase 1; disabled";
+            }
             config.mux.debug.key = LTrim(RTrim(config.mux.debug.key));
             config.mux.debug.set_mode = LTrim(RTrim(config.mux.debug.set_mode));
 

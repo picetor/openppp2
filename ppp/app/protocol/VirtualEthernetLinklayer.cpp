@@ -754,12 +754,21 @@ namespace ppp {
                     return false;
                 }
                 else if (packet_action == PacketAction_MUX) {            // MUX setup request
-                    static constexpr int MUX_IL_REFT = sizeof(VirtualEthernetLinklayer_MUX_IL) - 1;
+                    // The original protocol ends after `acceleration`. Treat the
+                    // newer trailing `ordering_caps` byte as optional so original
+                    // peers remain wire-compatible; an absent byte means COMPAT.
+                    static constexpr int MUX_IL_REQUIRED =
+                        sizeof(VirtualEthernetLinklayer_MUX_IL) - 1 - sizeof(Byte);
 
-                    if (packet_length >= MUX_IL_REFT) {
+                    if (packet_length >= MUX_IL_REQUIRED) {
                         VirtualEthernetLinklayer_MUX_IL* pil = reinterpret_cast<VirtualEthernetLinklayer_MUX_IL*>(p - 1);
+                        Byte ordering_caps = 0;
+                        if (packet_length >= static_cast<int>(sizeof(VirtualEthernetLinklayer_MUX_IL) - 1)) {
+                            ordering_caps = pil->ordering_caps;
+                        }
+
                         return OnMux(transmission, ntohs(pil->vlan), ntohs(pil->max_connections), 
-                                     pil->acceleration != 0, pil->ordering_caps, y);
+                                     pil->acceleration != 0, ordering_caps, y);
                     } else {
                         return packet_length == 0;
                     }

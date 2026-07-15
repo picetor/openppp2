@@ -14,7 +14,7 @@ namespace vmux {
         vmux->Vlan                       = 0;
    
         vmux->base_.server_or_client_    = server_mode;
-        vmux->base_.disposed_            = false;
+        vmux->base_.disposed_.store(false, std::memory_order_release);
         vmux->base_.ftt_                 = false;
         vmux->base_.established_         = false;
         vmux->base_.acceleration_        = acceleration;
@@ -50,8 +50,8 @@ namespace vmux {
 
         for (;;) {
             SynchronizationObjectScope __SCOPE__(syncobj_);
-            if (!base_.disposed_) {
-                base_.disposed_ = true;
+            if (!base_.disposed_.load(std::memory_order_acquire)) {
+                base_.disposed_.store(true, std::memory_order_release);
                 status_.last_ = now_tick(); 
             }
 
@@ -100,7 +100,7 @@ namespace vmux {
 
     bool vmux_net::ftt(uint32_t seq, uint32_t ack) noexcept {
         SynchronizationObjectScope __SCOPE__(syncobj_);
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
         
@@ -170,7 +170,7 @@ namespace vmux {
             return false;
         }
         
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -191,6 +191,13 @@ namespace vmux {
             [self, this, linklayer, posted_ac](bool ok) noexcept {
                 if (NULLPTR != posted_ac) {
                     posted_ac(ok);
+                }
+
+                // The completion may arrive after finalize() cleared the queues,
+                // or posted_ac may itself close the mux. Never touch scheduling
+                // state again after teardown has begun.
+                if (base_.disposed_.load(std::memory_order_acquire)) {
+                    return;
                 }
 
                 if (ok) {
@@ -214,7 +221,7 @@ namespace vmux {
     }
 
     bool vmux_net::update() noexcept {
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -289,7 +296,7 @@ namespace vmux {
 
     bool vmux_net::packet_input_unorder(const vmux_linklayer_ptr& linklayer, vmux_hdr* h, int length, uint64_t now) noexcept {
         // Prepare the ack frames.
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -434,7 +441,7 @@ namespace vmux {
     }
     
     bool vmux_net::process_rx_connecting(std::shared_ptr<vmux_skt>& skt, uint32_t connection_id, const char* host, int host_size) noexcept {
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -503,7 +510,7 @@ namespace vmux {
             return false;
         }
         
-        if (base_.disposed_ || !base_.established_) {
+        if (base_.disposed_.load(std::memory_order_acquire) || !base_.established_) {
             return false;
         }
 
@@ -564,7 +571,7 @@ namespace vmux {
             return false;
         }
 
-        if (base_.disposed_ || !base_.established_) {
+        if (base_.disposed_.load(std::memory_order_acquire) || !base_.established_) {
             return false;
         }
 
@@ -594,7 +601,7 @@ namespace vmux {
         }
 
         SynchronizationObjectScope __SCOPE__(syncobj_);
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             LOG_DEBUG("vmux_net::add_linklayer: disposed");
             return false;
         }
@@ -680,7 +687,7 @@ namespace vmux {
     }
 
     bool vmux_net::handshake(const vmux_linklayer_ptr& linklayer, uint16_t connection_id, ppp::coroutines::YieldContext& y) noexcept {
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             LOG_DEBUG("vmux_net::handshake: disposed");
             return false;
         }
@@ -708,6 +715,11 @@ namespace vmux {
 #pragma pack(pop)
 
         if (base_.server_or_client_) {
+            if (connection_id == 0 || connection_id > status_.max_connections) {
+                LOG_DEBUG("vmux_net::handshake: invalid server connection_id=%u", connection_id);
+                return false;
+            }
+
             vmux_linlayer_add_ack_packet packet;
             packet.receive_id = htons(connection_id);
 
@@ -728,12 +740,20 @@ namespace vmux {
             vmux_linlayer_add_ack_packet* packet = (vmux_linlayer_add_ack_packet*)packet_memory.get();
             uint32_t receive_id = ntohs(packet->receive_id);
 
-            if (receive_id == 0 && receive_id <= rx_links_.size()) {
+            if (receive_id == 0 || receive_id > status_.max_connections) {
                 LOG_DEBUG("vmux_net::handshake: invalid receive_id=%u", receive_id);
                 return false;
             }
 
             SynchronizationObjectScope __SCOPE__(syncobj_);
+            for (const vmux_linklayer_ptr& existing : rx_links_) {
+                if (existing != linklayer && existing->id_ == receive_id) {
+                    LOG_DEBUG("vmux_net::handshake: duplicate receive_id=%u", receive_id);
+                    return false;
+                }
+            }
+
+            linklayer->id_ = static_cast<uint16_t>(receive_id);
             status_.opened_connections++;
             LOG_DEBUG("vmux_net::handshake: received ack (client), receive_id=%u, opened=%u", receive_id, (unsigned)status_.opened_connections);
         }
@@ -761,7 +781,7 @@ namespace vmux {
     }
 
     bool vmux_net::forwarding(const vmux_linklayer_ptr& linklayer, ppp::coroutines::YieldContext& y) noexcept {
-        if (base_.disposed_) {
+        if (base_.disposed_.load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -783,7 +803,7 @@ namespace vmux {
 
         linklayer_update(linklayer);
         for (;;) {
-            if (base_.disposed_) {
+            if (base_.disposed_.load(std::memory_order_acquire)) {
                 break;
             }
 
@@ -830,7 +850,7 @@ namespace vmux {
         const template_string&                               host,
         int                                                  port) noexcept {
 
-        if (base_.disposed_ || !base_.established_) {
+        if (base_.disposed_.load(std::memory_order_acquire) || !base_.established_) {
             return false;
         }
 

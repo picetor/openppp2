@@ -35,6 +35,7 @@ namespace vmux {
             VirtualEthernetTcpipConnectionPtr                                       connection;
             std::shared_ptr<
                 ppp::app::server::VirtualEthernetNetworkTcpipConnection>            server;
+            uint16_t                                                                id_ = 0;
         }                                                                           vmux_linklayer;
 
         typedef std::shared_ptr<vmux_linklayer>                                     vmux_linklayer_ptr;
@@ -122,8 +123,8 @@ namespace vmux {
         uint64_t                                                                    get_last()            noexcept { return status_.last_; }
         const uint32_t&                                                             get_tx_seq()          noexcept { return status_.tx_seq_; }
         const uint32_t&                                                             get_rx_ack()          noexcept { return status_.rx_ack_; }
-        bool                                                                        is_disposed()         noexcept { return base_.disposed_; }
-        bool                                                                        is_established()      noexcept { return !base_.disposed_ && base_.established_; }
+        bool                                                                        is_disposed()         noexcept { return base_.disposed_.load(std::memory_order_acquire); }
+        bool                                                                        is_established()      noexcept { return !base_.disposed_.load(std::memory_order_acquire) && base_.established_; }
 
         bool                                                                        ftt(uint32_t seq, uint32_t ack) noexcept;
         static uint32_t                                                             ftt_random_aid(int min, int max) noexcept;
@@ -180,7 +181,7 @@ namespace vmux {
         bool                                                                        process_rx_connecting(std::shared_ptr<vmux_skt>& skt, uint32_t connection_id, const char* host, int host_size) noexcept;
 
         void                                                                        active(uint64_t now) noexcept { 
-            if (!base_.disposed_) {
+            if (!base_.disposed_.load(std::memory_order_acquire)) {
                 status_.last_ = now; 
             }
         }
@@ -229,11 +230,11 @@ namespace vmux {
 
     private:
         struct {
-            bool                                                                    disposed_          : 1;
             bool                                                                    ftt_               : 1;
             bool                                                                    established_       : 1;
             bool                                                                    server_or_client_  : 1;
             bool                                                                    acceleration_      : 4;
+            std::atomic<bool>                                                       disposed_{false};
         }                                                                           base_;
 
         struct {

@@ -352,6 +352,18 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | 2 | 客户端加速 | 上传密集型 |
 | 3 | 双向加速 | 高性能需求 |
 
+#### MUX 合并状态（阶段 1）
+
+当前数据面保持原版 MUX 调度行为，`appsettings.json` 中应使用 `mux.mode: "compat"` 和 `mux.turbo: false`。`flow`、`balance`、`stripe` 与动态 `turbo` 连接池尚未合并；如果配置这些值，程序会在启动时输出警告并安全回退到 `compat`。
+
+阶段 1 已合并的内容仅包括：
+
+- 兼容原版不携带 `ordering_caps` 的 MUX 握手，同时接受带该可选字段的新握手；缺省能力按 `compat` 处理。
+- 校验 MUX 链路握手的 `receive_id`（拒绝零值、越界值和重复值）。
+- 使用原子销毁状态，并阻止晚到的异步发送回调在会话销毁后继续访问发送队列。
+
+这些改动不改变原版 MUX 帧格式，也不启用 Miaocchi 的 flow-v2、逐流重排、队列背压或动态连接池。
+
 #### 虚拟网卡默认值
 | 平台 | 默认值 |
 |------|--------|
@@ -583,7 +595,7 @@ CDN 优选 IP 场景需额外配置 `client.websocket`：
 | Linux | aarch64 (4 variants) | Release / Debug |
 | macOS | arm64 + amd64 | Release / Debug |
 
-> 其他配置项（隧道协议、路由策略、MUX 多路复用、PaperAirplane 加速等）与原版一致，请参考上游文档。
+> 隧道协议、路由策略和 PaperAirplane 等配置可参考上游文档。MUX 当前处于阶段 1 兼容合并，能力边界请以上方“MUX 合并状态（阶段 1）”为准。
 
 ---
 
