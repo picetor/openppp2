@@ -110,8 +110,20 @@ namespace {
         }
 
         ppp::string value = ToLower(LTrim(RTrim(mode)));
+        if (value == "flow" || value == "flow-v1" || value == "primary" || value == "primary-link") {
+            return "flow";
+        }
+
         if (value == "compat" || value == "legacy" || value == "default") {
             return "compat";
+        }
+
+        if (value == "balance" || value == "balanced" || value == "lb" || value == "load-balance") {
+            return "balance";
+        }
+
+        if (value == "stripe" || value == "striped" || value == "striping") {
+            return "stripe";
         }
 
         if (value.empty()) {
@@ -120,7 +132,7 @@ namespace {
         }
 
         if (NULLPTR != note) {
-            *note = "mux.mode '" + value + "' is not available in MUX merge phase 1; falling back to 'compat'";
+            *note = "mux.mode '" + value + "' is not recognized; falling back to 'compat'";
         }
         return "compat";
     }
@@ -616,13 +628,6 @@ namespace ppp {
             }
 
             config.mux.mode = NormalizeMuxMode(config.mux.mode, &config._mux_mode_diagnostic);
-            if (config.mux.turbo) {
-                config.mux.turbo = false;
-                if (!config._mux_mode_diagnostic.empty()) {
-                    config._mux_mode_diagnostic += "; ";
-                }
-                config._mux_mode_diagnostic += "mux.turbo is not available in MUX merge phase 1; disabled";
-            }
             config.mux.debug.key = LTrim(RTrim(config.mux.debug.key));
             config.mux.debug.set_mode = LTrim(RTrim(config.mux.debug.set_mode));
 
@@ -1321,6 +1326,7 @@ namespace ppp {
             config.mux.tx.queue.max = JsonAuxiliary::AsValue<int>(json["mux"]["tx"]["queue"]["max"]);
             config.mux.tx.queue.stall = JsonAuxiliary::AsValue<int>(json["mux"]["tx"]["queue"]["stall"]);
             config.mux.debug.key = JsonAuxiliary::AsValue<ppp::string>(json["mux"]["debug"]["key"]);
+            config.mux.debug.set_mode = JsonAuxiliary::AsValue<ppp::string>(json["mux"]["debug"]["set-mode"]);
             config.mux.keep_alived[0] = JsonAuxiliary::AsValue<int>(json["mux"]["keep-alived"][0]);
             config.mux.keep_alived[1] = JsonAuxiliary::AsValue<int>(json["mux"]["keep-alived"][1]);
 
@@ -1504,6 +1510,9 @@ namespace ppp {
             mux["tx"]["queue"]["stall"] = config.mux.tx.queue.stall;
             if (!config.mux.debug.key.empty()) {
                 mux["debug"]["key"] = config.mux.debug.key;
+            }
+            if (!config.mux.debug.set_mode.empty()) {
+                mux["debug"]["set-mode"] = config.mux.debug.set_mode;
             }
 
             // Set keep-alived structure
@@ -1693,10 +1702,9 @@ namespace ppp {
         /**
          * @brief Emits the active MUX scheduler mode and any normalization note.
          *
-         * The active `mux.mode` is reported for observability (Phase 1). When
-         * `Loaded()` normalized the configured value (a reserved-but-unimplemented
-         * mode such as `balance`/`stripe`, or an unrecognized token), the captured
-         * note is emitted as a non-fatal warning on both telemetry and console.
+         * The active `mux.mode` is reported for observability. When `Loaded()`
+         * normalized an unrecognized token to compat, the captured note is
+         * emitted as a non-fatal warning on both telemetry and console.
          */
         void AppConfiguration::EmitMuxDiagnostics() noexcept {
             const AppConfiguration& config = *this;

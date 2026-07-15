@@ -373,6 +373,19 @@ namespace ppp {
 
             bool VirtualEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
                 bool err = true;
+
+                AppConfigurationPtr configuration = switcher_->GetConfiguration();
+                vmux::vmux_net::mux_mode effective_mux_mode = NULLPTR != configuration
+                    ? vmux::vmux_net::parse_mode(configuration->GetEffectiveMuxMode())
+                    : vmux::vmux_net::mux_mode_compat;
+                bool local_supports_flow_v2 = vmux::vmux_net::mode_requires_flow_v2(
+                    effective_mux_mode, NULLPTR != configuration && configuration->mux.turbo);
+                bool peer_supports_flow_v2 =
+                    (ordering_caps & vmux::vmux_net::ordering_caps_flow_v2) != 0;
+                vmux::vmux_net::receiver_ordering_mode agreed =
+                    (local_supports_flow_v2 && peer_supports_flow_v2)
+                        ? vmux::vmux_net::ordering_flow_v2
+                        : vmux::vmux_net::ordering_compat;
                 for (;;) {
                     if (disposed_) {
                         break;
@@ -400,13 +413,24 @@ namespace ppp {
                         break;
                     }
 
-                    mux = make_shared_object<vmux::vmux_net>(vmux_context, vmux_strand, max_connections, true, acceleration);
+                    vmux::vmux_net::mux_mode mux_mode = effective_mux_mode;
+                    mux = make_shared_object<vmux::vmux_net>(vmux_context, vmux_strand,
+                        max_connections, true, acceleration, mux_mode);
                     if (NULLPTR != mux) {
                         mux->Vlan = vlan;
                         mux->Firewall = GetFirewall();
                         mux->Logger = switcher_->GetLogger();
-                        mux->AppConfiguration = switcher_->GetConfiguration();
+                        mux->AppConfiguration = configuration;
                         mux->BufferAllocator = transmission->BufferAllocator;
+
+                        // A flow-mode server accepts the client's optional turbo
+                        // carrier growth up to the same bounded hard ceiling.
+                        if (mux_mode == vmux::vmux_net::mux_mode_flow) {
+                            uint32_t hard = static_cast<uint32_t>(max_connections) * static_cast<uint32_t>(PPP_MUX_TURBO_FACTOR_MAX);
+                            mux->set_pool_hard_max(static_cast<uint16_t>(std::min<uint32_t>(hard, UINT16_MAX)));
+                        }
+
+                        mux->set_ordering_mode(agreed);
 
                         if (mux->update()) {
                             err = false;
@@ -429,7 +453,10 @@ namespace ppp {
                     DoMux(transmission, 0, 0, false, 0, y);
                 }
                 else {
-                    DoMux(transmission, vlan, max_connections, acceleration, 0, y);
+                    Byte agreed_caps = agreed == vmux::vmux_net::ordering_flow_v2
+                        ? static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2)
+                        : static_cast<Byte>(0);
+                    DoMux(transmission, vlan, max_connections, acceleration, agreed_caps, y);
                 }
 
                 return true;

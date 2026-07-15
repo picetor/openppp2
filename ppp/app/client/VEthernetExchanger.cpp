@@ -578,6 +578,12 @@ namespace ppp {
                         if (breaking) {
                             LOG_DEBUG("VEthernetExchanger::DoMuxEvents: keeping existing mux, state=%d, established=%d, disposed=%d",
                                 (int)GetMuxNetworkState(), (int)mux->is_established(), (int)mux->is_disposed());
+                            if (mux->is_established()) {
+                                int grow = mux->take_turbo_pending_grow();
+                                if (grow > 0) {
+                                    MuxGrowLinklayers(switcher_->GetBufferAllocator(), mux, grow);
+                                }
+                            }
                             break;
                         }
                     }
@@ -588,9 +594,16 @@ namespace ppp {
                         break;
                     }
                     else {
-                        mux = make_shared_object<vmux::vmux_net>(vmux_context, vmux_strand, max_connections, false, (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_LOCAL) != 0);
+                        vmux::vmux_net::mux_mode mux_mode = vmux::vmux_net::parse_mode(configuration->GetEffectiveMuxMode());
+                        mux = make_shared_object<vmux::vmux_net>(vmux_context, vmux_strand, max_connections, false,
+                            (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_LOCAL) != 0, mux_mode);
                         if (NULLPTR == mux) {
                             break;
+                        }
+
+                        if (mux_mode == vmux::vmux_net::mux_mode_flow && configuration->mux.turbo) {
+                            uint32_t hard = static_cast<uint32_t>(max_connections) * static_cast<uint32_t>(PPP_MUX_TURBO_FACTOR_MAX);
+                            mux->set_pool_hard_max(static_cast<uint16_t>(std::min<uint32_t>(hard, UINT16_MAX)));
                         }
                     }
 
@@ -625,13 +638,20 @@ namespace ppp {
                     mux_ = mux;
 
                     successes = YieldContext::Spawn(buffer_allocator.get(), *vnet_context, 
-                        [self, this, vnet_transmission, mux, vnet_context](YieldContext& y) noexcept {
+                        [self, this, vnet_transmission, mux, vnet_context, configuration](YieldContext& y) noexcept {
                             bool ok = false;
                             if (!disposed_) {
                                 uint16_t max_connections = mux->get_max_connections();
                                 LOG_DEBUG("VEthernetExchanger::DoMuxEvents: sending mux request, vlan=%u, max_connections=%u, acceleration=%d",
                                     mux->Vlan, max_connections, (int)((switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0));
-                                ok = DoMux(vnet_transmission, mux->Vlan, max_connections, (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0, 0, y);
+                                bool advertise_flow_v2 = vmux::vmux_net::mode_requires_flow_v2(
+                                    mux->get_mode(), configuration->mux.turbo);
+                                Byte ordering_caps = advertise_flow_v2
+                                    ? static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2)
+                                    : static_cast<Byte>(0);
+                                ok = DoMux(vnet_transmission, mux->Vlan, max_connections,
+                                    (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0,
+                                    ordering_caps, y);
                             }
 
                             if (!ok) {
@@ -769,6 +789,64 @@ namespace ppp {
                     });
             }
 
+            bool VEthernetExchanger::MuxGrowLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux, int count) noexcept {
+                using ppp::app::protocol::VirtualEthernetTcpipConnection;
+
+                if (NULLPTR == mux || count <= 0) {
+                    return false;
+                }
+
+                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
+                if (NULLPTR == context) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                auto strand = mux->get_strand();
+                return YieldContext::Spawn(allocator.get(), *context, strand.get(),
+                    [self, this, mux, count, context, strand](YieldContext& y) noexcept -> bool {
+                        const uint32_t& tx_seq = mux->get_tx_seq();
+                        const uint32_t& rx_ack = mux->get_rx_ack();
+
+                        for (int i = 0; i < count; i++) {
+                            if (disposed_ || mux != mux_ || mux->is_disposed()) {
+                                break;
+                            }
+
+                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y);
+                            if (NULLPTR == transmission) {
+                                break;
+                            }
+
+                            std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
+                            std::shared_ptr<VirtualEthernetTcpipConnection> connection =
+                                make_shared_object<VirtualEthernetTcpipConnection>(
+                                    mux->AppConfiguration, context, strand, GetId(), default_socket);
+                            if (NULLPTR == connection) {
+                                break;
+                            }
+
+                            if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
+                                break;
+                            }
+
+                            bool added = mux->do_yield(y,
+                                [self, mux, connection]() noexcept -> bool {
+                                    vmux::vmux_net::vmux_linklayer_ptr linklayer;
+                                    vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
+                                    return mux->add_linklayer(connection, linklayer, handling);
+                                });
+                            if (!added) {
+                                break;
+                            }
+                        }
+
+                        // Runtime growth is best-effort. The established base pool
+                        // remains usable when an extra carrier cannot be created.
+                        return true;
+                    });
+            }
+
             bool VEthernetExchanger::ReleaseDeadlineTimer(const boost::asio::deadline_timer* deadline_timer) noexcept {
                 if (NULLPTR == deadline_timer) {
                     return false;
@@ -893,7 +971,15 @@ namespace ppp {
                         if (!established) {
                             auto configuration = GetConfiguration();
                             auto allocator = configuration->GetBufferAllocator();
-                        
+
+                            bool local_supports_flow_v2 = vmux::vmux_net::mode_requires_flow_v2(
+                                mux->get_mode(), configuration->mux.turbo);
+                            bool agreed_flow_v2 = local_supports_flow_v2 &&
+                                ((ordering_caps & vmux::vmux_net::ordering_caps_flow_v2) != 0);
+                            mux->set_ordering_mode(agreed_flow_v2
+                                ? vmux::vmux_net::ordering_flow_v2
+                                : vmux::vmux_net::ordering_compat);
+
                             successed = MuxConnectAllLinklayers(allocator, mux);
                         }
                     }

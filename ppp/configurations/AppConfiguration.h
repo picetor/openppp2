@@ -115,10 +115,10 @@ namespace ppp {
                 struct {
                     int                                                     timeout;        ///< MUX connect handshake timeout in seconds.
                 }                                                           connect;
-                ppp::string                                                 mode;           ///< MUX transmit scheduler mode: compat or flow.
+                ppp::string                                                 mode;           ///< MUX transmit scheduler mode: compat, flow, balance, or stripe.
                 int                                                         congestions;    ///< MUX congestion control level; higher values reduce burst aggressiveness.
                 int                                                         keep_alived[2]; ///< MUX keep-alive interval range [min, max] in seconds.
-                bool                                                        turbo;          ///< flow-mode turbo: best-link-first first packet + prewarmed carrier links (--mux-mode-turbo); default false.
+                bool                                                        turbo;          ///< Enables the experimental dynamic carrier pool for flow mode; default false.
                 struct {
                     struct {
                         int                                                 bytes;          ///< Per-connection reorder buffer byte cap (flow v2); strictly > 0.
@@ -328,9 +328,8 @@ namespace ppp {
             /**
              * @brief Emits a startup report describing the active MUX scheduler.
              *
-             * Logs the active `mux.mode` (Phase 1 observability) and, when the
-             * loaded value was normalized (reserved-but-unimplemented mode or an
-             * unrecognized value), emits a non-fatal warning describing the
+             * Logs the active `mux.mode` and, when an unknown configured value
+             * was normalized to compat, emits a non-fatal warning describing the
              * fallback. Startup never fails as a result of this call.
              *
              * @note Called once during application startup after telemetry is

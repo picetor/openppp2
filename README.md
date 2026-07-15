@@ -380,7 +380,23 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
     "keep-alived": [
         5,
         20
-    ]
+    ],
+    "flow": {
+        "reorder": {
+            "bytes": 1048576,
+            "timeout": 400
+        }
+    },
+    "tx": {
+        "queue": {
+            "max": 4096,
+            "stall": 8000
+        }
+    },
+    "debug": {
+        "key": "",
+        "set-mode": ""
+    }
 }
 ```
 
@@ -389,13 +405,49 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
 | `connect.timeout` | MUX 连接建立超时，单位为秒 | `20` |
 | `inactive.timeout` | MUX 空闲连接超时，单位为秒 | `60` |
 | `congestions` | 单连接接收拥塞阈值，单位为字节；`0` 表示不限制 | `134217728` |
-| `mode` | MUX 调度模式；当前使用兼容模式 | `compat` |
-| `turbo` | 动态连接池开关；当前应保持关闭 | `false` |
+| `mode` | MUX 调度模式：`compat`、`flow`、`balance` 或 `stripe` | `compat` |
+| `turbo` | flow 模式动态连接池；最多扩展到基础连接数的 3 倍 | `false` |
 | `keep-alived` | 心跳间隔随机范围，单位为秒 | `[5, 20]` |
+| `flow.reorder.bytes` | 每个业务流的最大乱序缓存，单位为字节 | `1048576` |
+| `flow.reorder.timeout` | 等待缺失数据序号的超时，单位为毫秒 | `400` |
+| `tx.queue.max` | 数据发送队列高水位，达到后暂停继续读取 | `4096` |
+| `tx.queue.stall` | 发送队列持续阻塞后重建 MUX 的时间，单位为毫秒 | `8000` |
+| `debug.key` | 远程切换 MUX 模式的共享密钥；空值表示禁用 | 空 |
+| `debug.set-mode` | 启动后向对端发送一次模式切换请求 | 空 |
+
+#### MUX 调度模式
+
+| 模式 | 链路选择 | 接收排序 | 适用场景 |
+|------|----------|----------|----------|
+| `compat` | 空闲链路竞争 | 全局序号 | 与原版或旧版本互通，兼容性最高 |
+| `flow` | 空闲链路竞争 | 默认全局序号；启用 turbo 后协商逐流序号 | 链路质量不同，或需要动态扩缩连接池 |
+| `balance` | 空闲链路竞争 | 逐流序号，避免不同业务流互相阻塞 | 多连接并发、链路质量不同，推荐优先测试 |
+| `stripe` | 按链路轮询分包 | 逐流序号 | 带宽和延迟接近的同质链路 |
+
+客户端和服务端应配置相同的 `mux.mode`。`balance`、`stripe` 以及 `flow + turbo` 会通过 `ordering_caps` 协商 flow-v2；只有两端都支持时才启用逐流排序，否则自动退回全局兼容排序。与原版服务端或客户端互通时应使用：
+
+```json
+"mode": "compat",
+"turbo": false
+```
+
+启用 balance：
+
+```json
+"mode": "balance",
+"turbo": false
+```
+
+启用 flow 动态连接池：
+
+```json
+"mode": "flow",
+"turbo": true
+```
 
 > 建议先从 `--tun-mux=2` 或 `--tun-mux=4` 开始测试。连接数越多，连接建立、心跳和服务器资源开销也越大，不一定能继续提高速度。不需要 MUX 时只需设置 `--tun-mux=0`，无需删除配置文件中的 `mux` 段。
 
-> 当前版本支持 `compat` 调度模式。配置 `flow`、`balance`、`stripe` 或 `turbo: true` 时会输出警告，并自动回退到 `compat` 和 `turbo: false`。
+> `turbo` 仅在 `flow` 模式生效，会根据发送队列和链路活跃度动态增加或回收载波连接。该功能涉及运行期连接扩缩，建议先在测试环境验证断线重连、长连接和高并发场景。
 
 #### 虚拟网卡默认值
 | 平台 | 默认值 |

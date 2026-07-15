@@ -199,6 +199,7 @@ namespace ppp {
                 virtual bool                                                            DoKeepAlived(const ITransmissionPtr& transmission, uint64_t now) noexcept override;
                 bool                                                                    DoMuxEvents() noexcept;
                 bool                                                                    MuxConnectAllLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux) noexcept;
+                bool                                                                    MuxGrowLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux, int count) noexcept;
 
             private:
                 class StaticEchoDatagarmSocket final : public boost::asio::ip::udp::socket {

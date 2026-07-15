@@ -350,6 +350,8 @@ static constexpr int                                                        PPP_
 static constexpr int                                                        PPP_MUX_FLOW_REORDER_TIMEOUT    = 1000;
 static constexpr int                                                        PPP_MUX_TX_QUEUE_HIGH_WATER     = 65536;
 static constexpr int                                                        PPP_MUX_TX_BACKLOG_STALL_TIMEOUT = 5000;
+static constexpr int                                                        PPP_MUX_TURBO_FACTOR_MAX        = 3;
+static constexpr int                                                        PPP_MUX_TURBO_CONTROL_COOLDOWN  = 3000;
 static constexpr int                                                        PPP_UDP_INACTIVE_TIMEOUT        = 72; 
 static constexpr int                                                        PPP_UDP_KEEP_ALIVED_MIN_TIMEOUT = 20;
 static constexpr int                                                        PPP_UDP_KEEP_ALIVED_MAX_TIMEOUT = 60;
