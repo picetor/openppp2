@@ -386,7 +386,8 @@ namespace ppp {
                                 boost::asio::ip::address ancestor = network.address;
                                 NormalizeNetwork(ancestor, prefix);
                                 ppp::string key = (ancestor.is_v4() ? "4:" : "6:") +
-                                    std::to_string(prefix) + ":" + ancestor.to_string();
+                                    stl::to_string<ppp::string>(prefix) + ":" +
+                                    ppp::net::Ipep::ToAddressString<ppp::string>(ancestor);
                                 if (accepted_prefixes.find(key) != accepted_prefixes.end()) {
                                     covered = true;
                                     break;
@@ -395,7 +396,8 @@ namespace ppp {
                             if (covered) continue;
 
                             ppp::string key = (network.address.is_v4() ? "4:" : "6:") +
-                                std::to_string(network.prefix) + ":" + network.address.to_string();
+                                stl::to_string<ppp::string>(network.prefix) + ":" +
+                                ppp::net::Ipep::ToAddressString<ppp::string>(network.address);
                             accepted_prefixes.emplace(std::move(key));
                             compiled.emplace_back(network);
                         }
@@ -458,7 +460,7 @@ namespace ppp {
                                 boost::system::error_code ec;
                                 boost::asio::ip::address address = StringToAddress(ATrim<ppp::string>(item).data(), ec);
                                 if (ec || ppp::net::IPEndPoint::IsInvalid(address)) {
-                                    error = "invalid direct_dns address at line " + std::to_string(line_number + 1);
+                                    error = "invalid direct_dns address at line " + stl::to_string<ppp::string>(line_number + 1);
                                     return false;
                                 }
                                 direct_dns_.emplace_back(address);
@@ -469,7 +471,7 @@ namespace ppp {
                         ppp::vector<ppp::string> fields;
                         Tokenize<ppp::string>(line, fields, ",");
                         if (fields.size() != 3) {
-                            error = "geo rule must have exactly 3 fields at line " + std::to_string(line_number + 1);
+                            error = "geo rule must have exactly 3 fields at line " + stl::to_string<ppp::string>(line_number + 1);
                             return false;
                         }
 
@@ -479,7 +481,7 @@ namespace ppp {
                         rule.action = ParseAction(fields[2]);
                         rule.priority = rules_.size();
                         if (rule.value.empty() || rule.action == Action::None) {
-                            error = "invalid geo rule value or action at line " + std::to_string(line_number + 1);
+                            error = "invalid geo rule value or action at line " + stl::to_string<ppp::string>(line_number + 1);
                             return false;
                         }
 
@@ -493,7 +495,7 @@ namespace ppp {
                                 if (!attribute.empty()) rule.attributes.emplace_back(std::move(attribute));
                             }
                             if (rule.value.empty()) {
-                                error = "empty geosite category at line " + std::to_string(line_number + 1);
+                                error = "empty geosite category at line " + stl::to_string<ppp::string>(line_number + 1);
                                 return false;
                             }
                             wanted_sites.emplace(rule.value);
@@ -514,11 +516,11 @@ namespace ppp {
                         else if (type == "domain-regex" || type == "regexp") {
                             rule.type = RuleType::DomainRegex;
                             try {
-                                rule.regex = make_shared_object<boost::regex>(rule.value,
+                                rule.regex = make_shared_object<boost::regex>(rule.value.data(),
                                     boost::regex_constants::icase | boost::regex_constants::perl);
                             }
                             catch (const std::exception&) {
-                                error = "invalid domain regex at line " + std::to_string(line_number + 1);
+                                error = "invalid domain regex at line " + stl::to_string<ppp::string>(line_number + 1);
                                 return false;
                             }
                         }
@@ -528,7 +530,7 @@ namespace ppp {
                             if (!ParseCidrText(rule.value, network) ||
                                 (type == "ip-cidr" && !network.address.is_v4()) ||
                                 (type == "ip-cidr6" && !network.address.is_v6())) {
-                                error = "invalid IP CIDR at line " + std::to_string(line_number + 1);
+                                error = "invalid IP CIDR at line " + stl::to_string<ppp::string>(line_number + 1);
                                 return false;
                             }
                             network.action = rule.action;
@@ -537,7 +539,7 @@ namespace ppp {
                             static_networks_.emplace_back(std::move(network));
                         }
                         else {
-                            error = "unsupported geo rule type at line " + std::to_string(line_number + 1) + ": " + type;
+                            error = "unsupported geo rule type at line " + stl::to_string<ppp::string>(line_number + 1) + ": " + type;
                             return false;
                         }
                         rules_.emplace_back(std::move(rule));
@@ -587,7 +589,7 @@ namespace ppp {
                                 pattern.value = source.value;
                                 if (pattern.type == 1) {
                                     try {
-                                        pattern.regex = make_shared_object<boost::regex>(pattern.value,
+                                        pattern.regex = make_shared_object<boost::regex>(pattern.value.data(),
                                             boost::regex_constants::icase | boost::regex_constants::perl);
                                     }
                                     catch (const std::exception&) {
@@ -644,7 +646,7 @@ namespace ppp {
                         matched = host.find(rule.value) != ppp::string::npos;
                         break;
                     case RuleType::DomainRegex:
-                        try { matched = rule.regex && boost::regex_search(host, *rule.regex); }
+                        try { matched = rule.regex && boost::regex_search(host.data(), *rule.regex); }
                         catch (const std::exception&) { matched = false; }
                         break;
                     case RuleType::Geosite:
@@ -652,7 +654,7 @@ namespace ppp {
                             switch (pattern.type) {
                             case 0: matched = host.find(pattern.value) != ppp::string::npos; break;
                             case 1:
-                                try { matched = pattern.regex && boost::regex_search(host, *pattern.regex); }
+                                try { matched = pattern.regex && boost::regex_search(host.data(), *pattern.regex); }
                                 catch (const std::exception&) { matched = false; }
                                 break;
                             case 2: matched = DomainSuffixMatch(host, pattern.value); break;
@@ -690,7 +692,7 @@ namespace ppp {
                 }
 
                 ppp::string GeoRuleEngine::AddressKey(const boost::asio::ip::address& address) noexcept {
-                    return address.to_string();
+                    return ppp::net::Ipep::ToAddressString<ppp::string>(address);
                 }
 
                 GeoRuleEngine::Decision GeoRuleEngine::MatchAddress(const boost::asio::ip::address& address, uint64_t now) const noexcept {
@@ -732,7 +734,7 @@ namespace ppp {
                     if (message.decode(reinterpret_cast<uint8_t*>(const_cast<void*>(packet)), static_cast<size_t>(packet_size)) != ::dns::BufferResult::NoError ||
                         message.questions.empty()) return false;
 
-                    ppp::string domain = LowerTrim(message.questions[0].mName);
+                    ppp::string domain = LowerTrim(stl::transform<ppp::string>(message.questions[0].mName));
                     Decision domain_decision = MatchDomain(domain);
                     if (!domain_decision.Matched()) return false;
 

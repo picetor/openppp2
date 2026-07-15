@@ -2992,7 +2992,8 @@ namespace ppp {
                 ppp::unordered_set<ppp::string> installed;
                 bool any = false;
                 for (const auto& network : geo_rules_->GetStaticNetworks()) {
-                    ppp::string key = network.address.to_string() + "/" + std::to_string(network.prefix);
+                    ppp::string key = ppp::net::Ipep::ToAddressString<ppp::string>(network.address) +
+                        "/" + stl::to_string<ppp::string>(network.prefix);
                     if (!installed.emplace(key).second) {
                         continue; // First rule owns an identical prefix.
                     }
