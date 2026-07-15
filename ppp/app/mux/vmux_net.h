@@ -31,7 +31,7 @@ namespace vmux {
         std::shared_ptr<ppp::net::Firewall>                                         Firewall;
 
         typedef std::shared_ptr<vmux_skt>                                           vmux_skt_ptr;
-        typedef struct {
+        typedef struct vmux_linklayer {
             VirtualEthernetTcpipConnectionPtr                                       connection;
             std::shared_ptr<
                 ppp::app::server::VirtualEthernetNetworkTcpipConnection>            server;

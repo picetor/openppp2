@@ -352,17 +352,50 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | 2 | 客户端加速 | 上传密集型 |
 | 3 | 双向加速 | 高性能需求 |
 
-#### MUX 合并状态（阶段 1）
+#### MUX 使用说明
 
-当前数据面保持原版 MUX 调度行为，`appsettings.json` 中应使用 `mux.mode: "compat"` 和 `mux.turbo: false`。`flow`、`balance`、`stripe` 与动态 `turbo` 连接池尚未合并；如果配置这些值，程序会在启动时输出警告并安全回退到 `compat`。
+MUX 使用多条隧道连接承载客户端流量，默认关闭。客户端通过 `--tun-mux` 指定连接数，服务端会自动完成协商，无需单独设置连接数。
 
-阶段 1 已合并的内容仅包括：
+```bash
+# 关闭 MUX
+ppp --mode=client --config=appsettings.json --tun-mux=0
 
-- 兼容原版不携带 `ordering_caps` 的 MUX 握手，同时接受带该可选字段的新握手；缺省能力按 `compat` 处理。
-- 校验 MUX 链路握手的 `receive_id`（拒绝零值、越界值和重复值）。
-- 使用原子销毁状态，并阻止晚到的异步发送回调在会话销毁后继续访问发送队列。
+# 启用 4 条 MUX 连接，使用标准加速模式
+ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
+```
 
-这些改动不改变原版 MUX 帧格式，也不启用 Miaocchi 的 flow-v2、逐流重排、队列背压或动态连接池。
+`appsettings.json` 配置示例：
+
+```json
+"mux": {
+    "connect": {
+        "timeout": 20
+    },
+    "inactive": {
+        "timeout": 60
+    },
+    "congestions": 134217728,
+    "mode": "compat",
+    "turbo": false,
+    "keep-alived": [
+        5,
+        20
+    ]
+}
+```
+
+| 配置项 | 功能 | 默认值 |
+|--------|------|:------:|
+| `connect.timeout` | MUX 连接建立超时，单位为秒 | `20` |
+| `inactive.timeout` | MUX 空闲连接超时，单位为秒 | `60` |
+| `congestions` | 单连接接收拥塞阈值，单位为字节；`0` 表示不限制 | `134217728` |
+| `mode` | MUX 调度模式；当前使用兼容模式 | `compat` |
+| `turbo` | 动态连接池开关；当前应保持关闭 | `false` |
+| `keep-alived` | 心跳间隔随机范围，单位为秒 | `[5, 20]` |
+
+> 建议先从 `--tun-mux=2` 或 `--tun-mux=4` 开始测试。连接数越多，连接建立、心跳和服务器资源开销也越大，不一定能继续提高速度。不需要 MUX 时只需设置 `--tun-mux=0`，无需删除配置文件中的 `mux` 段。
+
+> 当前版本支持 `compat` 调度模式。配置 `flow`、`balance`、`stripe` 或 `turbo: true` 时会输出警告，并自动回退到 `compat` 和 `turbo: false`。
 
 #### 虚拟网卡默认值
 | 平台 | 默认值 |
@@ -595,7 +628,7 @@ CDN 优选 IP 场景需额外配置 `client.websocket`：
 | Linux | aarch64 (4 variants) | Release / Debug |
 | macOS | arm64 + amd64 | Release / Debug |
 
-> 隧道协议、路由策略和 PaperAirplane 等配置可参考上游文档。MUX 当前处于阶段 1 兼容合并，能力边界请以上方“MUX 合并状态（阶段 1）”为准。
+> 隧道协议、路由策略和 PaperAirplane 等配置可参考上游文档。MUX 的启用方法和当前可用模式请参考上方“MUX 使用说明”。
 
 ---
 

@@ -191,7 +191,6 @@ jobs:
           Copy-Item "${{ github.workspace }}\firewall-rules.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ip.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ipv6.txt" "$PackageDir\"
-          Copy-Item "${{ github.workspace }}\cacert.pem" "$PackageDir\"
           Copy-Item -Recurse "${{ github.workspace }}\Driver" "$PackageDir\Driver"
 
           $ReleaseArtifactName = "${PackageDir}"
