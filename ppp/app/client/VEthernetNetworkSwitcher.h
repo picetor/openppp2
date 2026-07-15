@@ -17,6 +17,7 @@
 #include <ppp/app/protocol/VirtualEthernetInformation.h>
 #include <ppp/app/protocol/VirtualEthernetLogger.h>
 #include <ppp/app/client/dns/Rule.h>
+#include <ppp/app/client/geo/GeoRuleEngine.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetSocksProxySwitcher.h>
 
@@ -158,6 +159,7 @@ namespace ppp {
 
             public: 
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
+                bool                                                                LoadGeoRules(const ppp::string& rules_path, const ppp::string& geosite_path, const ppp::string& geoip_path) noexcept;
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
@@ -276,6 +278,10 @@ namespace ppp {
                 bool                                                                LoadAllIPListWithFilePaths(const boost::asio::ip::address& gw) noexcept;
                 bool                                                                LoadAllIPListWithFilePaths6(const boost::asio::ip::address& gw6) noexcept;
                 void                                                                AddIPv6Route() noexcept;
+                bool                                                                ApplyGeoStaticRoutes() noexcept;
+                void                                                                ObserveGeoDnsResponse(const void* packet, int packet_size) noexcept;
+                void                                                                AddGeoDynamicRoute(const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept;
+                void                                                                DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept;
 #endif
                 void                                                                Finalize() noexcept;
 #if defined(PPP_LOG_VERBOSE)
@@ -318,6 +324,7 @@ namespace ppp {
                 VEthernetSocksProxySwitcherPtr                                      socks_proxy_;
                 TimeoutEventHandlerTable                                            timeouts_;
                 DNSRuleTable                                                        dns_ruless_[3];
+                std::shared_ptr<ppp::app::client::geo::GeoRuleEngine>               geo_rules_;
 
                 // Prefer IPv4: pending AAAA responses awaiting A-cache population or timeout.
                 // When an AAAA DNS response arrives before the corresponding A response,
@@ -374,6 +381,7 @@ namespace ppp {
                 boost::asio::ip::address                                            preferred_ngw_;
                 boost::asio::ip::address                                            preferred_ngw6_;
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
+                ppp::unordered_map<uint32_t, uint32_t>                              geo_dynamic_routes_;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;

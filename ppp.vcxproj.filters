@@ -396,6 +396,9 @@
     <ClCompile Include="ppp\app\client\dns\Rule.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="ppp\app\client\geo\GeoRuleEngine.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="ppp\net\asio\websocket\websocket_accept_sslv_websocket.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -1407,6 +1410,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ppp\app\client\dns\Rule.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ppp\app\client\geo\GeoRuleEngine.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ppp\net\asio\websocket\websocket_accept_sslv_websocket.h">

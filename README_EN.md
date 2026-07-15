@@ -18,6 +18,7 @@
 
 ## 📋 Table of Contents
 
+- [Geo Split-Tunneling Mode](#geo-split-tunneling-mode)
 - [IPv6 Feature Overview](#-ipv6-feature-overview)
   - [IPv6 Split Tunneling (--bypass6)](#-ipv6-split-tunneling---bypass6)
   - [VPN Server IPv6 Reachability Guarantee](#-vpn-server-ipv6-reachability-guarantee)
@@ -35,6 +36,43 @@
 - [Tunnel Protocol Configuration](#-tunnel-protocol-configuration)
 - [Build System](#-build-system)
 - [Related Projects](#-related-projects)
+
+---
+
+## Geo Split-Tunneling Mode
+
+Use `--bypass-mode` on the client to select the routing engine:
+
+| Mode | Behavior |
+|------|----------|
+| `original` | Default. Loads `ip.txt`, `ipv6.txt`, `dns-rules.txt`, and the original routes from `appsettings.json` |
+| `geo` | Loads `geo-rules.txt` plus Mihomo/V2Ray-compatible `geosite.dat` and `geoip.dat` as needed |
+| `no` | Disables user split-routing rules while retaining mandatory routes such as VPN server reachability |
+
+```bash
+ppp --mode=client --bypass-mode=geo
+
+ppp --mode=client --bypass-mode=geo \
+    --geo-rules=./geo-rules.txt \
+    --geosite=./geosite.dat \
+    --geoip=./geoip.dat
+```
+
+Each `geo-rules.txt` line uses `type,value,direct|tunnel`. Rules are matched from top to bottom and the first match wins. If several domains resolve to the same CDN IP, the earliest matching rule owns that IP policy.
+
+```ini
+direct_dns=223.5.5.5,119.29.29.29
+
+geosite,github,tunnel
+geosite,microsoft@cn,direct
+geoip,cn,direct
+domain-suffix,example.com,tunnel
+domain,api.example.com,direct
+ip-cidr,192.0.2.0/24,tunnel
+ip-cidr6,2001:db8::/32,direct
+```
+
+Supported types are `geosite` (including attributes such as `@cn`), `geoip`, `domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, and `ip-cidr6`. `direct_dns` is used only for domains matched as `direct`; unmatched traffic stays in the tunnel. Geo data files are not embedded in the executable and must exist at the selected paths before enabling `geo` mode.
 
 ---
 
@@ -316,11 +354,15 @@ The complete upstream CLI reference — fully compatible with this fork.
 #### Route Settings
 | Command | Description | Format | Default |
 |---------|-------------|--------|:------:|
+| `--bypass-mode` | Select split-routing engine | `--bypass-mode=original\|geo\|no` | `original` |
 | `--bypass` | Bypass list | `--bypass <file1\|file2>` | `./ip.txt` |
 | `--bypass-nic` | Bypass list NIC | `--bypass-nic <NIC>` | |
 | `--bypass-ngw` | Bypass list gateway | `--bypass-ngw <IP>` | `0.0.0.0` |
 | `--virr` | Auto-update & apply | `--virr [file]/[country]` | `./ip.txt/CN` |
 | `--dns-rules` | DNS rules | `--dns-rules <file>` | `./dns-rules.txt` |
+| `--geo-rules` | Geo rule file | `--geo-rules <file>` | `./geo-rules.txt` |
+| `--geosite` | geosite data file | `--geosite <file>` | `./geosite.dat` |
+| `--geoip` | geoip data file | `--geoip <file>` | `./geoip.dat` |
 
 #### Platform-Specific
 | Command | Platform | Description | Format | Default |

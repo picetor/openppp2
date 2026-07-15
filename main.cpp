@@ -88,6 +88,11 @@ using ppp::Int128;
 struct NetworkInterface final
 {
     typedef ppp::unordered_set<ppp::string>             BypassSet;
+    enum class BypassMode : uint8_t {
+        Original,
+        Geo,
+        No,
+    };
 
 #if defined(_WIN32)
     uint32_t                                            LeaseTimeInSeconds = 0;     // DHCP lease time
@@ -121,6 +126,10 @@ struct NetworkInterface final
     ppp::string                                         BypassNic6;                 // Network interface for IPv6 bypass
 #endif  
     boost::asio::ip::address                            BypassNgw6;                 // Gateway for IPv6 bypass routes
+    BypassMode                                          SplitMode = BypassMode::Original;
+    ppp::string                                         GeoRules;                   // Geo routing rules file
+    ppp::string                                         GeoSite;                    // V2Ray/Mihomo geosite.dat file
+    ppp::string                                         GeoIP;                      // V2Ray/Mihomo geoip.dat file
 
     ppp::string                                         ComponentId;                // TAP device identifier
 #if defined(_WIN32) 
@@ -1169,49 +1178,63 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet->PreferredNgw6(network_interface->BypassNgw6);
             ethernet->PreferredNic(network_interface->Nic);
 
-            // Load bypass IP lists
-#if defined(_LINUX)
-            for (auto&& bypass_path : *network_interface->Bypass) 
-            {
-                ethernet->AddLoadIPList(bypass_path, network_interface->BypassNic, network_interface->BypassNgw, ppp::string());
-            }
-#else
-            for (auto&& bypass_path : *network_interface->Bypass) 
-            {
-                ethernet->AddLoadIPList(bypass_path, network_interface->BypassNgw, ppp::string());
-            }
-#endif
-
-            // Load IPv6 bypass IP lists
-#if defined(_LINUX)
-            for (auto&& bypass_path : *network_interface->Bypass6) 
-            {
-                ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNic6, network_interface->BypassNgw6, ppp::string());
-            }
-#else
-            for (auto&& bypass_path : *network_interface->Bypass6) 
-            {
-                ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNgw6, ppp::string());
-            }
-#endif
-
-            for (auto&& route : configuration->client.routes)
-            {
-                ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
-                if (path.empty()) 
-                {
-                    continue;
+            // Load bypass policy selected by --bypass-mode.
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
+                if (!ethernet->LoadGeoRules(network_interface->GeoRules, network_interface->GeoSite, network_interface->GeoIP)) {
+                    fprintf(stdout, "%s\r\n", "Failed to load geo bypass rules.");
+                    break;
                 }
+            }
 
+            // Load original bypass IP lists.
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
 #if defined(_LINUX)
-                ethernet->AddLoadIPList(path, route.nic, Ipep::ToAddress(route.ngw), ppp::string());
+                for (auto&& bypass_path : *network_interface->Bypass)
+                {
+                    ethernet->AddLoadIPList(bypass_path, network_interface->BypassNic, network_interface->BypassNgw, ppp::string());
+                }
 #else
-                ethernet->AddLoadIPList(path, Ipep::ToAddress(route.ngw), ppp::string());
+                for (auto&& bypass_path : *network_interface->Bypass)
+                {
+                    ethernet->AddLoadIPList(bypass_path, network_interface->BypassNgw, ppp::string());
+                }
+#endif
+
+                // Load IPv6 bypass IP lists.
+#if defined(_LINUX)
+                for (auto&& bypass_path : *network_interface->Bypass6)
+                {
+                    ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNic6, network_interface->BypassNgw6, ppp::string());
+                }
+#else
+                for (auto&& bypass_path : *network_interface->Bypass6)
+                {
+                    ethernet->AddLoadIPList6(bypass_path, network_interface->BypassNgw6, ppp::string());
+                }
 #endif
             }
 
-            // Load DNS rules
-            ethernet->LoadAllDnsRules(network_interface->DNSRules, true);
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
+                for (auto&& route : configuration->client.routes)
+                {
+                    ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
+                    if (path.empty())
+                    {
+                        continue;
+                    }
+
+#if defined(_LINUX)
+                    ethernet->AddLoadIPList(path, route.nic, Ipep::ToAddress(route.ngw), ppp::string());
+#else
+                    ethernet->AddLoadIPList(path, Ipep::ToAddress(route.ngw), ppp::string());
+#endif
+                }
+            }
+
+            // Original DNS rules are mutually exclusive with geo mode.
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
+                ethernet->LoadAllDnsRules(network_interface->DNSRules, true);
+            }
 
             // Open switcher
             if (!ethernet->Open(tap))
@@ -1450,7 +1473,7 @@ void PppApplication::PrintHelpInformation() noexcept
         col_description_width, "DESCRIPTION", 
         col_default_width, "DEFAULT");
     printf("├──────────────────────────────────────────┼──────────────────────────────────────────────────┼─────────────────────────┤\n");
-    
+
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--rt=[yes|no]", 
         col_description_width, "Enable real-time mode", 
@@ -1506,7 +1529,7 @@ void PppApplication::PrintHelpInformation() noexcept
         col_description_width, "DESCRIPTION", 
         col_default_width, "DEFAULT");
     printf("├──────────────────────────────────────────┼──────────────────────────────────────────────────┼─────────────────────────┤\n");
-    
+
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--firewall-rules=<file>", 
         col_description_width, "Firewall rules file", 
@@ -1645,6 +1668,11 @@ void PppApplication::PrintHelpInformation() noexcept
         col_default_width, "DEFAULT");
     printf("├──────────────────────────────────────────┼──────────────────────────────────────────────────┼─────────────────────────┤\n");
 
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--bypass-mode=<original|geo|no>",
+        col_description_width, "Select bypass policy engine",
+        col_default_width, "original");
+
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--bypass=<file1|file2>", 
         col_description_width, "Bypass IP list file", 
@@ -1683,6 +1711,21 @@ void PppApplication::PrintHelpInformation() noexcept
         col_option_width, "--dns-rules=<file>", 
         col_description_width, "DNS rules configuration", 
         col_default_width, "./dns_rules.txt");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--geo-rules=<file>",
+        col_description_width, "Geo routing rules",
+        col_default_width, "./geo-rules.txt");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--geosite=<file>",
+        col_description_width, "Mihomo geosite database",
+        col_default_width, "./geosite.dat");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--geoip=<file>",
+        col_description_width, "Mihomo geoip database",
+        col_default_width, "./geoip.dat");
     
     printf("└──────────────────────────────────────────┴──────────────────────────────────────────────────┴─────────────────────────┘\n\n");
     
@@ -1946,6 +1989,29 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         ni->StaticMode = ppp::ToBoolean(ppp::GetCommandArgument("--tun-static", argc, argv).data());
         ni->HostedNetwork = ppp::ToBoolean(ppp::GetCommandArgument("--tun-host", argc, argv, "y").data());
         ni->VNet = ppp::ToBoolean(ppp::GetCommandArgument("--tun-vnet", argc, argv, "y").data());
+
+        ppp::string bypass_mode = ToLower(ppp::LTrim(ppp::RTrim(
+            ppp::GetCommandArgument("--bypass-mode", argc, argv, "original"))));
+        if (bypass_mode == "original") {
+            ni->SplitMode = NetworkInterface::BypassMode::Original;
+        }
+        elif(bypass_mode == "geo") {
+            ni->SplitMode = NetworkInterface::BypassMode::Geo;
+        }
+        elif(bypass_mode == "no") {
+            ni->SplitMode = NetworkInterface::BypassMode::No;
+        }
+        else {
+            fprintf(stdout, "Invalid --bypass-mode '%s'; expected original, geo, or no.\r\n", bypass_mode.data());
+            return NULLPTR;
+        }
+
+        ni->GeoRules = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
+            "--geo-rules", argc, argv, "./geo-rules.txt").data()).data());
+        ni->GeoSite = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
+            "--geosite", argc, argv, "./geosite.dat").data()).data());
+        ni->GeoIP = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
+            "--geoip", argc, argv, "./geoip.dat").data()).data());
 
 #if defined(_LINUX)
         ni->BypassNic = ppp::RTrim(ppp::LTrim(ppp::GetCommandArgument("--bypass-nic", argc, argv)));

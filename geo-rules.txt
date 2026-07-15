@@ -1,0 +1,18 @@
+# DNS servers used when a domain matches a direct rule.
+direct_dns=223.5.5.5,119.29.29.29
+
+# Rules are evaluated from top to bottom. The first match wins.
+# Supported actions: direct, tunnel.
+
+geosite,github,tunnel
+geosite,microsoft,direct
+geoip,cn,direct
+
+# Additional examples:
+# geosite,microsoft@cn,direct
+# domain,api.example.com,tunnel
+# domain-suffix,example.cn,direct
+# domain-keyword,github,tunnel
+# domain-regex,^.*\.example\.com$,tunnel
+# ip-cidr,192.168.0.0/16,direct
+# ip-cidr6,2001:db8::/32,tunnel

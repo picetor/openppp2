@@ -185,6 +185,16 @@ namespace ppp {
                     return false;
                 }
 
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                if (geo_rules_) {
+                    ppp::vector<ppp::app::client::geo::GeoRuleEngine::RouteUpdate> expired;
+                    geo_rules_->Update(now, expired);
+                    for (const auto& route : expired) {
+                        DeleteGeoDynamicRoute(route.address);
+                    }
+                }
+#endif
+
 #if defined(PPP_LOG_VERBOSE)
                 if (now >= debug_diagnostics_next_) {
                     debug_diagnostics_next_ = now + 5000;
@@ -634,11 +644,17 @@ namespace ppp {
                                 boost::asio::ip::address_v6 src_v6(src_bytes);
                                 boost::asio::ip::address_v6 dst_v6(dst_bytes);
 
-                                ppp::app::client::dns::Rule::Ptr rulePtr =
-                                    ppp::app::client::dns::Rule::Get(
+                                boost::asio::ip::address redirect_server;
+                                bool geo_direct_dns = geo_rules_ && geo_rules_->SelectDirectDns(
+                                    stl::transform<ppp::string>(qs.mName), redirect_server);
+                                ppp::app::client::dns::Rule::Ptr rulePtr;
+                                if (!geo_direct_dns) {
+                                    rulePtr = ppp::app::client::dns::Rule::Get(
                                         stl::transform<ppp::string>(qs.mName),
                                         dns_ruless_[0], dns_ruless_[1], dns_ruless_[2]);
-                                if (NULLPTR != rulePtr && rulePtr->Server != dst_v6) {
+                                    if (rulePtr) redirect_server = rulePtr->Server;
+                                }
+                                if ((geo_direct_dns || NULLPTR != rulePtr) && redirect_server != dst_v6) {
                                     std::shared_ptr<boost::asio::io_context> context = exchanger_->GetContext();
                                     std::shared_ptr<Byte> buffer = exchanger_->GetBuffer();
                                     if (NULLPTR != context && NULLPTR != buffer) {
@@ -646,11 +662,11 @@ namespace ppp {
                                             make_shared_object<boost::asio::ip::udp::socket>(*context);
                                         if (socket) {
                                             boost::system::error_code ec;
-                                            boost::asio::ip::udp::endpoint serverEP(rulePtr->Server, PPP_DNS_SYS_PORT);
+                                            boost::asio::ip::udp::endpoint serverEP(redirect_server, PPP_DNS_SYS_PORT);
                                             socket->open(serverEP.protocol(), ec);
                                             if (!ec) {
                                                 int handle = socket->native_handle();
-                                                ppp::net::Socket::AdjustDefaultSocketOptional(handle, rulePtr->Server.is_v4());
+                                                ppp::net::Socket::AdjustDefaultSocketOptional(handle, redirect_server.is_v4());
                                                 ppp::net::Socket::SetTypeOfService(handle);
                                                 ppp::net::Socket::SetSignalPipeline(handle, false);
                                                 ppp::net::Socket::ReuseSocketAddress(handle, true);
@@ -1193,6 +1209,12 @@ namespace ppp {
                 if (IsDisposed()) {
                     return false;
                 }
+
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                if (destinationEP.port() == PPP_DNS_SYS_PORT) {
+                    ObserveGeoDnsResponse(packet, packet_size);
+                }
+#endif
 
                 boost::asio::ip::udp::endpoint remoteEP = Ipep::V6ToV4(destinationEP);
                 boost::asio::ip::address address = remoteEP.address();
@@ -2154,6 +2176,11 @@ namespace ppp {
                         LoadAllIPListWithFilePaths6(gw6);
                     }
 
+                    if (geo_rules_ && !ApplyGeoStaticRoutes()) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::Open: failed to apply geo static routes");
+                        return false;
+                    }
+
                     // Add VPN remote server to IPList bypass route table iplist.
                     if (!AddRemoteEndPointToIPList(underlying_ni->GatewayServer)) {
                         LOG_DEBUG("VEthernetNetworkSwitcher::Open: AddRemoteEndPointToIPList failed");
@@ -2518,6 +2545,16 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::DeleteRoute() noexcept {
+                if (!geo_dynamic_routes_.empty()) {
+                    ppp::vector<boost::asio::ip::address> addresses;
+                    addresses.reserve(geo_dynamic_routes_.size());
+                    for (const auto& entry : geo_dynamic_routes_) {
+                        addresses.emplace_back(boost::asio::ip::address_v4(ntohl(entry.first)));
+                    }
+                    for (const boost::asio::ip::address& address : addresses) {
+                        DeleteGeoDynamicRoute(address);
+                    }
+                }
 #if defined(_WIN32)
                 if (ipv6_block_routes_added_) {
                     if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
@@ -2932,6 +2969,138 @@ namespace ppp {
 #endif
             }
 
+            bool VEthernetNetworkSwitcher::ApplyGeoStaticRoutes() noexcept {
+                if (!geo_rules_) {
+                    return true;
+                }
+
+                std::shared_ptr<ITap> tap = GetTap();
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (!tap || !underlying || !underlying->GatewayServer.is_v4()) {
+                    return false;
+                }
+
+                if (!rib_) {
+                    rib_ = make_shared_object<RouteInformationTable>();
+                }
+                if (!rib_) {
+                    return false;
+                }
+
+                uint32_t direct_gw = htonl(underlying->GatewayServer.to_v4().to_uint());
+                uint32_t tunnel_gw = tap->GatewayServer;
+                ppp::unordered_set<ppp::string> installed;
+                bool any = false;
+                for (const auto& network : geo_rules_->GetStaticNetworks()) {
+                    ppp::string key = network.address.to_string() + "/" + std::to_string(network.prefix);
+                    if (!installed.emplace(key).second) {
+                        continue; // First rule owns an identical prefix.
+                    }
+
+                    if (network.address.is_v4()) {
+                        uint32_t ip = htonl(network.address.to_v4().to_uint());
+                        uint32_t gateway = network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ?
+                            direct_gw : tunnel_gw;
+                        any |= rib_->AddRoute(ip, network.prefix, gateway);
+                    }
+                    else if (network.address.is_v6()) {
+                        boost::asio::ip::address_v6 gateway;
+                        if (network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct) {
+                            if (underlying->IPv6GatewayServer.is_v6() && !underlying->IPv6GatewayServer.is_unspecified()) {
+                                gateway = underlying->IPv6GatewayServer.to_v6();
+                            }
+                        }
+                        else if (tap->IPv6GatewayServer.is_v6() && !tap->IPv6GatewayServer.is_unspecified()) {
+                            gateway = tap->IPv6GatewayServer.to_v6();
+                        }
+
+                        if (!gateway.is_unspecified()) {
+                            if (!rib6_) rib6_ = make_shared_object<IPv6RouteTable>();
+                            if (rib6_) {
+                                IPv6RouteEntry entry;
+                                entry.Network = network.address.to_v6();
+                                entry.Prefix = network.prefix;
+                                entry.NextHop = gateway;
+                                rib6_->emplace_back(std::move(entry));
+                                any = true;
+                            }
+                        }
+                    }
+                }
+
+                LOG_INFO("VEthernetNetworkSwitcher::ApplyGeoStaticRoutes: networks=%llu, applied=%d",
+                    (unsigned long long)geo_rules_->GetStaticNetworks().size(), (int)any);
+                return true;
+            }
+
+            void VEthernetNetworkSwitcher::AddGeoDynamicRoute(
+                const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept {
+                if (!update.address.is_v4()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: IPv6 dynamic route deferred, address=%s",
+                        update.address.to_string().data());
+                    return;
+                }
+
+                std::shared_ptr<ITap> tap = GetTap();
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (!tap || !underlying || !underlying->GatewayServer.is_v4()) {
+                    return;
+                }
+
+                uint32_t ip = htonl(update.address.to_v4().to_uint());
+                uint32_t gateway = update.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ?
+                    htonl(underlying->GatewayServer.to_v4().to_uint()) : tap->GatewayServer;
+                auto existing = geo_dynamic_routes_.find(ip);
+                if (existing != geo_dynamic_routes_.end()) {
+                    if (existing->second == gateway) {
+                        return;
+                    }
+                    DeleteGeoDynamicRoute(update.address);
+                }
+                if (AddRoute(ip, gateway, 32)) {
+                    geo_dynamic_routes_[ip] = gateway;
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: address=%s, action=%s, priority=%llu",
+                        update.address.to_string().data(),
+                        update.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ? "direct" : "tunnel",
+                        (unsigned long long)update.priority);
+                }
+            }
+
+            void VEthernetNetworkSwitcher::DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept {
+                if (!address.is_v4()) {
+                    return;
+                }
+                uint32_t ip = htonl(address.to_v4().to_uint());
+                auto existing = geo_dynamic_routes_.find(ip);
+                if (existing == geo_dynamic_routes_.end()) {
+                    return;
+                }
+                uint32_t gateway = existing->second;
+#if defined(_WIN32)
+                MIB_IPFORWARDROW route;
+                if (ppp::win32::network::Router::GetBestRoute(ip, route) &&
+                    route.dwForwardDest == ip && route.dwForwardMask == 0xffffffffu && route.dwForwardNextHop == gateway) {
+                    ppp::win32::network::Router::Delete(route);
+                }
+#else
+                DeleteRoute(ip, gateway, 32);
+#endif
+                geo_dynamic_routes_.erase(existing);
+            }
+
+            void VEthernetNetworkSwitcher::ObserveGeoDnsResponse(const void* packet, int packet_size) noexcept {
+                if (!geo_rules_) {
+                    return;
+                }
+                ppp::vector<ppp::app::client::geo::GeoRuleEngine::RouteUpdate> updates;
+                if (geo_rules_->ObserveDnsResponse(packet, packet_size,
+                    ppp::threading::Executors::GetTickCount(), updates)) {
+                    for (const auto& update : updates) {
+                        AddGeoDynamicRoute(update);
+                    }
+                }
+            }
+
             void VEthernetNetworkSwitcher::AddRouteWithDnsServers() noexcept {
                 // Clear the current cached dns server ip address list.
                 for (auto& dns_servers : dns_serverss_) {
@@ -3009,6 +3178,14 @@ namespace ppp {
                         }
                         else {
                             dns_serverss_[0].emplace(ip);
+                        }
+                    }
+                }
+
+                if (geo_rules_) {
+                    for (const boost::asio::ip::address& server : geo_rules_->GetDirectDnsServers()) {
+                        if (server.is_v4()) {
+                            dns_serverss_[1].emplace(htonl(server.to_v4().to_uint()));
                         }
                     }
                 }
@@ -3266,6 +3443,13 @@ namespace ppp {
                     return false;
                 }
 
+                if (geo_rules_) {
+                    auto decision = geo_rules_->MatchAddress(ip, ppp::threading::Executors::GetTickCount());
+                    if (decision.Matched()) {
+                        return decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                    }
+                }
+
                 auto tap = GetTap();
                 if (NULLPTR == tap) {
                     return false;
@@ -3316,6 +3500,13 @@ namespace ppp {
 
                 if (ppp::net::IPEndPoint::IsInvalid(ip)) {
                     return false;
+                }
+
+                if (geo_rules_) {
+                    auto decision = geo_rules_->MatchAddress(ip, ppp::threading::Executors::GetTickCount());
+                    if (decision.Matched()) {
+                        return decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                    }
                 }
 
                 auto tap = GetTap();
@@ -3483,6 +3674,24 @@ namespace ppp {
                 }
 
                 return events > 0;
+            }
+
+            bool VEthernetNetworkSwitcher::LoadGeoRules(const ppp::string& rules_path,
+                const ppp::string& geosite_path, const ppp::string& geoip_path) noexcept {
+                auto engine = make_shared_object<ppp::app::client::geo::GeoRuleEngine>();
+                if (!engine) {
+                    return false;
+                }
+
+                ppp::string error;
+                if (!engine->Load(rules_path, geosite_path, geoip_path, error)) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::LoadGeoRules: %s", error.data());
+                    fprintf(stdout, "Geo rules error: %s\r\n", error.data());
+                    return false;
+                }
+
+                geo_rules_ = std::move(engine);
+                return true;
             }
 
             bool VEthernetNetworkSwitcher::AddRemoteEndPointToIPList(const boost::asio::ip::address& gw) noexcept {
@@ -3823,7 +4032,13 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address serverIP;
-                if (std::shared_ptr<ITap> tap = GetTap(); IPAddressIsGatewayServer(packet->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
+                bool geo_direct_dns = geo_rules_ && geo_rules_->SelectDirectDns(
+                    stl::transform<ppp::string>(qs.mName), serverIP);
+                if (geo_direct_dns) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::RedirectDnsServer: geo direct DNS, host=%s, server=%s",
+                        qs.mName.data(), serverIP.to_string().data());
+                }
+                elif(std::shared_ptr<ITap> tap = GetTap(); IPAddressIsGatewayServer(packet->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
                     auto& dnsServers = ppp::net::asio::vdns::servers;
                     if (dnsServers->empty()) {
                         return false;

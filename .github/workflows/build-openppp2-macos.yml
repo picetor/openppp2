@@ -103,6 +103,7 @@ jobs:
           cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
           cp "${GITHUB_WORKSPACE}/appsettings.json" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/geo-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"

@@ -18,6 +18,7 @@
 
 ## 📋 目录
 
+- [Geo 分流模式](#-geo-分流模式)
 - [IPv6 特性总览](#-ipv6-特性总览)
   - [IPv6 分流 (--bypass6)](#-ipv6-分流---bypass6)
   - [VPN 服务器 IPv6 连通性保证](#-vpn-服务器-ipv6-连通性保证)
@@ -35,6 +36,43 @@
 - [隧道协议配置](#-隧道协议配置)
 - [构建系统](#-构建系统)
 - [关联项目](#-关联项目)
+
+---
+
+## 🧭 Geo 分流模式
+
+客户端可用 `--bypass-mode` 一键切换分流引擎：
+
+| 模式 | 行为 |
+|------|------|
+| `original` | 默认模式，继续读取 `ip.txt`、`ipv6.txt`、`dns-rules.txt` 及 `appsettings.json` 中的原有路由配置 |
+| `geo` | 读取 `geo-rules.txt`，并按需加载 Mihomo/V2Ray 格式的 `geosite.dat`、`geoip.dat` |
+| `no` | 不读取用户分流规则；VPN 服务器地址等维持隧道所必需的保护路由仍会保留 |
+
+```bash
+ppp --mode=client --bypass-mode=geo
+
+ppp --mode=client --bypass-mode=geo \
+    --geo-rules=./geo-rules.txt \
+    --geosite=./geosite.dat \
+    --geoip=./geoip.dat
+```
+
+`geo-rules.txt` 每行一条规则，格式为 `类型,值,direct|tunnel`。规则严格从上到下匹配，第一条命中生效；同一 CDN IP 被多个域名命中时，也由更靠前的规则决定该 IP 的出口。
+
+```ini
+direct_dns=223.5.5.5,119.29.29.29
+
+geosite,github,tunnel
+geosite,microsoft@cn,direct
+geoip,cn,direct
+domain-suffix,example.com,tunnel
+domain,api.example.com,direct
+ip-cidr,192.0.2.0/24,tunnel
+ip-cidr6,2001:db8::/32,direct
+```
+
+支持 `geosite` 属性过滤（如 `@cn`），以及 `geosite`、`geoip`、`domain`、`domain-suffix`、`domain-keyword`、`domain-regex`、`ip-cidr`、`ip-cidr6`。`direct_dns` 只处理命中 `direct` 域名的查询；未命中规则的流量保持走隧道。Geo 数据文件不会内置到程序中，启用 `geo` 模式前需将兼容的 `geosite.dat` 和 `geoip.dat` 放到对应路径。
 
 ---
 
@@ -314,11 +352,15 @@ Socks Proxy           : 127.0.0.1:1080/socks
 #### 路由设置
 | 命令 | 功能 | 格式 | 默认值 |
 |------|------|------|:------:|
+| `--bypass-mode` | 选择分流引擎 | `--bypass-mode=original｜geo｜no` | `original` |
 | `--bypass` | 绕过列表 | `--bypass <文件1\|文件2>` | `./ip.txt` |
 | `--bypass-nic` | 指定绕过列表的接口 | `--bypass-nic <网卡>` | |
 | `--bypass-ngw` | 指定绕过列表的网关 | `--bypass-ngw <IP>` | `0.0.0.0` |
 | `--virr` | 自动更新并生效 | `--virr [文件]/[国家]` | `./ip.txt/CN` |
 | `--dns-rules` | DNS规则 | `--dns-rules <文件>` | `./dns-rules.txt` |
+| `--geo-rules` | Geo 规则文件 | `--geo-rules <文件>` | `./geo-rules.txt` |
+| `--geosite` | geosite 数据文件 | `--geosite <文件>` | `./geosite.dat` |
+| `--geoip` | geoip 数据文件 | `--geoip <文件>` | `./geoip.dat` |
 
 #### 平台专用
 | 命令 | 平台 | 功能 | 格式 | 默认值 |

@@ -282,6 +282,7 @@
     <ClCompile Include="common\lwip\my\sys_arch.c" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="ppp\app\client\dns\Rule.cpp" />
+    <ClCompile Include="ppp\app\client\geo\GeoRuleEngine.cpp" />
     <ClCompile Include="ppp\app\client\proxys\VEthernetHttpProxyConnection.cpp" />
     <ClCompile Include="ppp\app\client\proxys\VEthernetHttpProxySwitcher.cpp" />
     <ClCompile Include="ppp\app\client\proxys\VEthernetLocalProxyConnection.cpp" />
@@ -587,6 +588,7 @@
     <ClInclude Include="common\lwip\my\arch\epstruct.h" />
     <ClInclude Include="common\lwip\my\lwipopts.h" />
     <ClInclude Include="ppp\app\client\dns\Rule.h" />
+    <ClInclude Include="ppp\app\client\geo\GeoRuleEngine.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetHttpProxyConnection.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetHttpProxySwitcher.h" />
     <ClInclude Include="ppp\app\client\proxys\VEthernetLocalProxyConnection.h" />
