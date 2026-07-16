@@ -164,7 +164,7 @@ namespace ppp
 
             std::shared_ptr<SocketAcceptor> self = shared_from_this();
             server->async_accept(*socket, 
-                [self, this, server, socket](boost::system::error_code ec) noexcept
+                [self, this, server, socket, context](boost::system::error_code ec) noexcept
                 {
                     if (ec == boost::system::errc::operation_canceled) /* WSAWaitForMultipleEvents */
                     {
