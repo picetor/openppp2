@@ -30,6 +30,8 @@
 #else
 #include <common/unix/UnixAfx.h>
 #if defined(_MACOS)
+#include <cerrno>
+#include <sys/resource.h>
 #include <darwin/ppp/tap/TapDarwin.h>
 #else
 #include <linux/ppp/tap/TapLinux.h>
@@ -320,6 +322,67 @@ private:
 static std::shared_ptr<PppApplication>              DEFAULT_;                            // Application instance
 static ppp::string                                   LOG_FILE_PATH_;                      // Log file path from --log-file argument
 FILE*                                                ppp::g_log_stream = stdout;          // Log output stream, redirected by --log-file
+
+#if defined(_MACOS)
+static void ConfigureOpenFileDescriptorLimit() noexcept
+{
+    static constexpr rlim_t kDesiredOpenFiles = 65536;
+
+    struct rlimit current = {};
+    if (getrlimit(RLIMIT_NOFILE, &current) != 0)
+    {
+        LOG_WARN("ConfigureOpenFileDescriptorLimit: getrlimit failed, errno=%d", errno);
+        return;
+    }
+
+    rlim_t before = current.rlim_cur;
+    rlim_t ceiling = current.rlim_max == RLIM_INFINITY ?
+        kDesiredOpenFiles : std::min<rlim_t>(kDesiredOpenFiles, current.rlim_max);
+    if (before >= ceiling)
+    {
+        LOG_INFO("ConfigureOpenFileDescriptorLimit: soft=%llu, hard=%llu, unchanged=1",
+            (unsigned long long)before, (unsigned long long)current.rlim_max);
+        return;
+    }
+
+    int last_error = 0;
+    rlim_t applied = before;
+    for (rlim_t candidate = ceiling; candidate > before;)
+    {
+        struct rlimit desired = current;
+        desired.rlim_cur = candidate; // Never alter the process hard limit.
+        if (setrlimit(RLIMIT_NOFILE, &desired) == 0)
+        {
+            applied = candidate;
+            break;
+        }
+
+        last_error = errno;
+        rlim_t fallback = candidate / 2;
+        if (fallback < 1024 && before < 1024)
+        {
+            fallback = 1024;
+        }
+        if (fallback <= before || fallback >= candidate)
+        {
+            break;
+        }
+        candidate = fallback;
+    }
+
+    if (applied > before)
+    {
+        LOG_INFO("ConfigureOpenFileDescriptorLimit: soft_before=%llu, soft_after=%llu, hard=%llu",
+            (unsigned long long)before, (unsigned long long)applied,
+            (unsigned long long)current.rlim_max);
+    }
+    else
+    {
+        LOG_WARN("ConfigureOpenFileDescriptorLimit: unable to raise soft limit, soft=%llu, hard=%llu, errno=%d",
+            (unsigned long long)before, (unsigned long long)current.rlim_max, last_error);
+    }
+}
+#endif
 static struct {
     using BypassSet = NetworkInterface::BypassSet;
 
@@ -2816,6 +2879,13 @@ int main(int argc, const char* argv[]) noexcept
             fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
         }
     }
+#endif
+
+#if defined(_MACOS)
+    // A full-tunnel client can legitimately own hundreds of TCP sockets even
+    // with --tun-mux=0. macOS commonly starts command-line processes at 256,
+    // which causes EMFILE and eventually stalls the event loop.
+    ConfigureOpenFileDescriptorLimit();
 #endif
 
     int result_code = Executors::Run(APP->GetBufferAllocator(), 

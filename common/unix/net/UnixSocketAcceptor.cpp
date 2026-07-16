@@ -4,6 +4,10 @@
 #include <ppp/threading/Executors.h>
 #include <common/unix/net/UnixSocketAcceptor.h>
 
+#if defined(_MACOS)
+#include <cerrno>
+#endif
+
 namespace ppp
 {
     namespace net
@@ -171,6 +175,31 @@ namespace ppp
                         LOG_DEBUG("UnixSocketAcceptor::Next: async_accept failed, native=%lld, ec=%d, category=%s, message=%s",
                             (long long)server->native_handle(), ec.value(), ec.category().name(), ec.message().data());
                     }
+
+#if defined(_MACOS)
+                    if (ec.value() == EMFILE || ec.value() == ENFILE)
+                    {
+                        // Retrying accept immediately while the descriptor table is full creates
+                        // a tight error loop that can starve the whole io_context. Pause briefly
+                        // so existing connections have time to close and release descriptors.
+                        Socket::Closesocket(socket);
+                        std::shared_ptr<boost::asio::deadline_timer> retry =
+                            make_shared_object<boost::asio::deadline_timer>(*context);
+                        if (retry)
+                        {
+                            retry->expires_from_now(boost::posix_time::milliseconds(250));
+                            retry->async_wait(
+                                [self, this, retry](const boost::system::error_code& timer_ec) noexcept
+                                {
+                                    if (!timer_ec)
+                                    {
+                                        Next();
+                                    }
+                                });
+                        }
+                        return;
+                    }
+#endif
 
                     /* This function always fails with operation_not_supported when used on Windows versions prior to Windows 8.1. */
 #if defined(_WIN32)
