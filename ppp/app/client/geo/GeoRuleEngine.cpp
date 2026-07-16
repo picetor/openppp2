@@ -1,6 +1,7 @@
 #include <ppp/app/client/geo/GeoRuleEngine.h>
 
 #include <ppp/io/File.h>
+#include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
 
 #include <common/dnslib/message.h>
