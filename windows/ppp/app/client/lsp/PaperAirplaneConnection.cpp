@@ -190,7 +190,8 @@ namespace ppp
                     }
 
                     auto self = shared_from_this();
-                    int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger, boost::asio::ip::tcp::endpoint(host, port), socket, connection_mux_, y);
+                    int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger, "paper-airplane", this,
+                        boost::asio::ip::tcp::endpoint(host, port), socket, connection_mux_, y);
                     if (mux_status < 1) 
                     {
                         return mux_status == 0;
