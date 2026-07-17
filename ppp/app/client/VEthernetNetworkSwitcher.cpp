@@ -3178,7 +3178,7 @@ namespace ppp {
                     std::shared_ptr<NetworkInterface> target = direct ?
                         GetUnderlyingNetworkInterface() : GetTapNetworkInterface();
                     if (!target) return;
-                    ppp::string address = update.address.to_string();
+                    ppp::string address = ppp::net::Ipep::ToAddressString<ppp::string>(update.address);
                     ppp::string gateway;
                     if (direct) {
                         if (!target->IPv6GatewayServer.is_v6() || target->IPv6GatewayServer.is_unspecified()) return;
@@ -3262,7 +3262,7 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept {
                 if (address.is_v6()) {
-                    ppp::string key = address.to_string();
+                    ppp::string key = ppp::net::Ipep::ToAddressString<ppp::string>(address);
                     auto existing6 = geo_dynamic_routes6_.find(key);
                     if (existing6 == geo_dynamic_routes6_.end()) return;
 

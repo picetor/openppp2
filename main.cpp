@@ -2435,7 +2435,7 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
             continue;
         }
 
-        ppp::string argument_lower = ToLower<ppp::string>(argument_value);
+        ppp::string argument_lower = ppp::ToLower<ppp::string>(argument_value);
         bool requested_geo_manifest = argument_lower.size() >= 4 &&
             argument_lower.compare(argument_lower.size() - 4, 4, ".txt") == 0;
         if (requested_geo_manifest && !File::CanAccess(argument_value.data(), FileAccess::Read))
@@ -2454,7 +2454,7 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
     // A .txt file passed as --config is a geo multi-outbound manifest.  It is
     // parsed before the normal JSON configuration because its main= entry
     // identifies the primary AppConfiguration used for all system-level state.
-    ppp::string selected_lower = ToLower<ppp::string>(path);
+    ppp::string selected_lower = ppp::ToLower<ppp::string>(path);
     bool geo_manifest = selected_lower.size() >= 4 &&
         selected_lower.compare(selected_lower.size() - 4, 4, ".txt") == 0;
     if (geo_manifest)
