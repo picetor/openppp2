@@ -184,7 +184,7 @@ namespace ppp {
                         return false;
                     }
 
-                    int mux_status = Mux(self, exchanger, remoteEP, socket, connection_mux_, y);
+                    int mux_status = Mux(self, exchanger, "tap", this, remoteEP, socket, connection_mux_, y);
                     if (mux_status == 0) {
                         LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, transport_trace=%p, outbound=%s, mux selected, status=%d, host=%s, port=%d",
                             this, strand.get(), exchanger->GetOutboundTag().data(), mux_status, remote_host.data(), remoteEP.port());

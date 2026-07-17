@@ -126,6 +126,8 @@ namespace ppp {
                 static int                                                  Mux(
                     const std::shared_ptr<TReference>&                      reference,
                     const std::shared_ptr<VEthernetExchanger>&              exchanger,
+                    const char*                                             source,
+                    const void*                                             trace,
                     const ppp::string&                                      host,
                     const int                                               port,
                     const std::shared_ptr<boost::asio::ip::tcp::socket>&    socket,
@@ -134,6 +136,9 @@ namespace ppp {
 
                     typedef VEthernetExchanger::NetworkState NetworkState;
                     typedef std::shared_ptr<vmux::vmux_skt> VmuxSktPtr;
+
+                    LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: source=%s, trace=%p, outbound=%s, enter, host=%s, port=%d",
+                        NULLPTR == source ? "unknown" : source, trace, exchanger->GetOutboundTag().data(), host.data(), port);
 
                     if (auto mux = exchanger->GetMux(); NULLPTR != mux) {
                         auto network_state = exchanger->GetMuxNetworkState();
@@ -214,7 +219,8 @@ namespace ppp {
                         }
                     }
                     else {
-                        LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: no mux, host=%s, port=%d", host.data(), port);
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: source=%s, trace=%p, outbound=%s, no mux, host=%s, port=%d",
+                            NULLPTR == source ? "unknown" : source, trace, exchanger->GetOutboundTag().data(), host.data(), port);
                     }
 
                     return 1;
@@ -224,13 +230,15 @@ namespace ppp {
                 static int                                                  Mux(
                     const std::shared_ptr<TReference>&                      reference,
                     const std::shared_ptr<VEthernetExchanger>&              exchanger,
+                    const char*                                             source,
+                    const void*                                             trace,
                     const boost::asio::ip::tcp::endpoint&                   remoteEP, 
                     const std::shared_ptr<boost::asio::ip::tcp::socket>&    socket,
                     std::shared_ptr<vmux::vmux_skt>&                        out,
                     ppp::coroutines::YieldContext&                          y) noexcept {
 
                     ppp::string host = ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP);
-                    return Mux(reference, exchanger, host, remoteEP.port(), socket, out, y); /* https://www.youtube.com/watch?v=FdScisAHKBE */
+                    return Mux(reference, exchanger, source, trace, host, remoteEP.port(), socket, out, y); /* https://www.youtube.com/watch?v=FdScisAHKBE */
                 }
 
             protected:

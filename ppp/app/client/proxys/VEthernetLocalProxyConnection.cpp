@@ -192,7 +192,8 @@ namespace ppp {
                         }
                     }
 
-                    int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger_, destinationEP->Host, destinationEP->Port, socket, connection_mux_, y);
+                    int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger_, "local-proxy", this,
+                        destinationEP->Host, destinationEP->Port, socket, connection_mux_, y);
                     if (mux_status < 1) {
                         return mux_status == 0;
                     }
