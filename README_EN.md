@@ -45,7 +45,7 @@ Use `--bypass-mode` on the client to select the routing engine:
 
 | Mode | Behavior |
 |------|----------|
-| `original` | Default. Loads `ip.txt`, `ipv6.txt`, `dns-rules.txt`, and the original routes from `appsettings.json` |
+| `ip` | Default. Loads `ip.txt`, `ipv6.txt`, `dns-rules.txt`, and the IP routes from `appsettings.json` |
 | `geo` | Loads `geo-rules.txt` plus Mihomo/V2Ray-compatible `geosite.dat` and `geoip.dat` as needed |
 | `no` | Disables user split-routing rules while retaining mandatory routes such as VPN server reachability |
 
@@ -58,7 +58,7 @@ ppp --mode=client --bypass-mode=geo \
     --geoip=./geoip.dat
 ```
 
-The commands above retain the original single-outbound Geo mode: `--config` still points to JSON and rule actions use `direct` or `tunnel` (`tunnel` is an alias for `main`). Existing JSON startup and `--bypass-mode=original|geo|no` behavior is unchanged.
+The commands above retain the single-outbound Geo mode: `--config` still points to JSON and rule actions use `direct` or `tunnel` (`tunnel` is an alias for `main`). Existing JSON startup and `--bypass-mode=ip|geo|no` behavior is unchanged.
 
 ### Multi-outbound mode on one TAP
 
@@ -403,7 +403,7 @@ The complete upstream CLI reference — fully compatible with this fork.
 #### Route Settings
 | Command | Description | Format | Default |
 |---------|-------------|--------|:------:|
-| `--bypass-mode` | Select split-routing engine | `--bypass-mode=original\|geo\|no` | `original` |
+| `--bypass-mode` | Select split-routing engine | `--bypass-mode=ip\|geo\|no` | `ip` |
 | `--bypass` | Bypass list | `--bypass <file1\|file2>` | `./ip.txt` |
 | `--bypass-nic` | Bypass list NIC | `--bypass-nic <NIC>` | |
 | `--bypass-ngw` | Bypass list gateway | `--bypass-ngw <IP>` | `0.0.0.0` |

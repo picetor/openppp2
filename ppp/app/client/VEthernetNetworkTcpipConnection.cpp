@@ -118,11 +118,6 @@ namespace ppp {
                         return false;
                     }
 
-                    std::shared_ptr<AppConfiguration> configuration = exchanger->GetConfiguration();
-                    if (NULLPTR == configuration) {
-                        return false;
-                    }
-
                     std::shared_ptr<boost::asio::ip::tcp::socket> socket = GetSocket();
                     if (NULLPTR == socket) {
                         return false;
@@ -132,6 +127,48 @@ namespace ppp {
                     auto strand = GetStrand();
                     boost::asio::ip::tcp::endpoint remoteEP = GetRemoteEndPoint();
                     ppp::string remote_host = ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP);
+                    bool force_direct = false;
+
+                    // DNS-learned Geo policies can be installed after the TAP accepts
+                    // the SYN but before the remote sub-transmission is created. Always
+                    // resolve the outbound again at the last possible point so a stale
+                    // exchanger captured during accept cannot silently send the flow via
+                    // main. Each outbound owns its own configuration, key and server.
+                    if (std::shared_ptr<VEthernetNetworkSwitcher> switcher = exchanger->GetSwitcher(); NULLPTR != switcher) {
+                        std::shared_ptr<VEthernetExchanger> selected = switcher->GetExchanger(remoteEP.address());
+                        if (NULLPTR != selected) {
+                            if (selected->GetNetworkState() != VEthernetExchanger::NetworkState_Established) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, requested_outbound=%s, reason=outbound_not_established",
+                                    this, remote_host.data(), selected->GetOutboundTag().data());
+                                return false;
+                            }
+
+                            if (selected.get() != exchanger.get()) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, previous_outbound=%s, selected_outbound=%s, reason=final_reselection",
+                                    this, remote_host.data(), exchanger->GetOutboundTag().data(), selected->GetOutboundTag().data());
+                            }
+                            exchanger = std::move(selected);
+                            exchanger_ = exchanger;
+                        }
+                        else {
+                            force_direct = remoteEP.address().is_v4() ?
+                                switcher->IsBypassIpAddress(remoteEP.address()) :
+                                switcher->IsBypassIpAddress6(remoteEP.address());
+                            if (!force_direct) {
+                                LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, selected_outbound=none, reason=outbound_unavailable",
+                                    this, remote_host.data());
+                                return false;
+                            }
+                            LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, selected_outbound=direct, reason=final_reselection",
+                                this, remote_host.data());
+                        }
+                    }
+
+                    std::shared_ptr<AppConfiguration> configuration = exchanger->GetConfiguration();
+                    if (NULLPTR == configuration) {
+                        return false;
+                    }
+
                     LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, transport_trace=%p, outbound=%s, begin, host=%s, port=%d",
                         this, strand.get(), exchanger->GetOutboundTag().data(), remote_host.data(), remoteEP.port());
 
@@ -140,6 +177,11 @@ namespace ppp {
                         LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, transport_trace=%p, outbound=direct, rinetd selected, status=%d, host=%s, port=%d",
                             this, strand.get(), rinetd_status, remote_host.data(), remoteEP.port());
                         return rinetd_status == 0;
+                    }
+                    if (force_direct) {
+                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, selected_outbound=direct, reason=direct_connect_failed",
+                            this, remote_host.data());
+                        return false;
                     }
 
                     int mux_status = Mux(self, exchanger, remoteEP, socket, connection_mux_, y);

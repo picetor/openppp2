@@ -45,7 +45,7 @@
 
 | 模式 | 行为 |
 |------|------|
-| `original` | 默认模式，继续读取 `ip.txt`、`ipv6.txt`、`dns-rules.txt` 及 `appsettings.json` 中的原有路由配置 |
+| `ip` | 默认模式，继续读取 `ip.txt`、`ipv6.txt`、`dns-rules.txt` 及 `appsettings.json` 中的原有路由配置 |
 | `geo` | 读取 `geo-rules.txt`，并按需加载 Mihomo/V2Ray 格式的 `geosite.dat`、`geoip.dat` |
 | `no` | 不读取用户分流规则；VPN 服务器地址等维持隧道所必需的保护路由仍会保留 |
 
@@ -58,7 +58,7 @@ ppp --mode=client --bypass-mode=geo \
     --geoip=./geoip.dat
 ```
 
-以上是原有的单出口 Geo 用法：`--config` 仍指向 JSON，规则动作使用 `direct` 或 `tunnel`（`tunnel` 等价于 `main`）。原有 JSON 启动和 `--bypass-mode=original|geo|no` 行为不变。
+以上是原有的单出口 Geo 用法：`--config` 仍指向 JSON，规则动作使用 `direct` 或 `tunnel`（`tunnel` 等价于 `main`）。JSON 启动和 `--bypass-mode=ip|geo|no` 行为不变。
 
 ### 单 TAP 多出口模式
 
@@ -404,7 +404,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
 #### 路由设置
 | 命令 | 功能 | 格式 | 默认值 |
 |------|------|------|:------:|
-| `--bypass-mode` | 选择分流引擎 | `--bypass-mode=original｜geo｜no` | `original` |
+| `--bypass-mode` | 选择分流引擎 | `--bypass-mode=ip｜geo｜no` | `ip` |
 | `--bypass` | 绕过列表 | `--bypass <文件1\|文件2>` | `./ip.txt` |
 | `--bypass-nic` | 指定绕过列表的接口 | `--bypass-nic <网卡>` | |
 | `--bypass-ngw` | 指定绕过列表的网关 | `--bypass-ngw <IP>` | `0.0.0.0` |

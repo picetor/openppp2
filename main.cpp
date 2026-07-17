@@ -91,7 +91,7 @@ struct NetworkInterface final
 {
     typedef ppp::unordered_set<ppp::string>             BypassSet;
     enum class BypassMode : uint8_t {
-        Original,
+        Ip,
         Geo,
         No,
     };
@@ -128,7 +128,7 @@ struct NetworkInterface final
     ppp::string                                         BypassNic6;                 // Network interface for IPv6 bypass
 #endif  
     boost::asio::ip::address                            BypassNgw6;                 // Gateway for IPv6 bypass routes
-    BypassMode                                          SplitMode = BypassMode::Original;
+    BypassMode                                          SplitMode = BypassMode::Ip;
     ppp::string                                         GeoRules;                   // Geo routing rules file
     ppp::string                                         GeoSite;                    // V2Ray/Mihomo geosite.dat file
     ppp::string                                         GeoIP;                      // V2Ray/Mihomo geoip.dat file
@@ -1272,8 +1272,8 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 }
             }
 
-            // Load original bypass IP lists.
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
+            // Load bypass IP lists in IP mode.
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
 #if defined(_LINUX)
                 for (auto&& bypass_path : *network_interface->Bypass)
                 {
@@ -1300,7 +1300,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 #endif
             }
 
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
                 for (auto&& route : configuration->client.routes)
                 {
                     ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
@@ -1317,8 +1317,8 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 }
             }
 
-            // Original DNS rules are mutually exclusive with geo mode.
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Original) {
+            // IP-mode DNS rules are mutually exclusive with geo mode.
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
                 ethernet->LoadAllDnsRules(network_interface->DNSRules, true);
             }
 
@@ -1768,9 +1768,9 @@ void PppApplication::PrintHelpInformation() noexcept
     printf("├──────────────────────────────────────────┼──────────────────────────────────────────────────┼─────────────────────────┤\n");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
-        col_option_width, "--bypass-mode=<original|geo|no>",
+        col_option_width, "--bypass-mode=<ip|geo|no>",
         col_description_width, "Select bypass policy engine",
-        col_default_width, "original");
+        col_default_width, "ip");
 
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--bypass=<file1|file2>", 
@@ -2090,9 +2090,9 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         ni->VNet = ppp::ToBoolean(ppp::GetCommandArgument("--tun-vnet", argc, argv, "y").data());
 
         ppp::string bypass_mode = ToLower(ppp::LTrim(ppp::RTrim(
-            ppp::GetCommandArgument("--bypass-mode", argc, argv, "original"))));
-        if (bypass_mode == "original") {
-            ni->SplitMode = NetworkInterface::BypassMode::Original;
+            ppp::GetCommandArgument("--bypass-mode", argc, argv, "ip"))));
+        if (bypass_mode == "ip") {
+            ni->SplitMode = NetworkInterface::BypassMode::Ip;
         }
         elif(bypass_mode == "geo") {
             ni->SplitMode = NetworkInterface::BypassMode::Geo;
@@ -2101,7 +2101,7 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             ni->SplitMode = NetworkInterface::BypassMode::No;
         }
         else {
-            fprintf(stdout, "Invalid --bypass-mode '%s'; expected original, geo, or no.\r\n", bypass_mode.data());
+            fprintf(stdout, "Invalid --bypass-mode '%s'; expected ip, geo, or no.\r\n", bypass_mode.data());
             return NULLPTR;
         }
 
