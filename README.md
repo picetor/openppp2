@@ -1,4 +1,4 @@
-﻿# 🔐 PPP PRIVATE NETWORK™ 2 — 分支特性说明
+# 🔐 PPP PRIVATE NETWORK™ 2 — 分支特性说明
 
 <div align="right" style="margin-top:-40px;">
   <kbd style="background:#0366d6;">
@@ -25,7 +25,7 @@
   - [Windows IPv6 DNS 防泄漏](#-windows-ipv6-dns-防泄漏)
   - [Windows IPv6 源地址选择修复](#-windows-ipv6-源地址选择修复)
   - [服务器端 IPv6 模式](#-服务器端-ipv6-模式)
-  - [IPv6 DNS 原生支持](#-ipv6-dns-原生支持)
+  - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
 - [WSS 优选 IP 加速](#-wss-优选-ip-加速)
 - [SOCKS5 代理](#-socks5-代理)
 - [改进与修复](#-改进与修复)
@@ -58,7 +58,54 @@ ppp --mode=client --bypass-mode=geo \
     --geoip=./geoip.dat
 ```
 
-`geo-rules.txt` 每行一条规则，格式为 `类型,值,direct|tunnel`。规则严格从上到下匹配，第一条命中生效；同一 CDN IP 被多个域名命中时，也由更靠前的规则决定该 IP 的出口。
+以上是原有的单出口 Geo 用法：`--config` 仍指向 JSON，规则动作使用 `direct` 或 `tunnel`（`tunnel` 等价于 `main`）。原有 JSON 启动和 `--bypass-mode=original|geo|no` 行为不变。
+
+### 单 TAP 多出口模式
+
+当 `--config` 直接指向 `.txt` 文件时，程序将其严格识别为“多出口 Geo 清单”；指向 `.json` 时仍是传统单配置模式。默认清单路径可放在工作目录，例如：
+
+```bash
+ppp --mode=client --config=./geo-rules.txt \
+    --geosite=./geosite.dat \
+    --geoip=./geoip.dat
+```
+
+```ini
+# 出口声明：标签=JSON 配置路径
+main=./main.json
+tunnel1=./tunnel1.json
+tunnel2=./tunnel2.json
+
+# 可选；未写时默认 main
+final=main
+direct_dns=223.5.5.5,119.29.29.29
+
+# 匹配规则：类型,值,出口标签|direct
+geosite,github,main
+geosite,openai,tunnel1
+geosite,microsoft,direct
+geosite,cn,direct
+geoip,cn,direct
+domain-suffix,example.com,tunnel2
+ip-cidr,192.0.2.0/24,tunnel1
+ip-cidr6,2001:db8::/32,tunnel2
+```
+
+清单规则如下：
+
+- 必须声明 `main=<JSON>`；其他出口标签只能包含小写字母、数字、`_`、`-`，不区分输入大小写。`direct`、`tunnel`、`reject` 为保留字。重复标签、未知动作、缺少文件或无规则均会拒绝启动。
+- JSON 路径按程序的当前工作目录解析，与 `geo-rules.txt` 放在哪个目录无关。每个 JSON 都会独立读取自己的 `client.server`、`client.guid`、协议密钥、传输密钥、WebSocket/TLS 参数及 `client.server-proxy`，因此各出口可以使用不同的 key。
+- 只创建一个 TAP。`main` 负责 TAP 地址、DNS、系统路由、本地 HTTP/SOCKS 监听等全局状态；各标签拥有独立的远端连接和重连状态。所有出口启动时都会创建，任一出口不可初始化时整体启动失败；选中的出口断线时不会自动泄漏或回退到 `main`。
+- TCP 连接在建立时固定出口；原始 TCP/UDP/ICMP 按目标地址维护活动粘滞，持续有流量时不会因 DNS TTL 到期切换到另一组 key，空闲 5 分钟后才重新按规则选择。
+- 多出口模式不支持 `--tun-static=yes`，因为旧静态 UDP 回声只有一套全局服务器/聚合器，无法隔离不同出口密钥；使用该组合会明确拒绝启动。传统 JSON 模式不受影响。
+
+### 匹配语法和顺序
+
+规则格式为 `类型,值,动作`，支持 `geosite`（含 `@cn` 等属性）、`geoip`、`domain`/`full`、`domain-suffix`、`domain-keyword`、`domain-regex`/`regexp`、`ip-cidr`、`ip-cidr6`。动作可以是清单中已声明的出口标签或 `direct`；兼容动作 `tunnel` 等价于 `main`。
+
+规则严格从上到下匹配，第一条命中生效。域名规则通过 DNS 应答中的 A/AAAA 记录建立带 TTL 的 IPv4/IPv6 地址策略；操作系统是否同时发起 A 和 AAAA 查询由系统解析器决定，程序不会强制“双查”。同一 CDN IP 被多个域名命中时，优先级更高（更靠前）的规则拥有该 IP 策略。`direct_dns` 只重定向命中 `direct` 的域名查询；其他域名仍使用 TAP/主配置 DNS，解析出的业务连接再按目标 IP 进入对应出口。纯 IP 连接只匹配 `geoip`/CIDR 规则，未命中时使用 `final`（默认 `main`）。
+
+传统单出口规则示例：
 
 ```ini
 direct_dns=223.5.5.5,119.29.29.29
@@ -72,7 +119,7 @@ ip-cidr,192.0.2.0/24,tunnel
 ip-cidr6,2001:db8::/32,direct
 ```
 
-支持 `geosite` 属性过滤（如 `@cn`），以及 `geosite`、`geoip`、`domain`、`domain-suffix`、`domain-keyword`、`domain-regex`、`ip-cidr`、`ip-cidr6`。`direct_dns` 只处理命中 `direct` 域名的查询；未命中规则的流量保持走隧道。Geo 数据文件不会内置到程序中，启用 `geo` 模式前需将兼容的 `geosite.dat` 和 `geoip.dat` 放到对应路径。
+Geo 数据文件不会内置到程序中，启用 Geo 模式前需将兼容的 `geosite.dat` 和 `geoip.dat` 放到对应路径。
 
 ---
 
@@ -198,15 +245,20 @@ ppp --mode=client \
 
 ---
 
-### IPv6 DNS 原生支持
+### IPv6 DNS 配置与下发
 
-`--dns=` 参数原生支持 IPv6 DNS 地址：
+IPv6 DNS 不使用客户端的 `--dns=` 参数，而是在服务端 `appsettings.json` 中配置：
 
-```bash
---dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
+```json
+"server": {
+    "ipv6": {
+        "dns1": "2606:4700:4700::1111",
+        "dns2": "2001:4860:4860::8888"
+    }
+}
 ```
 
-IPv6 DNS 通过 `ApplyIPv6Assignment()` → `ApplyClientDns()` 路径下发到 TAP 适配器，与 IPv4 DNS (`--dns=`) 互不冲突。
+服务端通过 `AssignedIPv6Dns1/2` 将配置随 IPv6 分配信息下发。Linux/macOS 客户端通过 `ApplyIPv6Assignment()` → `ApplyClientDns()` 应用到 TAP 适配器；Windows 客户端当前会清除 TAP 的 IPv6 DNS，并优先使用由 `--dns=` 配置的 IPv4 DNS。
 
 ---
 

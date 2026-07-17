@@ -14,6 +14,7 @@
 #include <ppp/net/packet/IcmpFrame.h>
 #include <ppp/threading/Timer.h>
 #include <ppp/auxiliary/UriAuxiliary.h>
+#include <ppp/transmissions/proxys/IForwarding.h>
 
 namespace ppp {
     namespace app {
@@ -50,13 +51,17 @@ namespace ppp {
                 typedef std::shared_ptr<Ciphertext>                                     CiphertextPtr;
                 typedef std::shared_ptr<boost::asio::deadline_timer>                    DeadlineTimerPtr;
                 typedef ppp::unordered_map<void*, DeadlineTimerPtr>                     DeadlineTimerTable;
+                typedef ppp::transmissions::proxys::IForwarding                         IForwarding;
+                typedef std::shared_ptr<IForwarding>                                    IForwardingPtr;
 
             public:
                 VEthernetExchanger(
                     const VEthernetNetworkSwitcherPtr&                                  switcher,
                     const AppConfigurationPtr&                                          configuration,
                     const ContextPtr&                                                   context,
-                    const Int128&                                                       id) noexcept;
+                    const Int128&                                                       id,
+                    const ppp::string&                                                  outbound_tag = "main",
+                    bool                                                                primary_outbound = true) noexcept;
                 virtual ~VEthernetExchanger() noexcept;
 
             public:
@@ -68,6 +73,8 @@ namespace ppp {
 
             public:
                 NetworkState                                                            GetNetworkState()       noexcept { return network_state_.load(); }
+                const ppp::string&                                                      GetOutboundTag()        const noexcept { return outbound_tag_; }
+                bool                                                                    IsPrimaryOutbound()     const noexcept { return primary_outbound_; }
                 std::shared_ptr<Byte>                                                   GetBuffer()             noexcept { return buffer_; }
                 std::shared_ptr<vmux::vmux_net>                                         GetMux()                noexcept { return mux_; }
                 VEthernetNetworkSwitcherPtr                                             GetSwitcher()           noexcept { return switcher_; }
@@ -157,6 +164,7 @@ namespace ppp {
                     StrandPtr strand;
                     return OpenTransmission(context, strand, y);
                 }
+                bool                                                                    TranslateIPv6Packet(Byte* packet, int packet_length, bool outbound) noexcept;
                 void                                                                    Finalize() noexcept;
                 void                                                                    ExchangeToEstablishState() noexcept;
                 void                                                                    ExchangeToConnectingState() noexcept;
@@ -261,6 +269,10 @@ namespace ppp {
                 UInt64                                                                  sekap_next_         = 0;
 
                 VEthernetNetworkSwitcherPtr                                             switcher_;
+                ppp::string                                                             outbound_tag_;
+                bool                                                                    primary_outbound_ = true;
+                boost::asio::ip::address                                                assigned_ipv6_address_;
+                IForwardingPtr                                                          forwarding_;
                 std::shared_ptr<VirtualEthernetInformation>                             information_;
                 VEthernetDatagramPortTable                                              datagrams_;
                 DatagramPacketHandlerTable                                              datagram_handlers_;

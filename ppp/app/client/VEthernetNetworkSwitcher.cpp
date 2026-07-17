@@ -194,6 +194,13 @@ namespace ppp {
                     }
                 }
 #endif
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    for (auto affinity = outbound_affinities_.begin(); affinity != outbound_affinities_.end();) {
+                        if (affinity->second.expires_at <= now) affinity = outbound_affinities_.erase(affinity);
+                        else ++affinity;
+                    }
+                }
 
 #if defined(PPP_LOG_VERBOSE)
                 if (now >= debug_diagnostics_next_) {
@@ -260,9 +267,14 @@ namespace ppp {
                     qos->Update(now);
                 }
 
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_; 
-                if (NULLPTR != exchanger) {
-                    exchanger->Update();
+                if (!outbound_exchangers_.empty()) {
+                    for (auto& entry : outbound_exchangers_) {
+                        if (entry.second) entry.second->Update();
+                    }
+                }
+                else {
+                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                    if (NULLPTR != exchanger) exchanger->Update();
                 }
 
                 std::shared_ptr<IForwarding> forwarding = forwarding_; 
@@ -308,11 +320,6 @@ namespace ppp {
                     return false;
                 }
 
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
-                if (NULLPTR == exchanger) {
-                    return false;
-                }
-
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR == tap) {
                     return false;
@@ -335,6 +342,8 @@ namespace ppp {
                     }
                 }
 
+                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(Ipep::ToAddress(destination));
+                if (NULLPTR == exchanger) return false;
                 exchanger->Nat(packet, packet_length);
                 return true;
             }
@@ -369,7 +378,9 @@ namespace ppp {
 
                 // TCP (6): forward blindly via NAT (same as existing behavior)
                 if (next_header == IPPROTO_TCP) {
-                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                    boost::asio::ip::address_v6::bytes_type destination_bytes;
+                    memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
+                    std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(boost::asio::ip::address_v6(destination_bytes));
                     if (NULLPTR == exchanger) {
                         return false;
                     }
@@ -388,7 +399,9 @@ namespace ppp {
                 }
 
                 // Other protocols: forward via NAT
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                boost::asio::ip::address_v6::bytes_type destination_bytes;
+                memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
+                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(boost::asio::ip::address_v6(destination_bytes));
                 if (NULLPTR == exchanger) {
                     return false;
                 }
@@ -744,7 +757,9 @@ namespace ppp {
                 }
 
                 // Default: forward via NAT
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                boost::asio::ip::address_v6::bytes_type destination_bytes;
+                memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
+                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(boost::asio::ip::address_v6(destination_bytes));
                 if (NULLPTR == exchanger) {
                     return false;
                 }
@@ -785,7 +800,7 @@ namespace ppp {
                     // Only respond if the echo request is addressed to our TAP interface
                     if (dst_v6 != tap_v6 && (!tap_gw6.is_v6() || dst_v6 != tap_gw6.to_v6())) {
                         // Not for us - forward via NAT
-                        std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                        std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(dst_v6);
                         if (NULLPTR == exchanger) {
                             return false;
                         }
@@ -832,7 +847,9 @@ namespace ppp {
                 }
 
                 // Other ICMPv6 types: forward via NAT
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                boost::asio::ip::address_v6::bytes_type destination_bytes;
+                memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
+                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(boost::asio::ip::address_v6(destination_bytes));
                 if (NULLPTR == exchanger) {
                     return false;
                 }
@@ -851,7 +868,8 @@ namespace ppp {
                     return false;
                 }
 
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                boost::asio::ip::udp::endpoint destinationEP = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Destination);
+                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(destinationEP.address());
                 if (NULLPTR == exchanger) {
                     return false;
                 }
@@ -891,7 +909,6 @@ namespace ppp {
                 }
 
                 boost::asio::ip::udp::endpoint sourceEP = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Source);
-                boost::asio::ip::udp::endpoint destinationEP = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Destination);
                 return exchanger->SendTo(sourceEP, destinationEP, messages->Buffer.get(), messages->Length);
             }
 
@@ -955,11 +972,6 @@ namespace ppp {
             }
 
             bool VEthernetNetworkSwitcher::OnIcmpPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept {
-                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
-                if (NULLPTR == exchanger) {
-                    return false;
-                }
-
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR == tap) {
                     return false;
@@ -971,10 +983,10 @@ namespace ppp {
                     return false;
                 }
                 elif(IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
-                    return EchoGatewayServer(exchanger, packet, allocator);
+                    return EchoGatewayServer(exchanger_, packet, allocator);
                 }
                 elif(frame->Ttl == 1) {
-                    return EchoGatewayServer(exchanger, packet, allocator);
+                    return EchoGatewayServer(exchanger_, packet, allocator);
                 }
                 else {
                     int ttl = std::max<int>(0, static_cast<int>(packet->Ttl) - 1);
@@ -985,7 +997,7 @@ namespace ppp {
                     frame->Ttl = ttl;
                     packet->Ttl = ttl;
 
-                    return EchoOtherServer(exchanger, packet, allocator);
+                    return EchoOtherServer(GetExchanger(Ipep::ToAddress(frame->Destination)), packet, allocator);
                 }
             }
 
@@ -1167,8 +1179,87 @@ namespace ppp {
                 return make_shared_object<ppp::transmissions::ITransmissionQoS>(context, bandwidth);
             }
 
+            bool VEthernetNetworkSwitcher::SetOutboundConfigurations(const OutboundConfigurationList& configurations) noexcept {
+                if (configurations.empty()) {
+                    outbound_configurations_.clear();
+                    return true;
+                }
+
+                bool has_main = false;
+                ppp::unordered_set<ppp::string> tags;
+                for (const OutboundConfiguration& outbound : configurations) {
+                    ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
+                    if (tag.empty() || NULLPTR == outbound.configuration || !tags.emplace(tag).second) {
+                        return false;
+                    }
+                    if (tag == "main") {
+                        has_main = true;
+                        if (outbound.configuration != configuration_) return false;
+                    }
+                }
+                if (!has_main) return false;
+                outbound_configurations_ = configurations;
+                return true;
+            }
+
+            std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::GetExchanger(
+                const boost::asio::ip::address& destination) noexcept {
+                if (outbound_exchangers_.empty() || !geo_rules_ ||
+                    ppp::net::IPEndPoint::IsInvalid(destination)) {
+                    return exchanger_;
+                }
+
+                static constexpr uint64_t affinity_timeout = 300000;
+                uint64_t now = ppp::threading::Executors::GetTickCount();
+                ppp::string address_key = ppp::net::Ipep::ToAddressString<ppp::string>(destination);
+                ppp::string tag = final_outbound_.empty() ? ppp::string("main") : final_outbound_;
+                if (!outbound_configurations_.empty()) {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    auto affinity = outbound_affinities_.find(address_key);
+                    if (affinity != outbound_affinities_.end()) {
+                        if (affinity->second.expires_at > now) {
+                            affinity->second.expires_at = now + affinity_timeout;
+                            tag = affinity->second.tag;
+                            auto selected = outbound_exchangers_.find(tag);
+                            return selected == outbound_exchangers_.end() ? NULLPTR : selected->second;
+                        }
+                        outbound_affinities_.erase(affinity);
+                    }
+                }
+
+                auto decision = geo_rules_->MatchAddress(destination, now);
+                if (decision.Matched()) {
+                    if (decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct) {
+                        // A direct destination should have been routed around TAP.  Do not
+                        // leak it through a tunnel if an OS route update is racing.
+                        return NULLPTR;
+                    }
+                    if (!decision.outbound.empty()) tag = decision.outbound;
+                }
+                if (tag == "direct") return NULLPTR;
+
+                auto selected = outbound_exchangers_.find(tag);
+                if (selected == outbound_exchangers_.end()) return NULLPTR;
+                if (!outbound_configurations_.empty()) {
+                    // Keep active raw TCP/UDP/ICMP traffic on the same keyed
+                    // tunnel even if a learned DNS policy reaches its TTL.
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    outbound_affinities_[address_key] = OutboundAffinity{ tag, now + affinity_timeout };
+                }
+                return selected->second;
+            }
+
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::NewExchanger() noexcept {
                 std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                return NewExchanger(configuration, "main", true);
+            }
+
+            std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::NewExchanger(
+                const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration,
+                const ppp::string& tag, bool primary) noexcept {
+                if (NULLPTR == configuration) {
+                    return NULLPTR;
+                }
                 auto guid = StringAuxiliary::GuidStringToInt128(configuration->client.guid);
                 if (guid == 0) {
                     return NULLPTR;
@@ -1176,7 +1267,7 @@ namespace ppp {
 
                 auto my = shared_from_this();
                 auto self = std::dynamic_pointer_cast<VEthernetNetworkSwitcher>(my);
-                return make_shared_object<VEthernetExchanger>(self, configuration, GetContext(), guid);
+                return make_shared_object<VEthernetExchanger>(self, configuration, GetContext(), guid, tag, primary);
             }
 
             VEthernetNetworkSwitcher::VEthernetHttpProxySwitcherPtr VEthernetNetworkSwitcher::NewHttpProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept {
@@ -2096,18 +2187,53 @@ namespace ppp {
                 }
 #endif
 #endif
-                // Instantiate and open the internal virtual Ethernet switch that needs to be switcher to the remote.
-                std::shared_ptr<VEthernetExchanger> exchanger = NewExchanger();
+                // Exchangers and their per-outbound proxy forwarders need the
+                // protector before their asynchronous connection loops start.
+#if defined(_LINUX)
+                protect_network_ = protector_network;
+#endif
+                // Instantiate one independently configured exchanger per outbound.
+                // Traditional JSON mode has no explicit list and therefore keeps the
+                // original single-main behavior.
+                OutboundConfigurationList outbound_configurations = outbound_configurations_;
+                if (outbound_configurations.empty()) {
+                    outbound_configurations.emplace_back(OutboundConfiguration{ "main", configuration_ });
+                }
+                if (outbound_configurations.size() > 1 && static_mode_) {
+                    // Static UDP echo owns one global server/aggregator set in the
+                    // legacy design; sharing it would mix independently keyed
+                    // outbounds. Reject it instead of routing through the wrong key.
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: multi-outbound mode does not support --tun-static=yes");
+                    IDisposable::Dispose(qos);
+                    return false;
+                }
+
+                OutboundExchangerTable opened_outbounds;
+                std::shared_ptr<VEthernetExchanger> exchanger;
+                for (const OutboundConfiguration& outbound : outbound_configurations) {
+                    ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
+                    bool primary = tag == "main";
+                    std::shared_ptr<VEthernetExchanger> candidate = NewExchanger(outbound.configuration, tag, primary);
+                    if (NULLPTR == candidate || !candidate->Open()) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::Open: failed to open outbound '%s'", tag.data());
+                        for (auto& entry : opened_outbounds) {
+                            if (entry.second) entry.second->Dispose();
+                        }
+                        IDisposable::Dispose(qos);
+                        return false;
+                    }
+                    if (primary) exchanger = candidate;
+                    opened_outbounds.emplace(tag, std::move(candidate));
+                    LOG_INFO("VEthernetNetworkSwitcher::Open: outbound '%s' opened", tag.data());
+                }
                 if (NULLPTR == exchanger) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewExchanger failed");
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: main outbound is missing");
+                    for (auto& entry : opened_outbounds) {
+                        if (entry.second) entry.second->Dispose();
+                    }
+                    IDisposable::Dispose(qos);
                     return false;
                 }
-                elif(!exchanger->Open()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: exchanger->Open failed");
-                    IDisposable::DisposeReferences(qos, exchanger);
-                    return false;
-                }
-                LOG_DEBUG("VEthernetNetworkSwitcher::Open: exchanger opened");
 
                 // Enable the local HTTP PROXY server middleware to provide proxy services directly by the VPN.
                 VEthernetHttpProxySwitcherPtr http_proxy = NewHttpProxy(exchanger);
@@ -2143,11 +2269,8 @@ namespace ppp {
 
                 // Mounts the various service objects created and opened by the current constructor.
                 qos_             = std::move(qos);
-                exchanger_       = std::move(exchanger);
-
-#if defined(_LINUX)
-                protect_network_ = std::move(protector_network);
-#endif
+                exchanger_       = exchanger;
+                outbound_exchangers_ = std::move(opened_outbounds);
 
                 // New the beast network bandwidth aggregator.
                 if (static_mode_ && configuration_->udp.static_.aggligator > 0) {
@@ -2550,6 +2673,18 @@ namespace ppp {
                     addresses.reserve(geo_dynamic_routes_.size());
                     for (const auto& entry : geo_dynamic_routes_) {
                         addresses.emplace_back(boost::asio::ip::address_v4(ntohl(entry.first)));
+                    }
+                    for (const boost::asio::ip::address& address : addresses) {
+                        DeleteGeoDynamicRoute(address);
+                    }
+                }
+                if (!geo_dynamic_routes6_.empty()) {
+                    ppp::vector<boost::asio::ip::address> addresses;
+                    addresses.reserve(geo_dynamic_routes6_.size());
+                    for (const auto& entry : geo_dynamic_routes6_) {
+                        boost::system::error_code ec;
+                        boost::asio::ip::address address = StringToAddress(entry.first.data(), ec);
+                        if (!ec && address.is_v6()) addresses.emplace_back(std::move(address));
                     }
                     for (const boost::asio::ip::address& address : addresses) {
                         DeleteGeoDynamicRoute(address);
@@ -3036,9 +3171,67 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::AddGeoDynamicRoute(
                 const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept {
+                if (update.address.is_v6()) {
+                    // Install a /128 for both actions so a higher-priority domain
+                    // rule can override a broader static GeoIP route.
+                    bool direct = update.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                    std::shared_ptr<NetworkInterface> target = direct ?
+                        GetUnderlyingNetworkInterface() : GetTapNetworkInterface();
+                    if (!target) return;
+                    ppp::string address = update.address.to_string();
+                    ppp::string gateway;
+                    if (direct) {
+                        if (!target->IPv6GatewayServer.is_v6() || target->IPv6GatewayServer.is_unspecified()) return;
+                        gateway = target->IPv6GatewayServer.to_string();
+                    }
+                    else if (target->IPv6GatewayServer.is_v6() && !target->IPv6GatewayServer.is_unspecified()) {
+                        gateway = target->IPv6GatewayServer.to_string();
+                    }
+
+                    GeoDynamicRoute6 state;
+                    state.gateway = gateway;
+                    state.interface_index = target->Index;
+#if !defined(_WIN32)
+                    state.interface_name = target->Name;
+#endif
+                    auto existing = geo_dynamic_routes6_.find(address);
+                    if (existing != geo_dynamic_routes6_.end()) {
+                        if (existing->second.gateway == state.gateway &&
+                            existing->second.interface_index == state.interface_index &&
+                            existing->second.interface_name == state.interface_name) return;
+                        DeleteGeoDynamicRoute(update.address);
+                    }
+
+                    bool added = false;
+#if defined(_WIN32)
+                    if (state.interface_index >= 0) {
+                        ppp::win32::network::DeleteIPv6Route(
+                            state.interface_index, address, 128, gateway);
+                        added = ppp::win32::network::AddIPv6Route(
+                            state.interface_index, address, 128, gateway, 0);
+                    }
+#elif defined(_MACOS)
+                    std::string delete_command = "route -n delete -inet6 " + std::string(address.data()) + "/128 ";
+                    if (!gateway.empty()) delete_command += std::string(gateway.data());
+                    else delete_command += "-interface " + std::string(state.interface_name.data());
+                    delete_command += " >/dev/null 2>&1";
+                    system(delete_command.c_str());
+                    std::string command = "route -n add -inet6 " + std::string(address.data()) + "/128 ";
+                    if (!gateway.empty()) command += std::string(gateway.data());
+                    else command += "-interface " + std::string(state.interface_name.data());
+                    command += " >/dev/null 2>&1";
+                    added = system(command.c_str()) == 0;
+#else
+                    added = ppp::tap::TapLinux::AddRoute6(state.interface_name, address, 128, gateway);
+#endif
+                    if (added) {
+                        geo_dynamic_routes6_[address] = std::move(state);
+                        LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: IPv6 address=%s, action=%s, priority=%llu",
+                            address.data(), direct ? "direct" : "tunnel", (unsigned long long)update.priority);
+                    }
+                    return;
+                }
                 if (!update.address.is_v4()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: IPv6 dynamic route deferred, address=%s",
-                        update.address.to_string().data());
                     return;
                 }
 
@@ -3068,6 +3261,28 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept {
+                if (address.is_v6()) {
+                    ppp::string key = address.to_string();
+                    auto existing6 = geo_dynamic_routes6_.find(key);
+                    if (existing6 == geo_dynamic_routes6_.end()) return;
+
+                    GeoDynamicRoute6 state = existing6->second;
+#if defined(_WIN32)
+                    if (state.interface_index >= 0) {
+                        ppp::win32::network::DeleteIPv6Route(state.interface_index, key, 128, state.gateway);
+                    }
+#elif defined(_MACOS)
+                    std::string command = "route -n delete -inet6 " + std::string(key.data()) + "/128 ";
+                    if (!state.gateway.empty()) command += std::string(state.gateway.data());
+                    else command += "-interface " + std::string(state.interface_name.data());
+                    command += " >/dev/null 2>&1";
+                    system(command.c_str());
+#else
+                    ppp::tap::TapLinux::DeleteRoute6(state.interface_name, key, 128, state.gateway);
+#endif
+                    geo_dynamic_routes6_.erase(existing6);
+                    return;
+                }
                 if (!address.is_v4()) {
                     return;
                 }
@@ -3553,9 +3768,13 @@ namespace ppp {
                     socks_proxy->Dispose();
                 }
 
-                // Close and release the exchanger.
-                if (std::shared_ptr<VEthernetExchanger> exchanger = std::move(exchanger_); NULLPTR != exchanger) {
-                    exchanger->Dispose();
+                // Close and release every outbound exchanger.  The primary pointer is
+                // an alias into this table and must not be disposed a second time.
+                exchanger_.reset();
+                OutboundExchangerTable outbounds = std::move(outbound_exchangers_);
+                outbound_exchangers_.clear();
+                for (auto& entry : outbounds) {
+                    if (entry.second) entry.second->Dispose();
                 }
 
                 // Shutdown and release the qos control module.
@@ -3691,6 +3910,7 @@ namespace ppp {
                     return false;
                 }
 
+                final_outbound_ = engine->GetFinalOutbound();
                 geo_rules_ = std::move(engine);
                 return true;
             }
@@ -3887,8 +4107,49 @@ namespace ppp {
                         }
                     }
                 }
+                if (!fib_add_route_ipv4(remoteIP)) return false;
 
-                return fib_add_route_ipv4(remoteIP);
+                // Every secondary tunnel endpoint must bypass the TAP as well,
+                // otherwise establishing it after the default route is installed
+                // recursively sends the tunnel connection through the primary.
+                for (auto& entry : outbound_exchangers_) {
+                    if (entry.first == "main" || NULLPTR == entry.second) continue;
+
+                    boost::asio::ip::tcp::endpoint secondary_ep;
+                    ppp::string secondary_hostname, secondary_address, secondary_path, secondary_server;
+                    int secondary_port = 0;
+                    ProtocolType secondary_protocol = ProtocolType::ProtocolType_PPP;
+                    if (!entry.second->GetRemoteEndPoint(y, secondary_hostname, secondary_address,
+                        secondary_path, secondary_port, secondary_protocol, secondary_server, secondary_ep)) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: cannot resolve outbound '%s'",
+                            entry.first.data());
+                        return false;
+                    }
+
+                    // When this outbound uses its own upstream proxy, protect the
+                    // proxy endpoint rather than the loopback forwarding listener.
+                    if (auto secondary_forwarding = entry.second->forwarding_; NULLPTR != secondary_forwarding) {
+                        secondary_ep = secondary_forwarding->GetProxyEndPoint();
+                    }
+
+                    boost::asio::ip::address secondary_ip = secondary_ep.address();
+                    if (secondary_ip.is_v4()) {
+                        if (!secondary_ip.is_loopback() && !fib_add_route_ipv4(secondary_ip)) return false;
+                    }
+                    elif(secondary_ip.is_v6() && underlying_ni_) {
+                        boost::asio::ip::address ngw6_addr = underlying_ni_->IPv6GatewayServer;
+                        if (!ngw6_addr.is_v6() || ngw6_addr.is_unspecified()) return false;
+                        if (NULLPTR == rib6_) rib6_ = make_shared_object<IPv6RouteTable>();
+                        if (NULLPTR == rib6_) return false;
+                        IPv6RouteEntry entry6;
+                        entry6.Network = secondary_ip.to_v6();
+                        entry6.Prefix = 128;
+                        entry6.NextHop = ngw6_addr.to_v6();
+                        rib6_->emplace_back(std::move(entry6));
+                    }
+                }
+
+                return true;
             }
 
             bool VEthernetNetworkSwitcher::RedirectDnsServer(
@@ -4116,9 +4377,14 @@ namespace ppp {
 
             bool VEthernetNetworkSwitcher::OnUpdate(uint64_t now) noexcept {
                 if (VEthernet::OnUpdate(now)) {
-                    std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
-                    if (NULLPTR != exchanger) {
-                        exchanger->StaticEchoSwapAsynchronousSocket();
+                    if (!outbound_exchangers_.empty()) {
+                        for (auto& entry : outbound_exchangers_) {
+                            if (entry.second) entry.second->StaticEchoSwapAsynchronousSocket();
+                        }
+                    }
+                    else {
+                        std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                        if (NULLPTR != exchanger) exchanger->StaticEchoSwapAsynchronousSocket();
                     }
                 }
 

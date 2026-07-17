@@ -347,10 +347,31 @@ namespace ppp {
                         return true;
                     }
 
-                    static GeoRuleEngine::Action ParseAction(const ppp::string& value) noexcept {
+                    static bool IsValidOutboundTag(const ppp::string& value) noexcept {
+                        if (value.empty()) return false;
+                        for (char ch : value) {
+                            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+                                continue;
+                            }
+                            return false;
+                        }
+                        return true;
+                    }
+
+                    static GeoRuleEngine::Action ParseAction(const ppp::string& value,
+                        const ppp::unordered_set<ppp::string>& outbound_tags,
+                        ppp::string& outbound) noexcept {
                         ppp::string action = LowerTrim(value);
+                        outbound.clear();
                         if (action == "direct") return GeoRuleEngine::Action::Direct;
-                        if (action == "tunnel") return GeoRuleEngine::Action::Tunnel;
+                        if (action == "tunnel") {
+                            outbound = "main";
+                            return GeoRuleEngine::Action::Tunnel;
+                        }
+                        if (outbound_tags.find(action) != outbound_tags.end()) {
+                            outbound = action;
+                            return GeoRuleEngine::Action::Tunnel;
+                        }
                         return GeoRuleEngine::Action::None;
                     }
 
@@ -406,6 +427,93 @@ namespace ppp {
                     }
                 }
 
+                bool GeoRuleEngine::ParseOutboundConfigurations(const ppp::string& rules_path,
+                    ppp::vector<OutboundConfiguration>& configurations,
+                    ppp::string& final_outbound,
+                    ppp::string& error) noexcept {
+                    configurations.clear();
+                    final_outbound = "main";
+                    error.clear();
+
+                    ppp::string text = ppp::io::File::ReadAllText(rules_path.data());
+                    if (text.empty()) {
+                        error = "geo rules file is empty or cannot be read: " + rules_path;
+                        return false;
+                    }
+                    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xef &&
+                        static_cast<unsigned char>(text[1]) == 0xbb && static_cast<unsigned char>(text[2]) == 0xbf) {
+                        text.erase(0, 3);
+                    }
+
+                    ppp::unordered_set<ppp::string> tags;
+                    bool has_final = false;
+                    ppp::vector<ppp::string> lines;
+                    Tokenize<ppp::string>(text, lines, "\r\n");
+                    for (size_t line_number = 0; line_number < lines.size(); line_number++) {
+                        ppp::string line = ATrim<ppp::string>(lines[line_number]);
+                        size_t comment = line.find('#');
+                        if (comment != ppp::string::npos) line = ATrim<ppp::string>(line.substr(0, comment));
+                        if (line.empty() || line.find(',') != ppp::string::npos) continue;
+
+                        size_t equals = line.find('=');
+                        if (equals == ppp::string::npos) continue;
+                        ppp::string tag = LowerTrim(line.substr(0, equals));
+                        ppp::string value = ATrim<ppp::string>(line.substr(equals + 1));
+                        if (tag == "direct_dns") continue;
+                        if (tag == "final") {
+                            if (has_final) {
+                                error = "duplicate final outbound at line " + stl::to_string<ppp::string>(line_number + 1);
+                                return false;
+                            }
+                            if (value.empty()) {
+                                error = "empty final outbound at line " + stl::to_string<ppp::string>(line_number + 1);
+                                return false;
+                            }
+                            has_final = true;
+                            final_outbound = LowerTrim(value);
+                            continue;
+                        }
+                        if (!IsValidOutboundTag(tag) || tag == "direct" || tag == "tunnel" || tag == "reject") {
+                            error = "invalid or reserved outbound tag at line " + stl::to_string<ppp::string>(line_number + 1) + ": " + tag;
+                            return false;
+                        }
+                        if (value.empty()) {
+                            error = "empty outbound configuration path at line " + stl::to_string<ppp::string>(line_number + 1);
+                            return false;
+                        }
+                        if (!tags.emplace(tag).second) {
+                            error = "duplicate outbound tag at line " + stl::to_string<ppp::string>(line_number + 1) + ": " + tag;
+                            return false;
+                        }
+
+                        ppp::string path = ppp::io::File::GetFullPath(ppp::io::File::RewritePath(value.data()).data());
+                        if (path.empty() || !ppp::io::File::CanAccess(path.data(), ppp::io::FileAccess::Read)) {
+                            error = "outbound configuration cannot be read at line " + stl::to_string<ppp::string>(line_number + 1) + ": " + value;
+                            return false;
+                        }
+                        configurations.emplace_back(OutboundConfiguration{ tag, path, tag == "main" });
+                    }
+
+                    if (final_outbound == "tunnel") final_outbound = "main";
+                    if (configurations.empty()) {
+                        // Traditional geo mode has no outbound declarations.
+                        if (has_final && final_outbound != "main") {
+                            error = "final requires outbound declarations: " + final_outbound;
+                            return false;
+                        }
+                        return true;
+                    }
+                    if (tags.find("main") == tags.end()) {
+                        error = "multi-outbound geo rules must define main=<configuration.json>";
+                        return false;
+                    }
+                    if (tags.find(final_outbound) == tags.end()) {
+                        error = "final references an undefined outbound: " + final_outbound;
+                        return false;
+                    }
+                    return true;
+                }
+
                 bool GeoRuleEngine::Cidr::Contains(const boost::asio::ip::address& value) const noexcept {
                     if (address.is_v4() != value.is_v4() || address.is_v6() != value.is_v6()) return false;
                     if (address.is_v4()) {
@@ -431,15 +539,29 @@ namespace ppp {
                     rules_.clear();
                     static_networks_.clear();
                     direct_dns_.clear();
+                    outbound_configurations_.clear();
+                    final_outbound_ = "main";
                     {
                         std::lock_guard<std::mutex> scope(syncobj_);
                         dynamic_policies_.clear();
+                    }
+
+                    if (!ParseOutboundConfigurations(rules_path, outbound_configurations_, final_outbound_, error)) {
+                        return false;
+                    }
+                    ppp::unordered_set<ppp::string> outbound_tags;
+                    for (const OutboundConfiguration& outbound : outbound_configurations_) {
+                        outbound_tags.emplace(outbound.tag);
                     }
 
                     ppp::string text = ppp::io::File::ReadAllText(rules_path.data());
                     if (text.empty()) {
                         error = "geo rules file is empty or cannot be read: " + rules_path;
                         return false;
+                    }
+                    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xef &&
+                        static_cast<unsigned char>(text[1]) == 0xbb && static_cast<unsigned char>(text[2]) == 0xbf) {
+                        text.erase(0, 3);
                     }
 
                     ppp::unordered_set<ppp::string> wanted_sites;
@@ -469,6 +591,12 @@ namespace ppp {
                             continue;
                         }
 
+                        // Outbound declarations and the default route are parsed by
+                        // ParseOutboundConfigurations before the match rules.
+                        if (line.find(',') == ppp::string::npos && line.find('=') != ppp::string::npos) {
+                            continue;
+                        }
+
                         ppp::vector<ppp::string> fields;
                         Tokenize<ppp::string>(line, fields, ",");
                         if (fields.size() != 3) {
@@ -479,7 +607,7 @@ namespace ppp {
                         Rule rule;
                         ppp::string type = LowerTrim(fields[0]);
                         rule.value = LowerTrim(fields[1]);
-                        rule.action = ParseAction(fields[2]);
+                        rule.action = ParseAction(fields[2], outbound_tags, rule.outbound);
                         rule.priority = rules_.size();
                         if (rule.value.empty() || rule.action == Action::None) {
                             error = "invalid geo rule value or action at line " + stl::to_string<ppp::string>(line_number + 1);
@@ -536,6 +664,7 @@ namespace ppp {
                             }
                             network.action = rule.action;
                             network.priority = rule.priority;
+                            network.outbound = rule.outbound;
                             rule.cidrs.emplace_back(Cidr{ network.address, network.prefix });
                             static_networks_.emplace_back(std::move(network));
                         }
@@ -613,6 +742,7 @@ namespace ppp {
                             for (Network network : category->second) {
                                 network.action = rule.action;
                                 network.priority = rule.priority;
+                                network.outbound = rule.outbound;
                                 rule.cidrs.emplace_back(Cidr{ network.address, network.prefix });
                                 static_networks_.emplace_back(std::move(network));
                             }
@@ -621,9 +751,10 @@ namespace ppp {
 
                     CompileFirstMatchRoutes(static_networks_);
 
-                    LOG_INFO("GeoRuleEngine::Load: rules=%llu, networks=%llu, direct_dns=%llu",
+                    LOG_INFO("GeoRuleEngine::Load: rules=%llu, networks=%llu, direct_dns=%llu, outbounds=%llu, final=%s",
                         (unsigned long long)rules_.size(), (unsigned long long)static_networks_.size(),
-                        (unsigned long long)direct_dns_.size());
+                        (unsigned long long)direct_dns_.size(), (unsigned long long)outbound_configurations_.size(),
+                        final_outbound_.data());
                     return true;
                 }
 
@@ -668,7 +799,7 @@ namespace ppp {
                     default:
                         break;
                     }
-                    return matched ? Decision{ rule.action, rule.priority } : Decision{};
+                    return matched ? Decision{ rule.action, rule.priority, rule.outbound } : Decision{};
                 }
 
                 GeoRuleEngine::Decision GeoRuleEngine::MatchDomain(const ppp::string& host) const noexcept {
@@ -686,7 +817,7 @@ namespace ppp {
                     for (const Rule& rule : rules_) {
                         if (rule.type != RuleType::Geoip && rule.type != RuleType::IpCidr) continue;
                         for (const Cidr& cidr : rule.cidrs) {
-                            if (cidr.Contains(address)) return Decision{ rule.action, rule.priority };
+                            if (cidr.Contains(address)) return Decision{ rule.action, rule.priority, rule.outbound };
                         }
                     }
                     return Decision{};
@@ -702,7 +833,7 @@ namespace ppp {
                         std::lock_guard<std::mutex> scope(syncobj_);
                         auto existing = dynamic_policies_.find(AddressKey(address));
                         if (existing != dynamic_policies_.end() && existing->second.expires_at > now) {
-                            dynamic = Decision{ existing->second.action, existing->second.priority };
+                            dynamic = Decision{ existing->second.action, existing->second.priority, existing->second.outbound };
                         }
                     }
                     Decision fixed = MatchStaticAddress(address);
@@ -762,7 +893,7 @@ namespace ppp {
                         Decision final_decision = MergeDomainAndAddressDecision(domain_decision, address);
                         uint64_t ttl_seconds = std::max<uint64_t>(1, std::min<uint64_t>(answer.mTtl, 86400));
                         DynamicPolicy policy{ final_decision.action, final_decision.priority,
-                            now + ttl_seconds * 1000, domain };
+                            now + ttl_seconds * 1000, domain, final_decision.outbound };
                         bool changed = false;
                         {
                             std::lock_guard<std::mutex> scope(syncobj_);
@@ -774,12 +905,12 @@ namespace ppp {
                                 changed = true;
                             }
                             else if (policy.priority == existing->second.priority) {
-                                changed = existing->second.action != policy.action;
+                                changed = existing->second.action != policy.action || existing->second.outbound != policy.outbound;
                                 existing->second = policy;
                             }
                         }
                         if (changed) {
-                            updates.emplace_back(RouteUpdate{ address, policy.action, policy.priority, policy.expires_at });
+                            updates.emplace_back(RouteUpdate{ address, policy.action, policy.priority, policy.expires_at, policy.outbound });
                         }
                     }
                     return !updates.empty();
@@ -794,7 +925,7 @@ namespace ppp {
                             boost::asio::ip::address address = StringToAddress(iterator->first.data(), ec);
                             if (!ec) {
                                 expired.emplace_back(RouteUpdate{ address, iterator->second.action,
-                                    iterator->second.priority, iterator->second.expires_at });
+                                    iterator->second.priority, iterator->second.expires_at, iterator->second.outbound });
                             }
                             iterator = dynamic_policies_.erase(iterator);
                         }

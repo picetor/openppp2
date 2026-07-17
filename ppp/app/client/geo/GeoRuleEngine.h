@@ -11,6 +11,12 @@ namespace ppp {
             namespace geo {
                 class GeoRuleEngine final {
                 public:
+                    struct OutboundConfiguration final {
+                        ppp::string tag;
+                        ppp::string path;
+                        bool primary = false;
+                    };
+
                     enum class Action : uint8_t {
                         None = 0,
                         Direct,
@@ -20,6 +26,7 @@ namespace ppp {
                     struct Decision final {
                         Action action = Action::None;
                         size_t priority = SIZE_MAX;
+                        ppp::string outbound;
 
                         bool Matched() const noexcept { return action != Action::None; }
                     };
@@ -29,6 +36,7 @@ namespace ppp {
                         int prefix = 0;
                         Action action = Action::None;
                         size_t priority = SIZE_MAX;
+                        ppp::string outbound;
                     };
 
                     struct RouteUpdate final {
@@ -36,9 +44,15 @@ namespace ppp {
                         Action action = Action::None;
                         size_t priority = SIZE_MAX;
                         uint64_t expires_at = 0;
+                        ppp::string outbound;
                     };
 
                 public:
+                    static bool ParseOutboundConfigurations(const ppp::string& rules_path,
+                        ppp::vector<OutboundConfiguration>& configurations,
+                        ppp::string& final_outbound,
+                        ppp::string& error) noexcept;
+
                     bool Load(const ppp::string& rules_path,
                         const ppp::string& geosite_path,
                         const ppp::string& geoip_path,
@@ -53,6 +67,8 @@ namespace ppp {
 
                     const ppp::vector<boost::asio::ip::address>& GetDirectDnsServers() const noexcept { return direct_dns_; }
                     const ppp::vector<Network>& GetStaticNetworks() const noexcept { return static_networks_; }
+                    const ppp::vector<OutboundConfiguration>& GetOutboundConfigurations() const noexcept { return outbound_configurations_; }
+                    const ppp::string& GetFinalOutbound() const noexcept { return final_outbound_; }
                     size_t GetRuleCount() const noexcept { return rules_.size(); }
 
                 private:
@@ -88,6 +104,7 @@ namespace ppp {
                         ppp::vector<DomainPattern> domains;
                         ppp::vector<Cidr> cidrs;
                         std::shared_ptr<boost::regex> regex;
+                        ppp::string outbound;
                     };
 
                     struct DynamicPolicy final {
@@ -95,6 +112,7 @@ namespace ppp {
                         size_t priority = SIZE_MAX;
                         uint64_t expires_at = 0;
                         ppp::string domain;
+                        ppp::string outbound;
                     };
 
                 private:
@@ -109,6 +127,8 @@ namespace ppp {
                     ppp::vector<Rule> rules_;
                     ppp::vector<Network> static_networks_;
                     ppp::vector<boost::asio::ip::address> direct_dns_;
+                    ppp::vector<OutboundConfiguration> outbound_configurations_;
+                    ppp::string final_outbound_ = "main";
                     mutable std::mutex syncobj_;
                     ppp::unordered_map<ppp::string, DynamicPolicy> dynamic_policies_;
                     std::atomic<size_t> direct_dns_index_ = 0;

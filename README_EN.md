@@ -25,7 +25,7 @@
   - [Windows IPv6 DNS Leak Prevention](#-windows-ipv6-dns-leak-prevention)
   - [Windows IPv6 Source Address Selection Fix](#-windows-ipv6-source-address-selection-fix)
   - [Server-Side IPv6 Mode](#-server-side-ipv6-mode)
-  - [Native IPv6 DNS Support](#-native-ipv6-dns-support)
+  - [IPv6 DNS Configuration and Delivery](#-ipv6-dns-configuration-and-delivery)
 - [WSS Optimized IP Acceleration](#-wss-optimized-ip-acceleration)
 - [SOCKS5 Proxy](#-socks5-proxy)
 - [Improvements & Bug Fixes](#-improvements--bug-fixes)
@@ -58,7 +58,51 @@ ppp --mode=client --bypass-mode=geo \
     --geoip=./geoip.dat
 ```
 
-Each `geo-rules.txt` line uses `type,value,direct|tunnel`. Rules are matched from top to bottom and the first match wins. If several domains resolve to the same CDN IP, the earliest matching rule owns that IP policy.
+The commands above retain the original single-outbound Geo mode: `--config` still points to JSON and rule actions use `direct` or `tunnel` (`tunnel` is an alias for `main`). Existing JSON startup and `--bypass-mode=original|geo|no` behavior is unchanged.
+
+### Multi-outbound mode on one TAP
+
+When `--config` points directly to a `.txt` file, it is strictly interpreted as a multi-outbound Geo manifest. A `.json` value continues to select traditional single-configuration mode.
+
+```bash
+ppp --mode=client --config=./geo-rules.txt \
+    --geosite=./geosite.dat \
+    --geoip=./geoip.dat
+```
+
+```ini
+main=./main.json
+tunnel1=./tunnel1.json
+tunnel2=./tunnel2.json
+
+final=main
+direct_dns=223.5.5.5,119.29.29.29
+
+geosite,github,main
+geosite,openai,tunnel1
+geosite,microsoft,direct
+geosite,cn,direct
+geoip,cn,direct
+domain-suffix,example.com,tunnel2
+ip-cidr,192.0.2.0/24,tunnel1
+ip-cidr6,2001:db8::/32,tunnel2
+```
+
+Manifest rules:
+
+- `main=<JSON>` is mandatory. Other tags may contain lowercase letters, digits, `_`, and `-`; input is case-insensitive. `direct`, `tunnel`, and `reject` are reserved. Duplicate tags, unknown actions, missing files, or an empty rule set fail startup.
+- JSON paths are resolved from the process working directory, not from the manifest's directory. Every JSON independently supplies its server, GUID, protocol/transport keys, WebSocket/TLS settings, and optional `client.server-proxy`, so different outbounds may use different keys.
+- Only one TAP is created. `main` owns TAP addressing, DNS, system routes, and local HTTP/SOCKS listeners; each tag owns an independent remote connection and reconnection state. All outbounds are created at startup. Initialization failure aborts startup, and a disconnected selected outbound never leaks or falls back to `main`.
+- TCP connections pin their outbound when established. Raw TCP/UDP/ICMP maintains active destination affinity, so DNS TTL expiry cannot move active traffic to a differently keyed tunnel; selection is recalculated after five minutes of inactivity.
+- Multi-outbound mode rejects `--tun-static=yes`, because the legacy static UDP echo path has one global server/aggregator set and cannot isolate independent keys. Traditional JSON mode is unaffected.
+
+### Matching syntax and order
+
+Rules use `type,value,action`. Supported types are `geosite` (including attributes such as `@cn`), `geoip`, `domain`/`full`, `domain-suffix`, `domain-keyword`, `domain-regex`/`regexp`, `ip-cidr`, and `ip-cidr6`. An action is a declared outbound tag or `direct`; legacy `tunnel` means `main`.
+
+Rules are evaluated top to bottom and the first match wins. Domain rules learn TTL-bound IPv4/IPv6 policies from DNS A/AAAA answers. Whether both query types are issued is decided by the OS resolver; the application does not force both. If domains share a CDN IP, the earlier rule owns that address policy. `direct_dns` redirects only queries for domains matched as `direct`; other queries use the TAP/main DNS, then the resulting connection is sent through the outbound selected for its destination IP. Literal-IP connections use only `geoip`/CIDR rules. Unmatched traffic uses `final` (default `main`).
+
+Traditional single-outbound example:
 
 ```ini
 direct_dns=223.5.5.5,119.29.29.29
@@ -72,7 +116,7 @@ ip-cidr,192.0.2.0/24,tunnel
 ip-cidr6,2001:db8::/32,direct
 ```
 
-Supported types are `geosite` (including attributes such as `@cn`), `geoip`, `domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, and `ip-cidr6`. `direct_dns` is used only for domains matched as `direct`; unmatched traffic stays in the tunnel. Geo data files are not embedded in the executable and must exist at the selected paths before enabling `geo` mode.
+Geo data files are not embedded in the executable and must exist at the selected paths before enabling Geo mode.
 
 ---
 
@@ -190,15 +234,20 @@ Works automatically — no extra configuration needed.
 
 ---
 
-### Native IPv6 DNS Support
+### IPv6 DNS Configuration and Delivery
 
-The `--dns=` parameter natively supports IPv6 DNS addresses:
+IPv6 DNS does not use the client's `--dns=` option. Configure it in the server's `appsettings.json` instead:
 
-```bash
-ppp --mode=client --dns=1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888
+```json
+"server": {
+    "ipv6": {
+        "dns1": "2606:4700:4700::1111",
+        "dns2": "2001:4860:4860::8888"
+    }
+}
 ```
 
-IPv6 DNS is delivered to the TAP adapter via `ApplyIPv6Assignment()` → `ApplyClientDns()`, coexisting with IPv4 DNS (`--dns=`) without conflict.
+The server delivers these values with the IPv6 assignment as `AssignedIPv6Dns1/2`. Linux and macOS clients apply them to the TAP adapter through `ApplyIPv6Assignment()` → `ApplyClientDns()`. Windows clients currently clear IPv6 DNS from the TAP adapter and prefer IPv4 DNS configured with `--dns=`.
 
 ---
 

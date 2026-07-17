@@ -85,6 +85,12 @@ namespace ppp {
                 typedef ppp::function<void(VEthernetNetworkSwitcher*, UInt64)>      VEthernetTickEventHandler;
                 typedef ppp::transmissions::ITransmissionStatistics                 ITransmissionStatistics;
                 typedef std::shared_ptr<ITransmissionStatistics>                    ITransmissionStatisticsPtr;
+                struct OutboundConfiguration final {
+                    ppp::string                                                     tag;
+                    std::shared_ptr<ppp::configurations::AppConfiguration>          configuration;
+                };
+                typedef ppp::vector<OutboundConfiguration>                         OutboundConfigurationList;
+                typedef ppp::unordered_map<ppp::string, std::shared_ptr<VEthernetExchanger>> OutboundExchangerTable;
                 class NetworkInterface {    
                 public: 
                     ppp::string                                                     Name;
@@ -142,6 +148,7 @@ namespace ppp {
 #endif  
                 std::shared_ptr<ppp::configurations::AppConfiguration>              GetConfiguration()           noexcept { return configuration_; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger()               noexcept { return exchanger_; }
+                std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const boost::asio::ip::address& destination) noexcept;
                 VirtualEthernetLoggerPtr                                            GetLogger()                  noexcept { return logger_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               GetQoS()                     noexcept { return qos_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        GetStatistics()              noexcept { return statistics_; }
@@ -160,6 +167,7 @@ namespace ppp {
             public: 
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
                 bool                                                                LoadGeoRules(const ppp::string& rules_path, const ppp::string& geosite_path, const ppp::string& geoip_path) noexcept;
+                bool                                                                SetOutboundConfigurations(const OutboundConfigurationList& configurations) noexcept;
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
@@ -214,6 +222,9 @@ namespace ppp {
 
             protected:  
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger() noexcept;
+                virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger(
+                    const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration,
+                    const ppp::string& tag, bool primary) noexcept;
                 virtual std::shared_ptr<ppp::ethernet::VNetstack>                   NewNetstack() noexcept override;
                 virtual VEthernetHttpProxySwitcherPtr                               NewHttpProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
                 virtual VEthernetSocksProxySwitcherPtr                              NewSocksProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
@@ -303,6 +314,14 @@ namespace ppp {
             private:    
                 VirtualEthernetLoggerPtr                                            logger_;
                 std::shared_ptr<VEthernetExchanger>                                 exchanger_;
+                OutboundConfigurationList                                           outbound_configurations_;
+                OutboundExchangerTable                                              outbound_exchangers_;
+                ppp::string                                                         final_outbound_ = "main";
+                struct OutboundAffinity final {
+                    ppp::string                                                     tag;
+                    uint64_t                                                        expires_at = 0;
+                };
+                ppp::unordered_map<ppp::string, OutboundAffinity>                  outbound_affinities_;
                 std::shared_ptr<ppp::configurations::AppConfiguration>              configuration_;
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               qos_;
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        statistics_;
@@ -382,6 +401,12 @@ namespace ppp {
                 boost::asio::ip::address                                            preferred_ngw6_;
                 ppp::unordered_set<uint32_t>                                        dns_serverss_[3];
                 ppp::unordered_map<uint32_t, uint32_t>                              geo_dynamic_routes_;
+                struct GeoDynamicRoute6 final {
+                    ppp::string                                                     gateway;
+                    ppp::string                                                     interface_name;
+                    int                                                             interface_index = -1;
+                };
+                ppp::unordered_map<ppp::string, GeoDynamicRoute6>                  geo_dynamic_routes6_;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;

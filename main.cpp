@@ -276,6 +276,12 @@ protected:
     virtual bool                                    OnTick(uint64_t now) noexcept;
 
 private:
+    struct ClientOutboundConfiguration final
+    {
+        ppp::string                                     tag;
+        std::shared_ptr<AppConfiguration>               configuration;
+    };
+
     // Load configuration file
     std::shared_ptr<AppConfiguration>               LoadConfiguration(int argc, const char* argv[], ppp::string& path) noexcept;
     // Determine if running in client or server mode
@@ -308,6 +314,8 @@ private:
     bool                                            client_mode_                = false; // Current mode flag
     bool                                            quic_                       = false; // Original QUIC setting (Windows)
     std::shared_ptr<AppConfiguration>               configuration_;                      // Application configuration
+    ppp::vector<ClientOutboundConfiguration>        outbound_configurations_;             // Geo multi-outbound configurations
+    ppp::string                                     geo_configuration_path_;              // geo-rules.txt used as --config
     std::shared_ptr<VirtualEthernetSwitcher>        server_;                             // Server switcher
     std::shared_ptr<VEthernetNetworkSwitcher>       client_;                             // Client switcher
     ppp::string                                     configuration_path_;                 // Configuration file path
@@ -1225,6 +1233,21 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 break;
             }
 
+            if (!outbound_configurations_.empty())
+            {
+                VEthernetNetworkSwitcher::OutboundConfigurationList outbounds;
+                for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
+                {
+                    outbounds.emplace_back(VEthernetNetworkSwitcher::OutboundConfiguration{
+                        outbound.tag, outbound.configuration });
+                }
+                if (!ethernet->SetOutboundConfigurations(outbounds))
+                {
+                    fprintf(stdout, "%s\r\n", "Invalid multi-outbound configuration.");
+                    break;
+                }
+            }
+
 #if !defined(_WIN32)
             // Configure SSMT settings
             ethernet->Ssmt(&network_interface->Ssmt);
@@ -1439,6 +1462,11 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         // Gets whether client mode or server mode is currently running.
         client_mode_ = IsModeClientOrServer(argc, argv);
     }
+    if (!geo_configuration_path_.empty() && !client_mode_)
+    {
+        fprintf(stdout, "%s\r\n", "A geo-rules.txt configuration is only valid in client mode.");
+        return -1;
+    }
 
     // Configure thread pool
     int max_concurrent = configuration->concurrent - 1;
@@ -1460,6 +1488,14 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     if (NULLPTR == network_interface)
     {
         return -1;
+    }
+
+    // Passing geo-rules.txt through --config selects multi-outbound geo mode.
+    // Command-line bypass flags must not silently replace the manifest rules.
+    if (!geo_configuration_path_.empty())
+    {
+        network_interface->SplitMode = NetworkInterface::BypassMode::Geo;
+        network_interface->GeoRules = geo_configuration_path_;
     }
 
     network_interface_ = network_interface;
@@ -2380,6 +2416,8 @@ std::shared_ptr<AppConfiguration> PppApplication::GetConfiguration() noexcept
 std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, const char* argv[], ppp::string& path) noexcept
 {
     static constexpr const char* argument_keys[] = { "-c", "--c", "-config", "--config" };
+    outbound_configurations_.clear();
+    geo_configuration_path_.clear();
 
     // Find configuration file from command line
     for (const char* argument_key : argument_keys)
@@ -2397,11 +2435,81 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
             continue;
         }
 
+        ppp::string argument_lower = ToLower<ppp::string>(argument_value);
+        bool requested_geo_manifest = argument_lower.size() >= 4 &&
+            argument_lower.compare(argument_lower.size() - 4, 4, ".txt") == 0;
+        if (requested_geo_manifest && !File::CanAccess(argument_value.data(), FileAccess::Read))
+        {
+            fprintf(stdout, "Geo configuration cannot be read: %s\r\n", argument_value.data());
+            return NULLPTR;
+        }
+
         if (File::CanAccess(argument_value.data(), FileAccess::Read))
         {
             path = std::move(argument_value);
             break;
         }
+    }
+
+    // A .txt file passed as --config is a geo multi-outbound manifest.  It is
+    // parsed before the normal JSON configuration because its main= entry
+    // identifies the primary AppConfiguration used for all system-level state.
+    ppp::string selected_lower = ToLower<ppp::string>(path);
+    bool geo_manifest = selected_lower.size() >= 4 &&
+        selected_lower.compare(selected_lower.size() - 4, 4, ".txt") == 0;
+    if (geo_manifest)
+    {
+        using GeoRuleEngine = ppp::app::client::geo::GeoRuleEngine;
+        ppp::vector<GeoRuleEngine::OutboundConfiguration> declarations;
+        ppp::string final_outbound;
+        ppp::string error;
+        if (!GeoRuleEngine::ParseOutboundConfigurations(path, declarations, final_outbound, error) || declarations.empty())
+        {
+            if (error.empty()) error = "geo configuration contains no outbound declarations";
+            fprintf(stdout, "Geo configuration error: %s\r\n", error.data());
+            path.clear();
+            return NULLPTR;
+        }
+
+        std::shared_ptr<AppConfiguration> primary;
+        for (const GeoRuleEngine::OutboundConfiguration& declaration : declarations)
+        {
+            std::shared_ptr<AppConfiguration> configuration = ppp::make_shared_object<AppConfiguration>();
+            if (NULLPTR == configuration || !configuration->Load(declaration.path))
+            {
+                fprintf(stdout, "Failed to load outbound '%s' configuration: %s\r\n",
+                    declaration.tag.data(), declaration.path.data());
+                outbound_configurations_.clear();
+                path.clear();
+                return NULLPTR;
+            }
+
+#if defined(_WIN32)
+            bool initialize_allocator = configuration->vmem.size > 0;
+#else
+            bool initialize_allocator = configuration->vmem.path.size() > 0 && configuration->vmem.size > 0;
+#endif
+            if (initialize_allocator)
+            {
+                std::shared_ptr<BufferswapAllocator> allocator = ppp::make_shared_object<BufferswapAllocator>(configuration->vmem.path,
+                    std::max<int64_t>((int64_t)1LL << (int64_t)25LL, (int64_t)configuration->vmem.size << (int64_t)20LL));
+                if (NULLPTR != allocator && allocator->IsVaild()) configuration->SetBufferAllocator(allocator);
+            }
+
+            outbound_configurations_.emplace_back(ClientOutboundConfiguration{ declaration.tag, configuration });
+            if (declaration.primary) primary = configuration;
+        }
+
+        if (NULLPTR == primary)
+        {
+            fprintf(stdout, "%s\r\n", "Geo configuration does not define a valid main outbound.");
+            outbound_configurations_.clear();
+            path.clear();
+            return NULLPTR;
+        }
+
+        geo_configuration_path_ = path;
+        return primary;
     }
 
     // Try default configuration file locations

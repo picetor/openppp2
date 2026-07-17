@@ -23,7 +23,7 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                std::shared_ptr<VEthernetExchanger> exchanger = ethernet->GetExchanger();
+                std::shared_ptr<VEthernetExchanger> exchanger = ethernet->GetExchanger(remoteEP.address());
                 if (NULLPTR == exchanger) {
                     return NULLPTR;
                 }

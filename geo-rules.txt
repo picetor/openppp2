@@ -1,18 +1,25 @@
+# Used directly as: --mode=client --config=./geo-rules.txt
+# Paths are resolved from the process working directory.
+main=./appsettings.json
+# tunnel1=./tunnel1.json
+# tunnel2=./tunnel2.json
+final=main
+
 # DNS servers used when a domain matches a direct rule.
 direct_dns=223.5.5.5,119.29.29.29
 
 # Rules are evaluated from top to bottom. The first match wins.
-# Supported actions: direct, tunnel.
+# Actions are direct, a declared outbound tag, or legacy tunnel (= main).
 
-geosite,github,tunnel
+geosite,github,main
 geosite,microsoft,direct
 geoip,cn,direct
 
 # Additional examples:
 # geosite,microsoft@cn,direct
-# domain,api.example.com,tunnel
+# domain,api.example.com,tunnel1
 # domain-suffix,example.cn,direct
-# domain-keyword,github,tunnel
-# domain-regex,^.*\.example\.com$,tunnel
+# domain-keyword,github,main
+# domain-regex,^.*\.example\.com$,tunnel2
 # ip-cidr,192.168.0.0/16,direct
-# ip-cidr6,2001:db8::/32,tunnel
+# ip-cidr6,2001:db8::/32,tunnel2

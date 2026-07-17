@@ -48,12 +48,16 @@ namespace ppp {
                 const VEthernetNetworkSwitcherPtr&      switcher,
                 const AppConfigurationPtr&              configuration,
                 const ContextPtr&                       context,
-                const Int128&                           id) noexcept
+                const Int128&                           id,
+                const ppp::string&                      outbound_tag,
+                bool                                    primary_outbound) noexcept
                 : VirtualEthernetLinklayer(configuration, context, id)
                 , disposed_(false)
                 , sekap_last_(0)
                 , sekap_next_(0)
                 , switcher_(switcher)
+                , outbound_tag_(outbound_tag)
+                , primary_outbound_(primary_outbound)
                 , network_state_(NetworkState_Connecting)
                 , static_echo_input_(false)
                 , static_echo_timeout_(UINT64_MAX)
@@ -77,12 +81,72 @@ namespace ppp {
                 Finalize();
             }
 
+            bool VEthernetExchanger::TranslateIPv6Packet(Byte* packet, int packet_length, bool outbound) noexcept {
+                if (primary_outbound_ || NULLPTR == packet || packet_length < ppp::ipv6::IPv6_HEADER_MIN_SIZE) return true;
+                if ((packet[0] >> 4) != ppp::ipv6::IPv6_VERSION) return true;
+
+                boost::asio::ip::address assigned;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    assigned = assigned_ipv6_address_;
+                }
+                if (NULLPTR == switcher_) return false;
+                auto tap = switcher_->GetTap();
+                if (!assigned.is_v6() || NULLPTR == tap || !tap->IPv6Address.is_v6()) {
+                    LOG_DEBUG("VEthernetExchanger::TranslateIPv6Packet: outbound=%s has no usable IPv6 assignment",
+                        outbound_tag_.data());
+                    return false;
+                }
+
+                boost::asio::ip::address_v6 source;
+                boost::asio::ip::address_v6 destination;
+                Byte next_header = 0;
+                int payload_length = 0;
+                if (!ppp::ipv6::TryParsePacket(packet, packet_length, source, destination,
+                    &next_header, &payload_length)) return false;
+
+                boost::asio::ip::address_v6 tap_address = tap->IPv6Address.to_v6();
+                boost::asio::ip::address_v6 assigned_address = assigned.to_v6();
+                if (outbound) {
+                    if (source == assigned_address) return true;
+                    if (source != tap_address) return false;
+                    source = assigned_address;
+                }
+                else {
+                    if (destination == tap_address) return true;
+                    if (destination != assigned_address) return false;
+                    destination = tap_address;
+                }
+
+                int checksum_offset = -1;
+                if (next_header == IPPROTO_TCP && payload_length >= 20) checksum_offset = 16;
+                elif(next_header == IPPROTO_UDP && payload_length >= 8) checksum_offset = 6;
+                elif(next_header == IPPROTO_ICMPV6 && payload_length >= 4) checksum_offset = 2;
+                else return false;
+
+                ppp::ipv6::PacketHeader* header = reinterpret_cast<ppp::ipv6::PacketHeader*>(packet);
+                auto source_bytes = source.to_bytes();
+                auto destination_bytes = destination.to_bytes();
+                memcpy(header->Source, source_bytes.data(), source_bytes.size());
+                memcpy(header->Destination, destination_bytes.data(), destination_bytes.size());
+
+                Byte* payload = packet + ppp::ipv6::IPv6_HEADER_MIN_SIZE;
+                payload[checksum_offset] = 0;
+                payload[checksum_offset + 1] = 0;
+                unsigned short checksum = ppp::ipv6::ComputePseudoChecksum(payload,
+                    static_cast<unsigned int>(payload_length), source, destination, next_header);
+                if (next_header == IPPROTO_UDP && checksum == 0) checksum = 0xffff;
+                memcpy(payload + checksum_offset, &checksum, sizeof(checksum));
+                return true;
+            }
+
             void VEthernetExchanger::Finalize() noexcept {
                 VirtualEthernetMappingPortTable mappings;
                 VEthernetDatagramPortTable datagrams;
                 ITransmissionPtr transmission;
                 DeadlineTimerTable deadline_timers;
                 std::shared_ptr<vmux::vmux_net> mux;
+                IForwardingPtr forwarding;
 
                 for (;;) {
                     SynchronizedObjectScope scope(syncobj_);
@@ -99,6 +163,7 @@ namespace ppp {
                     
                     mux_vlan_ = 0;
                     mux = std::move(mux_);
+                    forwarding = std::move(forwarding_);
                     transmission = std::move(transmission_);
                     break;
                 }
@@ -118,6 +183,9 @@ namespace ppp {
 
                 if (NULLPTR != mux) {
                     mux->close_exec();
+                }
+                if (NULLPTR != forwarding) {
+                    forwarding->Dispose();
                 }
             }
 
@@ -219,7 +287,16 @@ namespace ppp {
                     return false;
                 }
 
-                std::shared_ptr<ppp::transmissions::proxys::IForwarding> forwarding = switcher_->GetForwarding(); ;
+                // The primary keeps the traditional switcher-owned proxy. Each
+                // secondary owns a forwarding proxy built from its own JSON.
+                std::shared_ptr<ppp::transmissions::proxys::IForwarding> forwarding;
+                if (primary_outbound_) {
+                    forwarding = switcher_->GetForwarding();
+                }
+                else {
+                    SynchronizedObjectScope scope(syncobj_);
+                    forwarding = forwarding_;
+                }
                 if (NULLPTR != forwarding) {
                     ppp::string abs_url;
                     server = UriAuxiliary::Parse(client_server_string, hostname, address, path, port, protocol_type, &abs_url, *y, false);
@@ -352,6 +429,24 @@ namespace ppp {
                     return false;
                 }
 
+                // A secondary configuration may use a different upstream proxy.
+                // Failure is fatal for that outbound: silently connecting directly
+                // would violate the selected route.
+                if (!primary_outbound_ && !configuration->client.server_proxy.empty()) {
+                    IForwardingPtr forwarding = make_shared_object<IForwarding>(context, configuration);
+                    if (NULLPTR == forwarding || !forwarding->Open()) {
+                        if (NULLPTR != forwarding) forwarding->Dispose();
+                        LOG_ERROR("VEthernetExchanger::Open: cannot open forwarding proxy for outbound '%s'",
+                            outbound_tag_.data());
+                        return false;
+                    }
+#if defined(_LINUX)
+                    forwarding->ProtectorNetwork = switcher_->GetProtectorNetwork();
+#endif
+                    SynchronizedObjectScope scope(syncobj_);
+                    forwarding_ = std::move(forwarding);
+                }
+
                 auto self = shared_from_this();
                 auto allocator = configuration->GetBufferAllocator();
 
@@ -371,6 +466,14 @@ namespace ppp {
                 boost::asio::post(*context, 
                     [self, this, context]() noexcept {
                         uint64_t now = ppp::threading::Executors::GetTickCount();
+                        IForwardingPtr forwarding;
+                        {
+                            SynchronizedObjectScope scope(syncobj_);
+                            forwarding = forwarding_;
+                        }
+                        if (NULLPTR != forwarding) {
+                            forwarding->Update(now);
+                        }
                         SendEchoKeepAlivePacket(now, false);
                         if (disposed_) {
                             return;
@@ -966,6 +1069,7 @@ namespace ppp {
             bool VEthernetExchanger::OnNat(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
                 bool vnet = switcher_->IsVNet();
                 if (vnet) {
+                    if (!TranslateIPv6Packet(packet, packet_length, false)) return false;
                     return switcher_->Output(packet, packet_length);
                 }
                 else {
@@ -1028,7 +1132,18 @@ namespace ppp {
                     [self, this, context, ei]() noexcept {
                         information_ = ei;
                         if (!disposed_) {
-                            switcher_->OnInformation(ei);
+                            if (!primary_outbound_) {
+                                SynchronizedObjectScope scope(syncobj_);
+                                assigned_ipv6_address_ = boost::asio::ip::address();
+                            }
+                            if (primary_outbound_) {
+                                switcher_->OnInformation(ei);
+                            }
+                            elif(!ei->Valid()) {
+                                if (ITransmissionPtr transmission = transmission_; NULLPTR != transmission) {
+                                    transmission->Dispose();
+                                }
+                            }
                         }
                     });
                 return true;
@@ -1051,14 +1166,30 @@ namespace ppp {
                     [self, this, context, ei, information]() noexcept {
                         information_ = ei;
                         if (!disposed_) {
-                            switcher_->OnInformation(ei);
+                            {
+                                // A reconnect may intentionally return no IPv6 lease,
+                                // so an old per-outbound address must not survive it.
+                                SynchronizedObjectScope scope(syncobj_);
+                                assigned_ipv6_address_ = information.Extensions.AssignedIPv6Address.is_v6()
+                                    ? information.Extensions.AssignedIPv6Address
+                                    : boost::asio::ip::address();
+                            }
+                            if (primary_outbound_) {
+                                switcher_->OnInformation(ei);
+                            }
+                            elif(!ei->Valid()) {
+                                if (ITransmissionPtr transmission = transmission_; NULLPTR != transmission) {
+                                    transmission->Dispose();
+                                }
+                            }
 
                             // Apply IPv6 (and optionally IPv4) assignment from ExtendedJson
-                            LOG_DEBUG("VEthernetExchanger::OnInformation: ExtendedJson.empty()=%d, len=%d, AssignedIPv6Mode=%d",
+                            LOG_DEBUG("VEthernetExchanger::OnInformation: outbound=%s, primary=%d, ExtendedJson.empty()=%d, len=%d, AssignedIPv6Mode=%d",
+                                outbound_tag_.data(), (int)primary_outbound_,
                                 (int)information.ExtendedJson.empty(),
                                 (int)information.ExtendedJson.size(),
                                 (int)information.Extensions.AssignedIPv6Mode);
-                            if (!information.ExtendedJson.empty()) {
+                            if (primary_outbound_ && !information.ExtendedJson.empty()) {
                                 switcher_->ApplyIPv6Assignment(information.Extensions);
                             }
                         }
@@ -1269,6 +1400,10 @@ namespace ppp {
 
                 ITransmissionPtr transmission = transmission_;
                 if (NULLPTR == transmission) {
+                    return false;
+                }
+
+                if (!TranslateIPv6Packet((Byte*)packet, packet_size, true)) {
                     return false;
                 }
 
