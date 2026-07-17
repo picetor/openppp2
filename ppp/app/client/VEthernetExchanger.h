@@ -258,10 +258,8 @@ namespace ppp {
             private:
                 SynchronizedObject                                                      syncobj_;
 
-                struct {
-                    bool                                                                disposed_           : 1;
-                    bool                                                                static_echo_input_  : 7;
-                };
+                std::atomic<bool>                                                       disposed_ = false;
+                bool                                                                    static_echo_input_ = false;
 
                 std::shared_ptr<Byte>                                                   buffer_;            
 

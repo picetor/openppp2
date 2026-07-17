@@ -152,12 +152,27 @@ namespace ppp
                     return false;
                 }
 
-                // Add a static IPv6 neighbor entry (NDP cache).
-                // Using netsh: netsh interface ipv6 add neighbors <ifindex> <address> <mac> store=persistent
+                // Add a static IPv6 neighbor entry (NDP cache). Keep it active-only;
+                // a persistent entry can survive an abnormal VPN termination.
                 char command[512];
                 ::snprintf(command, sizeof(command),
-                    "interface ipv6 add neighbors %d %s %s store=persistent",
+                    "interface ipv6 add neighbors %d %s %s store=active",
                     interface_index, address.c_str(), mac.c_str());
+
+                return ExecuteNetshCommand(command);
+            }
+
+            bool DeleteIPv6Neighbor(int interface_index, const ppp::string& address) noexcept
+            {
+                if (interface_index < 0 || address.empty())
+                {
+                    return false;
+                }
+
+                char command[512];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 delete neighbors %d %s",
+                    interface_index, address.c_str());
 
                 return ExecuteNetshCommand(command);
             }

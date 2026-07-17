@@ -1090,6 +1090,15 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::Dispose() noexcept {
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                // Restore host routing and DNS before posting asynchronous object
+                // teardown. The application may be terminated shortly after Dispose,
+                // so critical OS state must never depend on queued cleanup completing.
+                {
+                    SynchronizedObjectScope scope(prdr_);
+                    RestoreNetworkState();
+                }
+#endif
                 LOG_DEBUG("VEthernetNetworkSwitcher::Dispose: posting Finalize");
                 auto self = shared_from_this();
                 std::shared_ptr<boost::asio::io_context> context = GetContext();
@@ -1109,6 +1118,7 @@ namespace ppp {
                 ReleaseAllObjects();
                 ReleaseAllPackets();
                 ReleaseAllTimeouts();
+                LOG_INFO("VEthernetNetworkSwitcher::Finalize: cleanup completed");
             }
 
 #if defined(PPP_LOG_VERBOSE)
@@ -1549,24 +1559,53 @@ namespace ppp {
                 // Determine nat_mode from the extensions (server-assigned), not from local config.
                 // The client config may not have a server.ipv6 section at all.
                 bool nat_mode = (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Nat66);
+                int address_prefix_length = extensions.AssignedIPv6AddressPrefixLength > 0
+                    ? extensions.AssignedIPv6AddressPrefixLength
+                    : 64;
 
-                // Capture original IPv6 state before applying changes.
-                ppp::ipv6::auxiliary::ClientState state;
-                ppp::ipv6::auxiliary::CaptureClientOriginalState(ctx, nat_mode, state);
+                // Capture the original host state exactly once. A stack-local snapshot
+                // cannot be used during disconnect and was the reason managed IPv6
+                // addresses, split default routes and DNS changes survived shutdown.
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                bool assignment_changed = ipv6_client_state_captured_ &&
+                    (ipv6_client_address_ != extensions.AssignedIPv6Address ||
+                        ipv6_client_gateway_ != extensions.AssignedIPv6Gateway ||
+                        ipv6_client_route_prefix_ != extensions.AssignedIPv6RoutePrefix ||
+                        ipv6_client_prefix_length_ != address_prefix_length ||
+                        ipv6_client_route_prefix_length_ != extensions.AssignedIPv6RoutePrefixLength ||
+                        ipv6_client_nat_mode_ != nat_mode);
+                if (assignment_changed) {
+                    RestoreIPv6Assignment();
+                }
+                if (!ipv6_client_state_captured_) {
+                    ipv6_client_state_.Clear();
+                    ppp::ipv6::auxiliary::CaptureClientOriginalState(ctx, nat_mode, ipv6_client_state_);
+                    ipv6_client_address_ = extensions.AssignedIPv6Address;
+                    ipv6_client_gateway_ = extensions.AssignedIPv6Gateway;
+                    ipv6_client_route_prefix_ = extensions.AssignedIPv6RoutePrefix;
+                    ipv6_client_prefix_length_ = address_prefix_length;
+                    ipv6_client_route_prefix_length_ = extensions.AssignedIPv6RoutePrefixLength;
+                    ipv6_client_nat_mode_ = nat_mode;
+                    ipv6_client_state_captured_ = true;
+                }
+                ppp::ipv6::auxiliary::ClientState& state = ipv6_client_state_;
+#else
+                ppp::ipv6::auxiliary::ClientState transient_state;
+                ppp::ipv6::auxiliary::CaptureClientOriginalState(ctx, nat_mode, transient_state);
+                ppp::ipv6::auxiliary::ClientState& state = transient_state;
+#endif
 
                 // 1. Apply the assigned IPv6 address.
-                if (extensions.AssignedIPv6Address.is_v6()) {
+                if (extensions.AssignedIPv6Address.is_v6() && !state.AddressApplied) {
                     bool gua_mode = (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua);
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying address=%s/%d gua=%d",
                         extensions.AssignedIPv6Address.to_string().c_str(),
-                        (int)(extensions.AssignedIPv6AddressPrefixLength > 0 ? extensions.AssignedIPv6AddressPrefixLength : 64),
+                        address_prefix_length,
                         (int)gua_mode);
                     ppp::ipv6::auxiliary::ApplyClientAddress(
                         ctx,
                         extensions.AssignedIPv6Address,
-                        extensions.AssignedIPv6AddressPrefixLength > 0
-                            ? extensions.AssignedIPv6AddressPrefixLength
-                            : 64,
+                        address_prefix_length,
                         gua_mode,
                         state);
 
@@ -1613,6 +1652,12 @@ namespace ppp {
                                             LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: pin server IPv6 route via API failed, ifindex=%d, gw=\"%s\"",
                                                 v6_ifindex, gw6_str.c_str());
                                         }
+                                        else {
+                                            ipv6_server_route_applied_ = true;
+                                            ipv6_server_route_interface_index_ = v6_ifindex;
+                                            ipv6_server_route_address_ = server_address;
+                                            ipv6_server_route_gateway_ = underlying_ni->IPv6GatewayServer;
+                                        }
                                     }
                                 }
 #endif
@@ -1628,7 +1673,7 @@ namespace ppp {
                 // 2. Apply split default IPv6 routes (::/1 + 8000::/1) via the assigned gateway.
                 //    Same approach as IPv4's 0.0.0.0/1 + 128.0.0.0/1 — avoids overwriting
                 //    any existing ::/0 on the physical NIC.
-                if (extensions.AssignedIPv6Gateway.is_v6()) {
+                if (extensions.AssignedIPv6Gateway.is_v6() && !state.DefaultRouteApplied) {
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying default route via gateway=%s nat_mode=%d",
                         extensions.AssignedIPv6Gateway.to_string().c_str(), (int)nat_mode);
 
@@ -1661,7 +1706,7 @@ namespace ppp {
                 }
 
                 // 3. Apply an optional routed subnet prefix.
-                if (extensions.AssignedIPv6RoutePrefix.is_v6() && extensions.AssignedIPv6RoutePrefixLength > 0) {
+                if (extensions.AssignedIPv6RoutePrefix.is_v6() && extensions.AssignedIPv6RoutePrefixLength > 0 && !state.SubnetRouteApplied) {
                     ppp::ipv6::auxiliary::ApplyClientSubnetRoute(
                         ctx,
                         extensions.AssignedIPv6RoutePrefix,
@@ -1691,36 +1736,116 @@ namespace ppp {
                 //    We still clear non-TAP NICs' IPv6 DNS to prevent DNS leaks from
                 //    physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
 #if defined(_WIN32)
-                ppp::vector<ppp::string> dns_servers; // intentionally empty - skip IPv6 DNS on TAP
-                // Clear IPv6 DNS on the TAP interface itself (in case a previous
-                // ApplyClientDns call left stale IPv6 DNS servers behind).
-                ppp::win32::network::ClearDnsAddressesV6(ctx.InterfaceIndex);
-                // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leaks from
-                // physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
-                for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
-                    if (if_index != ctx.InterfaceIndex && !servers.empty()) {
-                        ppp::win32::network::ClearDnsAddressesV6(if_index);
+                if (!state.DnsApplied) {
+                    ppp::vector<ppp::string> dns_servers; // intentionally empty - skip IPv6 DNS on TAP
+                    // Clear IPv6 DNS on the TAP interface itself (in case a previous
+                    // ApplyClientDns call left stale IPv6 DNS servers behind).
+                    ppp::win32::network::ClearDnsAddressesV6(ctx.InterfaceIndex);
+                    // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leaks from
+                    // physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
+                    for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
+                        if (if_index != ctx.InterfaceIndex && !servers.empty()) {
+                            ppp::win32::network::ClearDnsAddressesV6(if_index);
+                        }
                     }
+                    state.DnsApplied = true;
+                    state.DnsServers = std::move(dns_servers);
+                    ppp::tap::TapWindows::DnsFlushResolverCache();
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + %d non-TAP NICs IPv6 DNS (prefer IPv4)",
+                        (int)state.OriginalAllDnsServers.size());
                 }
-                state.DnsApplied = true;
-                state.DnsServers = std::move(dns_servers);
-                ppp::tap::TapWindows::DnsFlushResolverCache();
-                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + %d non-TAP NICs IPv6 DNS (prefer IPv4)",
-                    (int)state.OriginalAllDnsServers.size());
 #else
-                ppp::vector<ppp::string> dns_servers;
-                if (extensions.AssignedIPv6Dns1.is_v6()) {
-                    dns_servers.emplace_back(extensions.AssignedIPv6Dns1.to_string());
-                }
-                if (extensions.AssignedIPv6Dns2.is_v6()) {
-                    dns_servers.emplace_back(extensions.AssignedIPv6Dns2.to_string());
-                }
-                if (!dns_servers.empty()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying %d DNS servers", (int)dns_servers.size());
-                    ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
+                if (!state.DnsApplied) {
+                    ppp::vector<ppp::string> dns_servers;
+                    if (extensions.AssignedIPv6Dns1.is_v6()) {
+                        dns_servers.emplace_back(extensions.AssignedIPv6Dns1.to_string());
+                    }
+                    if (extensions.AssignedIPv6Dns2.is_v6()) {
+                        dns_servers.emplace_back(extensions.AssignedIPv6Dns2.to_string());
+                    }
+                    if (!dns_servers.empty()) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: applying %d DNS servers", (int)dns_servers.size());
+                        ppp::ipv6::auxiliary::ApplyClientDns(ctx, dns_servers, state);
+                    }
                 }
 #endif
             }
+
+#if !defined(_ANDROID) && !defined(_IPHONE)
+            void VEthernetNetworkSwitcher::RestoreIPv6Assignment() noexcept {
+                if (!ipv6_client_state_captured_) {
+                    return;
+                }
+
+#if defined(_WIN32)
+                if (ipv6_server_route_applied_ &&
+                    ipv6_server_route_interface_index_ >= 0 &&
+                    ipv6_server_route_address_.is_v6()) {
+                    ppp::win32::network::DeleteIPv6Route(
+                        ipv6_server_route_interface_index_,
+                        ipv6_server_route_address_.to_string().c_str(),
+                        128,
+                        ipv6_server_route_gateway_.is_v6()
+                            ? ppp::string(ipv6_server_route_gateway_.to_string().c_str())
+                            : ppp::string());
+                }
+                ipv6_server_route_applied_ = false;
+                ipv6_server_route_interface_index_ = -1;
+                ipv6_server_route_address_ = boost::asio::ip::address();
+                ipv6_server_route_gateway_ = boost::asio::ip::address();
+#endif
+
+                std::shared_ptr<ITap> tap = GetTap();
+                if (NULLPTR != tap) {
+                    ppp::ipv6::auxiliary::ClientContext ctx;
+                    ctx.Tap = tap.get();
+                    ctx.InterfaceIndex = tap->GetInterfaceIndex();
+
+                    std::shared_ptr<NetworkInterface> tun_ni = GetTapNetworkInterface();
+                    if (NULLPTR != tun_ni && !tun_ni->Name.empty()) {
+                        ctx.InterfaceName = tun_ni->Name;
+                    }
+#if defined(_LINUX)
+                    else {
+                        int dev_handle = (int)reinterpret_cast<std::intptr_t>(tap->GetHandle());
+                        if (dev_handle != -1) {
+                            ppp::tap::TapLinux::GetInterfaceName(dev_handle, ctx.InterfaceName);
+                        }
+                    }
+#elif defined(_MACOS)
+                    else {
+                        int dev_handle = (int)reinterpret_cast<std::intptr_t>(tap->GetHandle());
+                        if (dev_handle != -1) {
+                            ppp::darwin::tun::utun_get_if_name(dev_handle, ctx.InterfaceName);
+                        }
+                    }
+#endif
+
+                    LOG_INFO("VEthernetNetworkSwitcher::RestoreIPv6Assignment: restoring interface=%d, address=%s/%d",
+                        ctx.InterfaceIndex,
+                        ipv6_client_address_.is_v6() ? ipv6_client_address_.to_string().c_str() : "(none)",
+                        ipv6_client_prefix_length_);
+                    ppp::ipv6::auxiliary::RestoreClientConfiguration(
+                        ctx,
+                        ipv6_client_address_,
+                        ipv6_client_prefix_length_,
+                        ipv6_client_nat_mode_,
+                        ipv6_client_state_);
+
+                    tap->IPv6Address = boost::asio::ip::address();
+                    tap->IPv6GatewayServer = boost::asio::ip::address();
+                }
+
+                ipv6_client_state_.Clear();
+                ipv6_client_address_ = boost::asio::ip::address();
+                ipv6_client_gateway_ = boost::asio::ip::address();
+                ipv6_client_route_prefix_ = boost::asio::ip::address();
+                ipv6_client_prefix_length_ = 0;
+                ipv6_client_route_prefix_length_ = 0;
+                ipv6_client_nat_mode_ = false;
+                ipv6_client_state_captured_ = false;
+            }
+#endif
 
 #if defined(_WIN32)
             VEthernetNetworkSwitcher::PaperAirplaneControllerPtr VEthernetNetworkSwitcher::NewPaperAirplaneController() noexcept {
@@ -2447,14 +2572,25 @@ namespace ppp {
                         auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
                         dns_guard_timer_ = make_shared_object<ppp::threading::Timer>(context);
                         if (NULLPTR != dns_guard_timer_) {
+                            dns_guard_active_.store(true);
                             dns_guard_timer_->TickEvent = 
                                 [self, tap_if_index](ppp::threading::Timer* sender, ppp::threading::Timer::TickEventArgs& e) noexcept {
+                                    if (!self->dns_guard_active_.load()) {
+                                        return;
+                                    }
+
                                     // Run DNS guard on a background thread to avoid blocking the main io_context.
                                     // SetDnsAddressesV6 uses ::system("netsh ...") and GetAllNetworkInterfaces uses
                                     // WMI COM calls — both are synchronous and can block for 100ms~2000ms+.
                                     // Blocking the main io_context would freeze all network I/O (TAP reads,
                                     // keepalive, mux heartbeat, TCP forwarding), causing the entire tunnel to stall.
+                                    self->dns_guard_workers_.fetch_add(1);
                                     std::thread([self, tap_if_index]() noexcept {
+                                        if (!self->dns_guard_active_.load()) {
+                                            self->dns_guard_workers_.fetch_sub(1);
+                                            return;
+                                        }
+
                                         // This thread runs blocking DNS guard operations (netsh + WMI) that would
                                         // freeze the main io_context if executed inline. Each call to netsh or WMI
                                         // can block for 100ms~2000ms+, which would stall all network I/O.
@@ -2463,22 +2599,31 @@ namespace ppp {
                                         {
                                             // Re-apply loopback DNS to all non-TAP NICs
                                             for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
+                                                if (!self->dns_guard_active_.load()) {
+                                                    break;
+                                                }
                                                 if (if_index != tap_if_index) {
                                                     ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
                                                 }
                                             }
                                             // Re-apply IPv4 loopback DNS via WMI
                                             ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
-                                            if (ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
+                                            if (self->dns_guard_active_.load() && ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
                                                 for (auto& ni : interfaces) {
+                                                    if (!self->dns_guard_active_.load()) {
+                                                        break;
+                                                    }
                                                     if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
                                                         ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
                                                         ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
                                                     }
                                                 }
                                             }
-                                            CoUninitialize();
+                                            if (SUCCEEDED(hr)) {
+                                                CoUninitialize();
+                                            }
                                         }
+                                        self->dns_guard_workers_.fetch_sub(1);
                                     }).detach();
                                 };
                             dns_guard_timer_->SetInterval(30000); // Every 30 seconds
@@ -3787,6 +3932,47 @@ namespace ppp {
 #endif
             }
 
+#if !defined(_ANDROID) && !defined(_IPHONE)
+            void VEthernetNetworkSwitcher::RestoreNetworkState() noexcept {
+#if defined(_WIN32)
+                // Stop the DNS guard before restoring physical-NIC DNS; otherwise a
+                // pending tick can clear the values again during shutdown.
+                dns_guard_active_.store(false);
+                if (std::shared_ptr<ppp::threading::Timer> timer = std::move(dns_guard_timer_); NULLPTR != timer) {
+                    timer->Stop();
+                    timer->Dispose();
+                }
+
+                uint64_t guard_deadline = ppp::threading::Executors::GetTickCount() + 10000;
+                while (dns_guard_workers_.load() > 0 && ppp::threading::Executors::GetTickCount() < guard_deadline) {
+                    ppp::Sleep(10);
+                }
+                if (dns_guard_workers_.load() > 0) {
+                    LOG_WARN("VEthernetNetworkSwitcher::RestoreNetworkState: DNS guard workers did not stop before timeout, workers=%d",
+                        dns_guard_workers_.load());
+                }
+#endif
+
+                RestoreIPv6Assignment();
+
+                if (!exchangeof(route_added_, false)) {
+                    return;
+                }
+
+                LOG_INFO("VEthernetNetworkSwitcher::RestoreNetworkState: restoring routes and DNS");
+                DeleteRoute();
+
+#if defined(_WIN32)
+                ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
+                ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
+                ppp::tap::TapWindows::DnsFlushResolverCache();
+#else
+                UnixNetworkInterface::SetDnsResolveConfiguration(GetUnderlyingNetworkInterface());
+#endif
+                LOG_INFO("VEthernetNetworkSwitcher::RestoreNetworkState: routes and DNS restored");
+            }
+#endif
+
             void VEthernetNetworkSwitcher::ReleaseAllObjects() noexcept {
 #if !defined(_ANDROID) && !defined(_IPHONE)
                 // Windows platform needs to set the prdr synchronization lock state to prevent the problem of multi-thread concurrent competition.
@@ -3795,6 +3981,12 @@ namespace ppp {
 
                 // Clear event bindings.
                 TickEvent = NULLPTR;
+
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                // Dispose normally restores this synchronously before Finalize is
+                // posted. Keep the idempotent call here for destructor/failure paths.
+                RestoreNetworkState();
+#endif
 
                 // Stop and release the http-proxy service.
                 if (VEthernetHttpProxySwitcherPtr http_proxy = std::move(http_proxy_); NULLPTR != http_proxy) {
@@ -3831,12 +4023,6 @@ namespace ppp {
                 }
 
 #if defined(_WIN32)
-                // Stop the DNS guard timer that prevents DHCP from restoring ISP DNS on physical NICs.
-                if (std::shared_ptr<ppp::threading::Timer> timer = std::move(dns_guard_timer_); NULLPTR != timer) {
-                    timer->Stop();
-                    timer->Dispose();
-                }
-
                 // On Windows platforms, you need to try to turn off the [PaperAirplane NSP/LSP] server-side controller.
                 if (PaperAirplaneControllerPtr controller = std::move(paper_airplane_ctrl_);  NULLPTR != controller) {
                     controller->Dispose();
@@ -3844,30 +4030,6 @@ namespace ppp {
 #endif
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
-                // Delete VPN route table information configured in the operating system!
-                if (exchangeof(route_added_, false)) {
-                    // Delete routes entries configured by the VPN program from the operating system. 
-                    DeleteRoute();
-
-#if defined(_WIN32)
-                    // Restore IPv6 DNS on all physical NICs that were cleared during VPN connect.
-                    // This must happen BEFORE restoring IPv4 DNS to ensure DNS is fully operational
-                    // after VPN disconnect.
-                    ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
-
-                    // Restore all IPv4 dns servers addresses that have been configured when VPN routes are enabled.
-                    ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
-
-                    // Windows clients need to request the operating system FLUSH to reset all DNS query cache immediately after 
-                    // The VPN is constructed, because the original DNS cache may not be the best destination IP resolution record 
-                    // Available in the region where the VPN server is located.
-                    ppp::tap::TapWindows::DnsFlushResolverCache();
-#else
-                    // Restore the original linux /etc/resolve.conf to linux operating system configuration files.
-                    UnixNetworkInterface::SetDnsResolveConfiguration(GetUnderlyingNetworkInterface());
-#endif
-                }
-
                 // To clean up the managed and unmanaged data currently held by the class, 
                 // You need to go through the complete construct fill process again after the Release of this function.
                 ribs_.reset();

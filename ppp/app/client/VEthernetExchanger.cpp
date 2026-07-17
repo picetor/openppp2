@@ -190,7 +190,11 @@ namespace ppp {
             }
 
             void VEthernetExchanger::Dispose() noexcept {
-                LOG_DEBUG("VEthernetExchanger::Dispose: posting Finalize, disposed=%d", (int)disposed_);
+                if (disposed_.exchange(true)) {
+                    return;
+                }
+
+                LOG_DEBUG("VEthernetExchanger::Dispose: posting Finalize, disposed=1");
                 auto self = shared_from_this();
                 std::shared_ptr<boost::asio::io_context> context = GetContext();
                 boost::asio::post(*context, 
@@ -642,9 +646,18 @@ namespace ppp {
                         }
                     } ExchangeToReconnectingState();
 
+                    // Dispose can race with the data loop ending. Do not create a new
+                    // reconnect wait after shutdown has already begun; Finalize will
+                    // cancel any timers that were active before Dispose.
+                    if (disposed_) {
+                        break;
+                    }
+
                     int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
                     LOG_DEBUG("VEthernetExchanger::Loopback: waiting %lld ms before reconnection attempt #%d", reconnection_timeout, (int)reconnection_count_);
-                    Sleep(reconnection_timeout, context, y);
+                    if (!Sleep(reconnection_timeout, context, y)) {
+                        break;
+                    }
                 }
                 return run_once;
             }

@@ -254,11 +254,21 @@ namespace ppp {
                         std::string gw_std = gateway.to_string();
                         ppp::string gw_str(gw_std.data(), gw_std.size());
 
+                        // Remove stale entries left by an older/abnormally terminated
+                        // client before creating this session's managed routes.
+                        ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, gw_str);
+                        ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, ppp::string());
+                        ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str);
+                        ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, ppp::string());
+                        ppp::win32::network::DeleteIPv6Neighbor(context.InterfaceIndex, gw_str);
+
                         if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "::", 1, gw_str, 0)) {
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
                         if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str, 0)) {
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, gw_str);
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, ppp::string());
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
@@ -268,6 +278,8 @@ namespace ppp {
                         // can resolve the gateway MAC without NDP and send IPv6
                         // packets directly to the TAP interface.
                         if (!ppp::win32::network::AddIPv6Neighbor(context.InterfaceIndex, gw_str, "00-00-00-00-00-01")) {
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, gw_str);
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str);
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
                         }
@@ -279,6 +291,9 @@ namespace ppp {
                         // the VPN entirely. Elevate the fd00::/8 prefix precedence to 50
                         // with label=1 so the ULA source address on TAP is preferred.
                         if (!ppp::win32::network::SetIPv6PrefixPolicyPreferULA()) {
+                            ppp::win32::network::DeleteIPv6Neighbor(context.InterfaceIndex, gw_str);
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, gw_str);
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, gw_str);
                             LOG_ERROR("ApplyClientDefaultRoute: SetIPv6PrefixPolicyPreferULA() failed, IPv6 source address selection may prefer physical NIC");
                             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                             return false;
@@ -296,11 +311,15 @@ namespace ppp {
                         return false;
                     }
 
+                    ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, ppp::string());
+                    ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, ppp::string());
+
                     if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "::", 1, ppp::string(), 0)) {
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }
                     if (!ppp::win32::network::AddIPv6Route(context.InterfaceIndex, "8000::", 1, ppp::string(), 0)) {
+                        ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, ppp::string());
                         ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ClientRouteApplyFailed);
                         return false;
                     }
@@ -468,7 +487,22 @@ namespace ppp {
 
 
                     if (state.DefaultRouteApplied) {
-                        ppp::win32::network::DeleteIPv6DefaultGateway(context.InterfaceIndex, state.DefaultRouteGateway);
+                        // ApplyClientDefaultRoute installs two /1 routes, not ::/0.
+                        // Delete the exact routes and the static Wintun gateway
+                        // neighbor so neither can survive a clean disconnect.
+                        bool left_deleted = ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, state.DefaultRouteGateway);
+                        bool right_deleted = ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, state.DefaultRouteGateway);
+                        // Wintun can normalize a via-gateway route into an on-link
+                        // entry. Retry without a gateway so cleanup handles both forms.
+                        if (!left_deleted && !state.DefaultRouteGateway.empty()) {
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "::", 1, ppp::string());
+                        }
+                        if (!right_deleted && !state.DefaultRouteGateway.empty()) {
+                            ppp::win32::network::DeleteIPv6Route(context.InterfaceIndex, "8000::", 1, ppp::string());
+                        }
+                        if (!state.DefaultRouteGateway.empty()) {
+                            ppp::win32::network::DeleteIPv6Neighbor(context.InterfaceIndex, state.DefaultRouteGateway);
+                        }
                     }
 
                     if (state.SubnetRouteApplied && !state.SubnetRoutePrefix.empty()) {

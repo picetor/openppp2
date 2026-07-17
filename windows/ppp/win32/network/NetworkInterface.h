@@ -114,6 +114,7 @@ namespace ppp
             bool                                                SetIPv6AddressSkipAsSource(int interface_index, const ppp::string& address) noexcept;
             bool                                                AddIPv6Route(int interface_index, const ppp::string& prefix, int prefix_length, const ppp::string& gateway, int metric) noexcept;
             bool                                                AddIPv6Neighbor(int interface_index, const ppp::string& address, const ppp::string& mac) noexcept;
+            bool                                                DeleteIPv6Neighbor(int interface_index, const ppp::string& address) noexcept;
             bool                                                DeleteIPv6DefaultGateway(int interface_index, const ppp::string& gateway) noexcept;
             bool                                                DeleteIPv6Route(int interface_index, const ppp::string& prefix, int prefix_length, const ppp::string& gateway) noexcept;
             bool                                                DeleteIPv6Address(int interface_index, const ppp::string& address) noexcept;

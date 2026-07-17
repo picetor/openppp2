@@ -271,6 +271,10 @@ namespace ppp {
                 void                                                                ReleaseAllObjects() noexcept;
                 void                                                                ReleaseAllPackets() noexcept;
                 void                                                                ReleaseAllTimeouts() noexcept;
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                void                                                                RestoreNetworkState() noexcept;
+                void                                                                RestoreIPv6Assignment() noexcept;
+#endif
 
             private:    
 #if !defined(_ANDROID) && !defined(_IPHONE)     
@@ -407,14 +411,28 @@ namespace ppp {
                     int                                                             interface_index = -1;
                 };
                 ppp::unordered_map<ppp::string, GeoDynamicRoute6>                  geo_dynamic_routes6_;
+                ppp::ipv6::auxiliary::ClientState                                  ipv6_client_state_;
+                boost::asio::ip::address                                            ipv6_client_address_;
+                boost::asio::ip::address                                            ipv6_client_gateway_;
+                boost::asio::ip::address                                            ipv6_client_route_prefix_;
+                int                                                                 ipv6_client_prefix_length_ = 0;
+                int                                                                 ipv6_client_route_prefix_length_ = 0;
+                bool                                                                ipv6_client_nat_mode_ = false;
+                bool                                                                ipv6_client_state_captured_ = false;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
                 bool                                                                ipv6_block_routes_added_ = false;
+                bool                                                                ipv6_server_route_applied_ = false;
+                int                                                                 ipv6_server_route_interface_index_ = -1;
+                boost::asio::ip::address                                            ipv6_server_route_address_;
+                boost::asio::ip::address                                            ipv6_server_route_gateway_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
+                std::atomic<bool>                                                   dns_guard_active_ = false;
+                std::atomic<int>                                                    dns_guard_workers_ = 0;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
