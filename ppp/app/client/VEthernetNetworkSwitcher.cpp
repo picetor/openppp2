@@ -1213,7 +1213,21 @@ namespace ppp {
                 uint64_t now = ppp::threading::Executors::GetTickCount();
                 ppp::string address_key = ppp::net::Ipep::ToAddressString<ppp::string>(destination);
                 ppp::string tag = final_outbound_.empty() ? ppp::string("main") : final_outbound_;
-                if (!outbound_configurations_.empty()) {
+                auto decision = geo_rules_->MatchAddress(destination, now);
+                if (decision.Matched()) {
+                    if (decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct) {
+                        // A current rule must override stale tunnel affinity. Existing
+                        // connections already retain their exchanger, so this only
+                        // affects new traffic for the destination.
+                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=direct, rule=1",
+                            address_key.data());
+                        return NULLPTR;
+                    }
+                    if (!decision.outbound.empty()) tag = decision.outbound;
+                }
+                else if (!outbound_configurations_.empty()) {
+                    // Affinity is only a fallback after a learned DNS policy expires.
+                    // It must never mask a newer domain or GeoIP decision.
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     auto affinity = outbound_affinities_.find(address_key);
                     if (affinity != outbound_affinities_.end()) {
@@ -1221,20 +1235,12 @@ namespace ppp {
                             affinity->second.expires_at = now + affinity_timeout;
                             tag = affinity->second.tag;
                             auto selected = outbound_exchangers_.find(tag);
+                            LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=%s, affinity=1",
+                                address_key.data(), tag.data());
                             return selected == outbound_exchangers_.end() ? NULLPTR : selected->second;
                         }
                         outbound_affinities_.erase(affinity);
                     }
-                }
-
-                auto decision = geo_rules_->MatchAddress(destination, now);
-                if (decision.Matched()) {
-                    if (decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct) {
-                        // A direct destination should have been routed around TAP.  Do not
-                        // leak it through a tunnel if an OS route update is racing.
-                        return NULLPTR;
-                    }
-                    if (!decision.outbound.empty()) tag = decision.outbound;
                 }
                 if (tag == "direct") return NULLPTR;
 
@@ -1246,6 +1252,8 @@ namespace ppp {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     outbound_affinities_[address_key] = OutboundAffinity{ tag, now + affinity_timeout };
                 }
+                LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=%s, rule=%d",
+                    address_key.data(), tag.data(), (int)decision.Matched());
                 return selected->second;
             }
 
@@ -3125,7 +3133,7 @@ namespace ppp {
                 uint32_t direct_gw = htonl(underlying->GatewayServer.to_v4().to_uint());
                 uint32_t tunnel_gw = tap->GatewayServer;
                 ppp::unordered_set<ppp::string> installed;
-                bool any = false;
+                size_t applied = 0;
                 for (const auto& network : geo_rules_->GetStaticNetworks()) {
                     ppp::string key = ppp::net::Ipep::ToAddressString<ppp::string>(network.address) +
                         "/" + stl::to_string<ppp::string>(network.prefix);
@@ -3137,7 +3145,7 @@ namespace ppp {
                         uint32_t ip = htonl(network.address.to_v4().to_uint());
                         uint32_t gateway = network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ?
                             direct_gw : tunnel_gw;
-                        any |= rib_->AddRoute(ip, network.prefix, gateway);
+                        if (rib_->AddRoute(ip, network.prefix, gateway)) applied++;
                     }
                     else if (network.address.is_v6()) {
                         boost::asio::ip::address_v6 gateway;
@@ -3158,14 +3166,14 @@ namespace ppp {
                                 entry.Prefix = network.prefix;
                                 entry.NextHop = gateway;
                                 rib6_->emplace_back(std::move(entry));
-                                any = true;
+                                applied++;
                             }
                         }
                     }
                 }
 
-                LOG_INFO("VEthernetNetworkSwitcher::ApplyGeoStaticRoutes: networks=%llu, applied=%d",
-                    (unsigned long long)geo_rules_->GetStaticNetworks().size(), (int)any);
+                LOG_INFO("VEthernetNetworkSwitcher::ApplyGeoStaticRoutes: networks=%llu, applied=%llu",
+                    (unsigned long long)geo_rules_->GetStaticNetworks().size(), (unsigned long long)applied);
                 return true;
             }
 
@@ -3226,8 +3234,9 @@ namespace ppp {
 #endif
                     if (added) {
                         geo_dynamic_routes6_[address] = std::move(state);
-                        LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: IPv6 address=%s, action=%s, priority=%llu",
-                            address.data(), direct ? "direct" : "tunnel", (unsigned long long)update.priority);
+                        LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: IPv6 address=%s, action=%s, outbound=%s, priority=%llu",
+                            address.data(), direct ? "direct" : "tunnel", update.outbound.data(),
+                            (unsigned long long)update.priority);
                     }
                     return;
                 }
@@ -3253,9 +3262,10 @@ namespace ppp {
                 }
                 if (AddRoute(ip, gateway, 32)) {
                     geo_dynamic_routes_[ip] = gateway;
-                    LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: address=%s, action=%s, priority=%llu",
+                    LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: address=%s, action=%s, outbound=%s, priority=%llu",
                         update.address.to_string().data(),
                         update.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ? "direct" : "tunnel",
+                        update.outbound.data(),
                         (unsigned long long)update.priority);
                 }
             }
