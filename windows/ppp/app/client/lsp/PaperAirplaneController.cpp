@@ -365,20 +365,16 @@ namespace ppp
 
                 bool PaperAirplaneController::AcceptForwardClient(const ppp::net::Socket::AsioContext& context, const ppp::threading::Executors::StrandPtr& strand, const ppp::net::Socket::AsioTcpSocket& socket, const boost::asio::ip::tcp::endpoint& remoteEP) noexcept
                 {
-                    using NetworkState = VEthernetExchanger::NetworkState;
-
                     std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
                     if (NULLPTR == exchanger)
                     {
                         return false;
                     }
 
-                    NetworkState network_state = exchanger->GetNetworkState();
-                    if (network_state != NetworkState::NetworkState_Established) 
-                    {
-                        return false;
-                    }
-
+                    // The controller owns the primary exchanger only as its lifetime,
+                    // context and allocator anchor. The connection selects and checks
+                    // the actual destination outbound after the original endpoint is
+                    // known, so main being down must not block a healthy secondary.
                     AppConfigurationPtr configuration = exchanger->GetConfiguration();
                     if (NULLPTR == configuration)
                     {

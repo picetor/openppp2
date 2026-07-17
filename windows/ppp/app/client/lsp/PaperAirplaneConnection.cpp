@@ -2,9 +2,11 @@
 #include <windows/ppp/app/client/lsp/PaperAirplaneController.h>
 
 #include <ppp/IDisposable.h>
+#include <ppp/net/Ipep.h>
 #include <ppp/threading/Executors.h>
 
 #include <ppp/app/client/VEthernetExchanger.h>
+#include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetNetworkTcpipConnection.h>
 #include <ppp/app/protocol/VirtualEthernetTcpipConnection.h>
 #include <ppp/app/protocol/templates/TVEthernetTcpipConnection.h>
@@ -40,11 +42,17 @@ namespace ppp
                     for (;;)
                     {
                         std::shared_ptr<VirtualEthernetTcpipConnection> connection = std::move(connection_);
+                        std::shared_ptr<RinetdConnection> connection_rinetd = std::move(connection_rinetd_);
                         std::shared_ptr<vmux::vmux_skt> connection_mux = std::move(connection_mux_);
 
                         if (NULLPTR != connection)
                         {
                             connection->Dispose();
+                        }
+
+                        if (NULLPTR != connection_rinetd)
+                        {
+                            connection_rinetd->Dispose();
                         }
 
                         if (NULLPTR != connection_mux) 
@@ -65,6 +73,10 @@ namespace ppp
                     if (VirtualEthernetTcpipConnectionPtr connection = connection_; NULLPTR != connection)
                     {
                         linked = connection->IsLinked();
+                    }
+                    elif(std::shared_ptr<RinetdConnection> connection_rinetd = connection_rinetd_; NULLPTR != connection_rinetd)
+                    {
+                        linked = connection_rinetd->IsLinked();
                     }
                     elif(std::shared_ptr<vmux::vmux_skt> connection_mux = connection_mux_; NULLPTR != connection_mux)
                     {
@@ -141,6 +153,13 @@ namespace ppp
                         return connection->Run(y);
                     }
 
+                    std::shared_ptr<RinetdConnection> connection_rinetd = this->connection_rinetd_;
+                    if (NULLPTR != connection_rinetd)
+                    {
+                        this->Update();
+                        return connection_rinetd->Run();
+                    }
+
                     std::shared_ptr<vmux::vmux_skt> connection_mux = this->connection_mux_;
                     if (NULLPTR != connection_mux)
                     {
@@ -171,12 +190,6 @@ namespace ppp
                         return false;
                     }
 
-                    AppConfigurationPtr configuration = GetConfiguration();
-                    if (NULLPTR == configuration)
-                    {
-                        return false;
-                    }
-
                     std::shared_ptr<boost::asio::ip::tcp::socket> socket = GetSocket();
                     if (NULLPTR == socket)
                     {
@@ -190,8 +203,65 @@ namespace ppp
                     }
 
                     auto self = shared_from_this();
+                    boost::asio::ip::tcp::endpoint remoteEP(host, port);
+                    ppp::string remote_host = ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP);
+
+                    // PaperAirplane is created with the primary exchanger, but the
+                    // destination is only known after the intercepted connection has
+                    // reached this point. Re-select here so DNS-learned Geo policies
+                    // cannot silently send a secondary-outbound flow through main.
+                    if (std::shared_ptr<VEthernetNetworkSwitcher> switcher = exchanger->GetSwitcher(); NULLPTR != switcher)
+                    {
+                        std::shared_ptr<VEthernetExchanger> selected = switcher->GetExchanger(host);
+                        if (NULLPTR == selected)
+                        {
+                            bool force_direct = host.is_v4() ?
+                                switcher->IsBypassIpAddress(host) :
+                                switcher->IsBypassIpAddress6(host);
+                            if (!force_direct)
+                            {
+                                LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, selected_outbound=none, reason=outbound_unavailable",
+                                    this, remote_host.data());
+                                return false;
+                            }
+
+                            AppConfigurationPtr direct_configuration = exchanger->GetConfiguration();
+                            if (NULLPTR == direct_configuration)
+                            {
+                                return false;
+                            }
+
+                            int rinetd_status = VEthernetNetworkTcpipConnection::Rinetd(self, exchanger, context, strand_,
+                                direct_configuration, socket, remoteEP, connection_rinetd_, y);
+                            LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, selected_outbound=direct, reason=final_reselection, status=%d",
+                                this, remote_host.data(), rinetd_status);
+                            return rinetd_status == 0;
+                        }
+
+                        if (selected->GetNetworkState() != VEthernetExchanger::NetworkState_Established)
+                        {
+                            LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, requested_outbound=%s, reason=outbound_not_established",
+                                this, remote_host.data(), selected->GetOutboundTag().data());
+                            return false;
+                        }
+
+                        if (selected.get() != exchanger.get())
+                        {
+                            LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, previous_outbound=%s, selected_outbound=%s, reason=final_reselection",
+                                this, remote_host.data(), exchanger->GetOutboundTag().data(), selected->GetOutboundTag().data());
+                        }
+                        exchanger = std::move(selected);
+                    }
+
+                    AppConfigurationPtr configuration = exchanger->GetConfiguration();
+                    if (NULLPTR == configuration)
+                    {
+                        return false;
+                    }
+                    configuration_ = configuration;
+
                     int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger, "paper-airplane", this,
-                        boost::asio::ip::tcp::endpoint(host, port), socket, connection_mux_, y);
+                        remoteEP, socket, connection_mux_, y);
                     if (mux_status < 1) 
                     {
                         return mux_status == 0;

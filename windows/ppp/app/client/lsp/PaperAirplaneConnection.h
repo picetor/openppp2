@@ -4,6 +4,7 @@
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/threading/Executors.h>
 #include <ppp/coroutines/YieldContext.h>
+#include <ppp/net/rinetd/RinetdConnection.h>
 
 #include <ppp/app/protocol/VirtualEthernetTcpipConnection.h>
 
@@ -32,6 +33,7 @@ namespace ppp
                     typedef ppp::transmissions::ITransmission                           ITransmission;
                     typedef std::shared_ptr<ITransmission>                              ITransmissionPtr;
                     typedef ppp::coroutines::YieldContext                               YieldContext;
+                    typedef ppp::net::rinetd::RinetdConnection                          RinetdConnection;
                     typedef std::shared_ptr<VEthernetExchanger>                         VEthernetExchangerPtr;
                     typedef std::shared_ptr<PaperAirplaneController>                    PaperAirplaneControllerPtr;
                     typedef ppp::app::protocol::VirtualEthernetTcpipConnection          VirtualEthernetTcpipConnection;
@@ -69,6 +71,7 @@ namespace ppp
                     ppp::threading::Executors::StrandPtr                                strand_;
                     std::shared_ptr<boost::asio::ip::tcp::socket>                       socket_;
                     VirtualEthernetTcpipConnectionPtr                                   connection_;
+                    std::shared_ptr<RinetdConnection>                                   connection_rinetd_;
                     std::shared_ptr<vmux::vmux_skt>                                     connection_mux_;
                     AppConfigurationPtr                                                 configuration_;
                 };
