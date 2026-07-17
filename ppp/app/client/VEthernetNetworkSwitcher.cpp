@@ -1204,8 +1204,17 @@ namespace ppp {
 
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::GetExchanger(
                 const boost::asio::ip::address& destination) noexcept {
-                if (outbound_exchangers_.empty() || !geo_rules_ ||
-                    ppp::net::IPEndPoint::IsInvalid(destination)) {
+                if (outbound_exchangers_.empty()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: selected_outbound=main, reason=no_outbound_map");
+                    return exchanger_;
+                }
+                if (!geo_rules_) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, selected_outbound=main, reason=geo_rules_unavailable",
+                        ppp::net::Ipep::ToAddressString<ppp::string>(destination).data());
+                    return exchanger_;
+                }
+                if (ppp::net::IPEndPoint::IsInvalid(destination)) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: selected_outbound=main, reason=invalid_destination");
                     return exchanger_;
                 }
 
@@ -1219,8 +1228,8 @@ namespace ppp {
                         // A current rule must override stale tunnel affinity. Existing
                         // connections already retain their exchanger, so this only
                         // affects new traffic for the destination.
-                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=direct, rule=1",
-                            address_key.data());
+                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=direct, rule=1, rule_priority=%llu",
+                            address_key.data(), (unsigned long long)decision.priority);
                         return NULLPTR;
                     }
                     if (!decision.outbound.empty()) tag = decision.outbound;
@@ -1235,25 +1244,44 @@ namespace ppp {
                             affinity->second.expires_at = now + affinity_timeout;
                             tag = affinity->second.tag;
                             auto selected = outbound_exchangers_.find(tag);
-                            LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=%s, affinity=1",
-                                address_key.data(), tag.data());
-                            return selected == outbound_exchangers_.end() ? NULLPTR : selected->second;
+                            if (selected == outbound_exchangers_.end()) {
+                                LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, requested_outbound=%s, selected_outbound=none, affinity=1, reason=outbound_not_found",
+                                    address_key.data(), tag.data());
+                                return NULLPTR;
+                            }
+                            LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, selected_outbound=%s, affinity=1",
+                                address_key.data(), selected->second->GetOutboundTag().data());
+                            return selected->second;
                         }
                         outbound_affinities_.erase(affinity);
                     }
                 }
-                if (tag == "direct") return NULLPTR;
+                if (tag == "direct") {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=direct, rule=%d, rule_priority=%llu",
+                        address_key.data(), (int)decision.Matched(), (unsigned long long)decision.priority);
+                    return NULLPTR;
+                }
 
                 auto selected = outbound_exchangers_.find(tag);
-                if (selected == outbound_exchangers_.end()) return NULLPTR;
+                if (selected == outbound_exchangers_.end()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, requested_outbound=%s, selected_outbound=none, rule=%d, reason=outbound_not_found",
+                        address_key.data(), tag.data(), (int)decision.Matched());
+                    return NULLPTR;
+                }
                 if (!outbound_configurations_.empty()) {
                     // Keep active raw TCP/UDP/ICMP traffic on the same keyed
                     // tunnel even if a learned DNS policy reaches its TTL.
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     outbound_affinities_[address_key] = OutboundAffinity{ tag, now + affinity_timeout };
                 }
-                LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, outbound=%s, rule=%d",
-                    address_key.data(), tag.data(), (int)decision.Matched());
+                if (decision.Matched()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=tunnel, requested_outbound=%s, selected_outbound=%s, rule=1, rule_priority=%llu",
+                        address_key.data(), tag.data(), selected->second->GetOutboundTag().data(), (unsigned long long)decision.priority);
+                }
+                else {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=final, requested_outbound=%s, selected_outbound=%s, rule=0",
+                        address_key.data(), tag.data(), selected->second->GetOutboundTag().data());
+                }
                 return selected->second;
             }
 

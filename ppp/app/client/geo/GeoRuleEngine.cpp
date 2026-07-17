@@ -751,10 +751,15 @@ namespace ppp {
 
                     CompileFirstMatchRoutes(static_networks_);
 
-                    LOG_INFO("GeoRuleEngine::Load: rules=%llu, networks=%llu, direct_dns=%llu, outbounds=%llu, final=%s",
+                    LOG_INFO("GeoRuleEngine::Load: rules_path=%s, geosite_path=%s, geoip_path=%s, rules=%llu, networks=%llu, direct_dns=%llu, outbounds=%llu, final=%s",
+                        rules_path.data(), geosite_path.data(), geoip_path.data(),
                         (unsigned long long)rules_.size(), (unsigned long long)static_networks_.size(),
                         (unsigned long long)direct_dns_.size(), (unsigned long long)outbound_configurations_.size(),
                         final_outbound_.data());
+                    for (const OutboundConfiguration& outbound : outbound_configurations_) {
+                        LOG_INFO("GeoRuleEngine::Load: outbound=%s, config_path=%s, primary=%d",
+                            outbound.tag.data(), outbound.path.data(), (int)outbound.primary);
+                    }
                     return true;
                 }
 

@@ -148,6 +148,9 @@ namespace ppp {
                         return false;
                     }
 
+                    LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: source=local-proxy, trace=%p, transport_trace=%p, outbound=%s, destination=%s:%d",
+                        this, strand_.get(), exchanger_->GetOutboundTag().data(), destinationEP->Host.data(), destinationEP->Port);
+
                     auto configuration = exchanger_->GetConfiguration();
                     if (NULLPTR == configuration) {
                         return false;
@@ -196,6 +199,8 @@ namespace ppp {
 
                     std::shared_ptr<ppp::transmissions::ITransmission> transmission = exchanger_->ConnectTransmission(context_, strand_, y);
                     if (NULLPTR == transmission) {
+                        LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: source=local-proxy, trace=%p, transport_trace=%p, outbound=%s, ConnectTransmission failed, destination=%s:%d",
+                            this, strand_.get(), exchanger_->GetOutboundTag().data(), destinationEP->Host.data(), destinationEP->Port);
                         return false;
                     }
 
@@ -220,6 +225,8 @@ namespace ppp {
                     }
 
                     this->connection_ = std::move(connection);
+                    LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: source=local-proxy, trace=%p, transport_trace=%p, outbound=%s, connected, destination=%s:%d",
+                        this, strand_.get(), exchanger_->GetOutboundTag().data(), destinationEP->Host.data(), destinationEP->Port);
                     return true;
                 }
 

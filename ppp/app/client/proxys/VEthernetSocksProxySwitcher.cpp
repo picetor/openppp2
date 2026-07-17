@@ -21,7 +21,12 @@ namespace ppp {
                     std::shared_ptr<VEthernetSocksProxySwitcher> self = std::dynamic_pointer_cast<VEthernetSocksProxySwitcher>(shared_from_this());
                     std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
 
-                    return make_shared_object<VEthernetSocksProxyConnection>(self, exchanger, context, strand, socket);
+                    auto connection = make_shared_object<VEthernetSocksProxyConnection>(self, exchanger, context, strand, socket);
+                    if (connection && exchanger) {
+                        LOG_DEBUG("VEthernetSocksProxySwitcher::NewConnection: source=socks, trace=%p, transport_trace=%p, selected_outbound=%s",
+                            connection.get(), strand.get(), exchanger->GetOutboundTag().data());
+                    }
+                    return connection;
                 }
 
                 boost::asio::ip::address VEthernetSocksProxySwitcher::MyLocalEndPoint(int& bind_port) noexcept {

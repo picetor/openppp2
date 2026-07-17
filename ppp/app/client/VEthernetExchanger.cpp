@@ -372,8 +372,8 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                LOG_DEBUG("VEthernetExchanger::OpenTransmission: connecting to %s:%d, protocol=%d, hostname=%s, path=%s",
-                    address.data(), remotePort, (int)protocol_type, hostname.data(), path.data());
+                LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, connecting to %s:%d, protocol=%d, hostname=%s, path=%s",
+                    outbound_tag_.data(), strand.get(), address.data(), remotePort, (int)protocol_type, hostname.data(), path.data());
 
                 std::shared_ptr<boost::asio::ip::tcp::socket> socket = NewAsynchronousSocket(context, strand, remoteEP.protocol(), y);
                 if (!socket) {
@@ -404,13 +404,14 @@ namespace ppp {
                 boost::system::error_code connect_ec;
                 bool ok = ppp::coroutines::asio::async_connect(*socket, remoteEP, y, &connect_ec);
                 if (!ok) {
-                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: async_connect failed, remote=%s:%d, native=%lld, ec=%d, category=%s, message=%s",
-                        address.data(), remotePort, (long long)socket->native_handle(), connect_ec.value(),
+                    LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, async_connect failed, remote=%s:%d, native=%lld, ec=%d, category=%s, message=%s",
+                        outbound_tag_.data(), strand.get(), address.data(), remotePort, (long long)socket->native_handle(), connect_ec.value(),
                         connect_ec.category().name(), connect_ec.message().data());
                     return NULLPTR;
                 }
 
-                LOG_DEBUG("VEthernetExchanger::OpenTransmission: connected to %s:%d, creating transmission", address.data(), remotePort);
+                LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, connected to %s:%d, creating transmission",
+                    outbound_tag_.data(), strand.get(), address.data(), remotePort);
                 return NewTransmission(context, strand, socket, protocol_type, hostname, path);
             }
 
