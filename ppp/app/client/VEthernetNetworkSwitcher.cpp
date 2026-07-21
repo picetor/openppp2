@@ -186,6 +186,8 @@ namespace ppp {
                 }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                UpdateNetworkTakeover(now);
+
                 if (geo_rules_) {
                     ppp::vector<ppp::app::client::geo::GeoRuleEngine::RouteUpdate> expired;
                     geo_rules_->Update(now, expired);
@@ -1091,6 +1093,7 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::Dispose() noexcept {
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                network_takeover_stopping_.store(true);
                 // Restore host routing and DNS before posting asynchronous object
                 // teardown. The application may be terminated shortly after Dispose,
                 // so critical OS state must never depend on queued cleanup completing.
@@ -2506,146 +2509,11 @@ namespace ppp {
                 }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
-                // Add VPN route table information to the operating system.
-                if (tap->IsHostedNetwork() && !exchangeof(route_added_, true)) {
-#if defined(_WIN32)
-                    // Use the Paper-Airplane NSP/LSP session layer forwarding plugins!
-                    if (!UsePaperAirplaneController()) {
-                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: UsePaperAirplaneController failed");
-                        return false;
-                    }
-#endif
-
-                    // VPN routes need to be configured for the operating system to configure the bearer network and overlapping network links.
-                    AddRoute();
-
-#if defined(_WIN32)
-                    // Replace all non-TAP NICs' DNS with 127.0.0.1 to prevent Windows multi-homed
-                    // DNS resolver from sending queries via physical NICs. The loopback address ensures
-                    // DNS queries on physical interfaces timeout immediately, forcing Windows to use
-                    // only the TAP NIC's DNS servers which route through the VPN tunnel.
-                    // Original DNS is saved to ni_dns_servers_ for restoration on disconnect.
-                    auto tun_ni = tun_ni_; 
-                    if (NULLPTR != tun_ni) {
-                        ppp::vector<boost::asio::ip::address> null_dns;
-                        null_dns.emplace_back(boost::asio::ip::make_address("127.0.0.1"));
-                        ppp::win32::network::SetAllNicsDnsAddresses(null_dns, ni_dns_servers_);
-
-                        // Restore proper DNS on the TAP NIC so VPN DNS resolution still works.
-                        if (!tun_ni->DnsAddresses.empty()) {
-                            ppp::vector<ppp::string> dns_strings;
-                            for (auto& addr : tun_ni->DnsAddresses) {
-                                dns_strings.emplace_back(addr.to_string());
-                            }
-                            ppp::win32::network::SetDnsAddresses(tun_ni->Index, dns_strings);
-                        }
-                    }
-
-                    // Also save and configure IPv6 DNS on all NICs (mirroring IPv4's 127.0.0.1 approach).
-                    // Set non-TAP NICs' IPv6 DNS to ::1 to prevent Windows multi-homed DNS resolver
-                    // from sending AAAA queries via ISP-assigned IPv6 DNS (e.g. China Mobile 2409:8a55::).
-                    // Using ::1 (instead of clearing) prevents SLAAC/DHCPv6 from auto-reacquiring DNS.
-                    // Original IPv6 DNS is saved to ni_dns_servers_v6_ for restoration on disconnect.
-                    ni_dns_servers_v6_.clear();
-                    ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
-                    if (NULLPTR != tun_ni) {
-                        int tap_if_index = tun_ni->Index;
-                        for (auto& [if_index, _] : ni_dns_servers_v6_) {
-                            if (if_index != tap_if_index) {
-                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
-                            }
-                        }
-                    }
-
-                    // Windows clients need to request the operating system FLUSH to reset all DNS query cache immediately after 
-                    // The VPN is constructed, because the original DNS cache may not be the best destination IP resolution record 
-                    // Available in the region where the VPN server is located.
-                    ppp::tap::TapWindows::DnsFlushResolverCache();
-
-                    // Start a periodic DNS guard timer to prevent DHCP from re-acquiring ISP DNS servers
-                    // on physical NICs. Windows DHCP client may refresh the lease and restore the original
-                    // DNS servers (e.g. China Mobile 183.234.190.94) at any time. This guard periodically
-                    // re-applies 127.0.0.1/::1 to non-TAP NICs to keep the DNS locked down.
-                    if (NULLPTR != tun_ni) {
-                        int tap_if_index = tun_ni->Index;
-                        auto context = GetContext();
-                        auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
-                        dns_guard_timer_ = make_shared_object<ppp::threading::Timer>(context);
-                        if (NULLPTR != dns_guard_timer_) {
-                            dns_guard_active_.store(true);
-                            dns_guard_timer_->TickEvent = 
-                                [self, tap_if_index](ppp::threading::Timer* sender, ppp::threading::Timer::TickEventArgs& e) noexcept {
-                                    if (!self->dns_guard_active_.load()) {
-                                        return;
-                                    }
-
-                                    // Run DNS guard on a background thread to avoid blocking the main io_context.
-                                    // SetDnsAddressesV6 uses ::system("netsh ...") and GetAllNetworkInterfaces uses
-                                    // WMI COM calls — both are synchronous and can block for 100ms~2000ms+.
-                                    // Blocking the main io_context would freeze all network I/O (TAP reads,
-                                    // keepalive, mux heartbeat, TCP forwarding), causing the entire tunnel to stall.
-                                    self->dns_guard_workers_.fetch_add(1);
-                                    std::thread([self, tap_if_index]() noexcept {
-                                        if (!self->dns_guard_active_.load()) {
-                                            self->dns_guard_workers_.fetch_sub(1);
-                                            return;
-                                        }
-
-                                        // This thread runs blocking DNS guard operations (netsh + WMI) that would
-                                        // freeze the main io_context if executed inline. Each call to netsh or WMI
-                                        // can block for 100ms~2000ms+, which would stall all network I/O.
-                                        HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
-                                        if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE)
-                                        {
-                                            // Re-apply loopback DNS to all non-TAP NICs
-                                            for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
-                                                if (!self->dns_guard_active_.load()) {
-                                                    break;
-                                                }
-                                                if (if_index != tap_if_index) {
-                                                    ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
-                                                }
-                                            }
-                                            // Re-apply IPv4 loopback DNS via WMI
-                                            ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
-                                            if (self->dns_guard_active_.load() && ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
-                                                for (auto& ni : interfaces) {
-                                                    if (!self->dns_guard_active_.load()) {
-                                                        break;
-                                                    }
-                                                    if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
-                                                        ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
-                                                        ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
-                                                    }
-                                                }
-                                            }
-                                            if (SUCCEEDED(hr)) {
-                                                CoUninitialize();
-                                            }
-                                        }
-                                        self->dns_guard_workers_.fetch_sub(1);
-                                    }).detach();
-                                };
-                            dns_guard_timer_->SetInterval(30000); // Every 30 seconds
-                            dns_guard_timer_->Start();
-                        }
-                    }
-
-                    // Delete the default route of a physical network card in a single attempt without a reason.
-                    auto underlying_ni = underlying_ni_; 
-                    if (NULLPTR != underlying_ni) {
-                        ppp::win32::network::DeleteAllDefaultGatewayRoutes(underlying_ni->GatewayServer);
-                    }
-#else
-                    // Set tun/tap vnic binding dns servers list to the linux operating system configuration files.
-                    auto tun_ni = tun_ni_; 
-                    if (NULLPTR != tun_ni) {
-                        ppp::unix__::UnixAfx::SetDnsAddresses(tun_ni->DnsAddresses);
-                    }
-#endif
-                    // Run the default gateway route protector.
-                    ProtectDefaultRoute();
-                }
+                // Hosted clients must not replace the host's routes or DNS until the
+                // primary tunnel has completed its handshake. OnTick performs this
+                // transition asynchronously so blocking Windows route/WMI calls never
+                // prevent the exchanger's connection coroutine from running.
+                main_outbound_unavailable_since_.store(0);
 #endif
 #if defined(_WIN32)
                 // For client mode: set non-TAP NICs' IPv6 DNS to ::1 to prevent DNS leak.
@@ -2727,6 +2595,191 @@ namespace ppp {
                 }
 
                 return false;
+            }
+
+            void VEthernetNetworkSwitcher::UpdateNetworkTakeover(uint64_t now) noexcept {
+                std::shared_ptr<ITap> tap = GetTap();
+                std::shared_ptr<VEthernetExchanger> main = exchanger_;
+                if (NULLPTR == tap || !tap->IsHostedNetwork() || NULLPTR == main || network_takeover_stopping_.load()) {
+                    return;
+                }
+
+                if (main->GetNetworkState() == VEthernetExchanger::NetworkState_Established) {
+                    main_outbound_unavailable_since_.store(0);
+                    if (!route_added_.load()) {
+                        QueueNetworkTakeover(true);
+                    }
+                    return;
+                }
+
+                if (!route_added_.load()) {
+                    main_outbound_unavailable_since_.store(0);
+                    return;
+                }
+
+                uint64_t unavailable_since = main_outbound_unavailable_since_.load();
+                if (unavailable_since == 0) {
+                    main_outbound_unavailable_since_.store(now);
+                }
+                elif(now >= unavailable_since && now - unavailable_since >= 10000) {
+                    QueueNetworkTakeover(false);
+                }
+            }
+
+            void VEthernetNetworkSwitcher::QueueNetworkTakeover(bool activate) noexcept {
+                if (network_takeover_stopping_.load() || network_takeover_worker_.exchange(true)) {
+                    return;
+                }
+
+                auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
+                try {
+                    std::thread([self, activate]() noexcept {
+#if defined(_WIN32)
+                        HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
+#endif
+                        {
+                            SynchronizedObjectScope scope(self->prdr_);
+                            if (!self->network_takeover_stopping_.load()) {
+                                if (activate) {
+                                    std::shared_ptr<VEthernetExchanger> main = self->exchanger_;
+                                    if (NULLPTR != main && main->GetNetworkState() == VEthernetExchanger::NetworkState_Established) {
+                                        self->ApplyNetworkTakeover();
+                                    }
+                                }
+                                else {
+                                    std::shared_ptr<VEthernetExchanger> main = self->exchanger_;
+                                    if (NULLPTR == main || main->GetNetworkState() != VEthernetExchanger::NetworkState_Established) {
+                                        self->RestoreNetworkTakeover(true);
+                                    }
+                                }
+                            }
+                        }
+#if defined(_WIN32)
+                        if (SUCCEEDED(hr)) {
+                            CoUninitialize();
+                        }
+#endif
+                        self->network_takeover_worker_.store(false);
+                    }).detach();
+                }
+                catch (const std::exception& e) {
+                    network_takeover_worker_.store(false);
+                    LOG_ERROR("VEthernetNetworkSwitcher::QueueNetworkTakeover: worker creation failed, exception=%s", e.what());
+                }
+            }
+
+            bool VEthernetNetworkSwitcher::ApplyNetworkTakeover() noexcept {
+                if (network_takeover_stopping_.load() || route_added_.exchange(true)) {
+                    return false;
+                }
+
+#if defined(_WIN32)
+                if (NULLPTR == paper_airplane_ctrl_ && !UsePaperAirplaneController()) {
+                    route_added_.store(false);
+                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: Paper-Airplane controller failed");
+                    return false;
+                }
+#endif
+
+                AddRoute();
+
+#if defined(_WIN32)
+                // Lock physical-NIC DNS only after the primary tunnel is usable.
+                auto tun_ni = tun_ni_;
+                if (NULLPTR != tun_ni) {
+                    ppp::vector<boost::asio::ip::address> null_dns;
+                    null_dns.emplace_back(boost::asio::ip::make_address("127.0.0.1"));
+                    ppp::win32::network::SetAllNicsDnsAddresses(null_dns, ni_dns_servers_);
+
+                    if (!tun_ni->DnsAddresses.empty()) {
+                        ppp::vector<ppp::string> dns_strings;
+                        for (auto& addr : tun_ni->DnsAddresses) {
+                            dns_strings.emplace_back(addr.to_string());
+                        }
+                        ppp::win32::network::SetDnsAddresses(tun_ni->Index, dns_strings);
+                    }
+
+                    ni_dns_servers_v6_.clear();
+                    ppp::win32::network::GetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
+                    int tap_if_index = tun_ni->Index;
+                    for (auto& [if_index, _] : ni_dns_servers_v6_) {
+                        if (if_index != tap_if_index) {
+                            ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                        }
+                    }
+
+                    auto context = GetContext();
+                    auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
+                    dns_guard_timer_ = make_shared_object<ppp::threading::Timer>(context);
+                    if (NULLPTR != dns_guard_timer_) {
+                        dns_guard_active_.store(true);
+                        dns_guard_timer_->TickEvent =
+                            [self, tap_if_index](ppp::threading::Timer*, ppp::threading::Timer::TickEventArgs&) noexcept {
+                                if (!self->dns_guard_active_.load()) {
+                                    return;
+                                }
+
+                                self->dns_guard_workers_.fetch_add(1);
+                                try {
+                                    std::thread([self, tap_if_index]() noexcept {
+                                        if (!self->dns_guard_active_.load()) {
+                                            self->dns_guard_workers_.fetch_sub(1);
+                                            return;
+                                        }
+
+                                        HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
+                                        if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
+                                            for (auto& [if_index, _] : self->ni_dns_servers_v6_) {
+                                                if (!self->dns_guard_active_.load()) {
+                                                    break;
+                                                }
+                                                if (if_index != tap_if_index) {
+                                                    ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                                }
+                                            }
+
+                                            ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                                            if (self->dns_guard_active_.load() && ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
+                                                for (auto& ni : interfaces) {
+                                                    if (!self->dns_guard_active_.load()) {
+                                                        break;
+                                                    }
+                                                    if (ni->InterfaceIndex != tap_if_index && ni->Status == ppp::win32::network::OperationalStatus_Up) {
+                                                        ppp::win32::network::ClearDnsAddresses(ni->InterfaceIndex);
+                                                        ppp::win32::network::SetDnsAddresses(ni->InterfaceIndex, { "127.0.0.1" });
+                                                    }
+                                                }
+                                            }
+                                            if (SUCCEEDED(hr)) {
+                                                CoUninitialize();
+                                            }
+                                        }
+                                        self->dns_guard_workers_.fetch_sub(1);
+                                    }).detach();
+                                }
+                                catch (const std::exception& e) {
+                                    self->dns_guard_workers_.fetch_sub(1);
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: DNS guard worker creation failed, exception=%s", e.what());
+                                }
+                            };
+                        dns_guard_timer_->SetInterval(30000);
+                        dns_guard_timer_->Start();
+                    }
+                }
+
+                ppp::tap::TapWindows::DnsFlushResolverCache();
+                if (auto underlying_ni = underlying_ni_; NULLPTR != underlying_ni) {
+                    ppp::win32::network::DeleteAllDefaultGatewayRoutes(underlying_ni->GatewayServer);
+                }
+#else
+                if (auto tun_ni = tun_ni_; NULLPTR != tun_ni) {
+                    ppp::unix__::UnixAfx::SetDnsAddresses(tun_ni->DnsAddresses);
+                }
+#endif
+
+                ProtectDefaultRoute();
+                LOG_INFO("VEthernetNetworkSwitcher::ApplyNetworkTakeover: primary outbound established, routes and DNS applied");
+                return true;
             }
 
             void VEthernetNetworkSwitcher::AddRoute() noexcept {
@@ -3756,17 +3809,25 @@ namespace ppp {
                 }
 #endif
 
+                // Keep exactly one protector across temporary tunnel outages. It
+                // exits after route_added_ becomes false and a later activation can
+                // start a replacement.
+                if (route_protector_running_.exchange(true)) {
+                    return true;
+                }
+
                 // Create a new network protection backend subthread.
                 auto self = shared_from_this();
-                std::thread([self, this]() noexcept {
-                    auto prepare = [self, this]() noexcept {
+                try {
+                    std::thread([self, this]() noexcept {
+                        auto prepare = [self, this]() noexcept {
                         // If the current VEthernet framework object instance is released, the process is break.
                         if (IsDisposed()) {
                             return false;
                         }
 
                         // If the route is not added to the system, the route pops out without setting the flag.
-                        if (!route_added_) {
+                        if (!route_added_.load()) {
                             return false;
                         }
 
@@ -3783,10 +3844,10 @@ namespace ppp {
                         }
 
                         return true;
-                    };
+                        };
 
-                    ppp::SetThreadName("protector");
-                    for (;;) {
+                        ppp::SetThreadName("protector");
+                        for (;;) {
                         // Gets the current process processing start time.
                         uint64_t start = ppp::GetTickCount();
 
@@ -3819,8 +3880,15 @@ namespace ppp {
 
                         // Check whether the default gateway route is faulty every second.
                         ppp::Sleep(delta);
-                    }
-                }).detach();
+                        }
+                        route_protector_running_.store(false);
+                    }).detach();
+                }
+                catch (const std::exception& e) {
+                    route_protector_running_.store(false);
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectDefaultRoute: worker creation failed, exception=%s", e.what());
+                    return false;
+                }
                 return true;
             }
 #endif
@@ -3933,7 +4001,7 @@ namespace ppp {
             }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
-            void VEthernetNetworkSwitcher::RestoreNetworkState() noexcept {
+            void VEthernetNetworkSwitcher::RestoreNetworkTakeover(bool restore_ipv6) noexcept {
 #if defined(_WIN32)
                 // Stop the DNS guard before restoring physical-NIC DNS; otherwise a
                 // pending tick can clear the values again during shutdown.
@@ -3953,9 +4021,10 @@ namespace ppp {
                 }
 #endif
 
-                RestoreIPv6Assignment();
-
-                if (!exchangeof(route_added_, false)) {
+                if (!route_added_.exchange(false)) {
+                    if (restore_ipv6) {
+                        RestoreIPv6Assignment();
+                    }
                     return;
                 }
 
@@ -3969,7 +4038,17 @@ namespace ppp {
 #else
                 UnixNetworkInterface::SetDnsResolveConfiguration(GetUnderlyingNetworkInterface());
 #endif
+                // Restore the server-managed IPv6 state last. In deferred-start
+                // mode it may have captured the physical NIC DNS before the route
+                // takeover did, so it is the authoritative original IPv6 snapshot.
+                if (restore_ipv6) {
+                    RestoreIPv6Assignment();
+                }
                 LOG_INFO("VEthernetNetworkSwitcher::RestoreNetworkState: routes and DNS restored");
+            }
+
+            void VEthernetNetworkSwitcher::RestoreNetworkState() noexcept {
+                RestoreNetworkTakeover(true);
             }
 #endif
 

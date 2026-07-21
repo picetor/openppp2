@@ -918,15 +918,17 @@ namespace ppp {
 #define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(ppp::g_log_stream, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
 #endif
 
-#define LOG_INFO(FORMAT, ...)       LOG_TAG("INFO", FORMAT, ##__VA_ARGS__)
 #define LOG_ERROR(FORMAT, ...)      LOG_TAG("ERROR", FORMAT, ##__VA_ARGS__)
-#define LOG_WARN(FORMAT, ...)       LOG_TAG("WARN", FORMAT, ##__VA_ARGS__)
 
-// Verbose debug logging - enabled by defining PPP_LOG_VERBOSE
-// Use: #define PPP_LOG_VERBOSE before including this header, or add to project defines
+// Release builds only report errors. Informational, warning, and debug
+// diagnostics are available in builds that explicitly enable verbose logging.
 #if defined(PPP_LOG_VERBOSE)
+#define LOG_INFO(FORMAT, ...)       LOG_TAG("INFO", FORMAT, ##__VA_ARGS__)
+#define LOG_WARN(FORMAT, ...)       LOG_TAG("WARN", FORMAT, ##__VA_ARGS__)
 #define LOG_DEBUG(FORMAT, ...)      LOG_TAG("DEBUG", FORMAT, ##__VA_ARGS__)
 #else
+#define LOG_INFO(...)               ((void)0)
+#define LOG_WARN(...)               ((void)0)
 #define LOG_DEBUG(FORMAT, ...)      ((void)0)
 #endif
 #endif

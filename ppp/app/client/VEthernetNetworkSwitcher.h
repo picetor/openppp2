@@ -272,6 +272,10 @@ namespace ppp {
                 void                                                                ReleaseAllPackets() noexcept;
                 void                                                                ReleaseAllTimeouts() noexcept;
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                void                                                                UpdateNetworkTakeover(uint64_t now) noexcept;
+                void                                                                QueueNetworkTakeover(bool activate) noexcept;
+                bool                                                                ApplyNetworkTakeover() noexcept;
+                void                                                                RestoreNetworkTakeover(bool restore_ipv6) noexcept;
                 void                                                                RestoreNetworkState() noexcept;
                 void                                                                RestoreIPv6Assignment() noexcept;
 #endif
@@ -392,7 +396,11 @@ namespace ppp {
 #if defined(_ANDROID) || defined(_IPHONE)   
                 ppp::string                                                         bypass_ip_list_;
 #else
-                bool                                                                route_added_   = false;
+                std::atomic<bool>                                                   route_added_   = false;
+                std::atomic<bool>                                                   network_takeover_worker_ = false;
+                std::atomic<bool>                                                   network_takeover_stopping_ = false;
+                std::atomic<bool>                                                   route_protector_running_ = false;
+                std::atomic<uint64_t>                                               main_outbound_unavailable_since_ = 0;
                 LoadIPListFileVectorPtr                                             ribs_;
                 LoadIPv6ListFileVectorPtr                                           ribs6_;
                 IPv6RouteTablePtr                                                   rib6_;
