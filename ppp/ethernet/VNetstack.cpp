@@ -742,6 +742,15 @@ namespace ppp {
 
                 if (NULLPTR != pcb->sync_ack_byte_array_) {
                     pcb->sync_ack_bytes_size_ = sync_packet_size;
+
+                    // Publish the delayed SYN before starting the asynchronous
+                    // remote connection. A fast completion may call AckAccept()
+                    // immediately and must always see a complete replay packet.
+                    if (!pcb->BeginAccept()) {
+                        this->CloseTcpLink(link);
+                        return -1;
+                    }
+
                     return 1;
                 }
                 else {
@@ -801,12 +810,6 @@ namespace ppp {
                 break;
             }
 #endif
-
-            bool bok = socket->BeginAccept();
-            if (!bok) {
-                this->CloseTcpLink(link);
-                return NULLPTR;
-            }
 
             link->socket = std::move(socket);
             return link;

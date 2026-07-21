@@ -716,7 +716,7 @@ namespace lwip {
     }
 
     static err_t netstack_ip_output(struct pbuf* p) noexcept {
-        if (!p || !p->len) {
+        if (!p || !p->tot_len) {
             return ERR_BUF;
         }
 
@@ -726,7 +726,17 @@ namespace lwip {
             return ERR_IF;
         }
 
-        return f(p->payload, p->len) ? ERR_OK : ERR_IF;
+        if (p->next == NULLPTR) {
+            return f(p->payload, p->len) ? ERR_OK : ERR_IF;
+        }
+
+        ppp::vector<ppp::Byte> packet(p->tot_len);
+        u16_t copied = pbuf_copy_partial(p, packet.data(), p->tot_len, 0);
+        if (copied != p->tot_len) {
+            return ERR_BUF;
+        }
+
+        return f(packet.data(), copied) ? ERR_OK : ERR_IF;
     }
 
     static err_t netstack_ip_output_v4(struct netif* netif, struct pbuf* p, const ip4_addr_t* ipaddr) noexcept {

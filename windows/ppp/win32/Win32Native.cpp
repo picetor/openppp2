@@ -1291,7 +1291,12 @@ namespace ppp
 
         static std::wstring __A2W__(UINT cp, const std::string& s) noexcept
         {
-            size_t len = MultiByteToWideChar(cp, 0, s.data(), s.size(), NULLPTR, 0);
+            if (s.empty() || s.size() > INT_MAX)
+            {
+                return std::wstring();
+            }
+
+            int len = MultiByteToWideChar(cp, 0, s.data(), static_cast<int>(s.size()), NULLPTR, 0);
             if (len == 0)
             {
                 return std::wstring();
@@ -1300,13 +1305,22 @@ namespace ppp
             std::wstring buffer;
             buffer.resize(len);
 
-            MultiByteToWideChar(CP_ACP, 0, s.data(), s.size(), buffer.data(), len);
+            if (MultiByteToWideChar(cp, 0, s.data(), static_cast<int>(s.size()), buffer.data(), len) != len)
+            {
+                return std::wstring();
+            }
+
             return buffer;
         }
 
         static std::string __W2A__(UINT cp, const std::wstring& s) noexcept
         {
-            size_t len = WideCharToMultiByte(CP_ACP, 0, s.data(), s.size(), NULLPTR, 0, 0, 0);
+            if (s.empty() || s.size() > INT_MAX)
+            {
+                return std::string();
+            }
+
+            int len = WideCharToMultiByte(cp, 0, s.data(), static_cast<int>(s.size()), NULLPTR, 0, NULLPTR, NULLPTR);
             if (len == 0)
             {
                 return std::string();
@@ -1315,7 +1329,11 @@ namespace ppp
             std::string buffer;
             buffer.resize(len);
 
-            WideCharToMultiByte(CP_ACP, 0, s.data(), s.size(), buffer.data(), len, 0, 0);
+            if (WideCharToMultiByte(cp, 0, s.data(), static_cast<int>(s.size()), buffer.data(), len, NULLPTR, NULLPTR) != len)
+            {
+                return std::string();
+            }
+
             return buffer;
         }
 

@@ -15,7 +15,7 @@ namespace ppp {
     namespace text {
         std::wstring Encoding::utf8_to_wstring(const std::string& s) noexcept {
 #if defined(_WIN32)
-            return ppp::win32::Win32Native::_A2W(s);
+            return ppp::win32::Win32Native::_Utf8ToUnicode(s);
 #else
             std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
             try {
@@ -29,7 +29,7 @@ namespace ppp {
 
         std::string Encoding::wstring_to_utf8(const std::wstring& s) noexcept {
 #if defined(_WIN32)
-            return ppp::win32::Win32Native::_W2A(s);
+            return ppp::win32::Win32Native::_UnicodeToUtf8(s);
 #else
             std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
             try {

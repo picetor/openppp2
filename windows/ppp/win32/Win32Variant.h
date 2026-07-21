@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ppp/stdafx.h>
+#include <ppp/text/Encoding.h>
 
 #include <comdef.h>
 #include <comutil.h>
@@ -12,18 +13,15 @@ namespace ppp
     {
         bool                       Win32Variant_Callvirt(IWbemServices* services, IWbemClassObject* obj, const _bstr_t& clazz, const _bstr_t& method, ppp::function<bool(IWbemClassObject*)>&& internal_call) noexcept;
          
-        inline ppp::string         VARIANT_string(BSTR& bstrVal)
+        inline ppp::string         VARIANT_string(BSTR bstrVal)
         {
-            ppp::string result;
-            LPSTR str = _com_util::ConvertBSTRToString(bstrVal);
-            if (NULLPTR != str)
+            if (NULLPTR == bstrVal)
             {
-                result = str;
-                delete[] str;
+                return ppp::string();
             }
 
-            SysFreeString(bstrVal);
-            return result;
+            return ppp::text::Encoding::wstring_to_utf8(
+                std::wstring(bstrVal, SysStringLen(bstrVal)));
         }
          
         inline ppp::string         VARIANT_string(VARIANT& vt) noexcept
@@ -51,7 +49,6 @@ namespace ppp
             if (SUCCEEDED(hr))
             {
                 ppp::string result = VARIANT_string(vt);
-                VariantClear(&vt);
                 return result;
             }
             else
@@ -185,6 +182,7 @@ namespace ppp
                         if (SUCCEEDED(hr))
                         {
                             ppp::string str = VARIANT_string(bstrIP);
+                            SysFreeString(bstrIP);
                             if (!str.empty())
                             {
                                 b |= true;
@@ -208,7 +206,6 @@ namespace ppp
             if (SUCCEEDED(hr))
             {
                 bool b = VARIANT_strings(vt, strings);
-                VariantClear(&vt);
                 return b;
             }
 
