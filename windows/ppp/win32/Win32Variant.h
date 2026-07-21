@@ -20,8 +20,9 @@ namespace ppp
                 return ppp::string();
             }
 
-            return ppp::text::Encoding::wstring_to_utf8(
+            std::string utf8 = ppp::text::Encoding::wstring_to_utf8(
                 std::wstring(bstrVal, SysStringLen(bstrVal)));
+            return ppp::string(utf8.data(), utf8.size());
         }
          
         inline ppp::string         VARIANT_string(VARIANT& vt) noexcept
