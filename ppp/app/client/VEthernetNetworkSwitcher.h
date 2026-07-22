@@ -143,6 +143,7 @@ namespace ppp {
                 PaperAirplaneControllerPtr                                          GetPaperAirplaneController() noexcept { return paper_airplane_ctrl_; }
                 virtual bool                                                        SetHttpProxyToSystemEnv()    noexcept;
                 virtual bool                                                        ClearHttpProxyToSystemEnv()  noexcept;
+                bool                                                                LocalDns(bool* value)        noexcept;
 #elif defined(_LINUX)   
                 ProtectorNetworkPtr                                                 GetProtectorNetwork()        noexcept { return protect_network_; }
 #endif  
@@ -284,6 +285,14 @@ namespace ppp {
 #if !defined(_ANDROID) && !defined(_IPHONE)     
 #if defined(_WIN32) 
                 bool                                                                UsePaperAirplaneController() noexcept;
+                bool                                                                StartLocalDnsProxy() noexcept;
+                void                                                                StopLocalDnsProxy() noexcept;
+                void                                                                ReceiveLocalDnsUdp(const std::shared_ptr<boost::asio::ip::udp::socket>& socket) noexcept;
+                void                                                                AcceptLocalDnsTcp(const std::shared_ptr<boost::asio::ip::tcp::acceptor>& acceptor) noexcept;
+                void                                                                ReadLocalDnsTcp(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) noexcept;
+                void                                                                DispatchLocalDnsQuery(const std::shared_ptr<ppp::string>& query, bool tcp,
+                    const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback) noexcept;
+                boost::asio::ip::address                                            SelectLocalDnsServer(const void* packet, int packet_size) noexcept;
 #endif  
                 void                                                                AddRouteWithDnsServers() noexcept;
                 void                                                                DeleteRouteWithDnsServers() noexcept;
@@ -441,6 +450,11 @@ namespace ppp {
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
                 std::atomic<bool>                                                   dns_guard_active_ = false;
                 std::atomic<int>                                                    dns_guard_workers_ = 0;
+                bool                                                                local_dns_enabled_ = true;
+                std::shared_ptr<boost::asio::ip::udp::socket>                      local_dns_udp4_;
+                std::shared_ptr<boost::asio::ip::udp::socket>                      local_dns_udp6_;
+                std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp4_;
+                std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
