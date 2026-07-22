@@ -742,6 +742,9 @@ namespace ppp {
 
                 if (NULLPTR != pcb->sync_ack_byte_array_) {
                     pcb->sync_ack_bytes_size_ = sync_packet_size;
+                    LOG_DEBUG("VNetstack::LwIpBeginAccept: delayed SYN stored, source=%s:%u, destination=%s:%u, seq=%u, ack=%u, wnd=%u, length=%d",
+                        src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port(),
+                        seq, ack, wnd, sync_packet_size);
 
                     // Publish the delayed SYN before starting the asynchronous
                     // remote connection. A fast completion may call AckAccept()
@@ -754,12 +757,18 @@ namespace ppp {
                     return 1;
                 }
                 else {
+                    LOG_DEBUG("VNetstack::LwIpBeginAccept: failed to build delayed SYN, source=%s:%u, destination=%s:%u",
+                        src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port());
                     this->CloseTcpLink(link);
                     return -1;
                 }
             }
 
-            return pcb->sync_ack_state_.load() >= VNETSTACK_SYNC_ACK_STATE_SYN_RECVD ? 0 : 1;
+            Byte state = pcb->sync_ack_state_.load();
+            int result = state >= VNETSTACK_SYNC_ACK_STATE_SYN_RECVD ? 0 : 1;
+            LOG_DEBUG("VNetstack::LwIpBeginAccept: repeated SYN, source=%s:%u, destination=%s:%u, state=%u, result=%d",
+                src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port(), state, result);
+            return result;
         }
 
         std::shared_ptr<VNetstack::TapTcpLink> VNetstack::LwIpAcceptLink(uint32_t srcAddr, uint32_t dstAddr, int srcPort, int dstPort) noexcept {
@@ -963,6 +972,8 @@ namespace ppp {
                 }
 
                 link->state = TcpState::TCP_STATE_ESTABLISHED;
+                LOG_DEBUG("VNetstack::TapTcpClient::EndAccept: LwIP connection established, this=%p, nat=%s:%u",
+                    this, natEP.address().to_string().data(), natEP.port());
             }
 
             return this->Establish();
@@ -970,6 +981,7 @@ namespace ppp {
 
         bool VNetstack::TapTcpClient::AckAccept() noexcept {
             if (disposed_) {
+                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: rejected because client is disposed, this=%p", this);
                 return false;
             }
 
@@ -978,11 +990,14 @@ namespace ppp {
 
             int packet_length = this->sync_ack_bytes_size_;
             if (packet_length < 1) {
+                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: delayed SYN is empty, this=%p, packet=%p, size=%d, state=%u",
+                    this, packet.get(), packet_length, sync_ack_state_.load());
                 return false;
             }
 
             Byte sync_ack_state = VNETSTACK_SYNC_ACK_STATE_SYN_SENT;
             if (!this->sync_ack_state_.compare_exchange_strong(sync_ack_state, VNETSTACK_SYNC_ACK_STATE_SYN_RECVD)) {
+                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: invalid state, this=%p, actual=%u", this, sync_ack_state);
                 return false;
             }
 
@@ -990,11 +1005,15 @@ namespace ppp {
             if (lwip_) {
                 std::shared_ptr<TapTcpLink> link = this->link_;
                 if (NULLPTR == link) {
+                    LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: LwIP link is null, this=%p", this);
                     return false;
                 }
 
                 link->state = TcpState::TCP_STATE_SYN_RECEIVED;
-                return lwip::netstack::input(packet.get(), packet_length);
+                bool queued = lwip::netstack::input(packet.get(), packet_length);
+                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: delayed SYN queued, this=%p, packet=%p, length=%d, result=%d",
+                    this, packet.get(), packet_length, queued ? 1 : 0);
+                return queued;
             }
 
             if (NULLPTR == tap || NULLPTR == packet) {

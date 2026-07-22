@@ -482,6 +482,9 @@ namespace lwip {
         LWIP_UNUSED_ARG(arg);
         LWIP_UNUSED_ARG(err);
 
+        LOG_DEBUG("lwip::netstack_tcp_doaccept: callback entered, local_port=%u, remote_port=%u, err=%d",
+            pcb ? pcb->local_port : 0, pcb ? pcb->remote_port : 0, err);
+
         boost::asio::io_context& context = *netstack::Executor;
         std::shared_ptr<netstack_tcp_socket> socket_ = ppp::make_shared_object<netstack_tcp_socket>();
         if (!socket_) {
@@ -514,10 +517,13 @@ namespace lwip {
 
         boost::asio::ip::tcp::endpoint remoteEP_;
         if (callback_arg && netstack_tunnel_open(socket_, remoteEP_) && netstack_socket_connect(socket_, remoteEP_)) {
+            LOG_DEBUG("lwip::netstack_tcp_doaccept: loopback connect started, endpoint=%s:%u",
+                remoteEP_.address().to_string().data(), remoteEP_.port());
             netstack_tcp_event(pcb, netstack_tcp_dorecv, netstack_tcp_dosent, netstack_tcp_doerrf, netstack_tcp_dopoll);
             return ERR_OK;
         }
         else {
+            LOG_DEBUG("lwip::netstack_tcp_doaccept: failed to open loopback tunnel, callback_arg=%p", callback_arg);
             netstack_tcp_closesocket(socket_);
             return ERR_ABRT;
         }
@@ -726,17 +732,37 @@ namespace lwip {
             return ERR_IF;
         }
 
-        if (p->next == NULLPTR) {
-            return f(p->payload, p->len) ? ERR_OK : ERR_IF;
+        void* packet_data = p->payload;
+        u16_t packet_size = p->len;
+        ppp::vector<ppp::Byte> packet;
+        if (p->next != NULLPTR) {
+            packet.resize(p->tot_len);
+            packet_size = pbuf_copy_partial(p, packet.data(), p->tot_len, 0);
+            if (packet_size != p->tot_len) {
+                LOG_DEBUG("lwip::netstack_ip_output: pbuf flatten failed, copied=%u, total=%u", packet_size, p->tot_len);
+                return ERR_BUF;
+            }
+
+            packet_data = packet.data();
         }
 
-        ppp::vector<ppp::Byte> packet(p->tot_len);
-        u16_t copied = pbuf_copy_partial(p, packet.data(), p->tot_len, 0);
-        if (copied != p->tot_len) {
-            return ERR_BUF;
+        bool output = f(packet_data, packet_size);
+        const ppp::Byte* bytes = static_cast<const ppp::Byte*>(packet_data);
+        if (packet_size >= 40 && (bytes[0] >> 4) == 4 && bytes[9] == IP_PROTO_TCP) {
+            int ip_header_size = (bytes[0] & 0x0f) << 2;
+            if (ip_header_size >= 20 && packet_size >= ip_header_size + 20) {
+                const ppp::Byte* tcp = bytes + ip_header_size;
+                ppp::Byte flags = tcp[13];
+                if (flags & (TCP_SYN | TCP_RST)) {
+                    uint16_t src_port = static_cast<uint16_t>((tcp[0] << 8) | tcp[1]);
+                    uint16_t dst_port = static_cast<uint16_t>((tcp[2] << 8) | tcp[3]);
+                    LOG_DEBUG("lwip::netstack_ip_output: tcp flags=0x%02x, src_port=%u, dst_port=%u, size=%u, chained=%d, output=%d",
+                        flags, src_port, dst_port, packet_size, p->next != NULLPTR, output ? 1 : 0);
+                }
+            }
         }
 
-        return f(packet.data(), copied) ? ERR_OK : ERR_IF;
+        return output ? ERR_OK : ERR_IF;
     }
 
     static err_t netstack_ip_output_v4(struct netif* netif, struct pbuf* p, const ip4_addr_t* ipaddr) noexcept {
@@ -758,6 +784,9 @@ namespace lwip {
                 boost::asio::ip::tcp::endpoint sep(boost::asio::ip::address_v4(sip), h->src);
 
                 int r = e(dep, sep, h->seqno, h->ackno, h->wnd);
+                LOG_DEBUG("lwip::netstack_tcp_do_before_accept: source=%s:%u, destination=%s:%u, seq=%u, ack=%u, wnd=%u, result=%d",
+                    sep.address().to_string().data(), sep.port(), dep.address().to_string().data(), dep.port(),
+                    h->seqno, h->ackno, h->wnd, r);
                 if (r > 0) {
                     return ERR_INPROGRESS;
                 }
@@ -847,11 +876,17 @@ namespace lwip {
             [pbuf]() noexcept {
                 struct netif* netif = netif_;
                 if (netif) {
-                    if (netif->input(pbuf, netif) == ERR_OK) {
+                    u16_t length = pbuf->tot_len;
+                    unsigned char first_byte = pbuf->len ? *(const unsigned char*)pbuf->payload : 0;
+                    err_t input_result = netif->input(pbuf, netif);
+                    LOG_DEBUG("lwip::netstack::input: dispatched, length=%u, first_byte=0x%02x, result=%d",
+                        length, first_byte, input_result);
+                    if (input_result == ERR_OK) {
                         return true;
                     }
                 }
 
+                LOG_DEBUG("lwip::netstack::input: dispatch failed or netif is unavailable");
                 pbuf_free(pbuf);
                 return true;
             });
