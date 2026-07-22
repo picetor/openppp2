@@ -77,7 +77,10 @@ namespace ppp {
                 void                                                    Update() noexcept {
                     UInt64 now = Executors::GetTickCount();
                     if (onlydns_) {
-                        timeout_ = now + (UInt64)configuration_->udp.dns.timeout * 1000;
+                        // A DNS query timeout is not an appropriate lifetime for a
+                        // reusable UDP mapping. Keep it at least for the cache TTL.
+                        timeout_ = now + (UInt64)std::max(configuration_->udp.dns.timeout,
+                            configuration_->udp.dns.ttl) * 1000;
                     }
                     else {
                         timeout_ = now + (UInt64)configuration_->udp.inactive.timeout * 1000;

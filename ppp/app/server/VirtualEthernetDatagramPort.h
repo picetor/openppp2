@@ -63,7 +63,8 @@ namespace ppp {
                 void                                                    Update() noexcept {
                     UInt64 now = Executors::GetTickCount();
                     if (onlydns_) {
-                        timeout_ = now + (UInt64)configuration_->udp.dns.timeout * 1000;
+                        timeout_ = now + (UInt64)std::max(configuration_->udp.dns.timeout,
+                            configuration_->udp.dns.ttl) * 1000;
                     }
                     else {
                         timeout_ = now + (UInt64)configuration_->udp.inactive.timeout * 1000;

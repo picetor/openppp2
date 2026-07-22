@@ -430,9 +430,9 @@ namespace ppp {
 
             // Prefer IPv4 DNS: when a DNS AAAA response arrives, check if the same
             // domain has cached A records (IPv4). If yes, strip AAAA so the client
-            // prefers IPv4. If no cached A records exist, defer with a timeout:
-            // - If A arrives within the timeout, strip AAAA (prefer IPv4).
-            // - If the timeout expires (pure IPv6 site), forward AAAA as-is.
+            // prefers IPv4. If there is no cached A response yet, forward AAAA
+            // immediately. Holding it for the DNS timeout delays Happy Eyeballs and
+            // can make IPv6-only sites appear unavailable.
             // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
             // Returns true if the caller should forward the response now.
             // Returns false if the caller should hold the response (AAAA with no A cache yet).
@@ -463,9 +463,9 @@ namespace ppp {
                 ppp::string cache_result = ppp::net::asio::vdns::QueryCache2(
                     domain, a_check, ppp::net::asio::vdns::AddressFamily::kA);
                 if (cache_result.empty()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, DEFERRING %d AAAA records (will expire in %ds)",
-                        domain, original_aaaa_count, configuration_->udp.dns.timeout);
-                    return false; // Caller must hold this response until A cache is populated or timeout expires
+                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, keeping %d AAAA records",
+                        domain, original_aaaa_count);
+                    return true;
                 }
                 bool hasA = false;
                 for (const auto& rr : a_check.answers) {
@@ -2205,12 +2205,13 @@ namespace ppp {
                 return ppp::net::proxies::HttpProxy::SetSystemProxy(server, pac, false);
             }
 
-            boost::asio::ip::address VEthernetNetworkSwitcher::SelectLocalDnsServer(const void* packet, int packet_size) noexcept {
+            ppp::vector<boost::asio::ip::address> VEthernetNetworkSwitcher::SelectLocalDnsServers(const void* packet, int packet_size) noexcept {
+                ppp::vector<boost::asio::ip::address> result;
                 ::dns::Message message;
                 if (NULLPTR == packet || packet_size < 1 ||
                     message.decode(reinterpret_cast<const uint8_t*>(packet), packet_size) != ::dns::BufferResult::NoError ||
                     message.questions.empty()) {
-                    return boost::asio::ip::address();
+                    return result;
                 }
 
                 const ppp::string hostname = stl::transform<ppp::string>(message.questions[0].mName);
@@ -2218,29 +2219,149 @@ namespace ppp {
                 if (geo_rules_ && geo_rules_->SelectDirectDns(hostname, server)) {
                     LOG_DEBUG("VEthernetNetworkSwitcher::SelectLocalDnsServer: geo direct DNS, host=%s, server=%s",
                         hostname.data(), server.to_string().data());
-                    return server;
+                    result.emplace_back(server);
+                    return result;
                 }
 
                 DNSRulePtr rule = ppp::app::client::dns::Rule::Get(hostname,
                     dns_ruless_[0], dns_ruless_[1], dns_ruless_[2]);
                 if (rule && !IPEndPoint::IsInvalid(rule->Server) && !rule->Server.is_loopback()) {
-                    return rule->Server;
+                    result.emplace_back(rule->Server);
+                    return result;
                 }
 
                 if (auto tun = tun_ni_; NULLPTR != tun) {
                     for (const boost::asio::ip::address& address : tun->DnsAddresses) {
-                        if (!IPEndPoint::IsInvalid(address) && !address.is_loopback()) {
-                            return address;
+                        if (!IPEndPoint::IsInvalid(address) && !address.is_loopback() &&
+                            std::find(result.begin(), result.end(), address) == result.end()) {
+                            result.emplace_back(address);
                         }
                     }
+                    if (!result.empty()) return result;
                 }
 
                 for (const boost::asio::ip::udp::endpoint& endpoint : *ppp::net::asio::vdns::servers) {
-                    if (!IPEndPoint::IsInvalid(endpoint.address()) && !endpoint.address().is_loopback()) {
-                        return endpoint.address();
+                    const boost::asio::ip::address& address = endpoint.address();
+                    if (!IPEndPoint::IsInvalid(address) && !address.is_loopback() &&
+                        std::find(result.begin(), result.end(), address) == result.end()) {
+                        result.emplace_back(address);
                     }
                 }
-                return boost::asio::ip::address();
+                return result;
+            }
+
+            bool VEthernetNetworkSwitcher::SendLocalDnsUdp(
+                const boost::asio::ip::address& server,
+                const std::shared_ptr<ppp::string>& query,
+                const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
+                ppp::string& upstream_key, uint16_t& upstream_id) noexcept {
+                if (NULLPTR == query || query->size() < 2 || !callback ||
+                    IPEndPoint::IsInvalid(server) || server.is_loopback()) {
+                    return false;
+                }
+
+                auto context = GetContext();
+                if (NULLPTR == context) return false;
+                upstream_key = server.to_string();
+                std::shared_ptr<LocalDnsUpstream> upstream;
+                bool start_receive = false;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    auto existing = local_dns_upstreams_.find(upstream_key);
+                    if (existing != local_dns_upstreams_.end()) {
+                        upstream = existing->second;
+                    }
+                    else {
+                        upstream = make_shared_object<LocalDnsUpstream>();
+                        upstream->server = server;
+                        upstream->socket = make_shared_object<boost::asio::ip::udp::socket>(*context);
+                        boost::system::error_code ec;
+                        upstream->socket->open(server.is_v4() ? boost::asio::ip::udp::v4() : boost::asio::ip::udp::v6(), ec);
+                        if (!ec) upstream->socket->connect({ server, PPP_DNS_SYS_PORT }, ec);
+                        if (ec) return false;
+                        local_dns_upstreams_[upstream_key] = upstream;
+                    }
+
+                    for (int i = 0; i < UINT16_MAX; ++i) {
+                        uint16_t candidate = ++upstream->next_id;
+                        if (candidate == 0) candidate = ++upstream->next_id;
+                        if (upstream->requests.find(candidate) == upstream->requests.end()) {
+                            upstream_id = candidate;
+                            upstream->requests[candidate] = callback;
+                            break;
+                        }
+                    }
+                    if (upstream_id == 0) return false;
+                    if (!upstream->receiving) {
+                        upstream->receiving = true;
+                        start_receive = true;
+                    }
+                }
+
+                if (start_receive) ReceiveLocalDnsUpstream(upstream);
+                auto request = make_shared_object<ppp::string>(*query);
+                (*request)[0] = static_cast<char>(upstream_id >> 8);
+                (*request)[1] = static_cast<char>(upstream_id & 0xff);
+                upstream->socket->async_send(boost::asio::buffer(*request),
+                    [this, upstream_key, upstream_id, request](boost::system::error_code ec, std::size_t) noexcept {
+                        if (!ec) return;
+                        SynchronizedObjectScope scope(GetSynchronizedObject());
+                        auto current = local_dns_upstreams_.find(upstream_key);
+                        if (current != local_dns_upstreams_.end()) {
+                            current->second->requests.erase(upstream_id);
+                        }
+                    });
+                return true;
+            }
+
+            void VEthernetNetworkSwitcher::ReceiveLocalDnsUpstream(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept {
+                if (NULLPTR == upstream || NULLPTR == upstream->socket || !upstream->socket->is_open()) return;
+                auto response = make_shared_object<ppp::vector<Byte>>();
+                response->resize(65536);
+                auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
+                upstream->socket->async_receive(boost::asio::buffer(*response),
+                    [self, upstream, response](boost::system::error_code ec, std::size_t size) noexcept {
+                        ppp::function<void(const std::shared_ptr<ppp::string>&)> callback;
+                        bool rearm = false;
+                        if (!ec && size >= 2) {
+                            uint16_t id = static_cast<uint16_t>((response->at(0) << 8) | response->at(1));
+                            {
+                                SynchronizedObjectScope scope(self->GetSynchronizedObject());
+                                auto request = upstream->requests.find(id);
+                                if (request != upstream->requests.end()) {
+                                    callback = std::move(request->second);
+                                    upstream->requests.erase(request);
+                                }
+                                rearm = upstream->socket->is_open();
+                            }
+                            if (callback) {
+                                callback(make_shared_object<ppp::string>(
+                                    reinterpret_cast<const char*>(response->data()), size));
+                            }
+                        }
+                        else {
+                            SynchronizedObjectScope scope(self->GetSynchronizedObject());
+                            upstream->receiving = false;
+                            const std::string server_text = upstream->server.to_string();
+                            const ppp::string upstream_key(server_text.data(), server_text.size());
+                            auto current = self->local_dns_upstreams_.find(upstream_key);
+                            if (current != self->local_dns_upstreams_.end() && current->second == upstream) {
+                                self->local_dns_upstreams_.erase(current);
+                            }
+                        }
+                        if (rearm) self->ReceiveLocalDnsUpstream(upstream);
+                    });
+            }
+
+            void VEthernetNetworkSwitcher::CancelLocalDnsUdp(
+                const ppp::vector<std::pair<ppp::string, uint16_t>>& requests) noexcept {
+                SynchronizedObjectScope scope(GetSynchronizedObject());
+                for (const auto& request : requests) {
+                    auto upstream = local_dns_upstreams_.find(request.first);
+                    if (upstream != local_dns_upstreams_.end()) {
+                        upstream->second->requests.erase(request.second);
+                    }
+                }
             }
 
             void VEthernetNetworkSwitcher::DispatchLocalDnsQuery(
@@ -2268,76 +2389,174 @@ namespace ppp {
                     }
                 }
 
-                boost::asio::ip::address server = SelectLocalDnsServer(query->data(), static_cast<int>(query->size()));
+                // Windows may issue the same DNS question concurrently through
+                // several adapters and through both 127.0.0.1 and ::1. Coalesce
+                // identical wire queries (the transaction ID is the only ignored
+                // field) so one browser lookup creates only one tunnel datagram.
+                const uint16_t transaction_id = query->size() >= 2 ?
+                    static_cast<uint16_t>((static_cast<Byte>((*query)[0]) << 8) |
+                        static_cast<Byte>((*query)[1])) : 0;
+                ppp::string pending_key = *query;
+                if (pending_key.size() >= 2) {
+                    pending_key[0] = 0;
+                    pending_key[1] = 0;
+                }
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    auto pending = local_dns_pending_.find(pending_key);
+                    if (pending != local_dns_pending_.end()) {
+                        pending->second.emplace_back(LocalDnsWaiter{ transaction_id, callback });
+                        return;
+                    }
+                    local_dns_pending_[pending_key].emplace_back(LocalDnsWaiter{ transaction_id, callback });
+                }
+
+                auto complete_pending = [this, pending_key](const std::shared_ptr<ppp::string>& response) noexcept {
+                    ppp::vector<LocalDnsWaiter> waiters;
+                    {
+                        SynchronizedObjectScope scope(GetSynchronizedObject());
+                        auto pending = local_dns_pending_.find(pending_key);
+                        if (pending == local_dns_pending_.end()) {
+                            return;
+                        }
+                        waiters = std::move(pending->second);
+                        local_dns_pending_.erase(pending);
+                    }
+
+                    for (LocalDnsWaiter& waiter : waiters) {
+                        if (!waiter.callback) {
+                            continue;
+                        }
+                        if (response && response->size() >= 2) {
+                            auto individualized = make_shared_object<ppp::string>(*response);
+                            (*individualized)[0] = static_cast<char>(waiter.transaction_id >> 8);
+                            (*individualized)[1] = static_cast<char>(waiter.transaction_id & 0xff);
+                            waiter.callback(individualized);
+                        }
+                        else {
+                            waiter.callback(response);
+                        }
+                    }
+                };
+
+                ppp::vector<boost::asio::ip::address> servers =
+                    SelectLocalDnsServers(query->data(), static_cast<int>(query->size()));
                 auto context = GetContext();
-                if (NULLPTR == context || IPEndPoint::IsInvalid(server) || server.is_loopback()) {
-                    callback(MakeLocalDnsServFail(*query));
+                if (NULLPTR == context || servers.empty()) {
+                    complete_pending(MakeLocalDnsServFail(*query));
                     return;
                 }
 
                 const auto completed = make_shared_object<std::atomic<bool>>(false);
                 const auto timer = make_shared_object<boost::asio::steady_timer>(*context);
+                const auto close_upstreams = make_shared_object<ppp::vector<ppp::function<void()>>>();
+                const auto close_upstreams_lock = make_shared_object<SynchronizedObject>();
+                const auto udp_requests = make_shared_object<ppp::vector<std::pair<ppp::string, uint16_t>>>();
+                const auto udp_requests_lock = make_shared_object<SynchronizedObject>();
                 timer->expires_after(std::chrono::seconds(std::max(1, configuration_->udp.dns.timeout)));
 
-                auto finish = [this, query, callback, completed, timer](const std::shared_ptr<ppp::string>& response) noexcept {
+                auto finish = [this, query, complete_pending, completed, timer, close_upstreams, close_upstreams_lock,
+                    udp_requests, udp_requests_lock](const std::shared_ptr<ppp::string>& response) noexcept {
                     if (completed->exchange(true)) {
                         return;
                     }
                     timer->cancel();
+                    {
+                        SynchronizedObjectScope scope(*close_upstreams_lock);
+                        for (auto& close : *close_upstreams) {
+                            if (close) close();
+                        }
+                        close_upstreams->clear();
+                    }
+                    ppp::vector<std::pair<ppp::string, uint16_t>> requests_to_cancel;
+                    {
+                        SynchronizedObjectScope scope(*udp_requests_lock);
+                        requests_to_cancel = std::move(*udp_requests);
+                    }
+                    CancelLocalDnsUdp(requests_to_cancel);
                     if (response && !response->empty()) {
                         ObserveGeoDnsResponse(response->data(), static_cast<int>(response->size()));
                         if (configuration_->udp.dns.cache) {
                             ppp::net::asio::vdns::AddCache(reinterpret_cast<Byte*>(const_cast<char*>(response->data())),
                                 static_cast<int>(response->size()));
                         }
-                        callback(response);
+                        complete_pending(response);
                     }
                     else {
-                        callback(MakeLocalDnsServFail(*query));
+                        complete_pending(MakeLocalDnsServFail(*query));
                     }
                 };
 
                 if (!tcp) {
-                    auto socket = make_shared_object<boost::asio::ip::udp::socket>(*context);
-                    auto response = make_shared_object<ppp::vector<Byte>>();
-                    response->resize(65536);
-                    boost::system::error_code ec;
-                    socket->open(server.is_v4() ? boost::asio::ip::udp::v4() : boost::asio::ip::udp::v6(), ec);
-                    boost::asio::ip::udp::endpoint upstream(server, PPP_DNS_SYS_PORT);
-                    if (!ec) socket->connect(upstream, ec);
-                    if (ec) {
+                    auto send_udp_server = [this, query, finish, completed, udp_requests,
+                        udp_requests_lock](const boost::asio::ip::address& server) noexcept {
+                        ppp::string upstream_key;
+                        uint16_t upstream_id = 0;
+                        if (!SendLocalDnsUdp(server, query, finish, upstream_key, upstream_id)) {
+                            return false;
+                        }
+                        bool cancel_immediately = false;
+                        {
+                            SynchronizedObjectScope scope(*udp_requests_lock);
+                            if (completed->load()) {
+                                cancel_immediately = true;
+                            }
+                            else {
+                                udp_requests->emplace_back(upstream_key, upstream_id);
+                            }
+                        }
+                        if (cancel_immediately) {
+                            CancelLocalDnsUdp({ std::make_pair(std::move(upstream_key), upstream_id) });
+                        }
+                        return true;
+                    };
+
+                    // Send only to the preferred resolver on the normal path. A
+                    // backup is hedged after 250 ms, rather than doubling every DNS
+                    // packet and all tunnel/log processing unconditionally.
+                    std::size_t primary_index = 0;
+                    while (primary_index < servers.size() && !send_udp_server(servers[primary_index])) {
+                        primary_index++;
+                    }
+                    if (primary_index >= servers.size()) {
                         finish(NULLPTR);
                         return;
                     }
-                    socket->async_send(boost::asio::buffer(*query),
-                        [socket, response, finish](boost::system::error_code ec, std::size_t) noexcept {
-                            if (ec) {
-                                finish(NULLPTR);
-                                return;
-                            }
-                            socket->async_receive(boost::asio::buffer(*response),
-                                [socket, response, finish](boost::system::error_code ec, std::size_t size) noexcept {
-                                    boost::system::error_code ignored;
-                                    socket->close(ignored);
-                                    if (ec || size < 1) {
-                                        finish(NULLPTR);
-                                        return;
-                                    }
-                                    finish(make_shared_object<ppp::string>(
-                                        reinterpret_cast<const char*>(response->data()), size));
-                                });
-                        });
-                    timer->async_wait([socket, finish](boost::system::error_code ec) noexcept {
+                    for (std::size_t i = primary_index + 1; i < servers.size(); ++i) {
+                        auto fallback_timer = make_shared_object<boost::asio::steady_timer>(*context);
+                        fallback_timer->expires_after(std::chrono::milliseconds(
+                            250 * static_cast<int>(i - primary_index)));
+                        {
+                            SynchronizedObjectScope scope(*close_upstreams_lock);
+                            close_upstreams->emplace_back([fallback_timer]() noexcept {
+                                fallback_timer->cancel();
+                            });
+                        }
+                        const boost::asio::ip::address fallback_server = servers[i];
+                        fallback_timer->async_wait([fallback_timer, fallback_server, completed,
+                            send_udp_server](boost::system::error_code ec) noexcept {
+                                if (!ec && !completed->load()) {
+                                    send_udp_server(fallback_server);
+                                }
+                            });
+                    }
+                    timer->async_wait([finish](boost::system::error_code ec) noexcept {
                         if (!ec) {
-                            boost::system::error_code ignored;
-                            socket->close(ignored);
                             finish(NULLPTR);
                         }
                     });
                     return;
                 }
 
+                const boost::asio::ip::address& server = servers.front();
                 auto socket = make_shared_object<boost::asio::ip::tcp::socket>(*context);
+                {
+                    SynchronizedObjectScope scope(*close_upstreams_lock);
+                    close_upstreams->emplace_back([socket]() noexcept {
+                        boost::system::error_code ignored;
+                        socket->close(ignored);
+                    });
+                }
                 auto request = make_shared_object<ppp::string>();
                 request->resize(query->size() + 2);
                 (*request)[0] = static_cast<char>((query->size() >> 8) & 0xff);
@@ -2366,10 +2585,8 @@ namespace ppp {
                                     });
                             });
                     });
-                timer->async_wait([socket, finish](boost::system::error_code ec) noexcept {
+                timer->async_wait([finish](boost::system::error_code ec) noexcept {
                     if (!ec) {
-                        boost::system::error_code ignored;
-                        socket->close(ignored);
                         finish(NULLPTR);
                     }
                 });
@@ -2486,6 +2703,19 @@ namespace ppp {
                 if (auto socket = std::move(local_dns_udp6_); socket) socket->close(ignored);
                 if (auto acceptor = std::move(local_dns_tcp4_); acceptor) acceptor->close(ignored);
                 if (auto acceptor = std::move(local_dns_tcp6_); acceptor) acceptor->close(ignored);
+                ppp::vector<std::shared_ptr<LocalDnsUpstream>> upstreams;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    upstreams.reserve(local_dns_upstreams_.size());
+                    for (auto& upstream : local_dns_upstreams_) {
+                        upstreams.emplace_back(std::move(upstream.second));
+                    }
+                    local_dns_upstreams_.clear();
+                    local_dns_pending_.clear();
+                }
+                for (const auto& upstream : upstreams) {
+                    if (upstream && upstream->socket) upstream->socket->close(ignored);
+                }
             }
 #endif
 

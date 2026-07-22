@@ -23,6 +23,7 @@
   - [IPv6 分流 (--bypass6)](#-ipv6-分流---bypass6)
   - [VPN 服务器 IPv6 连通性保证](#-vpn-服务器-ipv6-连通性保证)
   - [Windows IPv6 DNS 防泄漏](#-windows-ipv6-dns-防泄漏)
+  - [Windows 本地 DNS 代理](#-windows-本地-dns-代理)
   - [Windows IPv6 源地址选择修复](#-windows-ipv6-源地址选择修复)
   - [服务器端 IPv6 模式](#-服务器端-ipv6-模式)
   - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
@@ -210,6 +211,22 @@ ppp --mode=client \
 
 ---
 
+### 🛡️ Windows 本地 DNS 代理
+
+Windows 客户端默认启用 `--local-dns=yes`，在 `127.0.0.1:53` 与 `[::1]:53` 同时监听 UDP/TCP DNS，并在 VPN 连接期间把物理网卡和虚拟网卡 DNS 临时指向环回地址。这样不依赖应用是否遵循系统代理，也能避免物理网卡 DNS 直接泄漏；退出时会先恢复原 DNS，再停止本地监听。
+
+- Geo/IP 分流均可使用：命中 `direct` 的域名使用 `geo-rules.txt` 的 `direct_dns`，其他域名使用 `--dns` 或配置中的隧道 DNS。
+- 相同的并发查询会合并；上游 UDP socket 和 DNS 映射会复用。正常只请求首选 DNS，250 ms 未返回时才请求备用 DNS。
+- `udp.dns.prefer_ipv4=true` 仅在已缓存 A 记录时移除 AAAA；没有 A 缓存时会立即保留并返回 AAAA，不会阻塞 IPv6-only 域名。
+- 若本机已有其他程序占用 53 端口，启动会明确报错。可临时使用 `--local-dns=no` 恢复旧行为，但会失去这层 DNS 防泄漏保护。
+
+```bash
+# 默认已启用，通常无需显式指定
+ppp --mode=client --local-dns=yes
+```
+
+---
+
 ### 🎯 Windows IPv6 源地址选择修复
 
 **问题**：Windows 优先选择全局单播地址（2409::/...）而非 TAP 的 ULA 地址（fd42::
@@ -340,6 +357,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | `--bypass6=<file1\|file2>` | 全平台 | IPv6 分流列表 | `./ipv6.txt` |
 | `--bypass-nic6=<interface>` | Linux | IPv6 分流物理网卡 | 自动选择 |
 | `--bypass-ngw6=<ip>` | 全平台 | IPv6 分流网关 | `::` (禁用分流) |
+| `--local-dns=[yes\|no]` | Windows | 本地环回 DNS 防泄漏代理 | `yes` |
 
 ---
 

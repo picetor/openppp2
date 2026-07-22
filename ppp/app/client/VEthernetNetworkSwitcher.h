@@ -292,7 +292,14 @@ namespace ppp {
                 void                                                                ReadLocalDnsTcp(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) noexcept;
                 void                                                                DispatchLocalDnsQuery(const std::shared_ptr<ppp::string>& query, bool tcp,
                     const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback) noexcept;
-                boost::asio::ip::address                                            SelectLocalDnsServer(const void* packet, int packet_size) noexcept;
+                ppp::vector<boost::asio::ip::address>                              SelectLocalDnsServers(const void* packet, int packet_size) noexcept;
+                struct LocalDnsUpstream;
+                bool                                                                SendLocalDnsUdp(const boost::asio::ip::address& server,
+                    const std::shared_ptr<ppp::string>& query,
+                    const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
+                    ppp::string& upstream_key, uint16_t& upstream_id) noexcept;
+                void                                                                ReceiveLocalDnsUpstream(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
+                void                                                                CancelLocalDnsUdp(const ppp::vector<std::pair<ppp::string, uint16_t>>& requests) noexcept;
 #endif  
                 void                                                                AddRouteWithDnsServers() noexcept;
                 void                                                                DeleteRouteWithDnsServers() noexcept;
@@ -455,6 +462,20 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::udp::socket>                      local_dns_udp6_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp4_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
+                struct LocalDnsWaiter final {
+                    uint16_t                                                        transaction_id = 0;
+                    ppp::function<void(const std::shared_ptr<ppp::string>&)>        callback;
+                };
+                ppp::unordered_map<ppp::string, ppp::vector<LocalDnsWaiter>>       local_dns_pending_;
+                struct LocalDnsUpstream final {
+                    boost::asio::ip::address                                        server;
+                    std::shared_ptr<boost::asio::ip::udp::socket>                  socket;
+                    uint16_t                                                        next_id = 0;
+                    bool                                                            receiving = false;
+                    ppp::unordered_map<uint16_t,
+                        ppp::function<void(const std::shared_ptr<ppp::string>&)>>   requests;
+                };
+                ppp::unordered_map<ppp::string, std::shared_ptr<LocalDnsUpstream>> local_dns_upstreams_;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;

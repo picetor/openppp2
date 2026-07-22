@@ -23,6 +23,7 @@
   - [IPv6 Split Tunneling (--bypass6)](#-ipv6-split-tunneling---bypass6)
   - [VPN Server IPv6 Reachability Guarantee](#-vpn-server-ipv6-reachability-guarantee)
   - [Windows IPv6 DNS Leak Prevention](#-windows-ipv6-dns-leak-prevention)
+  - [Windows Local DNS Proxy](#-windows-local-dns-proxy)
   - [Windows IPv6 Source Address Selection Fix](#-windows-ipv6-source-address-selection-fix)
   - [Server-Side IPv6 Mode](#-server-side-ipv6-mode)
   - [IPv6 DNS Configuration and Delivery](#-ipv6-dns-configuration-and-delivery)
@@ -200,6 +201,22 @@ Works automatically — no extra configuration needed.
 
 ---
 
+### 🛡️ Windows Local DNS Proxy
+
+Windows clients enable `--local-dns=yes` by default. The client listens for UDP/TCP DNS on both `127.0.0.1:53` and `[::1]:53`, then temporarily points physical and virtual adapter DNS at loopback while the VPN is connected. This prevents direct physical-NIC DNS leakage even for applications that ignore the system proxy. On shutdown, the original DNS configuration is restored before the listeners stop.
+
+- Both Geo and IP split-tunneling modes are supported. Domains matched as `direct` use `direct_dns` from `geo-rules.txt`; all other domains use the tunnel DNS from `--dns` or configuration.
+- Identical concurrent queries are coalesced, and upstream UDP sockets and DNS mappings are reused. Only the preferred resolver is queried normally; a backup is started after 250 ms without a response.
+- With `udp.dns.prefer_ipv4=true`, AAAA records are removed only when an A response is already cached. Without an A cache, AAAA is returned immediately so IPv6-only domains are not blocked.
+- Startup reports an explicit error if another local service already owns port 53. `--local-dns=no` restores the legacy behavior when required, but disables this DNS leak protection layer.
+
+```bash
+# Enabled by default; normally no explicit option is needed
+ppp --mode=client --local-dns=yes
+```
+
+---
+
 ### 🎯 Windows IPv6 Source Address Selection Fix
 
 **Problem**: Windows prefers global unicast addresses (2409::/...) over TAP's ULA addresses (fd42::/...) for outgoing connections, causing IPv6 traffic to bypass the VPN.
@@ -339,6 +356,7 @@ New CLI parameters (compared to the original):
 | `--bypass6=<file1\|file2>` | All | IPv6 bypass list file | `./ipv6.txt` |
 | `--bypass-nic6=<interface>` | Linux | Physical NIC for IPv6 bypass | auto-select |
 | `--bypass-ngw6=<ip>` | All | IPv6 bypass next-hop gateway | `::` (disabled) |
+| `--local-dns=[yes\|no]` | Windows | Local loopback DNS leak-protection proxy | `yes` |
 
 ---
 
