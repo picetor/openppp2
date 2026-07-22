@@ -192,6 +192,77 @@ public:
     }
 
 private:
+    // Return the number of console cells occupied by a Unicode code point.
+    // Windows Terminal renders CJK/full-width characters as two cells, while
+    // UTF-8 stores them in multiple bytes.  Byte-count based padding therefore
+    // breaks the fixed-width screen buffer as soon as a localized NIC name is
+    // printed.
+    static std::size_t                              UnicodeConsoleCellWidth(std::uint32_t cp) noexcept
+    {
+        if (cp == 0 || (cp >= 0x0300 && cp <= 0x036f) ||
+            (cp >= 0x1ab0 && cp <= 0x1aff) || (cp >= 0x1dc0 && cp <= 0x1dff) ||
+            (cp >= 0x20d0 && cp <= 0x20ff) || (cp >= 0xfe00 && cp <= 0xfe0f) ||
+            (cp >= 0xfe20 && cp <= 0xfe2f))
+        {
+            return 0;
+        }
+
+        return (cp >= 0x1100 &&
+            (cp <= 0x115f || cp == 0x2329 || cp == 0x232a ||
+             (cp >= 0x2e80 && cp <= 0xa4cf && cp != 0x303f) ||
+             (cp >= 0xac00 && cp <= 0xd7a3) ||
+             (cp >= 0xf900 && cp <= 0xfaff) ||
+             (cp >= 0xfe10 && cp <= 0xfe19) ||
+             (cp >= 0xfe30 && cp <= 0xfe6f) ||
+             (cp >= 0xff00 && cp <= 0xff60) ||
+             (cp >= 0xffe0 && cp <= 0xffe6) ||
+             (cp >= 0x1f300 && cp <= 0x1faff) ||
+             (cp >= 0x20000 && cp <= 0x3fffd))) ? 2 : 1;
+    }
+
+    // Copy a UTF-8 string up to a console-cell limit and report its display
+    // width. Invalid sequences are copied one byte at a time as narrow text.
+    static ppp::string                              FitToConsoleWidth(const char* text, std::size_t length,
+                                                                      std::size_t limit, std::size_t& width) noexcept
+    {
+        ppp::string result;
+        result.reserve(length);
+        width = 0;
+
+        for (std::size_t i = 0; i < length;)
+        {
+            const unsigned char lead = static_cast<unsigned char>(text[i]);
+            std::size_t count = 1;
+            std::uint32_t cp = lead;
+            if ((lead & 0xe0) == 0xc0) { count = 2; cp = lead & 0x1f; }
+            elif ((lead & 0xf0) == 0xe0) { count = 3; cp = lead & 0x0f; }
+            elif ((lead & 0xf8) == 0xf0) { count = 4; cp = lead & 0x07; }
+
+            bool valid = count > 1 && i + count <= length;
+            for (std::size_t j = 1; valid && j < count; ++j)
+            {
+                const unsigned char continuation = static_cast<unsigned char>(text[i + j]);
+                valid = (continuation & 0xc0) == 0x80;
+                cp = (cp << 6) | (continuation & 0x3f);
+            }
+            if (!valid)
+            {
+                count = 1;
+                cp = lead;
+            }
+
+            const std::size_t cells = UnicodeConsoleCellWidth(cp);
+            if (width + cells > limit)
+            {
+                break;
+            }
+            result.append(text + i, count);
+            width += cells;
+            i += count;
+        }
+        return result;
+    }
+
     // Format text with padding and line endings
     template <class... A>
     ppp::string                                     PrintToString(std::size_t padding_length, char padding_char, const char* format, A&&... args) noexcept 
@@ -212,10 +283,15 @@ private:
         ppp::string result;
         buf[dw] = '\x0';
 
-        // Apply right padding
-        result = ppp::PaddingRight<ppp::string>(
-            ppp::string(buf, dw), 
-            padding_length, padding_char);
+        // Fit and pad by displayed console cells, not UTF-8 byte count. Each
+        // terminal row must occupy exactly padding_length cells because TTY
+        // refresh deliberately relies on automatic wrapping instead of CRLF.
+        std::size_t display_width = 0;
+        result = FitToConsoleWidth(buf, static_cast<std::size_t>(dw), padding_length, display_width);
+        if (display_width < padding_length)
+        {
+            result.append(padding_length - display_width, padding_char);
+        }
             
         // Add line endings for non-terminal output
         if (!console_window_size->tty) 
