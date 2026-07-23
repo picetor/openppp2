@@ -66,6 +66,7 @@ namespace ppp {
                     void Update(uint64_t now, ppp::vector<RouteUpdate>& expired) noexcept;
 
                     const ppp::vector<boost::asio::ip::address>& GetDirectDnsServers() const noexcept { return direct_dns_; }
+                    bool UsesLocalDirectDns() const noexcept { return direct_dns_local_; }
                     const ppp::vector<Network>& GetStaticNetworks() const noexcept { return static_networks_; }
                     const ppp::vector<OutboundConfiguration>& GetOutboundConfigurations() const noexcept { return outbound_configurations_; }
                     const ppp::string& GetFinalOutbound() const noexcept { return final_outbound_; }
@@ -127,6 +128,7 @@ namespace ppp {
                     ppp::vector<Rule> rules_;
                     ppp::vector<Network> static_networks_;
                     ppp::vector<boost::asio::ip::address> direct_dns_;
+                    bool direct_dns_local_ = false;
                     ppp::vector<OutboundConfiguration> outbound_configurations_;
                     ppp::string final_outbound_ = "main";
                     mutable std::mutex syncobj_;

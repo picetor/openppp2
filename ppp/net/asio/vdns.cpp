@@ -20,7 +20,7 @@ namespace ppp {
                 // -----------------------------------------------------------------------------
                 // Constants (defined in stdafx.h, referenced here for clarity)
                 // -----------------------------------------------------------------------------
-                static constexpr int                                                                PPP_MAX_HOSTNAME_SIZE_LIMIT        = 64;
+                static constexpr int                                                                PPP_MAX_HOSTNAME_SIZE_LIMIT        = 254;
                 static constexpr int                                                                PPP_IP_DNS_MERGE_WAIT              = 100;
                 // Linux  : systemd-resolved set 50ms               
                 // glibc  : getaddrinfo set 500ms               
@@ -863,6 +863,12 @@ namespace ppp {
                     bool any = false;
                     {
                         SynchronizedObjectScope lock(record.lockobj);
+                        const uint64_t now = Executors::GetTickCount();
+                        if (record.expired_time <= now) {
+                            return ppp::string();
+                        }
+                        const uint32_t remaining_ttl = static_cast<uint32_t>(std::max<uint64_t>(
+                            1, (record.expired_time - now + 999) / 1000));
                         // Quick check inside lock to avoid reading stale flags
                         if ((want_v4 && !record.ipv4) || (want_v6 && !record.ipv6)) {
                             return ppp::string();
@@ -881,6 +887,7 @@ namespace ppp {
                                 rr.mName = hostname_str;
                                 rr.mClass = ::dns::RecordClass::kIN;
                                 rr.mType = ::dns::RecordType::kA;
+                                rr.mTtl = remaining_ttl;
                                 rr.setRData(rd_a);
 
                                 try {
@@ -904,6 +911,7 @@ namespace ppp {
                                 rr.mName = hostname_str;
                                 rr.mClass = ::dns::RecordClass::kIN;
                                 rr.mType = ::dns::RecordType::kAAAA;
+                                rr.mTtl = remaining_ttl;
                                 rr.setRData(rd_aaaa);
 
                                 try {
@@ -955,6 +963,18 @@ namespace ppp {
                         return false;
                     }
 
+                    ::dns::Message message;
+                    if (message.decode(packet, static_cast<size_t>(packet_size)) != ::dns::BufferResult::NoError ||
+                        message.mQr != 1 ||
+                        message.mRCode != static_cast<uint16_t>(::dns::ResponseCode::kNOERROR) ||
+                        message.questions.size() != 1) {
+                        return false;
+                    }
+                    const auto query_type = message.questions[0].mType;
+                    if (query_type != ::dns::RecordType::kA && query_type != ::dns::RecordType::kAAAA) {
+                        return false;
+                    }
+
                     uint16_t ack = 0;
                     ppp::string hostname;
                     bool ipv4_or_ipv6 = false;
@@ -963,6 +983,18 @@ namespace ppp {
                     // No expected hostname verification for manual cache addition – trust the packet.
                     if (!DNS_ProcessAResponseAddresses(const_cast<Byte*>(packet), packet_size,
                         addresses, ack, NULLPTR, &hostname, &ipv4_or_ipv6)) {
+                        return false;
+                    }
+
+                    for (auto iterator = addresses.begin(); iterator != addresses.end();) {
+                        const bool matching_family = query_type == ::dns::RecordType::kA ?
+                            iterator->is_v4() : iterator->is_v6();
+                        if (!matching_family) iterator = addresses.erase(iterator);
+                        else ++iterator;
+                    }
+                    if (addresses.empty()) {
+                        // NODATA is not NXDOMAIN and this address-only cache has no
+                        // negative-record representation. Do not cache it as present.
                         return false;
                     }
 

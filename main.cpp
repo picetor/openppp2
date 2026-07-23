@@ -945,7 +945,6 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
 
 #if defined(_WIN32)
         printfn("P/A Controller        : %s", client->GetPaperAirplaneController() ? "on" : "off");
-        printfn("Local DNS             : %s", network_interface->LocalDns ? "enabled" : "disabled");
 #endif
     }
 
@@ -1341,10 +1340,6 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet->PreferredNgw(network_interface->Ngw);
             ethernet->PreferredNgw6(network_interface->BypassNgw6);
             ethernet->PreferredNic(network_interface->Nic);
-#if defined(_WIN32)
-            ethernet->LocalDns(&network_interface->LocalDns);
-#endif
-
             // Load bypass policy selected by --bypass-mode.
             if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
                 if (!ethernet->LoadGeoRules(network_interface->GeoRules, network_interface->GeoSite, network_interface->GeoIP)) {
@@ -1699,13 +1694,6 @@ void PppApplication::PrintHelpInformation() noexcept
         col_description_width, "Block QUIC protocol traffic", 
         col_default_width, "no");
 
-#if defined(_WIN32)
-    printf("│ %-*s │ %-*s │ %-*s │\n",
-        col_option_width, "--local-dns=[yes|no]",
-        col_description_width, "Listen on loopback for leak-safe system DNS",
-        col_default_width, "yes");
-#endif
-    
     printf("└──────────────────────────────────────────┴──────────────────────────────────────────────────┴─────────────────────────┘\n\n");
     
     // SERVER-SPECIFIC OPTIONS table
@@ -2226,7 +2214,6 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
 
 #if defined(_WIN32)
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
-        ni->LocalDns = ppp::ToBoolean(ppp::GetCommandArgument("--local-dns", argc, argv, "y").data());
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
         ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
 #else

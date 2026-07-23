@@ -539,6 +539,7 @@ namespace ppp {
                     rules_.clear();
                     static_networks_.clear();
                     direct_dns_.clear();
+                    direct_dns_local_ = false;
                     outbound_configurations_.clear();
                     final_outbound_ = "main";
                     {
@@ -580,13 +581,20 @@ namespace ppp {
                             ppp::vector<ppp::string> servers;
                             Tokenize<ppp::string>(line.substr(dns_prefix.size()), servers, ",");
                             for (const ppp::string& item : servers) {
+                                ppp::string value = LowerTrim(item);
+                                if (value == "local") {
+                                    direct_dns_local_ = true;
+                                    continue;
+                                }
                                 boost::system::error_code ec;
-                                boost::asio::ip::address address = StringToAddress(ATrim<ppp::string>(item).data(), ec);
+                                boost::asio::ip::address address = StringToAddress(value.data(), ec);
                                 if (ec || ppp::net::IPEndPoint::IsInvalid(address)) {
                                     error = "invalid direct_dns address at line " + stl::to_string<ppp::string>(line_number + 1);
                                     return false;
                                 }
-                                direct_dns_.emplace_back(address);
+                                if (std::find(direct_dns_.begin(), direct_dns_.end(), address) == direct_dns_.end()) {
+                                    direct_dns_.emplace_back(address);
+                                }
                             }
                             continue;
                         }
@@ -751,10 +759,11 @@ namespace ppp {
 
                     CompileFirstMatchRoutes(static_networks_);
 
-                    LOG_INFO("GeoRuleEngine::Load: rules_path=%s, geosite_path=%s, geoip_path=%s, rules=%llu, networks=%llu, direct_dns=%llu, outbounds=%llu, final=%s",
+                    LOG_INFO("GeoRuleEngine::Load: rules_path=%s, geosite_path=%s, geoip_path=%s, rules=%llu, networks=%llu, direct_dns=%llu, direct_dns_local=%d, outbounds=%llu, final=%s",
                         rules_path.data(), geosite_path.data(), geoip_path.data(),
                         (unsigned long long)rules_.size(), (unsigned long long)static_networks_.size(),
-                        (unsigned long long)direct_dns_.size(), (unsigned long long)outbound_configurations_.size(),
+                        (unsigned long long)direct_dns_.size(), (int)direct_dns_local_,
+                        (unsigned long long)outbound_configurations_.size(),
                         final_outbound_.data());
                     for (const OutboundConfiguration& outbound : outbound_configurations_) {
                         LOG_INFO("GeoRuleEngine::Load: outbound=%s, config_path=%s, primary=%d",
@@ -895,7 +904,24 @@ namespace ppp {
                             continue;
                         }
 
+                        Decision fixed_decision = MatchStaticAddress(address);
                         Decision final_decision = MergeDomainAndAddressDecision(domain_decision, address);
+
+                        // A host route is only needed when the domain decision
+                        // overrides the route the address would already use. Avoid
+                        // synchronous /32 and /128 churn for the common case where a
+                        // main-domain resolves to an address already using final=main,
+                        // or where GeoIP and domain policy already agree.
+                        if (fixed_decision.Matched()) {
+                            if (fixed_decision.action == final_decision.action &&
+                                fixed_decision.outbound == final_decision.outbound) {
+                                continue;
+                            }
+                        }
+                        else if (final_decision.action == Action::Tunnel &&
+                            final_decision.outbound == final_outbound_) {
+                            continue;
+                        }
                         uint64_t ttl_seconds = std::max<uint64_t>(1, std::min<uint64_t>(answer.mTtl, 86400));
                         DynamicPolicy policy{ final_decision.action, final_decision.priority,
                             now + ttl_seconds * 1000, domain, final_decision.outbound };

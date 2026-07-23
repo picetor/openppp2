@@ -6,10 +6,33 @@ main=./appsettings.json
 final=main
 
 # DNS servers used when a domain matches a direct rule.
-direct_dns=223.5.5.5,119.29.29.29
+# local snapshots the original IPv4/IPv6 DNS servers from the selected physical
+# NIC before takeover.  A private router address such as 192.168.68.1 or a
+# link-local IPv6 address such as fe80::1%8 is valid and remains on the physical
+# path.  Append literals to provide fallbacks, or omit local to fully override.
+direct_dns=local
+# direct_dns=local,223.5.5.5,119.29.29.29
+# direct_dns=223.5.5.5,119.29.29.29
 
 # Rules are evaluated from top to bottom. The first match wins.
 # Actions are direct, a declared outbound tag, or legacy tunnel (= main).
+#
+# Encrypted DNS is not decrypted or redirected.  These rules classify the
+# resolver endpoint like any other connection:
+#   * DoT: TCP/853; DoQ: UDP/853 (the port is a useful protocol hint).
+#   * DoH: TCP/UDP 443, indistinguishable from ordinary HTTPS by port alone.
+# Explicit endpoint-domain rules are therefore the reliable policy.  Hardcoded
+# endpoint IPs fall through to geoip/CIDR rules.  Unknown endpoints use final=main.
+
+# Domestic encrypted-DNS endpoints: preserve the software's original direct path.
+domain,dns.alidns.com,direct
+domain,doh.pub,direct
+domain,dot.pub,direct
+
+# Non-domestic encrypted-DNS endpoints: keep the complete encrypted session in VPN.
+domain,cloudflare-dns.com,main
+domain,dns.google,main
+domain,dns.quad9.net,main
 
 geosite,github,main
 geosite,microsoft,direct

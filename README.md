@@ -23,7 +23,7 @@
   - [IPv6 分流 (--bypass6)](#-ipv6-分流---bypass6)
   - [VPN 服务器 IPv6 连通性保证](#-vpn-服务器-ipv6-连通性保证)
   - [Windows IPv6 DNS 防泄漏](#-windows-ipv6-dns-防泄漏)
-  - [Windows 本地 DNS 代理](#-windows-本地-dns-代理)
+  - [Windows TUN DNS 防泄漏](#-windows-tun-dns-防泄漏)
   - [Windows IPv6 源地址选择修复](#-windows-ipv6-源地址选择修复)
   - [服务器端 IPv6 模式](#-服务器端-ipv6-模式)
   - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
@@ -79,7 +79,7 @@ tunnel2=./tunnel2.json
 
 # 可选；未写时默认 main
 final=main
-direct_dns=223.5.5.5,119.29.29.29
+direct_dns=local
 
 # 匹配规则：类型,值,出口标签|direct
 geosite,github,main
@@ -106,10 +106,14 @@ ip-cidr6,2001:db8::/32,tunnel2
 
 规则严格从上到下匹配，第一条命中生效。域名规则通过 DNS 应答中的 A/AAAA 记录建立带 TTL 的 IPv4/IPv6 地址策略；操作系统是否同时发起 A 和 AAAA 查询由系统解析器决定，程序不会强制“双查”。同一 CDN IP 被多个域名命中时，优先级更高（更靠前）的规则拥有该 IP 策略。`direct_dns` 只重定向命中 `direct` 的域名查询；其他域名仍使用 TAP/主配置 DNS，解析出的业务连接再按目标 IP 进入对应出口。纯 IP 连接只匹配 `geoip`/CIDR 规则，未命中时使用 `final`（默认 `main`）。
 
+`direct_dns=local` 会在网络接管前，从选中的物理网卡一次性读取原始 IPv4/IPv6 DNS。可以追加显式地址（例如 `direct_dns=local,223.5.5.5,119.29.29.29`），也可以只写地址以完全自定义；重复或无效地址会被移除。直连 DNS 的 IPv4/IPv6 路由固定到物理出口并在退出时删除，接管后不会重新读取网卡 DNS，避免把虚拟 DNS 读回后形成递归。
+
+DoH、DoT、DoQ 不会被解密、重定向或伪造失败，而是作为普通连接按服务端域名/IP 使用同一套 geo 规则：明确命中 `direct` 的国内加密 DNS 端点保持直连，其他或未知端点使用 `final`（默认 `main`）。因此不会破坏证书固定、HTTP/3 或软件自身的安全 DNS逻辑；加密隧道内部的单个查询无法再由 openppp2 二次分流。
+
 传统单出口规则示例：
 
 ```ini
-direct_dns=223.5.5.5,119.29.29.29
+direct_dns=local,223.5.5.5,119.29.29.29
 
 geosite,github,tunnel
 geosite,microsoft@cn,direct
@@ -200,29 +204,37 @@ ppp --mode=client \
 
 ### 🛡️ Windows IPv6 DNS 防泄漏
 
-**问题**：VPN 连接时，物理网卡的 IPv6 DNS 服务器仍然可用，导致 IPv6 DNS 查询绕过
+**范围**：只管理 openppp2 自己的 TUN DNS，不修改物理网卡、ICS、WSL、Hyper-V 或其他虚拟网卡。
  VPN 隧道，造成 DNS 泄漏。
 
 **修复**：
-- VPN **连接时**：自动扫描所有物理网卡的 IPv6 DNS → 临时清除
-- VPN **断开时**：自动恢复所有物理网卡的 IPv6 DNS
+- VPN **连接时**：保存并临时清除 TUN 的 IPv6 DNS，使宿主普通查询进入 IPv4 虚拟 DNS 网关
+- VPN **断开时**：恢复 TUN 原始 IPv6 DNS
 
 无需额外配置，自动生效。
 
 ---
 
-### 🛡️ Windows 本地 DNS 代理
+### 🛡️ Windows TUN DNS 防泄漏
 
-Windows 客户端默认启用 `--local-dns=yes`，在 `127.0.0.1:53` 与 `[::1]:53` 同时监听 UDP/TCP DNS，并在 VPN 连接期间把物理网卡和虚拟网卡 DNS 临时指向环回地址。这样不依赖应用是否遵循系统代理，也能避免物理网卡 DNS 直接泄漏；退出时会先恢复原 DNS，再停止本地监听。
+Windows 只把 openppp2 自己的 TUN 网卡 DNS 设置为虚拟网关（例如 `192.168.12.1`）。ICS、WSL、Hyper-V、Docker、移动热点及其他虚拟网卡不会被改绑或清空。openppp2 在 TUN 内接收宿主查询：普通域名使用 TUN 实际下发的主 DNS，命中 `direct` 的域名使用 `direct_dns`。主 DNS 同时通过延迟隔离的 Static Echo UDP 通道和 `main` exchanger 兼容通道查询，首个有效响应立即返回；该 DNS 专用通道在 Windows 本地 DNS 开启时自动建立，不要求启用全局 `--tun-static=yes`，其他 UDP 流量仍保持原模式。普通主 DNS 查询不会自动创建 TCP/53 回退连接；本地直连 DNS 若 UDP 300 ms 未返回，只向同一台直连解析器尝试 TCP/53，不会把国内域名送往主 DNS。应用显式发出的 TCP DNS 查询仍按相同分流策略处理。该方式不监听宿主的 53 端口，避免与 ICS 等服务冲突；退出时恢复 TUN 原始 DNS。
 
-- Geo/IP 分流均可使用：命中 `direct` 的域名使用 `geo-rules.txt` 的 `direct_dns`，其他域名使用 `--dns` 或配置中的隧道 DNS。
-- 相同的并发查询会合并；上游 UDP socket 和 DNS 映射会复用。正常只请求首选 DNS，250 ms 未返回时才请求备用 DNS。
-- `udp.dns.prefer_ipv4=true` 仅在已缓存 A 记录时移除 AAAA；没有 A 缓存时会立即保留并返回 AAAA，不会阻塞 IPv6-only 域名。
-- 若本机已有其他程序占用 53 端口，启动会明确报错。可临时使用 `--local-dns=no` 恢复旧行为，但会失去这层 DNS 防泄漏保护。
+- 无需 DNS 模式开关，也无需额外启动参数。
+- Geo/IP 分流均可使用：命中 `direct` 的域名使用 `geo-rules.txt` 的 `direct_dns`；其他域名只使用 `main` DNS 及其同出口备用服务器，失败时不会回退到物理网卡 DNS。
+- 只守护 TUN 网卡：运行期间将其 IPv4 DNS 固定到虚拟网关并清空其 IPv6 DNS；其他网卡保持不变。若应用主动绕过系统解析器，严格防泄露还需要可选的 Windows 过滤层，不能仅靠网卡 DNS 配置宣称完全无泄露。
+- `udp.dns.prefer_ipv4` 只处理隧道规则的 DNS 响应；命中 `direct` 的 DNS 响应保持原始 A/AAAA 记录。
+- `udp.dns.prefer_ipv4=true` 仅在已缓存 A 记录时移除 AAAA；没有 A 缓存时立即保留并返回 AAAA。
 
-```bash
-# 默认已启用，通常无需显式指定
-ppp --mode=client --local-dns=yes
+```powershell
+# 正常启动即可；DNS 自动经 TUN
+.\ppp.exe --mode=client
+
+# 查看网卡 DNS 和到上游 DNS 的 TUN 路由
+Get-DnsClientServerAddress
+route print 1.1.1.1
+
+# 验证系统解析
+nslookup example.com
 ```
 
 ---
@@ -357,7 +369,6 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | `--bypass6=<file1\|file2>` | 全平台 | IPv6 分流列表 | `./ipv6.txt` |
 | `--bypass-nic6=<interface>` | Linux | IPv6 分流物理网卡 | 自动选择 |
 | `--bypass-ngw6=<ip>` | 全平台 | IPv6 分流网关 | `::` (禁用分流) |
-| `--local-dns=[yes\|no]` | Windows | 本地环回 DNS 防泄漏代理 | `yes` |
 
 ---
 

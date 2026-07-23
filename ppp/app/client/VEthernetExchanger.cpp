@@ -1347,17 +1347,20 @@ namespace ppp {
                     return false;
                 }
 
-                SynchronizedObjectScope scope(syncobj_);
-                auto tail = datagram_handlers_.find(sourceEP);
-                if (tail == datagram_handlers_.end()) {
-                    return false;
+                DatagramPacketHandler handler;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    auto tail = datagram_handlers_.find(sourceEP);
+                    if (tail == datagram_handlers_.end()) {
+                        return false;
+                    }
+                    handler = tail->second;
                 }
-
-                DatagramPacketHandler& handler = tail->second;
-                if (NULLPTR == handler) {
-                    return false;
-                }
-
+                if (NULLPTR == handler) return false;
+                // A handler may enter the switcher and later release/register an
+                // exchanger handler.  Invoking it while syncobj_ is held creates a
+                // lock inversion with the switcher's DNS request lock and can stall
+                // every UDP response during a query burst.
                 return handler(sourceEP, destinationEP, packet, packet_length);
             }
 
@@ -2081,13 +2084,27 @@ namespace ppp {
                         return false;
                     }
 
+                    auto payload = frame->Payload;
+                    if (NULLPTR != payload) {
+                        const boost::asio::ip::udp::endpoint localEP =
+                            IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Destination);
+                        const boost::asio::ip::udp::endpoint remoteEP =
+                            IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Source);
+                        if (TryHandleDatagram(localEP, remoteEP,
+                            payload->Buffer.get(), payload->Length)) {
+                            LOG_DEBUG("VEthernetExchanger::StaticEchoPacketInput: DNS response handled, local=%s:%u, remote=%s:%u, bytes=%d",
+                                localEP.address().to_string().data(), localEP.port(),
+                                remoteEP.address().to_string().data(), remoteEP.port(), payload->Length);
+                            return true;
+                        }
+                    }
+
                     std::shared_ptr<ppp::net::packet::IPFrame> ip = frame->ToIp(allocator);
                     if (NULLPTR == ip) {
                         return false;
                     }
                     
                     if (configuration->udp.dns.cache && frame->Source.Port == PPP_DNS_SYS_PORT) {
-                        auto payload = frame->Payload;
                         if (NULLPTR != payload) {
                             ppp::net::asio::vdns::AddCache(payload->Buffer.get(), payload->Length);
                         }

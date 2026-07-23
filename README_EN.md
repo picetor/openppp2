@@ -23,7 +23,7 @@
   - [IPv6 Split Tunneling (--bypass6)](#-ipv6-split-tunneling---bypass6)
   - [VPN Server IPv6 Reachability Guarantee](#-vpn-server-ipv6-reachability-guarantee)
   - [Windows IPv6 DNS Leak Prevention](#-windows-ipv6-dns-leak-prevention)
-  - [Windows Local DNS Proxy](#-windows-local-dns-proxy)
+  - [Windows TUN DNS Leak Prevention](#-windows-tun-dns-leak-prevention)
   - [Windows IPv6 Source Address Selection Fix](#-windows-ipv6-source-address-selection-fix)
   - [Server-Side IPv6 Mode](#-server-side-ipv6-mode)
   - [IPv6 DNS Configuration and Delivery](#-ipv6-dns-configuration-and-delivery)
@@ -77,7 +77,7 @@ tunnel1=./tunnel1.json
 tunnel2=./tunnel2.json
 
 final=main
-direct_dns=223.5.5.5,119.29.29.29
+direct_dns=local
 
 geosite,github,main
 geosite,openai,tunnel1
@@ -103,10 +103,14 @@ Rules use `type,value,action`. Supported types are `geosite` (including attribut
 
 Rules are evaluated top to bottom and the first match wins. Domain rules learn TTL-bound IPv4/IPv6 policies from DNS A/AAAA answers. Whether both query types are issued is decided by the OS resolver; the application does not force both. If domains share a CDN IP, the earlier rule owns that address policy. `direct_dns` redirects only queries for domains matched as `direct`; other queries use the TAP/main DNS, then the resulting connection is sent through the outbound selected for its destination IP. Literal-IP connections use only `geoip`/CIDR rules. Unmatched traffic uses `final` (default `main`).
 
+`direct_dns=local` snapshots the original IPv4 and IPv6 DNS servers from the selected physical interface before network takeover. Literal addresses can be appended (for example `direct_dns=local,223.5.5.5,119.29.29.29`) or used alone to fully override the local list. Duplicate and unusable addresses are removed. Direct IPv4/IPv6 DNS routes are pinned to the physical interface and removed on exit; the snapshot is never refreshed after takeover, preventing recursion through the virtual DNS.
+
+DoH, DoT, and DoQ are never decrypted, redirected, or forced to fail. They remain ordinary connections governed by the same geo domain/IP rules: explicitly `direct` domestic encrypted-DNS endpoints stay direct, while other or unknown endpoints use `final` (normally `main`). This preserves certificate pinning, HTTP/3, and application-specific secure-DNS behavior; individual queries inside an encrypted session cannot be split again by openppp2.
+
 Traditional single-outbound example:
 
 ```ini
-direct_dns=223.5.5.5,119.29.29.29
+direct_dns=local,223.5.5.5,119.29.29.29
 
 geosite,github,tunnel
 geosite,microsoft@cn,direct
@@ -191,28 +195,36 @@ Implemented on all platforms (Windows `netsh` / Linux `ip route` / macOS `route 
 
 ### 🛡️ Windows IPv6 DNS Leak Prevention
 
-**Problem**: When the VPN is connected, physical NICs' IPv6 DNS servers are still reachable, causing IPv6 DNS queries to bypass the VPN tunnel.
+**Scope**: Only the openppp2 TUN DNS is managed. Physical, ICS, WSL, Hyper-V, and other virtual adapters are not modified.
 
 **Fix**:
-- On VPN **connect**: Automatically enumerates all physical NICs' IPv6 DNS → clears them temporarily
-- On VPN **disconnect**: Automatically restores all physical NICs' IPv6 DNS
+- On VPN **connect**: Saves and temporarily clears the TUN IPv6 DNS so ordinary host queries use the IPv4 virtual DNS gateway
+- On VPN **disconnect**: Restores the original TUN IPv6 DNS
 
 Works automatically — no extra configuration needed.
 
 ---
 
-### 🛡️ Windows Local DNS Proxy
+### 🛡️ Windows TUN DNS Leak Prevention
 
-Windows clients enable `--local-dns=yes` by default. The client listens for UDP/TCP DNS on both `127.0.0.1:53` and `[::1]:53`, then temporarily points physical and virtual adapter DNS at loopback while the VPN is connected. This prevents direct physical-NIC DNS leakage even for applications that ignore the system proxy. On shutdown, the original DNS configuration is restored before the listeners stop.
+Windows configures only the openppp2 TUN adapter with the virtual DNS gateway (for example `192.168.12.1`). ICS, WSL, Hyper-V, Docker, Mobile Hotspot, and other virtual adapters are neither rebound nor cleared. openppp2 receives host queries inside TUN: ordinary domains use the resolver actually assigned to the TUN, while domains matched as `direct` use `direct_dns`. Main DNS races a latency-isolated Static Echo UDP path against the compatible `main` exchanger path and immediately returns the first valid response. This DNS-only channel is established automatically when Windows local DNS is enabled; it does not require global `--tun-static=yes`, and other UDP traffic keeps its original mode. Ordinary main DNS queries do not create TCP/53 fallback connections. If a local direct resolver has not answered over UDP after 300 ms, TCP/53 is attempted only against that same direct resolver, so domestic queries are not exposed to main DNS. DNS-over-TCP explicitly requested by an application still follows the same routing policy. Nothing listens on a host port 53, avoiding conflicts with services such as ICS. The original TUN DNS settings are restored on exit.
 
-- Both Geo and IP split-tunneling modes are supported. Domains matched as `direct` use `direct_dns` from `geo-rules.txt`; all other domains use the tunnel DNS from `--dns` or configuration.
-- Identical concurrent queries are coalesced, and upstream UDP sockets and DNS mappings are reused. Only the preferred resolver is queried normally; a backup is started after 250 ms without a response.
-- With `udp.dns.prefer_ipv4=true`, AAAA records are removed only when an A response is already cached. Without an A cache, AAAA is returned immediately so IPv6-only domains are not blocked.
-- Startup reports an explicit error if another local service already owns port 53. `--local-dns=no` restores the legacy behavior when required, but disables this DNS leak protection layer.
+- No DNS mode switch or extra startup option is required.
+- Both Geo and IP split-tunneling modes are supported. Domains matched as `direct` use `direct_dns` from `geo-rules.txt`; other domains use only main DNS and same-outbound backups, never the physical-interface resolver as a failure fallback.
+- Only the TUN adapter is guarded: its IPv4 DNS is locked to the virtual gateway and its IPv6 DNS list is cleared during the session. Other adapters remain untouched. Strict prevention of applications that explicitly bypass the system resolver requires the optional Windows filtering layer; adapter DNS configuration alone is not described as leak-proof.
+- `udp.dns.prefer_ipv4` processes only DNS responses for tunneled rules; responses matched as `direct` retain their original A/AAAA records.
+- With `udp.dns.prefer_ipv4=true`, AAAA is removed only when an A response is already cached; otherwise AAAA is returned immediately.
 
-```bash
-# Enabled by default; normally no explicit option is needed
-ppp --mode=client --local-dns=yes
+```powershell
+# Start normally; DNS is routed through TUN automatically
+.\ppp.exe --mode=client
+
+# Inspect adapter DNS and the TUN route to an upstream resolver
+Get-DnsClientServerAddress
+route print 1.1.1.1
+
+# Verify system resolution
+nslookup example.com
 ```
 
 ---
@@ -356,7 +368,6 @@ New CLI parameters (compared to the original):
 | `--bypass6=<file1\|file2>` | All | IPv6 bypass list file | `./ipv6.txt` |
 | `--bypass-nic6=<interface>` | Linux | Physical NIC for IPv6 bypass | auto-select |
 | `--bypass-ngw6=<ip>` | All | IPv6 bypass next-hop gateway | `::` (disabled) |
-| `--local-dns=[yes\|no]` | Windows | Local loopback DNS leak-protection proxy | `yes` |
 
 ---
 

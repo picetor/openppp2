@@ -297,7 +297,7 @@ namespace ppp {
                 bool                                                                SendLocalDnsUdp(const boost::asio::ip::address& server,
                     const std::shared_ptr<ppp::string>& query,
                     const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
-                    ppp::string& upstream_key, uint16_t& upstream_id) noexcept;
+                    bool through_tunnel, ppp::string& upstream_key, uint16_t& upstream_id) noexcept;
                 void                                                                ReceiveLocalDnsUpstream(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
                 void                                                                CancelLocalDnsUdp(const ppp::vector<std::pair<ppp::string, uint16_t>>& requests) noexcept;
 #endif  
@@ -314,6 +314,8 @@ namespace ppp {
                 bool                                                                LoadAllIPListWithFilePaths6(const boost::asio::ip::address& gw6) noexcept;
                 void                                                                AddIPv6Route() noexcept;
                 bool                                                                ApplyGeoStaticRoutes() noexcept;
+                bool                                                                RefreshDirectDnsServers() noexcept;
+                bool                                                                SelectDirectDnsServer(const ppp::string& host, boost::asio::ip::address& server) noexcept;
                 void                                                                ObserveGeoDnsResponse(const void* packet, int packet_size) noexcept;
                 void                                                                AddGeoDynamicRoute(const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept;
                 void                                                                DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept;
@@ -368,6 +370,8 @@ namespace ppp {
                 TimeoutEventHandlerTable                                            timeouts_;
                 DNSRuleTable                                                        dns_ruless_[3];
                 std::shared_ptr<ppp::app::client::geo::GeoRuleEngine>               geo_rules_;
+                ppp::vector<boost::asio::ip::address>                               direct_dns_servers_;
+                std::atomic<size_t>                                                  direct_dns_server_index_ = 0;
 
                 // Prefer IPv4: pending AAAA responses awaiting A-cache population or timeout.
                 // When an AAAA DNS response arrives before the corresponding A response,
@@ -435,6 +439,9 @@ namespace ppp {
                     int                                                             interface_index = -1;
                 };
                 ppp::unordered_map<ppp::string, GeoDynamicRoute6>                  geo_dynamic_routes6_;
+#if defined(_WIN32)
+                ppp::unordered_map<ppp::string, GeoDynamicRoute6>                  direct_dns_routes6_;
+#endif
                 ppp::ipv6::auxiliary::ClientState                                  ipv6_client_state_;
                 boost::asio::ip::address                                            ipv6_client_address_;
                 boost::asio::ip::address                                            ipv6_client_gateway_;
@@ -470,12 +477,16 @@ namespace ppp {
                 struct LocalDnsUpstream final {
                     boost::asio::ip::address                                        server;
                     std::shared_ptr<boost::asio::ip::udp::socket>                  socket;
+                    std::shared_ptr<VEthernetExchanger>                            exchanger;
+                    boost::asio::ip::udp::endpoint                                 tunnel_source;
                     uint16_t                                                        next_id = 0;
                     bool                                                            receiving = false;
+                    bool                                                            through_tunnel = false;
                     ppp::unordered_map<uint16_t,
                         ppp::function<void(const std::shared_ptr<ppp::string>&)>>   requests;
                 };
                 ppp::unordered_map<ppp::string, std::shared_ptr<LocalDnsUpstream>> local_dns_upstreams_;
+                uint16_t                                                            local_dns_tunnel_port_ = 19999;
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
