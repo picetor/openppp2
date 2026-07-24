@@ -1349,22 +1349,11 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet->ProtectMode(&network_interface->ProtectNetwork);
 #endif
 #endif
-            // Configure switcher properties
-            // The standalone proxy runtime must not share its local HTTP/SOCKS
-            // streams with the control link through vmux.  A vmux peer which
-            // rejects a logical proxy SYN can tear down every mux link,
-            // including the primary session.  Use one regular PPP transmission
-            // per proxy connection; normal TUN client mode keeps its configured
-            // mux behavior.
-            if (!proxy_mode_)
-            {
-                ethernet->Mux(&network_interface->Mux);
-                ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
-            }
-            else
-            {
-                LOG_INFO("Proxy mode: vmux disabled; local proxy streams use independent PPP transmissions");
-            }
+            // Proxy-only follows the normal client transport policy: prefer a
+            // configured vmux logical stream and fall back to an independent
+            // PPP transmission when vmux is unavailable.
+            ethernet->Mux(&network_interface->Mux);
+            ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
             ethernet->StaticMode(&network_interface->StaticMode);
             if (!proxy_mode_)
             {
@@ -1658,6 +1647,16 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     if (proxy_mode_)
     {
         network_interface->SplitMode = NetworkInterface::BypassMode::No;
+        // Proxy-only does not parse the TUN interface settings, but it still
+        // shares the normal client's vmux transport policy.
+        network_interface->Mux = (uint16_t)std::max<int>(
+            0, atoi(ppp::GetCommandArgument("--tun-mux", argc, argv).data()));
+        network_interface->MuxAcceleration = (uint8_t)std::max<int>(
+            0, atoi(ppp::GetCommandArgument("--tun-mux-acceleration", argc, argv).data()));
+        if (network_interface->MuxAcceleration > PPP_MUX_ACCELERATION_MAX)
+        {
+            network_interface->MuxAcceleration = 0;
+        }
 #if defined(_WIN32)
         network_interface->LocalDns = false;
 #endif
