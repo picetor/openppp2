@@ -206,6 +206,11 @@ namespace ppp {
                 virtual bool                                                        OpenLogger() noexcept;
                 virtual std::shared_ptr<ppp::threading::BufferswapAllocator>        GetBufferAllocator() noexcept override;
                 virtual bool                                                        BlockQUIC(bool value) noexcept;
+#if defined(_WIN32)
+                // Keep the VPN's own IPv6 transport reachable after the physical
+                // interface default route has been suppressed for leak prevention.
+                bool                                                                EnsureWindowsIPv6ServerRoute(const boost::asio::ip::address& address) noexcept;
+#endif
 
             protected:  
                 virtual bool                                                        OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept override;
@@ -313,6 +318,12 @@ namespace ppp {
                 bool                                                                LoadAllIPListWithFilePaths(const boost::asio::ip::address& gw) noexcept;
                 bool                                                                LoadAllIPListWithFilePaths6(const boost::asio::ip::address& gw6) noexcept;
                 void                                                                AddIPv6Route() noexcept;
+#if defined(_WIN32)
+                bool                                                                ApplyWindowsIPv6LeakBlockRoutes() noexcept;
+                void                                                                RemoveWindowsIPv6LeakBlock() noexcept;
+                void                                                                RemoveWindowsIPv6ServerRoutes() noexcept;
+                int                                                                 DeleteWindowsIPv6BypassRoutes() noexcept;
+#endif
                 bool                                                                ApplyGeoStaticRoutes() noexcept;
                 bool                                                                RefreshDirectDnsServers() noexcept;
                 bool                                                                SelectDirectDnsServer(const ppp::string& host, boost::asio::ip::address& server) noexcept;
@@ -455,10 +466,18 @@ namespace ppp {
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
                 bool                                                                ipv6_block_routes_added_ = false;
-                bool                                                                ipv6_server_route_applied_ = false;
-                int                                                                 ipv6_server_route_interface_index_ = -1;
-                boost::asio::ip::address                                            ipv6_server_route_address_;
-                boost::asio::ip::address                                            ipv6_server_route_gateway_;
+                bool                                                                ipv6_block_prefix_policy_applied_ = false;
+                bool                                                                ipv6_physical_default_block_applied_ = false;
+                bool                                                                ipv6_ignore_default_routes_captured_ = false;
+                bool                                                                ipv6_original_ignore_default_routes_ = false;
+                ppp::vector<MIB_IPFORWARD_ROW2>                                     ipv6_physical_default_routes_;
+                struct IPv6ServerRoute final {
+                    boost::asio::ip::address                                        address;
+                    boost::asio::ip::address                                        gateway;
+                    int                                                             interface_index = -1;
+                    bool                                                            owned = false;
+                };
+                ppp::vector<IPv6ServerRoute>                                        ipv6_server_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;

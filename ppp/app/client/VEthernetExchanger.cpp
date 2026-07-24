@@ -376,6 +376,19 @@ namespace ppp {
                     return NULLPTR;
                 }
 
+#if defined(_WIN32)
+                // The switcher intentionally suppresses the physical IPv6 default
+                // route while the peer has not provided an IPv6 data plane. The
+                // VPN transport itself is the exception: resolve it first, then pin
+                // that exact /128 through the physical gateway before connecting.
+                if (remoteIP.is_v6() && !remoteIP.is_loopback() &&
+                    !switcher_->EnsureWindowsIPv6ServerRoute(remoteIP)) {
+                    LOG_ERROR("VEthernetExchanger::OpenTransmission: cannot pin IPv6 server route, outbound=%s, remote=%s:%d",
+                        outbound_tag_.data(), address.data(), remotePort);
+                    return NULLPTR;
+                }
+#endif
+
                 LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, connecting to %s:%d, protocol=%d, hostname=%s, path=%s",
                     outbound_tag_.data(), strand.get(), address.data(), remotePort, (int)protocol_type, hostname.data(), path.data());
 

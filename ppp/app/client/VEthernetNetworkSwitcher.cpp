@@ -44,6 +44,7 @@
 
 #if defined(_WIN32)
 #include <windows/ppp/tap/TapWindows.h>
+#include <windows/ppp/win32/network/Firewall.h>
 #include <windows/ppp/win32/network/Router.h>
 #include <windows/ppp/net/proxies/HttpProxy.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
@@ -1131,6 +1132,7 @@ namespace ppp {
             }
 
             void VEthernetNetworkSwitcher::Finalize() noexcept {
+                network_takeover_stopping_.store(true);
                 LOG_DEBUG("VEthernetNetworkSwitcher::Finalize: releasing all objects");
 #if defined(PPP_LOG_VERBOSE)
                 StopDebugWatchdog();
@@ -1542,7 +1544,34 @@ namespace ppp {
                     extensions.AssignedIPv6Dns1.is_v6() ? extensions.AssignedIPv6Dns1.to_string().c_str() : "(none)",
                     extensions.AssignedIPv6Dns2.is_v6() ? extensions.AssignedIPv6Dns2.to_string().c_str() : "(none)");
                 if (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_None) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: IPv6Mode=None, returning");
+                    // A reconnect can explicitly withdraw a previously assigned IPv6
+                    // data plane.  Leaving the old TAP /1 routes or trusting the
+                    // cached TAP gateway in that case lets Windows select the
+                    // physical NIC's global IPv6 address again.
+                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Assignment: IPv6Mode=None, disabling tunnel IPv6 and restoring leak block");
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                    RestoreIPv6Assignment();
+#endif
+#if defined(_WIN32)
+                    // Keep direct IPv6 decisions: after the physical ::/0 is
+                    // suppressed, these more-specific routes are the intentional
+                    // domestic/direct allow-list. Remove only stale tunnel-side
+                    // decisions left by a previous managed IPv6 assignment.
+                    ppp::vector<boost::asio::ip::address> dynamic_addresses;
+                    dynamic_addresses.reserve(geo_dynamic_routes6_.size());
+                    for (const auto& entry : geo_dynamic_routes6_) {
+                        if (entry.second.interface_index !=
+                            (underlying_ni_ ? underlying_ni_->Index : -1)) {
+                            boost::system::error_code ec;
+                            boost::asio::ip::address address = StringToAddress(entry.first.data(), ec);
+                            if (!ec && address.is_v6()) dynamic_addresses.emplace_back(std::move(address));
+                        }
+                    }
+                    for (const boost::asio::ip::address& address : dynamic_addresses) {
+                        DeleteGeoDynamicRoute(address);
+                    }
+                    ApplyWindowsIPv6LeakBlockRoutes();
+#endif
                     return;
                 }
 
@@ -1634,11 +1663,17 @@ namespace ppp {
                     tap->IPv6Address = extensions.AssignedIPv6Address;
 
                     // Pin server IPv6 route to the underlying physical NIC (avoid routing loop).
+                    // OpenTransmission normally installs this before the first
+                    // connection. Keep this call for compatibility with an already
+                    // established transport created by an older startup path.
                     boost::asio::ip::address server_address;
                     if (auto exchanger = exchanger_) {
                         server_address = exchanger->server_url_.remoteEP.address();
                     }
                     if (server_address.is_v6() && !server_address.is_unspecified()) {
+#if defined(_WIN32)
+                        EnsureWindowsIPv6ServerRoute(server_address);
+#else
                         std::shared_ptr<NetworkInterface> underlying_ni = GetUnderlyingNetworkInterface();
                         if (NULLPTR == underlying_ni) {
                             LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: cannot pin server IPv6 route, GetUnderlyingNetworkInterface() returned null");
@@ -1663,24 +1698,6 @@ namespace ppp {
                                 if (rc != 0) {
                                     LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Configuration: failed to pin server IPv6 route, cmd=\"%s\", rc=%d", cmd.c_str(), rc);
                                 }
-#elif defined(_WIN32)
-                                {
-                                    (void)server_ip_str;
-                                    (void)ni_name_str;
-                                    int v6_ifindex = underlying_ni->Index;
-                                    if (v6_ifindex >= 0) {
-                                        if (!ppp::win32::network::Router::AddIPv6RouteEntry(server_address.to_v6(), 128, underlying_ni->IPv6GatewayServer.to_v6(), v6_ifindex)) {
-                                            LOG_WARN("VEthernetNetworkSwitcher::ApplyIPv6Configuration: pin server IPv6 route via API failed, ifindex=%d, gw=\"%s\"",
-                                                v6_ifindex, gw6_str.c_str());
-                                        }
-                                        else {
-                                            ipv6_server_route_applied_ = true;
-                                            ipv6_server_route_interface_index_ = v6_ifindex;
-                                            ipv6_server_route_address_ = server_address;
-                                            ipv6_server_route_gateway_ = underlying_ni->IPv6GatewayServer;
-                                        }
-                                    }
-                                }
 #endif
                             }
                             else {
@@ -1688,6 +1705,7 @@ namespace ppp {
                                     gw6_str.c_str(), (int)underlying_ni->IPv6GatewayServer.is_v6());
                             }
                         }
+#endif
                     }
                 }
 
@@ -1701,9 +1719,7 @@ namespace ppp {
 #if defined(_WIN32)
                     bool had_block_routes = ipv6_block_routes_added_;
                     if (had_block_routes) {
-                        ppp::win32::network::DeleteIPv6Route(ctx.InterfaceIndex, "::", 1, ppp::string());
-                        ppp::win32::network::DeleteIPv6Route(ctx.InterfaceIndex, "8000::", 1, ppp::string());
-                        ipv6_block_routes_added_ = false;
+                        RemoveWindowsIPv6LeakBlock();
                     }
 #endif
 
@@ -1712,11 +1728,9 @@ namespace ppp {
 
 #if defined(_WIN32)
                     if (!route_applied && had_block_routes) {
-                        bool left = ppp::win32::network::AddIPv6Route(ctx.InterfaceIndex, "::", 1, ppp::string(), 0);
-                        bool right = ppp::win32::network::AddIPv6Route(ctx.InterfaceIndex, "8000::", 1, ppp::string(), 0);
-                        ipv6_block_routes_added_ = left && right;
-                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Assignment: managed IPv6 route failed, leak-block routes restored=%d",
-                            (int)ipv6_block_routes_added_);
+                        const bool restored = ApplyWindowsIPv6LeakBlockRoutes();
+                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyIPv6Assignment: managed IPv6 route failed, leak block restored=%d",
+                            static_cast<int>(restored));
                     }
 #endif
 
@@ -1797,24 +1811,6 @@ namespace ppp {
                 if (!ipv6_client_state_captured_) {
                     return;
                 }
-
-#if defined(_WIN32)
-                if (ipv6_server_route_applied_ &&
-                    ipv6_server_route_interface_index_ >= 0 &&
-                    ipv6_server_route_address_.is_v6()) {
-                    ppp::win32::network::DeleteIPv6Route(
-                        ipv6_server_route_interface_index_,
-                        ipv6_server_route_address_.to_string().c_str(),
-                        128,
-                        ipv6_server_route_gateway_.is_v6()
-                            ? ppp::string(ipv6_server_route_gateway_.to_string().c_str())
-                            : ppp::string());
-                }
-                ipv6_server_route_applied_ = false;
-                ipv6_server_route_interface_index_ = -1;
-                ipv6_server_route_address_ = boost::asio::ip::address();
-                ipv6_server_route_gateway_ = boost::asio::ip::address();
-#endif
 
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR != tap) {
@@ -2994,6 +2990,15 @@ namespace ppp {
                     return false;
                 }
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
+#if defined(_WIN32)
+                // Fail closed before opening any server transmission. Until the
+                // peer explicitly supplies a working IPv6 dataplane, locally
+                // originated public IPv6 must not escape through the physical NIC.
+                if (!ApplyWindowsIPv6LeakBlockRoutes()) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
+                    return false;
+                }
+#endif
 #endif
 
                 // Open client-side logger
@@ -3463,28 +3468,20 @@ namespace ppp {
                 // Adds the loaded route table to the operating system.
                 ppp::win32::network::AddAllRoutes(rib_);
 
-                // Also add IPv6 bypass routes (ipv6.txt / --bypass6).
-                AddIPv6Route();
-
                 // Capture all IPv6 traffic on the VPN interface until the server
                 // supplies managed IPv6 routes. These /1 routes outrank an ISP ::/0
                 // even when Router Advertisement recreates it. More-specific China
                 // bypass routes still use the underlying interface.
-                if (NULLPTR != tap && (!tap->IPv6GatewayServer.is_v6() || tap->IPv6GatewayServer.is_unspecified())) {
-                    int interface_index = tap->GetInterfaceIndex();
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                    bool left = ppp::win32::network::AddIPv6Route(interface_index, "::", 1, ppp::string(), 0);
-                    bool right = ppp::win32::network::AddIPv6Route(interface_index, "8000::", 1, ppp::string(), 0);
-                    ipv6_block_routes_added_ = left && right;
-                    if (!ipv6_block_routes_added_) {
-                        ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                        ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                        LOG_ERROR("VEthernetNetworkSwitcher::AddRoute: failed to install IPv6 leak-block routes, ifindex=%d", interface_index);
-                    }
-                    else {
-                        LOG_INFO("VEthernetNetworkSwitcher::AddRoute: installed IPv6 leak-block routes on ifindex=%d", interface_index);
-                    }
+                // A TAP gateway is not proof that the server can carry IPv6: it
+                // can be stale after reconnect, while a server without IPv6 sends
+                // no IPv6 extension at all.  Only a successfully applied managed
+                // IPv6 default route authorizes IPv6 egress.
+                if (NULLPTR != tap && (!ipv6_client_state_captured_ || !ipv6_client_state_.DefaultRouteApplied)) {
+                    // Remove active-store routes left by an older build or an
+                    // unclean shutdown. Any prefix longer than /1 would otherwise
+                    // override the leak block and expose the physical IPv6 address.
+                    DeleteWindowsIPv6BypassRoutes();
+                    ApplyWindowsIPv6LeakBlockRoutes();
                 }
 #elif defined(_MACOS)
                 // Delete all found default gateway routes.
@@ -3527,7 +3524,9 @@ namespace ppp {
                     }
                 }
 #endif
-                // Add IPv6 bypass routes to the operating system.
+                // IPv6 direct/bypass prefixes remain usable even when the server
+                // is IPv4-only. The physical default route is suppressed, so only
+                // these explicit more-specific routes can leave via the NIC.
                 AddIPv6Route();
 
                 // Configure the DNS servers used by the virtual network adapter to route to the operating system.
@@ -3594,14 +3593,8 @@ namespace ppp {
                     }
                 }
 #if defined(_WIN32)
-                if (ipv6_block_routes_added_) {
-                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
-                        int interface_index = tap->GetInterfaceIndex();
-                        ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                        ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                    }
-                    ipv6_block_routes_added_ = false;
-                }
+                DeleteWindowsIPv6BypassRoutes();
+                RemoveWindowsIPv6LeakBlock();
 
                 // Delete the loaded route table from the windows operating system.
                 ppp::win32::network::DeleteAllRoutes(rib_);
@@ -4146,6 +4139,18 @@ namespace ppp {
                         GetUnderlyingNetworkInterface() : GetTapNetworkInterface();
                     if (!target) return;
                     ppp::string address = ppp::net::Ipep::ToAddressString<ppp::string>(update.address);
+#if defined(_WIN32)
+                    if (!ipv6_client_state_.DefaultRouteApplied && !direct) {
+                        // Without a managed server IPv6 dataplane, only explicit
+                        // direct decisions may create physical /128 routes.
+                        if (geo_dynamic_routes6_.find(address) != geo_dynamic_routes6_.end()) {
+                            DeleteGeoDynamicRoute(update.address);
+                        }
+                        LOG_DEBUG("VEthernetNetworkSwitcher::AddGeoDynamicRoute: suppressing tunnel IPv6 address=%s; server IPv6 is unavailable",
+                            address.data());
+                        return;
+                    }
+#endif
                     ppp::string gateway;
                     if (direct) {
                         if (!target->IPv6GatewayServer.is_v6() || target->IPv6GatewayServer.is_unspecified()) return;
@@ -4228,6 +4233,206 @@ namespace ppp {
                         (unsigned long long)update.priority);
                 }
             }
+
+#if defined(_WIN32)
+            bool VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute(
+                const boost::asio::ip::address& address) noexcept {
+                if (!address.is_v6() || address.is_unspecified() ||
+                    address.is_loopback() || address.to_v6().is_link_local()) {
+                    return false;
+                }
+
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (NULLPTR == underlying || underlying->Index < 0 ||
+                    !underlying->IPv6GatewayServer.is_v6() ||
+                    underlying->IPv6GatewayServer.is_unspecified()) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: physical IPv6 gateway unavailable, remote=%s",
+                        address.to_string().c_str());
+                    return false;
+                }
+
+                SynchronizedObjectScope scope(GetSynchronizedObject());
+                for (const IPv6ServerRoute& route : ipv6_server_routes_) {
+                    if (route.address == address &&
+                        route.interface_index == underlying->Index &&
+                        route.gateway == underlying->IPv6GatewayServer) {
+                        return true;
+                    }
+                }
+
+                bool created = false;
+                if (!ppp::win32::network::Router::AddIPv6RouteEntry(
+                        address.to_v6(), 128, underlying->IPv6GatewayServer.to_v6(),
+                        underlying->Index, &created)) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: add /128 failed, remote=%s, gateway=%s, ifindex=%d",
+                        address.to_string().c_str(),
+                        underlying->IPv6GatewayServer.to_string().c_str(),
+                        underlying->Index);
+                    return false;
+                }
+
+                ipv6_server_routes_.emplace_back(IPv6ServerRoute{
+                    address, underlying->IPv6GatewayServer, underlying->Index, created });
+                LOG_INFO("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: pinned remote=%s/128, gateway=%s, ifindex=%d, created=%d",
+                    address.to_string().c_str(),
+                    underlying->IPv6GatewayServer.to_string().c_str(),
+                    underlying->Index, static_cast<int>(created));
+                return true;
+            }
+
+            void VEthernetNetworkSwitcher::RemoveWindowsIPv6ServerRoutes() noexcept {
+                ppp::vector<IPv6ServerRoute> routes;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    routes = std::move(ipv6_server_routes_);
+                    ipv6_server_routes_.clear();
+                }
+                for (const IPv6ServerRoute& route : routes) {
+                    if (!route.owned || route.interface_index < 0 || !route.address.is_v6()) {
+                        continue;
+                    }
+                    ppp::win32::network::DeleteIPv6Route(
+                        route.interface_index,
+                        route.address.to_string().c_str(),
+                        128,
+                        route.gateway.is_v6()
+                            ? ppp::string(route.gateway.to_string().c_str())
+                            : ppp::string());
+                }
+            }
+
+            void VEthernetNetworkSwitcher::RemoveWindowsIPv6LeakBlock() noexcept {
+                // Delete unconditionally so a stale active-store route from an
+                // abnormal earlier process does not depend on an in-memory flag.
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    const int interface_index = tap->GetInterfaceIndex();
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                }
+                ipv6_block_routes_added_ = false;
+                if (ipv6_block_prefix_policy_applied_) {
+                    ppp::win32::network::RestoreIPv6PrefixPolicyULA();
+                    ipv6_block_prefix_policy_applied_ = false;
+                }
+                // Remove compatibility filters from earlier policy revisions.
+                // The selective policy below is enforced by suppressing only the
+                // physical default route, so direct geo prefixes remain usable.
+                ppp::win32::network::Fw::SetIPv6LeakBlock("openppp2 IPv6 Leak Block", NULLPTR, false);
+
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (NULLPTR != underlying && underlying->Index >= 0 &&
+                    ipv6_ignore_default_routes_captured_) {
+                    ppp::win32::network::Router::SetIPv6IgnoreDefaultRoutes(
+                        underlying->Index, ipv6_original_ignore_default_routes_);
+                }
+                if (!ipv6_original_ignore_default_routes_) {
+                    const int restored = ppp::win32::network::Router::RestoreIPv6Routes(
+                        ipv6_physical_default_routes_);
+                    if (restored > 0) {
+                        LOG_INFO("VEthernetNetworkSwitcher::RemoveWindowsIPv6LeakBlock: restored physical IPv6 defaults=%d",
+                            restored);
+                    }
+                }
+                ipv6_physical_default_routes_.clear();
+                ipv6_ignore_default_routes_captured_ = false;
+                ipv6_original_ignore_default_routes_ = false;
+                ipv6_physical_default_block_applied_ = false;
+                if (network_takeover_stopping_.load()) {
+                    RemoveWindowsIPv6ServerRoutes();
+                }
+            }
+
+            int VEthernetNetworkSwitcher::DeleteWindowsIPv6BypassRoutes() noexcept {
+                IPv6RouteTablePtr rib6 = rib6_;
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (NULLPTR == rib6 || rib6->empty() || NULLPTR == underlying || underlying->Index < 0) {
+                    return 0;
+                }
+
+                ppp::vector<std::pair<boost::asio::ip::address_v6, int>> routes;
+                routes.reserve(rib6->size());
+                for (const IPv6RouteEntry& entry : *rib6) {
+                    routes.emplace_back(entry.Network, entry.Prefix);
+                }
+
+                const int deleted = ppp::win32::network::Router::DeleteIPv6RouteEntries(routes, underlying->Index);
+                if (deleted < 0) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::DeleteWindowsIPv6BypassRoutes: route table query failed, ifindex=%d",
+                        underlying->Index);
+                }
+                elif(deleted > 0) {
+                    LOG_INFO("VEthernetNetworkSwitcher::DeleteWindowsIPv6BypassRoutes: removed=%d, ifindex=%d",
+                        deleted, underlying->Index);
+                }
+                return deleted;
+            }
+
+            bool VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes() noexcept {
+                std::shared_ptr<ITap> tap = GetTap();
+                if (NULLPTR == tap) {
+                    return false;
+                }
+
+                const int interface_index = tap->GetInterfaceIndex();
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (interface_index < 0 || NULLPTR == underlying || underlying->Index < 0) {
+                    return false;
+                }
+
+                // Two /1 routes are more specific than any physical ::/0.  They
+                // deliberately terminate on the TUN while no server IPv6 data
+                // plane exists, so Windows cannot fall back to a global address on
+                // the physical NIC.  A successful IPv6 assignment removes them
+                // before installing its own routes.
+                ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                const bool left = ppp::win32::network::AddIPv6Route(interface_index, "::", 1, ppp::string(), 0);
+                const bool right = ppp::win32::network::AddIPv6Route(interface_index, "8000::", 1, ppp::string(), 0);
+                ipv6_block_routes_added_ = left && right;
+
+                // A /1 sink alone is insufficient: Windows may select the physical
+                // GUA source and then its physical ::/0. Preserve direct IPv6 by
+                // keeping all more-specific geo routes, while disabling only the
+                // selected physical interface's default-route acquisition.
+                if (!ipv6_ignore_default_routes_captured_) {
+                    bool original = false;
+                    if (!ppp::win32::network::Router::GetIPv6IgnoreDefaultRoutes(
+                            underlying->Index, original)) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: cannot read IgnoreDefaultRoutes, ifindex=%d",
+                            underlying->Index);
+                        return false;
+                    }
+                    ipv6_original_ignore_default_routes_ = original;
+                    ipv6_ignore_default_routes_captured_ = true;
+                }
+                const bool ignore_ok = ppp::win32::network::Router::SetIPv6IgnoreDefaultRoutes(
+                    underlying->Index, true);
+                const int removed_defaults =
+                    ppp::win32::network::Router::CaptureAndDeleteIPv6DefaultRoutes(
+                        underlying->Index, ipv6_physical_default_routes_);
+                ipv6_physical_default_block_applied_ = ignore_ok && removed_defaults >= 0;
+
+                // Remove the old all-public-IPv6 rule if upgrading/reapplying in
+                // the same process. It would also block intentional domestic routes.
+                ppp::win32::network::Fw::SetIPv6LeakBlock(
+                    "openppp2 IPv6 Leak Block", NULLPTR, false);
+                if (!ipv6_block_routes_added_) {
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
+                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
+                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: failed, ifindex=%d", interface_index);
+                }
+                elif(!ipv6_physical_default_block_applied_) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: physical default suppression failed, ifindex=%d",
+                        underlying->Index);
+                }
+                else {
+                    LOG_INFO("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: installed selective block on tun=%d, physical=%s, removed_defaults=%d, direct_ipv6=allowed",
+                        interface_index, underlying->Name.data(), removed_defaults);
+                }
+                return ipv6_block_routes_added_ && ipv6_physical_default_block_applied_;
+            }
+
+#endif
 
             void VEthernetNetworkSwitcher::DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept {
                 if (address.is_v6()) {
@@ -4796,6 +5001,14 @@ namespace ppp {
                     if (restore_ipv6) {
                         RestoreIPv6Assignment();
                     }
+#if defined(_WIN32)
+                    if (network_takeover_stopping_.load()) {
+                        RemoveWindowsIPv6LeakBlock();
+                    }
+                    else {
+                        ApplyWindowsIPv6LeakBlockRoutes();
+                    }
+#endif
                     return;
                 }
 
@@ -4818,6 +5031,14 @@ namespace ppp {
                 if (restore_ipv6) {
                     RestoreIPv6Assignment();
                 }
+#if defined(_WIN32)
+                // A temporary primary-outbound failure must stay fail-closed. Only
+                // Dispose() sets network_takeover_stopping_ and permits host IPv6
+                // restoration.
+                if (!network_takeover_stopping_.load()) {
+                    ApplyWindowsIPv6LeakBlockRoutes();
+                }
+#endif
                 LOG_INFO("VEthernetNetworkSwitcher::RestoreNetworkState: routes and DNS restored");
             }
 

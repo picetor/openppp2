@@ -202,8 +202,11 @@ namespace ppp
                 return err == NO_ERROR;
             }
 
-            bool Router::AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index) noexcept
+            bool Router::AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index, bool* created) noexcept
             {
+                if (created) {
+                    *created = false;
+                }
                 if (interface_index < 0)
                 {
                     return false;
@@ -285,12 +288,196 @@ namespace ppp
                             network_str.c_str(), prefix_length, interface_index, next_hop_str.c_str());
                         int rc = ::system(command);
                         if (rc == 0) {
+                            if (created) {
+                                *created = true;
+                            }
                             return true;
                         }
                         LOG_DEBUG("Router::AddIPv6RouteEntry: netsh fallback also failed, rc=%d", rc);
                     }
                 }
+                if (result == NO_ERROR && created) {
+                    *created = true;
+                }
                 return result == NO_ERROR;
+            }
+
+            int Router::DeleteIPv6RouteEntries(const ppp::vector<std::pair<boost::asio::ip::address_v6, int>>& routes, int interface_index) noexcept
+            {
+                if (interface_index < 0 || routes.empty())
+                {
+                    return 0;
+                }
+
+                PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                DWORD result = ::GetIpForwardTable2(AF_INET6, &table);
+                if (result != NO_ERROR || NULLPTR == table)
+                {
+                    LOG_DEBUG("Router::DeleteIPv6RouteEntries: GetIpForwardTable2 failed, result=%lu, ifindex=%d",
+                        result, interface_index);
+                    return -1;
+                }
+
+                int deleted = 0;
+                for (ULONG i = 0; i < table->NumEntries; ++i)
+                {
+                    MIB_IPFORWARD_ROW2& row = table->Table[i];
+                    if (row.InterfaceIndex != static_cast<NET_IFINDEX>(interface_index) ||
+                        row.DestinationPrefix.Prefix.si_family != AF_INET6)
+                    {
+                        continue;
+                    }
+
+                    const int prefix_length = static_cast<int>(row.DestinationPrefix.PrefixLength);
+                    const IN6_ADDR& destination = row.DestinationPrefix.Prefix.Ipv6.sin6_addr;
+                    bool matched = false;
+                    for (const auto& route : routes)
+                    {
+                        if (route.second != prefix_length)
+                        {
+                            continue;
+                        }
+                        const auto bytes = route.first.to_bytes();
+                        if (::memcmp(&destination, bytes.data(), sizeof(destination)) == 0)
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (matched && ::DeleteIpForwardEntry2(&row) == NO_ERROR)
+                    {
+                        ++deleted;
+                    }
+                }
+
+                ::FreeMibTable(table);
+                return deleted;
+            }
+
+            int Router::CaptureAndDeleteIPv6DefaultRoutes(int interface_index, ppp::vector<MIB_IPFORWARD_ROW2>& routes) noexcept
+            {
+                if (interface_index < 0)
+                {
+                    return -1;
+                }
+
+                PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                DWORD result = ::GetIpForwardTable2(AF_INET6, &table);
+                if (result != NO_ERROR || NULLPTR == table)
+                {
+                    return -1;
+                }
+
+                int deleted = 0;
+                for (ULONG i = 0; i < table->NumEntries; ++i)
+                {
+                    MIB_IPFORWARD_ROW2& row = table->Table[i];
+                    if (row.InterfaceIndex != static_cast<NET_IFINDEX>(interface_index) ||
+                        row.DestinationPrefix.Prefix.si_family != AF_INET6 ||
+                        row.DestinationPrefix.PrefixLength != 0 ||
+                        !IN6_IS_ADDR_UNSPECIFIED(&row.DestinationPrefix.Prefix.Ipv6.sin6_addr))
+                    {
+                        continue;
+                    }
+
+                    bool captured = false;
+                    for (const MIB_IPFORWARD_ROW2& saved : routes)
+                    {
+                        if (saved.InterfaceLuid.Value == row.InterfaceLuid.Value &&
+                            saved.NextHop.si_family == row.NextHop.si_family &&
+                            ::memcmp(&saved.NextHop.Ipv6, &row.NextHop.Ipv6, sizeof(row.NextHop.Ipv6)) == 0)
+                        {
+                            captured = true;
+                            break;
+                        }
+                    }
+                    if (!captured)
+                    {
+                        routes.emplace_back(row);
+                    }
+
+                    result = ::DeleteIpForwardEntry2(&row);
+                    if (result == NO_ERROR || result == ERROR_NOT_FOUND)
+                    {
+                        ++deleted;
+                    }
+                    else
+                    {
+                        LOG_ERROR("Router::CaptureAndDeleteIPv6DefaultRoutes: delete failed, result=%lu, ifindex=%d",
+                            result, interface_index);
+                    }
+                }
+
+                ::FreeMibTable(table);
+                return deleted;
+            }
+
+            int Router::RestoreIPv6Routes(const ppp::vector<MIB_IPFORWARD_ROW2>& routes) noexcept
+            {
+                int restored = 0;
+                for (const MIB_IPFORWARD_ROW2& saved : routes)
+                {
+                    MIB_IPFORWARD_ROW2 row = saved;
+                    DWORD result = ::CreateIpForwardEntry2(&row);
+                    if (result == NO_ERROR || result == ERROR_OBJECT_ALREADY_EXISTS)
+                    {
+                        ++restored;
+                    }
+                    else
+                    {
+                        LOG_ERROR("Router::RestoreIPv6Routes: restore failed, result=%lu, ifindex=%u",
+                            result, static_cast<unsigned int>(row.InterfaceIndex));
+                    }
+                }
+                return restored;
+            }
+
+            bool Router::GetIPv6IgnoreDefaultRoutes(int interface_index, bool& value) noexcept
+            {
+                value = false;
+                if (interface_index < 0)
+                {
+                    return false;
+                }
+
+                MIB_IPINTERFACE_ROW row;
+                ::InitializeIpInterfaceEntry(&row);
+                row.Family = AF_INET6;
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                DWORD result = ::GetIpInterfaceEntry(&row);
+                if (result != NO_ERROR)
+                {
+                    return false;
+                }
+                value = row.DisableDefaultRoutes != FALSE;
+                return true;
+            }
+
+            bool Router::SetIPv6IgnoreDefaultRoutes(int interface_index, bool value) noexcept
+            {
+                if (interface_index < 0)
+                {
+                    return false;
+                }
+
+                MIB_IPINTERFACE_ROW row;
+                ::InitializeIpInterfaceEntry(&row);
+                row.Family = AF_INET6;
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                DWORD result = ::GetIpInterfaceEntry(&row);
+                if (result != NO_ERROR)
+                {
+                    return false;
+                }
+                row.DisableDefaultRoutes = value ? TRUE : FALSE;
+                result = ::SetIpInterfaceEntry(&row);
+                if (result != NO_ERROR)
+                {
+                    LOG_ERROR("Router::SetIPv6IgnoreDefaultRoutes: failed, result=%lu, ifindex=%d, value=%d",
+                        result, interface_index, static_cast<int>(value));
+                    return false;
+                }
+                return true;
             }
         }
     }

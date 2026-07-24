@@ -35,7 +35,12 @@ namespace ppp
                 static bool                                 Add(MIB_IPFORWARDROW& route) noexcept;
 
             public:
-                static bool                                 AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index) noexcept;
+                static bool                                 AddIPv6RouteEntry(const boost::asio::ip::address_v6& network, int prefix_length, const boost::asio::ip::address_v6& next_hop, int interface_index, bool* created = NULLPTR) noexcept;
+                static int                                  DeleteIPv6RouteEntries(const ppp::vector<std::pair<boost::asio::ip::address_v6, int>>& routes, int interface_index) noexcept;
+                static int                                  CaptureAndDeleteIPv6DefaultRoutes(int interface_index, ppp::vector<MIB_IPFORWARD_ROW2>& routes) noexcept;
+                static int                                  RestoreIPv6Routes(const ppp::vector<MIB_IPFORWARD_ROW2>& routes) noexcept;
+                static bool                                 GetIPv6IgnoreDefaultRoutes(int interface_index, bool& value) noexcept;
+                static bool                                 SetIPv6IgnoreDefaultRoutes(int interface_index, bool value) noexcept;
             };
         }
     }
