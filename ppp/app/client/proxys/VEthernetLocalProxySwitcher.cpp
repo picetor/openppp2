@@ -1,6 +1,7 @@
 #include <ppp/app/client/proxys/VEthernetLocalProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetLocalProxyConnection.h>
 #include <ppp/app/client/VEthernetExchanger.h>
+#include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/Socket.h>
 
@@ -85,7 +86,13 @@ namespace ppp {
                             return false;
                         }
 
-                        for (boost::asio::ip::address& interfaceIP : bind_ips) {
+                        bool proxy_only = false;
+                        if (auto switcher = exchanger_->GetSwitcher(); NULLPTR != switcher) {
+                            proxy_only = switcher->IsProxyOnly();
+                        }
+                        const int bind_ip_count = proxy_only ? 1 : arraysizeof(bind_ips);
+                        for (int bind_ip_index = 0; bind_ip_index < bind_ip_count; ++bind_ip_index) {
+                            boost::asio::ip::address& interfaceIP = bind_ips[bind_ip_index];
                             if (interfaceIP.is_multicast()) {
                                 continue;
                             }
@@ -114,6 +121,8 @@ namespace ppp {
                         }
 
                         if (NULLPTR == acceptor) {
+                            LOG_ERROR("VEthernetLocalProxySwitcher::Open: cannot bind %s proxy listener on loopback port %d",
+                                proxy_only ? "proxy-only" : "local", bind_port);
                             return false;
                         }
                     }

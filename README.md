@@ -385,7 +385,9 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | `--tun-flash` | 启用高级QoS策略控制 | `--tun-flash=[yes｜no]` | `no` |
 | `--pull-iplist` | 下载国家IP列表 | `--pull-iplist [文件]/[国家]` | `./ip.txt/CN` |
 | `--config` | 配置文件路径 | `--config <文件路径>` | `./appsettings.json` |
-| `--mode` | 运行模式 | `--mode=[client｜server]` | `server` |
+| `--mode` | 运行模式 | `--mode=[client｜server｜proxy]` | `server` |
+| `--proxy-http-port` | 覆盖 Proxy 模式 HTTP 端口 | `--proxy-http-port=18080` | 配置文件 |
+| `--proxy-socks-port` | 覆盖 Proxy 模式 SOCKS5 端口 | `--proxy-socks-port=11080` | 配置文件 |
 
 > 🔗 **IP列表数据源**: [APNIC 官方列表](http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest)
 
@@ -603,6 +605,18 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
 # 最简启动（全部使用 appsettings.json 默认值）
 ppp --mode=client
 ```
+
+### 独立 Proxy 模式
+
+当 Clash、v2rayN 等其他代理软件负责 DNS 和分流时，可以只把选中的流量转发给 openppp2：
+
+```powershell
+.\ppp.exe --mode=proxy --config=.\appsettings.json --proxy-http-port=18080 --proxy-socks-port=11080
+```
+
+该模式的 HTTP/SOCKS5 监听地址和默认端口取自配置文件；`--proxy-http-port`、`--proxy-socks-port` 仅覆盖对应端口。配置为 `0.0.0.0` 时会监听所有 IPv4 接口，但 Proxy 模式不会自动修改防火墙。不创建 TUN/TAP、不安装驱动、不修改路由、DNS、系统代理、防火墙或 LSP，也不加载 openppp2 的 IP/geo 分流规则。HTTP 与 SOCKS5 至少一个端口必须成功监听，否则启动失败。Proxy 模式会忽略其他 `tun-*` 参数；每个代理连接使用独立 PPP transmission，避免不兼容的 vmux 对端在拒绝代理逻辑流时同时关闭主控制链路。
+
+其他代理软件必须将 `ppp.exe`、VPN 服务端域名及其全部 A/AAAA 地址设为 `DIRECT`，防止 `ppp.exe → 外部代理 → openppp2 本地代理 → ppp.exe` 递归回环。DNS 由外部代理软件唯一负责；转发到 SOCKS5 时应保留域名并使用远端解析。UDP/QUIC 必须单独验证，不支持可靠 SOCKS5 UDP 链时应关闭 QUIC，避免旁路。
 
 一个贴近实际使用的客户端启动示例：
 

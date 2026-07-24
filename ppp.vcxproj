@@ -383,6 +383,7 @@
     <ClCompile Include="ppp\net\Socket.cpp" />
     <ClCompile Include="ppp\stdafx.cpp" />
     <ClCompile Include="ppp\tap\ITap.cpp" />
+    <ClCompile Include="ppp\tap\TapStub.cpp" />
     <ClCompile Include="windows\ppp\tap\WintunAdapter.cpp" />
     <ClCompile Include="windows\ppp\win32\network\NetworkInterface.cpp" />
     <ClCompile Include="windows\ppp\win32\network\Win32NetworkIPv6.cpp" />
@@ -689,6 +690,7 @@
     <ClInclude Include="ppp\ssl\root_certificates.hpp" />
     <ClInclude Include="ppp\ssl\SSL.h" />
     <ClInclude Include="ppp\tap\ITap.h" />
+    <ClInclude Include="ppp\tap\TapStub.h" />
     <ClCompile Include="windows\ppp\tap\TapWindows.cpp" />
     <ClInclude Include="ppp\threading\Timer.h" />
     <ClInclude Include="ppp\net\asio\IAsynchronousWriteIoQueue.h" />

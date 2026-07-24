@@ -215,8 +215,7 @@ namespace ppp {
             boost::asio::ip::basic_endpoint<TProtocol>                          GetAddressByHostName(const char* hostname, int port, YieldContext& y) noexcept {
                 typedef boost::asio::ip::basic_resolver<TProtocol>              protocol_resolver;
                 typedef ppp::net::IPEndPoint                                    IPEndPoint;
-                typedef ppp::net::Ipep                                          Ipep;
-                typedef std::atomic<bool>                                       atomic_bool;
+                typedef boost::asio::ip::basic_endpoint<TProtocol>              protocol_endpoint;
 
                 if (NULLPTR == hostname || *hostname == '\x0') {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
@@ -226,37 +225,67 @@ namespace ppp {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 }
 
-                std::shared_ptr<atomic_bool> status = make_shared_object<atomic_bool>(false);
-                if (NULLPTR == status) {
+                // Keep every object touched by the asynchronous resolver on the
+                // heap.  The old implementation posted a lambda which captured
+                // `processing` by reference; that callback in turn referenced
+                // stack-local result/yield objects across an asynchronous DNS
+                // boundary.  A fast completion or scheduler hand-off could use
+                // those references after their owning frame had moved/returned,
+                // terminating a noexcept server worker.
+                struct ResolveState final {
+                    std::shared_ptr<protocol_resolver> resolver;
+                    protocol_endpoint                  result;
+                    ppp::string                        hostname;
+                    ppp::string                        service;
+                    YieldContext*                      yield = NULLPTR;
+                    int                                port = IPEndPoint::MinPort;
+                };
+
+                std::shared_ptr<ResolveState> state = make_shared_object<ResolveState>();
+                if (NULLPTR == state) {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 }
 
-                boost::asio::ip::basic_endpoint<TProtocol> results = IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
-                auto processing =
-                    [status, &results, &y](IPEndPoint* ep) noexcept {
-                        if (!status->exchange(true)) {
-                            if (NULLPTR != ep) {
-                                results = IPEndPoint::ToEndPoint<TProtocol>(*ep);
-                            }
-
-                            y.R();
-                        }
-                    };
-
                 boost::asio::io_context& context = y.GetContext();
                 boost::asio::strand<boost::asio::io_context::executor_type>* strand = y.GetStrand();
+                state->resolver = strand ?
+                    make_shared_object<protocol_resolver>(*strand) :
+                    make_shared_object<protocol_resolver>(context);
+                if (NULLPTR == state->resolver) {
+                    return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
+                }
 
-                ppp::threading::Executors::Post(addressof(context), strand, 
-                    [&y, &context, hostname, port, &processing, status]() noexcept {
-                        if (!Ipep::GetAddressByHostName(context, hostname, port, processing)) {
-                            if (!status->exchange(true)) {
-                                y.R();
-                            }
+                state->result = IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
+                state->hostname.assign(hostname);
+                state->service = stl::to_string<ppp::string>(port);
+                state->yield = &y;
+                state->port = port;
+
+                bool posted = ppp::threading::Executors::Post(addressof(context), strand,
+                    [state]() noexcept {
+                        try {
+                            state->resolver->async_resolve(state->hostname, state->service,
+                                [state](const boost::system::error_code& ec,
+                                    const typename protocol_resolver::results_type& results) noexcept {
+                                    if (!ec) {
+                                        state->result =
+                                            ppp::net::asio::internal::GetAddressByHostName<TProtocol>(
+                                                results, state->port);
+                                    }
+
+                                    state->yield->R();
+                                });
+                        }
+                        catch (...) {
+                            state->yield->R();
                         }
                     });
+                if (!posted) {
+                    return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
+                }
 
                 y.Suspend();
-                return results;
+                return state->result;
             }
 #if defined(_WIN32)
 #pragma optimize("", on)

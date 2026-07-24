@@ -206,6 +206,8 @@ namespace ppp {
                 virtual bool                                                        OpenLogger() noexcept;
                 virtual std::shared_ptr<ppp::threading::BufferswapAllocator>        GetBufferAllocator() noexcept override;
                 virtual bool                                                        BlockQUIC(bool value) noexcept;
+                bool                                                                ProxyOnly(bool* value = NULLPTR) noexcept;
+                bool                                                                IsProxyOnly() const noexcept { return proxy_only_; }
 #if defined(_WIN32)
                 // Keep the VPN's own IPv6 transport reachable after the physical
                 // interface default route has been suppressed for leak prevention.
@@ -373,6 +375,7 @@ namespace ppp {
                     int                                                             icmppackets_aid_  = 0;
                     bool                                                            block_quic_       = false;
                     bool                                                            static_mode_      = false;
+                    bool                                                            proxy_only_       = false;
                     uint16_t                                                        mux_              = 0;
                     uint8_t                                                         mux_acceleration_ = 0;
                 };

@@ -36,6 +36,9 @@
     <ClCompile Include="ppp\tap\ITap.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="ppp\tap\TapStub.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="ppp\threading\Thread.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -570,6 +573,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ppp\tap\ITap.h">
+      <Filter>源文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ppp\tap\TapStub.h">
       <Filter>源文件</Filter>
     </ClInclude>
     <ClInclude Include="windows\ppp\tap\TapWindows.h">

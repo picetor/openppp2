@@ -3,6 +3,7 @@
 #include <ppp/Int128.h>
 #include <ppp/io/File.h>
 #include <ppp/tap/ITap.h>
+#include <ppp/tap/TapStub.h>
 #include <ppp/net/http/HttpClient.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/Socket.h>
@@ -63,6 +64,7 @@ using ppp::threading::BufferswapAllocator;
 using ppp::diagnostics::Stopwatch;
 using ppp::diagnostics::PreventReturn;
 using ppp::tap::ITap;
+using ppp::tap::TapStub;
 using ppp::net::Ipep;
 using ppp::net::IPEndPoint;
 using ppp::net::AddressFamily;
@@ -389,6 +391,7 @@ private:
     ConsoleForegroundWindowSize                     console_window_size_last_;           // Previous console size
     std::size_t                                     console_window_buff_size_   = 0;     // Console buffer size
     bool                                            client_mode_                = false; // Current mode flag
+    bool                                            proxy_mode_                 = false; // Local HTTP/SOCKS only; no TUN/routes/DNS
     bool                                            quic_                       = false; // Original QUIC setting (Windows)
     std::shared_ptr<AppConfiguration>               configuration_;                      // Application configuration
     ppp::vector<ClientOutboundConfiguration>        outbound_configurations_;             // Geo multi-outbound configurations
@@ -1227,17 +1230,16 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
     else
     {
 #if defined(_WIN32)
-        // Configure Windows Firewall rules
-        ppp::string executable_path = File::GetFullPath(File::RewritePath(ppp::GetFullExecutionFilePath().data()).data());
-
-        ppp::win32::network::Fw::NetFirewallAddApplication(PPP_APPLICATION_NAME, executable_path.data());
-        ppp::win32::network::Fw::NetFirewallAddAllApplication(PPP_APPLICATION_NAME, executable_path.data());
-
-        // Client-specific Windows setup
-        if (client_mode_)
+        if (!proxy_mode_)
         {
+            // Configure Windows Firewall rules only for runtimes which expose a
+            // kernel network path. Proxy mode does not mutate firewall state.
+            ppp::string executable_path = File::GetFullPath(File::RewritePath(ppp::GetFullExecutionFilePath().data()).data());
+            ppp::win32::network::Fw::NetFirewallAddApplication(PPP_APPLICATION_NAME, executable_path.data());
+            ppp::win32::network::Fw::NetFirewallAddAllApplication(PPP_APPLICATION_NAME, executable_path.data());
+
             // Install paper airplane plugin if needed
-            if (network_interface->HostedNetwork && configuration->client.paper_airplane.tcp)
+            if (client_mode_ && network_interface->HostedNetwork && configuration->client.paper_airplane.tcp)
             {
                 if (ppp::app::client::lsp::PaperAirplaneController::Install() < 0)
                 {
@@ -1246,10 +1248,11 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
 
             // Prevent problematic programs from loading LSPs
-            ppp::app::client::lsp::PaperAirplaneController::NoLsp();
-
-            // Reset paper airplane controller
-            ppp::app::client::lsp::PaperAirplaneController::Reset();
+            if (client_mode_)
+            {
+                ppp::app::client::lsp::PaperAirplaneController::NoLsp();
+                ppp::app::client::lsp::PaperAirplaneController::Reset();
+            }
         }
 #endif
     }
@@ -1261,7 +1264,14 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
         std::shared_ptr<ITap> tap = NULLPTR;
         do
         {
-            // Create TAP device
+            // Proxy mode uses a no-op adapter and never creates a Windows/Linux
+            // kernel interface.
+            if (proxy_mode_)
+            {
+                tap = TapStub::Create(context);
+            }
+            else
+            {
 #if defined(_WIN32)
             tap = ITap::Create(context,
                 network_interface->ComponentId,
@@ -1281,6 +1291,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 network_interface->HostedNetwork,
                 Ipep::AddressesTransformToStrings(network_interface->DnsAddresses));
 #endif
+            }
             if (NULLPTR == tap)
             {
                 fprintf(stdout, "%s\r\n", "Open tun/tap driver failure.");
@@ -1310,7 +1321,12 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 break;
             }
 
-            if (!outbound_configurations_.empty())
+            {
+                bool proxy_only = proxy_mode_;
+                ethernet->ProxyOnly(&proxy_only);
+            }
+
+            if (!proxy_mode_ && !outbound_configurations_.empty())
             {
                 VEthernetNetworkSwitcher::OutboundConfigurationList outbounds;
                 for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
@@ -1334,14 +1350,30 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 #endif
 #endif
             // Configure switcher properties
-            ethernet->Mux(&network_interface->Mux);
-            ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
+            // The standalone proxy runtime must not share its local HTTP/SOCKS
+            // streams with the control link through vmux.  A vmux peer which
+            // rejects a logical proxy SYN can tear down every mux link,
+            // including the primary session.  Use one regular PPP transmission
+            // per proxy connection; normal TUN client mode keeps its configured
+            // mux behavior.
+            if (!proxy_mode_)
+            {
+                ethernet->Mux(&network_interface->Mux);
+                ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
+            }
+            else
+            {
+                LOG_INFO("Proxy mode: vmux disabled; local proxy streams use independent PPP transmissions");
+            }
             ethernet->StaticMode(&network_interface->StaticMode);
-            ethernet->PreferredNgw(network_interface->Ngw);
-            ethernet->PreferredNgw6(network_interface->BypassNgw6);
-            ethernet->PreferredNic(network_interface->Nic);
+            if (!proxy_mode_)
+            {
+                ethernet->PreferredNgw(network_interface->Ngw);
+                ethernet->PreferredNgw6(network_interface->BypassNgw6);
+                ethernet->PreferredNic(network_interface->Nic);
+            }
             // Load bypass policy selected by --bypass-mode.
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
+            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
                 if (!ethernet->LoadGeoRules(network_interface->GeoRules, network_interface->GeoSite, network_interface->GeoIP)) {
                     fprintf(stdout, "%s\r\n", "Failed to load geo bypass rules.");
                     break;
@@ -1349,7 +1381,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
 
             // Load bypass IP lists in IP mode.
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
+            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
 #if defined(_LINUX)
                 for (auto&& bypass_path : *network_interface->Bypass)
                 {
@@ -1376,7 +1408,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 #endif
             }
 
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
+            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
                 for (auto&& route : configuration->client.routes)
                 {
                     ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
@@ -1394,7 +1426,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
 
             // IP-mode DNS rules are mutually exclusive with geo mode.
-            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
+            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
                 ethernet->LoadAllDnsRules(network_interface->DNSRules, true);
             }
 
@@ -1510,9 +1542,6 @@ std::shared_ptr<BufferswapAllocator> PppApplication::GetBufferAllocator() noexce
 // Parse and prepare command line arguments
 int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) noexcept
 {
-    // Configure socket flash TOS
-    Socket::SetDefaultFlashTypeOfService(ppp::ToBoolean(ppp::GetCommandArgument("--tun-flash", argc, argv).data()));
-    
     // Parse log file path from command line
     LOG_FILE_PATH_ = ppp::GetCommandArgument("--log-file", argc, argv);
     if (LOG_FILE_PATH_.size() > 0)
@@ -1536,7 +1565,64 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     else
     {
         // Gets whether client mode or server mode is currently running.
-        client_mode_ = IsModeClientOrServer(argc, argv);
+        ppp::string mode;
+        static constexpr const char* mode_keys[] = { "--mode", "--m", "-mode", "-m" };
+        for (const char* key : mode_keys)
+        {
+            mode = ppp::GetCommandArgument(key, argc, argv);
+            if (!mode.empty())
+            {
+                break;
+            }
+        }
+        mode = ppp::ToLower<ppp::string>(ppp::ATrim<ppp::string>(mode));
+        proxy_mode_ = mode == "proxy";
+        client_mode_ = proxy_mode_ || IsModeClientOrServer(argc, argv);
+
+        if (proxy_mode_)
+        {
+            // Listener addresses and default ports come from the JSON
+            // configuration.  Explicit proxy port arguments override only
+            // their corresponding configured ports.
+            ppp::string http_port = ppp::GetCommandArgument("--proxy-http-port", argc, argv);
+            ppp::string socks_port = ppp::GetCommandArgument("--proxy-socks-port", argc, argv);
+            auto parse_proxy_port = [](const ppp::string& text, const char* option, int& destination) noexcept -> bool
+                {
+                    if (text.empty()) return true;
+
+                    char* tail = NULLPTR;
+                    long value = strtol(text.data(), &tail, 10);
+                    if (NULLPTR == tail || tail == text.data() || *tail != '\x0' ||
+                        value <= IPEndPoint::MinPort || value > IPEndPoint::MaxPort)
+                    {
+                        fprintf(stdout, "Invalid %s value '%s'; expected 1-65535.\r\n",
+                            option, text.data());
+                        return false;
+                    }
+
+                    destination = static_cast<int>(value);
+                    return true;
+                };
+            if (!parse_proxy_port(http_port, "--proxy-http-port", configuration->client.http_proxy.port) ||
+                !parse_proxy_port(socks_port, "--proxy-socks-port", configuration->client.socks_proxy.port))
+            {
+                return -1;
+            }
+            bool http_enabled = configuration->client.http_proxy.port > IPEndPoint::MinPort &&
+                configuration->client.http_proxy.port <= IPEndPoint::MaxPort;
+            bool socks_enabled = configuration->client.socks_proxy.port > IPEndPoint::MinPort &&
+                configuration->client.socks_proxy.port <= IPEndPoint::MaxPort;
+            if (!http_enabled && !socks_enabled)
+            {
+                fprintf(stdout, "%s\r\n",
+                    "Proxy mode requires a valid configured or command-line HTTP/SOCKS port.");
+                return -1;
+            }
+
+            LOG_INFO("Proxy mode: HTTP=%s:%d SOCKS=%s:%d; TUN/routes/DNS/system-proxy disabled",
+                configuration->client.http_proxy.bind.data(), configuration->client.http_proxy.port,
+                configuration->client.socks_proxy.bind.data(), configuration->client.socks_proxy.port);
+        }
     }
     if (!geo_configuration_path_.empty() && !client_mode_)
     {
@@ -1559,11 +1645,28 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     configuration_path_ = path;
     configuration_ = configuration;
 
-    // Parse network interface configuration
-    std::shared_ptr<NetworkInterface> network_interface = GetNetworkInterface(argc, argv);
+    // A standalone proxy has no network-interface policy.  In particular it
+    // must not parse TUN arguments, select a driver, replace the process-global
+    // DNS list, or inherit LwIP/VNet/static/bypass settings from an old client
+    // command line.
+    std::shared_ptr<NetworkInterface> network_interface =
+        proxy_mode_ ? ppp::make_shared_object<NetworkInterface>() : GetNetworkInterface(argc, argv);
     if (NULLPTR == network_interface)
     {
         return -1;
+    }
+    if (proxy_mode_)
+    {
+        network_interface->SplitMode = NetworkInterface::BypassMode::No;
+#if defined(_WIN32)
+        network_interface->LocalDns = false;
+#endif
+        Socket::SetDefaultFlashTypeOfService(false);
+    }
+    else
+    {
+        Socket::SetDefaultFlashTypeOfService(
+            ppp::ToBoolean(ppp::GetCommandArgument("--tun-flash", argc, argv).data()));
     }
 
     // Passing geo-rules.txt through --config selects multi-outbound geo mode.
@@ -1655,9 +1758,19 @@ void PppApplication::PrintHelpInformation() noexcept
         col_default_width, "yes");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--mode=[client|server]", 
+        col_option_width, "--mode=[client|server|proxy]",
         col_description_width, "Set running mode", 
         col_default_width, "server");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--proxy-http-port=<port>",
+        col_description_width, "Override proxy-mode HTTP port",
+        col_default_width, "config");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--proxy-socks-port=<port>",
+        col_description_width, "Override proxy-mode SOCKS5 port",
+        col_default_width, "config");
 
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--config=<path>", 
@@ -2876,14 +2989,14 @@ static bool Windows_PreferredNetwork(int argc, const char* argv[]) noexcept
 int PppApplication::Main(int argc, const char* argv[]) noexcept
 {
     // Require administrator/root privileges
-    if (!ppp::IsUserAnAdministrator()) // $ROOT is 0.
+    if (!proxy_mode_ && !ppp::IsUserAnAdministrator()) // $ROOT is 0.
     {
         fprintf(stdout, "%s\r\n", "Non-administrators are not allowed to run.");
         return -1;
     }
 
     // Prevent multiple instances
-    ppp::string rerun_name = (client_mode_ ? "client://" : "server://") + configuration_path_;
+    ppp::string rerun_name = (proxy_mode_ ? "proxy://" : (client_mode_ ? "client://" : "server://")) + configuration_path_;
     if (prevent_rerun_.Exists(rerun_name.data()))
     {
         fprintf(stdout, "%s\r\n", "Repeat runs are not allowed.");
@@ -2899,7 +3012,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
 
 #if defined(_WIN32)
     // Windows-specific setup
-    if (client_mode_)
+    if (client_mode_ && !proxy_mode_)
     {
         // Prepare the environment for the virtual Ethernet network device card.
         if (!Windows_PreparedEthernetEnvironment(network_interface_))
@@ -2928,11 +3041,17 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     {
 #if defined(_WIN32)
         // Configure QUIC blocking
-        ppp::net::proxies::HttpProxy::SetSupportExperimentalQuicProtocol(!network_interface_->BlockQUIC);
+        if (!proxy_mode_)
+        {
+            ppp::net::proxies::HttpProxy::SetSupportExperimentalQuicProtocol(!network_interface_->BlockQUIC);
+        }
 #endif
 
         // Set up http-proxy and whether to block QUIC traffic!
-        client->BlockQUIC(network_interface_->BlockQUIC);
+        if (!proxy_mode_)
+        {
+            client->BlockQUIC(network_interface_->BlockQUIC);
+        }
 
 #if defined(_WIN32)
         // Linux does not support global Settings of the http proxy server on the operating system.   
@@ -2946,14 +3065,17 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
         // However, there is a big flaw here, if the _tty terminal window that has been opened cannot take effect, 
         // And the Windows platform can take effect globally is different, so directly cancel the function support 
         // Of setting http proxy on Linux above the operating system.
-        if (network_interface_->SetHttpProxy)
+        if (!proxy_mode_ && network_interface_->SetHttpProxy)
         {
             client->SetHttpProxyToSystemEnv();
         }
 #endif
 
         // Configure the bypass list
-        GLOBAL_.bypass = network_interface_->Bypass;
+        if (!proxy_mode_)
+        {
+            GLOBAL_.bypass = network_interface_->Bypass;
+        }
     }
 
     // Parse restart configuration

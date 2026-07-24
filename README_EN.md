@@ -384,7 +384,9 @@ The complete upstream CLI reference — fully compatible with this fork.
 | `--tun-flash` | Advanced QoS control | `--tun-flash=[yes｜no]` | `no` |
 | `--pull-iplist` | Download country IP list | `--pull-iplist [file]/[country]` | `./ip.txt/CN` |
 | `--config` | Config file path | `--config <path>` | `./appsettings.json` |
-| `--mode` | Run mode | `--mode=[client｜server]` | `server` |
+| `--mode` | Run mode | `--mode=[client｜server｜proxy]` | `server` |
+| `--proxy-http-port` | Override proxy-mode HTTP port | `--proxy-http-port=18080` | Configuration file |
+| `--proxy-socks-port` | Override proxy-mode SOCKS5 port | `--proxy-socks-port=11080` | Configuration file |
 
 > 🔗 **IP list source**: [APNIC official](http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest)
 
@@ -505,6 +507,18 @@ Core settings (tunnel type, server address, encryption keys) go in `appsettings.
 # Minimal — all settings in appsettings.json
 ppp --mode=client
 ```
+
+### Standalone proxy mode
+
+When another proxy application such as Clash or v2rayN owns DNS and routing policy, selected traffic can be forwarded to openppp2:
+
+```powershell
+.\ppp.exe --mode=proxy --config=.\appsettings.json --proxy-http-port=18080 --proxy-socks-port=11080
+```
+
+HTTP/SOCKS5 listener addresses and default ports come from the configuration file; `--proxy-http-port` and `--proxy-socks-port` override only the corresponding port. Configuring `0.0.0.0` listens on every IPv4 interface, but Proxy mode does not modify the firewall automatically. It does not create a TUN/TAP, install a driver, change routes, DNS, the system proxy, firewall or LSP state, and it does not load openppp2 IP/geo split rules. At least one HTTP or SOCKS5 listener must bind successfully or startup fails. Proxy mode ignores other `tun-*` arguments; each proxy stream uses an independent PPP transmission so an incompatible vmux peer cannot reject a logical stream and tear down the primary control link with it.
+
+The other proxy application must route `ppp.exe`, the VPN server hostname, and every resolved A/AAAA server address as `DIRECT`; otherwise a recursive `ppp.exe → external proxy → local openppp2 proxy → ppp.exe` loop can occur. The external proxy is the sole DNS policy owner. Preserve hostnames and use remote resolution when forwarding through SOCKS5. Test UDP/QUIC explicitly and disable QUIC when the upstream SOCKS5 UDP chain is not reliable.
 
 A real-world client startup example:
 

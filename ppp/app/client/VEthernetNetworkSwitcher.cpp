@@ -204,7 +204,9 @@ namespace ppp {
                 }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
-                UpdateNetworkTakeover(now);
+                if (!proxy_only_) {
+                    UpdateNetworkTakeover(now);
+                }
 
                 if (geo_rules_) {
                     ppp::vector<ppp::app::client::geo::GeoRuleEngine::RouteUpdate> expired;
@@ -2156,6 +2158,14 @@ namespace ppp {
                 return true;
             }
 
+            bool VEthernetNetworkSwitcher::ProxyOnly(bool* value) noexcept {
+                bool previous = proxy_only_;
+                if (NULLPTR != value) {
+                    proxy_only_ = *value;
+                }
+                return previous;
+            }
+
 #if defined(_WIN32)
             bool VEthernetNetworkSwitcher::LocalDns(bool* value) noexcept {
                 bool previous = local_dns_enabled_;
@@ -2937,6 +2947,7 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::Open(const std::shared_ptr<ITap>& tap) noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: starting");
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                if (!proxy_only_) {
                 // Get and retrieve the current underlying Ethernet interface information!
 #if defined(_WIN32)
                 underlying_ni_ = Windows_GetUnderlyingNetowrkInterface(tap, preferred_nic_);
@@ -2967,6 +2978,7 @@ namespace ppp {
                 // Compatibility by all means try to check and fix the gateway route of the physical network card once, 
                 // Otherwise there will be no network with all kinds of chain problems!
                 FixUnderlyingNgw();
+                }
 #endif
                 // Construction of VEtherent virtual Ethernet switcher processing framework.
                 if (!VEthernet::Open(tap)) {
@@ -2976,6 +2988,7 @@ namespace ppp {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: VEthernet::Open succeeded");
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                if (!proxy_only_) {
 #if defined(_WIN32)
                 // Get network interface information for TAP-Windows virtual Ethernet devices!
                 tun_ni_ = Windows_GetTapNetworkInterface(tap);
@@ -2999,6 +3012,7 @@ namespace ppp {
                     return false;
                 }
 #endif
+                }
 #endif
 
                 // Open client-side logger
@@ -3120,6 +3134,16 @@ namespace ppp {
                 qos_             = std::move(qos);
                 exchanger_       = exchanger;
                 outbound_exchangers_ = std::move(opened_outbounds);
+
+                if (proxy_only_) {
+                    if (NULLPTR == http_proxy_ && NULLPTR == socks_proxy_) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::Open: proxy-only mode requires at least one local listener");
+                        return false;
+                    }
+
+                    LOG_INFO("VEthernetNetworkSwitcher::Open: proxy-only connected; route, DNS and geo policy are disabled");
+                    return true;
+                }
 
                 // New the beast network bandwidth aggregator.
                 if (static_mode_ && configuration_->udp.static_.aggligator > 0) {
