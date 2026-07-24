@@ -185,17 +185,56 @@ namespace ppp
             return true;
         }
 
+        static void YieldContext_ResumeWithBackoff(YieldContext* y, int attempts) noexcept
+        {
+            if (NULLPTR == y || y->Resume())
+            {
+                return;
+            }
+
+            // A completion callback can arrive just before Suspend() finishes
+            // changing the state to STATUS_SUSPEND.  The old implementation
+            // reposted immediately and without a limit; a corrupted or stale
+            // state therefore became a permanent io_context busy loop.
+            if (attempts >= 64)
+            {
+                return;
+            }
+
+            std::shared_ptr<boost::asio::steady_timer> timer;
+            boost::asio::strand<boost::asio::io_context::executor_type>* strand = y->GetStrand();
+            if (strand)
+            {
+                timer = make_shared_object<boost::asio::steady_timer>(*strand);
+            }
+            else
+            {
+                timer = make_shared_object<boost::asio::steady_timer>(y->GetContext());
+            }
+
+            if (NULLPTR == timer)
+            {
+                return;
+            }
+
+            timer->expires_after(std::chrono::milliseconds(1));
+            timer->async_wait(
+                [y, attempts, timer](const boost::system::error_code& ec) noexcept
+                {
+                    if (!ec)
+                    {
+                        YieldContext_ResumeWithBackoff(y, attempts + 1);
+                    }
+                });
+        }
+
         bool YieldContext::R() noexcept
         {
             YieldContext* y = this;
             auto invoked =
                 [y]() noexcept -> void
                 {
-                    bool resumed = y->Resume();
-                    if (!resumed)
-                    {
-                        y->R();
-                    }
+                    YieldContext_ResumeWithBackoff(y, 0);
                 };
 
             boost::asio::io_context* context = &y->context_;
