@@ -234,10 +234,12 @@ namespace ppp {
                 // terminating a noexcept server worker.
                 struct ResolveState final {
                     std::shared_ptr<protocol_resolver> resolver;
+                    std::shared_ptr<boost::asio::steady_timer> timer;
                     protocol_endpoint                  result;
                     ppp::string                        hostname;
                     ppp::string                        service;
                     YieldContext*                      yield = NULLPTR;
+                    std::atomic<int>                   completion{ 0 };
                     int                                port = IPEndPoint::MinPort;
                 };
 
@@ -254,6 +256,12 @@ namespace ppp {
                 if (NULLPTR == state->resolver) {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 }
+                state->timer = strand ?
+                    make_shared_object<boost::asio::steady_timer>(*strand) :
+                    make_shared_object<boost::asio::steady_timer>(context);
+                if (NULLPTR == state->timer) {
+                    return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
+                }
 
                 state->result = IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 state->hostname.assign(hostname);
@@ -264,20 +272,53 @@ namespace ppp {
                 bool posted = ppp::threading::Executors::Post(addressof(context), strand,
                     [state]() noexcept {
                         try {
+                            state->timer->expires_after(std::chrono::seconds(5));
+                            state->timer->async_wait(
+                                [state](const boost::system::error_code& ec) noexcept {
+                                    if (ec) {
+                                        return;
+                                    }
+
+                                    int pending = 0;
+                                    if (state->completion.compare_exchange_strong(pending, 2)) {
+                                        try {
+                                            state->resolver->cancel();
+                                        } catch (...) {
+                                        }
+                                        state->yield->R();
+                                    }
+                                });
+
                             state->resolver->async_resolve(state->hostname, state->service,
                                 [state](const boost::system::error_code& ec,
                                     const typename protocol_resolver::results_type& results) noexcept {
+                                    int pending = 0;
+                                    if (!state->completion.compare_exchange_strong(pending, 1)) {
+                                        return;
+                                    }
+
                                     if (!ec) {
                                         state->result =
                                             ppp::net::asio::internal::GetAddressByHostName<TProtocol>(
                                                 results, state->port);
                                     }
 
+                                    try {
+                                        state->timer->cancel();
+                                    } catch (...) {
+                                    }
                                     state->yield->R();
                                 });
                         }
                         catch (...) {
-                            state->yield->R();
+                            int pending = 0;
+                            if (state->completion.compare_exchange_strong(pending, 3)) {
+                                try {
+                                    state->timer->cancel();
+                                } catch (...) {
+                                }
+                                state->yield->R();
+                            }
                         }
                     });
                 if (!posted) {

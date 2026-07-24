@@ -106,30 +106,18 @@ namespace ppp {
                             }
                         }
 
-                        // Resolve in the current server worker without suspending
-                        // the custom stackful coroutine.  Linux servers were
-                        // observed terminating immediately after a domain SYN
-                        // even after all asynchronous resolver state was moved to
-                        // the heap, while literal-IP SYN packets remained stable.
-                        // The synchronous resolver is bounded by the operating
-                        // system resolver and affects only this transient worker;
-                        // it provides a safe baseline for remote HTTP/SOCKS
-                        // hostname CONNECT requests.
+                        // Resolving synchronously here can starve the complete
+                        // server when it runs with a single I/O worker.  Keep the
+                        // packet coroutine suspended while the resolver runs on
+                        // Asio's asynchronous resolver service.
                         if (y) {
-                            try {
-                                boost::asio::ip::basic_resolver<TProtocol> resolver(y.GetContext());
-                                boost::asio::ip::basic_endpoint<TProtocol> endpoint =
-                                    ppp::net::asio::GetAddressByHostName<TProtocol>(
-                                        resolver, hostname.data(), port);
-                                LOG_DEBUG("VirtualEthernetLinklayer::PACKET_IPEndPoint: synchronous DNS host=%s port=%d resolved=%s",
-                                    hostname.data(), port,
-                                    Ipep::ToAddressString<ppp::string>(endpoint.address()).data());
-                                return endpoint;
-                            } catch (...) {
-                                LOG_DEBUG("VirtualEthernetLinklayer::PACKET_IPEndPoint: synchronous DNS threw, host=%s port=%d",
-                                    hostname.data(), port);
-                                return boost::asio::ip::basic_endpoint<TProtocol>(boost::asio::ip::address_v4::any(), 0);
-                            }
+                            boost::asio::ip::basic_endpoint<TProtocol> endpoint =
+                                ppp::coroutines::asio::GetAddressByHostName<TProtocol>(
+                                    hostname.data(), port, y);
+                            LOG_DEBUG("VirtualEthernetLinklayer::PACKET_IPEndPoint: asynchronous DNS host=%s port=%d resolved=%s",
+                                hostname.data(), port,
+                                Ipep::ToAddressString<ppp::string>(endpoint.address()).data());
+                            return endpoint;
                         } else {
                             return boost::asio::ip::basic_endpoint<TProtocol>(boost::asio::ip::address_v4::any(), 0);
                         }
