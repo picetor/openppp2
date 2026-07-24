@@ -36,7 +36,7 @@ namespace ppp {
                 // Returns an empty endpoint (port 0) on any failure.
                 // -----------------------------------------------------------------
                 template <class TProtocol>
-                static boost::asio::ip::basic_endpoint<TProtocol>       PACKET_IPEndPoint(const std::shared_ptr<ppp::net::Firewall>& firewall, Byte*& stream, int& packet_length, YieldContext& y, ppp::string& hostname) noexcept 
+                static boost::asio::ip::basic_endpoint<TProtocol>       PACKET_IPEndPoint(const std::shared_ptr<ppp::net::Firewall>& firewall, Byte*& stream, int& packet_length, YieldContext& y, ppp::string& hostname, bool defer_domain = false) noexcept 
                 {
                     /* Packet wire format:
                        ACTION(1) ADDR_LEN(1) HOSTNAME(ADDR_LEN) PORT_LEN(1) PORT_STRING(PORT_LEN) */
@@ -104,6 +104,11 @@ namespace ppp {
                             if (firewall->IsDropNetworkDomains(hostname)) {
                                 return boost::asio::ip::basic_endpoint<TProtocol>(boost::asio::ip::address_v4::any(), 0);
                             }
+                        }
+
+                        if (defer_domain) {
+                            return boost::asio::ip::basic_endpoint<TProtocol>(
+                                boost::asio::ip::address_v4::any(), port);
                         }
 
                         // Resolving synchronously here can starve the complete
@@ -581,8 +586,15 @@ namespace ppp {
                     if (connection_id != 0) {
                         ppp::string destinationHost;
                         boost::asio::ip::tcp::endpoint destinationEP = 
-                            global::PACKET_IPEndPoint<boost::asio::ip::tcp>(GetFirewall(), p, packet_length, y, destinationHost);
+                            global::PACKET_IPEndPoint<boost::asio::ip::tcp>(
+                                GetFirewall(), p, packet_length, y, destinationHost, true);
                         if (destinationEP.port() != 0) {
+                            if (destinationEP.address().is_unspecified()) {
+                                return OnConnectHost(
+                                    transmission, connection_id, destinationHost,
+                                    destinationEP.port(), y);
+                            }
+
                             if (OnPreparedConnect(transmission, connection_id, destinationHost, destinationEP, y)) {
                                 return OnConnect(transmission, connection_id, destinationEP, y);
                             }

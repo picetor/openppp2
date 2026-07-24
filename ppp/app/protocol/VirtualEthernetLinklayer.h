@@ -222,6 +222,8 @@ namespace ppp {
                 virtual bool                                                OnPush(const ITransmissionPtr& transmission, int connection_id, Byte* packet, int packet_length, YieldContext& y) noexcept { return true; }
                 /** @brief Handles inbound TCP connect request. */
                 virtual bool                                                OnConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept { return true; }
+                /** @brief Handles an inbound TCP connect request whose destination is a domain name. */
+                virtual bool                                                OnConnectHost(const ITransmissionPtr& transmission, int connection_id, const ppp::string& hostname, int port, YieldContext& y) noexcept { return false; }
                 /** @brief Handles inbound connect acknowledgment. */
                 virtual bool                                                OnConnectOK(const ITransmissionPtr& transmission, int connection_id, Byte error_code, YieldContext& y) noexcept { return true; }
                 /** @brief Handles inbound disconnect event. */
