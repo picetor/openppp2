@@ -61,6 +61,34 @@ namespace ppp {
                     Host = destinationHost;
                     return true;
                 }
+                virtual bool                                                OnConnectHost(const ITransmissionPtr& transmission, int connection_id, const ppp::string& hostname, int port, YieldContext& y) noexcept override {
+                    boost::asio::ip::tcp::endpoint destinationEP =
+                        ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                            hostname.data(), port, y);
+
+                    const boost::asio::ip::address destinationIP = destinationEP.address();
+                    if (destinationEP.port() == 0 ||
+                        destinationIP.is_unspecified() ||
+                        destinationIP.is_multicast()) {
+                        return DoConnectOK(
+                            transmission, connection_id,
+                            ERROR_CODES::ERRORS_CONNECT_TO_DESTINATION, y);
+                    }
+
+                    std::shared_ptr<ppp::net::Firewall> firewall = GetFirewall();
+                    if (NULLPTR != firewall && firewall->IsDropNetworkSegment(destinationIP)) {
+                        return DoConnectOK(
+                            transmission, connection_id,
+                            ERROR_CODES::ERRORS_CONNECT_TO_DESTINATION, y);
+                    }
+
+                    LOG_DEBUG("VETcpip::OnConnectHost: host=%s resolved=%s",
+                        hostname.data(),
+                        ppp::net::Ipep::ToAddressString<ppp::string>(destinationEP).data());
+                    return OnPreparedConnect(
+                        transmission, connection_id, hostname, destinationEP, y) &&
+                        OnConnect(transmission, connection_id, destinationEP, y);
+                }
                 virtual bool                                                OnConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept override {
                     Connect = true;
                     ConnectId = connection_id;
