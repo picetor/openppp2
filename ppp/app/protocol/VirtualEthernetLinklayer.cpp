@@ -36,7 +36,7 @@ namespace ppp {
                 // Returns an empty endpoint (port 0) on any failure.
                 // -----------------------------------------------------------------
                 template <class TProtocol>
-                static boost::asio::ip::basic_endpoint<TProtocol>       PACKET_IPEndPoint(const std::shared_ptr<ppp::net::Firewall>& firewall, Byte*& stream, int& packet_length, YieldContext& y, ppp::string& hostname, bool defer_domain = false) noexcept 
+                static boost::asio::ip::basic_endpoint<TProtocol>       PACKET_IPEndPoint(const std::shared_ptr<ppp::net::Firewall>& firewall, Byte*& stream, int& packet_length, YieldContext& y, ppp::string& hostname, bool defer_domain = false) noexcept
                 {
                     /* Packet wire format:
                        ACTION(1) ADDR_LEN(1) HOSTNAME(ADDR_LEN) PORT_LEN(1) PORT_STRING(PORT_LEN) */
