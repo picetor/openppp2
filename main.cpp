@@ -1791,6 +1791,36 @@ static ppp::string GetBoostVersionString() noexcept
 // Print comprehensive help information
 void PppApplication::PrintHelpInformation() noexcept
 {
+#if defined(_WIN32)
+    auto printf = [](const char* format, auto&&... args) noexcept {
+        int length = std::snprintf(NULLPTR, 0, format, std::forward<decltype(args)>(args)...);
+        if (length < 1) {
+            return length;
+        }
+
+        std::vector<char> utf8(static_cast<std::size_t>(length) + 1);
+        std::snprintf(utf8.data(), utf8.size(), format, std::forward<decltype(args)>(args)...);
+
+        HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (output != INVALID_HANDLE_VALUE && GetConsoleMode(output, &mode)) {
+            int wide_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), length, NULLPTR, 0);
+            if (wide_length > 0) {
+                std::vector<wchar_t> wide(static_cast<std::size_t>(wide_length));
+                if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), length,
+                    wide.data(), wide_length) == wide_length) {
+                    DWORD written = 0;
+                    if (WriteConsoleW(output, wide.data(), static_cast<DWORD>(wide.size()), &written, NULLPTR)) {
+                        return length;
+                    }
+                }
+            }
+        }
+
+        return static_cast<int>(fwrite(utf8.data(), 1, static_cast<std::size_t>(length), stdout));
+    };
+#endif
+
     ppp::string execution_file_name = ppp::GetExecutionFileName();
     ppp::string cwd = ppp::GetCurrentDirectoryPath();
     
