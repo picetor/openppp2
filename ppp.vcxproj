@@ -282,7 +282,9 @@
     <ClCompile Include="common\lwip\core\timeouts.c" />
     <ClCompile Include="common\lwip\core\udp.c" />
     <ClCompile Include="common\lwip\my\sys_arch.c" />
-    <ClCompile Include="main.cpp" />
+    <ClCompile Include="main.cpp">
+      <AdditionalOptions>/source-charset:utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="ppp\app\client\dns\Rule.cpp" />
     <ClCompile Include="ppp\app\client\geo\GeoRuleEngine.cpp" />
     <ClCompile Include="ppp\app\client\proxys\VEthernetHttpProxyConnection.cpp" />

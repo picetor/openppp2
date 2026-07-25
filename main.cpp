@@ -490,7 +490,7 @@ PppApplication::PppApplication() noexcept
 
 #if defined(_WIN32)
     // Set console window title
-    SetConsoleTitleW(L"PPP PRIVATE NETWORK™ 2");
+    SetConsoleTitleW(L"PPP PRIVATE NETWORK\u2122 2");
 
     // Set console buffer and window size on Windows
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE); 
@@ -1817,7 +1817,23 @@ void PppApplication::PrintHelpInformation() noexcept
             }
         }
 
-        return static_cast<int>(fwrite(utf8.data(), 1, static_cast<std::size_t>(length), stdout));
+        ppp::string compatible(utf8.data(), static_cast<std::size_t>(length));
+        const std::pair<const char*, const char*> box_characters[] = {
+            { "\xE2\x94\x8C", "+" }, { "\xE2\x94\x90", "+" },
+            { "\xE2\x94\x94", "+" }, { "\xE2\x94\x98", "+" },
+            { "\xE2\x94\x9C", "+" }, { "\xE2\x94\xA4", "+" },
+            { "\xE2\x94\xAC", "+" }, { "\xE2\x94\xB4", "+" },
+            { "\xE2\x94\xBC", "+" }, { "\xE2\x94\x80", "-" },
+            { "\xE2\x94\x82", "|" }
+        };
+        for (const auto& character : box_characters) {
+            std::size_t offset = 0;
+            while ((offset = compatible.find(character.first, offset)) != ppp::string::npos) {
+                compatible.replace(offset, std::strlen(character.first), character.second);
+                offset += std::strlen(character.second);
+            }
+        }
+        return static_cast<int>(fwrite(compatible.data(), 1, compatible.size(), stdout));
     };
 #endif
 
