@@ -164,67 +164,21 @@ namespace ppp {
                     return true;
                 }
 
-                auto base = shared_from_this();
-                auto self = std::dynamic_pointer_cast<VirtualEthernetExchanger>(base);
-                if (NULLPTR == self) {
-                    return true;
-                }
-
-                std::shared_ptr<boost::asio::io_context> context = GetContext();
-                if (NULLPTR == context) {
-                    return true;
-                }
-
-                // Do not suspend the main protocol read coroutine for DNS.  A
-                // fresh coroutine performs the outbound connect after the
-                // bounded resolver pool posts the result back to this context.
-                try {
-                    boost::asio::post(
-                        ppp::coroutines::asio::GetAddressResolverThreadPool<boost::asio::ip::tcp>(),
-                        [self, context, transmission, connection_id, hostname, port]() noexcept {
-                            boost::asio::ip::tcp::endpoint destinationEP(
-                                boost::asio::ip::address_v4::any(), 0);
-                            try {
-                                boost::asio::io_context resolver_context;
-                                boost::asio::ip::tcp::resolver resolver(resolver_context);
-                                destinationEP = ppp::net::asio::GetAddressByHostName<boost::asio::ip::tcp>(
-                                    resolver, hostname.data(), port);
-                            } catch (...) {
-                            }
-
-                            boost::asio::post(*context,
-                                [self, context, transmission, connection_id, hostname, destinationEP]() noexcept {
-                                    YieldContext::Spawn(*context,
-                                        [self, transmission, connection_id, hostname, destinationEP](YieldContext& child_y) noexcept {
-                                            if (self->disposed_) {
-                                                return;
-                                            }
-
-                                            if (destinationEP.port() == 0 ||
-                                                destinationEP.address().is_unspecified()) {
-                                                self->DoConnectOK(
-                                                    transmission, connection_id,
-                                                    ERROR_CODES::ERRORS_CONNECT_TO_DESTINATION,
-                                                    child_y);
-                                                return;
-                                            }
-
-                                            LOG_DEBUG("VirtualEthernetExchanger::OnConnectHost: host=%s resolved=%s",
-                                                hostname.data(),
-                                                Ipep::ToAddressString<ppp::string>(destinationEP).data());
-                                            self->OnConnect(
-                                                transmission, connection_id,
-                                                destinationEP, child_y);
-                                        });
-                                });
-                        });
-                } catch (...) {
-                    DoConnectOK(
+                boost::asio::ip::tcp::endpoint destinationEP =
+                    ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                        hostname.data(), port, y);
+                if (destinationEP.port() == 0 ||
+                    destinationEP.address().is_unspecified() ||
+                    destinationEP.address().is_multicast()) {
+                    return DoConnectOK(
                         transmission, connection_id,
                         ERROR_CODES::ERRORS_CONNECT_TO_DESTINATION, y);
                 }
 
-                return true;
+                LOG_DEBUG("VirtualEthernetExchanger::OnConnectHost: host=%s resolved=%s",
+                    hostname.data(),
+                    Ipep::ToAddressString<ppp::string>(destinationEP).data());
+                return OnConnect(transmission, connection_id, destinationEP, y);
             }
 
             bool VirtualEthernetExchanger::OnConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept {
