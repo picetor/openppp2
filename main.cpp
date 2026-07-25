@@ -1,4 +1,4 @@
-﻿#include <glibc_compat.h>
+#include <glibc_compat.h>
 #include <ppp/configurations/AppConfiguration.h>
 #include <ppp/Int128.h>
 #include <ppp/io/File.h>
@@ -1001,6 +1001,67 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     // Print network interface details
     if (NULLPTR != client)
     {
+        if (client->IsProxyOnly())
+        {
+            printfn("%s", "TUNNEL");
+            printfn("%s", section_separator.data());
+            printfn("Mode                  : %s", "proxy-only");
+            printfn("Adapter               : %s", "none");
+
+            if (std::shared_ptr<ITap> tap = client->GetTap(); NULLPTR != tap)
+            {
+                if (tap->IPAddress != ppp::net::IPEndPoint::AnyAddress)
+                {
+                    printfn("Logical IPv4          : %s", ppp::net::IPEndPoint::ToAddressString(tap->IPAddress).data());
+                }
+                if (tap->IPv6Address.is_v6() && !tap->IPv6Address.is_unspecified())
+                {
+                    printfn("Logical IPv6          : %s", tap->IPv6Address.to_string().data());
+                }
+            }
+            if (std::shared_ptr<AppConfiguration> configuration = configuration_;
+                NULLPTR != configuration && configuration->udp.dns.redirect.size() > 0)
+            {
+                printfn("Tunnel DNS            : %s", configuration->udp.dns.redirect.data());
+            }
+
+            if (std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
+                NULLPTR != exchanger)
+            {
+                const char* network_states[] = { "connecting", "established", "reconnecting" };
+                int link_state = static_cast<int>(exchanger->GetNetworkState());
+                int mux_state = static_cast<int>(exchanger->GetMuxNetworkState());
+                const char* link_state_text =
+                    link_state >= 0 && link_state < arraysizeof(network_states) ?
+                    network_states[link_state] : "unknown";
+                printfn("Link State            : %s", link_state_text);
+
+                if (client->IsMuxEnabled())
+                {
+                    ppp::string mux_state_text =
+                        mux_state >= 0 && mux_state < arraysizeof(network_states) ?
+                        network_states[mux_state] : "unknown";
+                    mux_state_text += ", ";
+                    mux_state_text += stl::to_string<ppp::string>(client->Mux(NULLPTR));
+                    mux_state_text += "-channel";
+                    printfn("Mux State             : %s", mux_state_text.data());
+                }
+                else
+                {
+                    printfn("Mux State             : %s", "disabled");
+                }
+            }
+            else
+            {
+                printfn("Link State            : %s", "unavailable");
+                printfn("Mux State             : %s", "unavailable");
+            }
+
+            printfn("TCP/IP Transport      : %s", "PPP tunnel");
+            printfn("DNS Transport         : %s", "PPP tunnel");
+            printfn("");
+        }
+
         struct
         {
             std::shared_ptr<VEthernetNetworkSwitcher::NetworkInterface> ni;
@@ -1012,6 +1073,10 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         };
         for (auto&& sti : stnis)
         {
+            if (client->IsProxyOnly() && sti.tun)
+            {
+                continue;
+            }
             auto ni = sti.ni; 
             if (NULLPTR != ni)
             {
