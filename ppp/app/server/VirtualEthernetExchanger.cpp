@@ -155,39 +155,6 @@ namespace ppp {
                 return firewall_;
             }
 
-            bool VirtualEthernetExchanger::OnConnectHost(
-                const ITransmissionPtr& transmission, int connection_id,
-                const ppp::string& hostname, int port, YieldContext& y) noexcept {
-                if (disposed_ || NULLPTR == transmission || connection_id == 0 ||
-                    hostname.empty() || port <= IPEndPoint::MinPort ||
-                    port > IPEndPoint::MaxPort) {
-                    return true;
-                }
-
-                boost::asio::ip::tcp::endpoint destinationEP(
-                    boost::asio::ip::address_v4::any(), 0);
-                try {
-                    boost::asio::io_context resolver_context;
-                    boost::asio::ip::tcp::resolver resolver(resolver_context);
-                    destinationEP =
-                        ppp::net::asio::GetAddressByHostName<boost::asio::ip::tcp>(
-                            resolver, hostname.data(), port);
-                } catch (...) {
-                }
-                if (destinationEP.port() == 0 ||
-                    destinationEP.address().is_unspecified() ||
-                    destinationEP.address().is_multicast()) {
-                    return DoConnectOK(
-                        transmission, connection_id,
-                        ERROR_CODES::ERRORS_CONNECT_TO_DESTINATION, y);
-                }
-
-                LOG_DEBUG("VirtualEthernetExchanger::OnConnectHost: host=%s resolved=%s",
-                    hostname.data(),
-                    Ipep::ToAddressString<ppp::string>(destinationEP).data());
-                return OnConnect(transmission, connection_id, destinationEP, y);
-            }
-
             bool VirtualEthernetExchanger::OnConnect(const ITransmissionPtr& transmission, int connection_id, const boost::asio::ip::tcp::endpoint& destinationEP, YieldContext& y) noexcept {
                 if (disposed_) {
                     return false;

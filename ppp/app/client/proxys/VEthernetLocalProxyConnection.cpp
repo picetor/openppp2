@@ -192,6 +192,42 @@ namespace ppp {
                         }
                     }
 
+                    // Proxy-only changes only the local traffic ingress.  Keep
+                    // the tunnel side identical to TUN mode, where TCP
+                    // connections always carry a resolved IP endpoint.
+                    if (destinationEP->Type == ppp::app::protocol::AddressType::Domain) {
+                        auto switcher = exchanger_->GetSwitcher();
+                        if (NULLPTR != switcher && switcher->IsProxyOnly()) {
+                            boost::asio::ip::tcp::endpoint resolvedEP(
+                                boost::asio::ip::address_v4::any(), 0);
+                            try {
+                                boost::asio::io_context resolver_context;
+                                boost::asio::ip::tcp::resolver resolver(resolver_context);
+                                resolvedEP =
+                                    ppp::net::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                                        resolver, destinationEP->Host.data(), destinationEP->Port);
+                            } catch (...) {
+                            }
+
+                            const boost::asio::ip::address resolvedIP = resolvedEP.address();
+                            if (resolvedEP.port() == 0 ||
+                                resolvedIP.is_unspecified() ||
+                                resolvedIP.is_multicast()) {
+                                LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: proxy-only resolve failed, destination=%s:%d",
+                                    destinationEP->Host.data(), destinationEP->Port);
+                                return false;
+                            }
+
+                            LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: proxy-only resolved, destination=%s:%d, endpoint=%s",
+                                destinationEP->Host.data(), destinationEP->Port,
+                                ppp::net::Ipep::ToAddressString<ppp::string>(resolvedEP).data());
+                            destinationEP->Host = resolvedIP.to_string();
+                            destinationEP->Type = resolvedIP.is_v4() ?
+                                ppp::app::protocol::AddressType::IPv4 :
+                                ppp::app::protocol::AddressType::IPv6;
+                        }
+                    }
+
                     int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger_, "local-proxy", this,
                         destinationEP->Host, destinationEP->Port, socket, connection_mux_, y);
                     if (mux_status < 1) {
