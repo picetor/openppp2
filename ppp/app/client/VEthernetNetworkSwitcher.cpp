@@ -2175,6 +2175,91 @@ namespace ppp {
                 return previous;
             }
 
+            boost::asio::ip::address VEthernetNetworkSwitcher::ResolveProxyDomainThroughTunnel(
+                const ppp::string& hostname, ppp::coroutines::YieldContext& y) noexcept {
+                if (!proxy_only_ || hostname.empty() || !y) {
+                    return boost::asio::ip::address();
+                }
+
+                ::dns::Message message;
+                static std::atomic<uint16_t> query_id{ 0 };
+                uint16_t id = ++query_id;
+                if (id == 0) {
+                    id = ++query_id;
+                }
+                message.mRD = 1;
+                message.mId = id;
+                message.questions.emplace_back(::dns::QuestionSection(
+                    stl::transform<std::string>(hostname),
+                    ::dns::RecordType::kA,
+                    ::dns::RecordClass::kIN));
+
+                auto query = make_shared_object<ppp::string>();
+                if (NULLPTR == query) {
+                    return boost::asio::ip::address();
+                }
+                query->resize(PPP_MAX_DNS_PACKET_BUFFER_SIZE);
+                std::size_t query_size = 0;
+                if (message.encode(&(*query)[0], query->size(), query_size) !=
+                    ::dns::BufferResult::NoError || query_size == 0) {
+                    return boost::asio::ip::address();
+                }
+                query->resize(query_size);
+
+                struct ResolveState final {
+                    std::atomic<bool> completed{ false };
+                    boost::asio::ip::address address;
+                };
+                auto state = make_shared_object<ResolveState>();
+                if (NULLPTR == state) {
+                    return boost::asio::ip::address();
+                }
+
+                DispatchLocalDnsQuery(query, false,
+                    [state, &y, hostname](const std::shared_ptr<ppp::string>& response) noexcept {
+                        boost::asio::ip::address address;
+                        if (response && !response->empty()) {
+                            ::dns::Message answer;
+                            if (answer.decode(
+                                    reinterpret_cast<const uint8_t*>(response->data()),
+                                    response->size()) == ::dns::BufferResult::NoError &&
+                                answer.mQr == 1 &&
+                                answer.mRCode == static_cast<uint16_t>(::dns::ResponseCode::kNOERROR)) {
+                                for (::dns::ResourceRecord& record : answer.answers) {
+                                    if (record.mClass != ::dns::RecordClass::kIN ||
+                                        record.mType != ::dns::RecordType::kA) {
+                                        continue;
+                                    }
+                                    auto rdata = record.getRData<::dns::RDataA>();
+                                    if (NULLPTR == rdata) {
+                                        continue;
+                                    }
+                                    IPEndPoint endpoint(
+                                        AddressFamily::InterNetwork,
+                                        rdata->getAddress(), 4,
+                                        IPEndPoint::MinPort);
+                                    address = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(endpoint).address();
+                                    if (address.is_v4() && !IPEndPoint::IsInvalid(address)) {
+                                        break;
+                                    }
+                                    address = boost::asio::ip::address();
+                                }
+                            }
+                        }
+
+                        if (!state->completed.exchange(true)) {
+                            state->address = address;
+                            LOG_DEBUG("VEthernetNetworkSwitcher::ResolveProxyDomainThroughTunnel: host=%s, address=%s",
+                                hostname.data(),
+                                address.is_unspecified() ? "(none)" : address.to_string().data());
+                            y.R();
+                        }
+                    });
+
+                y.Suspend();
+                return state->address;
+            }
+
             bool VEthernetNetworkSwitcher::SetHttpProxyToSystemEnv() noexcept {
                 // Windows platform uses the system's Internet function library to set the system HTTP proxy environment.
                 auto http_proxy = GetHttpProxy();

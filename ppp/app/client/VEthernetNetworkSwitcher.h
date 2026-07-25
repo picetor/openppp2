@@ -144,6 +144,9 @@ namespace ppp {
                 virtual bool                                                        SetHttpProxyToSystemEnv()    noexcept;
                 virtual bool                                                        ClearHttpProxyToSystemEnv()  noexcept;
                 bool                                                                LocalDns(bool* value)        noexcept;
+                boost::asio::ip::address                                             ResolveProxyDomainThroughTunnel(
+                    const ppp::string& hostname,
+                    ppp::coroutines::YieldContext& y) noexcept;
 #elif defined(_LINUX)   
                 ProtectorNetworkPtr                                                 GetProtectorNetwork()        noexcept { return protect_network_; }
 #endif  

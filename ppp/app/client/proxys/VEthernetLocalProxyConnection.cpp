@@ -198,6 +198,12 @@ namespace ppp {
                     if (destinationEP->Type == ppp::app::protocol::AddressType::Domain) {
                         auto switcher = exchanger_->GetSwitcher();
                         if (NULLPTR != switcher && switcher->IsProxyOnly()) {
+#if defined(_WIN32)
+                            const boost::asio::ip::address resolvedIP =
+                                switcher->ResolveProxyDomainThroughTunnel(destinationEP->Host, y);
+                            boost::asio::ip::tcp::endpoint resolvedEP(
+                                resolvedIP, destinationEP->Port);
+#else
                             boost::asio::ip::tcp::endpoint resolvedEP(
                                 boost::asio::ip::address_v4::any(), 0);
                             try {
@@ -210,6 +216,7 @@ namespace ppp {
                             }
 
                             const boost::asio::ip::address resolvedIP = resolvedEP.address();
+#endif
                             if (resolvedEP.port() == 0 ||
                                 resolvedIP.is_unspecified() ||
                                 resolvedIP.is_multicast()) {
