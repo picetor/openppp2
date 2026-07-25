@@ -5,13 +5,16 @@ namespace ppp
     namespace tap
     {
         TapStub::TapStub(const std::shared_ptr<boost::asio::io_context>& context,
-            uint32_t ip, uint32_t gw, uint32_t mask) noexcept
-            : ITap(context, "proxy-stub", INVALID_HANDLE_VALUE, ip, gw, mask, false)
+                        uint32_t ip, uint32_t gw, uint32_t mask,
+                        const ppp::vector<boost::asio::ip::address>& dns_addresses) noexcept
+                        : ITap(context, "proxy-stub", INVALID_HANDLE_VALUE, ip, gw, mask, false),
+                            dns_addresses_(dns_addresses)
         {
         }
 
         std::shared_ptr<TapStub> TapStub::Create(
-            const std::shared_ptr<boost::asio::io_context>& context) noexcept
+            const std::shared_ptr<boost::asio::io_context>& context,
+            const ppp::vector<boost::asio::ip::address>& dns_addresses) noexcept
         {
             if (NULLPTR == context)
             {
@@ -22,7 +25,8 @@ namespace ppp
                 context,
                 ::inet_addr("10.255.255.1"),
                 ::inet_addr("10.255.255.2"),
-                ::inet_addr("255.255.255.252"));
+                ::inet_addr("255.255.255.252"),
+                dns_addresses);
         }
 
         bool TapStub::IsReady() noexcept
@@ -48,7 +52,8 @@ namespace ppp
             }
 
             opened_ = true;
-            LOG_INFO("TapStub::Open: proxy-only runtime, no kernel adapter created");
+            LOG_INFO("TapStub::Open: proxy-only runtime, no kernel adapter created, tunnel_dns=%llu",
+                static_cast<unsigned long long>(dns_addresses_.size()));
             return true;
         }
 

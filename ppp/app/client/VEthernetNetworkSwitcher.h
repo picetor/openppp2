@@ -341,6 +341,7 @@ namespace ppp {
                 void                                                                StopDebugWatchdog() noexcept;
 #endif
                 bool                                                                AddRemoteEndPointToIPList(const boost::asio::ip::address& gw) noexcept;
+                bool                                                                UpdateRemoteUri() noexcept;
                 
             private:    
                 bool                                                                ER(const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<IcmpFrame>& frame, int ttl, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;

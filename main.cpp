@@ -490,7 +490,7 @@ PppApplication::PppApplication() noexcept
 
 #if defined(_WIN32)
     // Set console window title
-    SetConsoleTitle(TEXT("PPP PRIVATE NETWORK™ 2"));
+    SetConsoleTitleW(L"PPP PRIVATE NETWORK™ 2");
 
     // Set console buffer and window size on Windows
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE); 
@@ -910,7 +910,14 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         if (ppp::string remote_uri = client->GetRemoteUri(); remote_uri.size() > 0)
         {
             std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
-            printfn("VPN Server            : %s [%s]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
+            if (client->IsProxyOnly())
+            {
+                printfn("VPN Server            : %s [%s] [proxy]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
+            }
+            else
+            {
+                printfn("VPN Server            : %s [%s]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
+            }
         }
 
         // Local proxy servers
@@ -1333,7 +1340,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             // kernel interface.
             if (proxy_mode_)
             {
-                tap = TapStub::Create(context);
+                tap = TapStub::Create(context, network_interface->DnsAddresses);
             }
             else
             {
@@ -1712,6 +1719,7 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     if (proxy_mode_)
     {
         network_interface->SplitMode = NetworkInterface::BypassMode::No;
+        GetDnsAddresses(network_interface->DnsAddresses, argc, argv);
         // Proxy-only does not parse the TUN interface settings, but it still
         // shares the normal client's vmux transport policy.
         network_interface->Mux = (uint16_t)std::max<int>(

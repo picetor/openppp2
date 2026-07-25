@@ -11,6 +11,7 @@
 #include <ppp/threading/Executors.h>
 #include <ppp/collections/Dictionary.h>
 #include <ppp/auxiliary/StringAuxiliary.h>
+#include <ppp/tap/TapStub.h>
 #include <ppp/net/packet/IPFrame.h>
 #include <ppp/net/packet/UdpFrame.h>
 #include <ppp/net/packet/IcmpFrame.h>
@@ -2339,6 +2340,17 @@ namespace ppp {
                         }
                     }
                 }
+                else if (proxy_only_) {
+                    auto stub = std::dynamic_pointer_cast<ppp::tap::TapStub>(GetTap());
+                    if (NULLPTR != stub) {
+                        for (const boost::asio::ip::address& address : stub->GetDnsAddresses()) {
+                            if (!IPEndPoint::IsInvalid(address) && !address.is_loopback() &&
+                                std::find(result.begin(), result.end(), address) == result.end()) {
+                                result.emplace_back(address);
+                            }
+                        }
+                    }
+                }
                 return result;
             }
 
@@ -2631,9 +2643,10 @@ namespace ppp {
                     SelectLocalDnsServers(query->data(), static_cast<int>(query->size()));
                 bool direct_query = false;
                 ::dns::Message query_message;
-                if (geo_rules_ &&
-                    query_message.decode(reinterpret_cast<const uint8_t*>(query->data()), query->size()) == ::dns::BufferResult::NoError &&
-                    !query_message.questions.empty()) {
+                const bool query_decoded =
+                    query_message.decode(reinterpret_cast<const uint8_t*>(query->data()), query->size()) ==
+                    ::dns::BufferResult::NoError && !query_message.questions.empty();
+                if (geo_rules_ && query_decoded) {
                     const auto decision = geo_rules_->MatchDomain(
                         stl::transform<ppp::string>(query_message.questions[0].mName));
                     direct_query = decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
@@ -3224,6 +3237,9 @@ namespace ppp {
                     if (NULLPTR == http_proxy_ && NULLPTR == socks_proxy_) {
                         LOG_ERROR("VEthernetNetworkSwitcher::Open: proxy-only mode requires at least one local listener");
                         return false;
+                    }
+                    if (!UpdateRemoteUri()) {
+                        LOG_WARN("VEthernetNetworkSwitcher::Open: cannot determine proxy-only remote URI");
                     }
 
                     LOG_INFO("VEthernetNetworkSwitcher::Open: proxy-only connected; route, DNS and geo policy are disabled");
@@ -5295,6 +5311,43 @@ namespace ppp {
 
                 final_outbound_ = engine->GetFinalOutbound();
                 geo_rules_ = std::move(engine);
+                return true;
+            }
+
+            bool VEthernetNetworkSwitcher::UpdateRemoteUri() noexcept {
+                using ProtocolType = VEthernetExchanger::ProtocolType;
+
+                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                if (NULLPTR == exchanger) {
+                    return false;
+                }
+
+                boost::asio::ip::tcp::endpoint remoteEP;
+                ppp::string hostname;
+                ppp::string address;
+                ppp::string path;
+                ppp::string server;
+                int port = IPEndPoint::MinPort;
+                ProtocolType protocol_type = ProtocolType::ProtocolType_PPP;
+                static constexpr ppp::coroutines::YieldContext* y = NULLPTR;
+                if (!exchanger->GetRemoteEndPoint(y, hostname, address, path, port, protocol_type, server, remoteEP)) {
+                    return false;
+                }
+
+                server_ru_ = "[";
+                server_ru_ += hostname;
+                server_ru_ += "]:";
+                server_ru_ += stl::to_string<ppp::string>(port);
+                server_ru_ += "/";
+                if (protocol_type == ProtocolType::ProtocolType_Http || protocol_type == ProtocolType::ProtocolType_WebSocket) {
+                    server_ru_ += "ppp+ws";
+                }
+                elif(protocol_type == ProtocolType::ProtocolType_HttpSSL || protocol_type == ProtocolType::ProtocolType_WebSocketSSL) {
+                    server_ru_ += "ppp+wss";
+                }
+                else {
+                    server_ru_ += "ppp+tcp";
+                }
                 return true;
             }
 
