@@ -164,9 +164,16 @@ namespace ppp {
                     return true;
                 }
 
-                boost::asio::ip::tcp::endpoint destinationEP =
-                    ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(
-                        hostname.data(), port, y);
+                boost::asio::ip::tcp::endpoint destinationEP(
+                    boost::asio::ip::address_v4::any(), 0);
+                try {
+                    boost::asio::io_context resolver_context;
+                    boost::asio::ip::tcp::resolver resolver(resolver_context);
+                    destinationEP =
+                        ppp::net::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                            resolver, hostname.data(), port);
+                } catch (...) {
+                }
                 if (destinationEP.port() == 0 ||
                     destinationEP.address().is_unspecified() ||
                     destinationEP.address().is_multicast()) {
