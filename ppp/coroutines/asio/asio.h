@@ -223,9 +223,9 @@ namespace ppp {
 
             template <class TProtocol>
             boost::asio::ip::basic_endpoint<TProtocol>                          GetAddressByHostName(const char* hostname, int port, YieldContext& y) noexcept {
-                typedef boost::asio::ip::basic_resolver<TProtocol>              protocol_resolver;
                 typedef ppp::net::IPEndPoint                                    IPEndPoint;
-                typedef boost::asio::ip::basic_endpoint<TProtocol>              protocol_endpoint;
+                typedef ppp::net::Ipep                                          Ipep;
+                typedef std::atomic<bool>                                       atomic_bool;
 
                 if (NULLPTR == hostname || *hostname == '\x0') {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
@@ -235,87 +235,34 @@ namespace ppp {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 }
 
-                // Keep every object shared by the DNS worker and the suspended
-                // packet coroutine on the heap.  The resolver itself lives only
-                // on the isolated worker thread.
-                struct ResolveState final {
-                    std::shared_ptr<boost::asio::steady_timer> timer;
-                    protocol_endpoint                  result;
-                    ppp::string                        hostname;
-                    YieldContext*                      yield = NULLPTR;
-                    std::atomic<int>                   completion{ 0 };
-                    int                                port = IPEndPoint::MinPort;
-                };
-
-                std::shared_ptr<ResolveState> state = make_shared_object<ResolveState>();
-                if (NULLPTR == state) {
+                std::shared_ptr<atomic_bool> status = make_shared_object<atomic_bool>(false);
+                if (NULLPTR == status) {
                     return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
                 }
+
+                boost::asio::ip::basic_endpoint<TProtocol> results =
+                    IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
+                auto processing =
+                    [status, &results, &y](IPEndPoint* ep) noexcept {
+                        if (!status->exchange(true)) {
+                            if (NULLPTR != ep) {
+                                results = IPEndPoint::ToEndPoint<TProtocol>(*ep);
+                            }
+
+                            y.R();
+                        }
+                    };
 
                 boost::asio::io_context& context = y.GetContext();
                 boost::asio::strand<boost::asio::io_context::executor_type>* strand = y.GetStrand();
-                state->timer = strand ?
-                    make_shared_object<boost::asio::steady_timer>(*strand) :
-                    make_shared_object<boost::asio::steady_timer>(context);
-                if (NULLPTR == state->timer) {
-                    return IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
-                }
 
-                state->result = IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
-                state->hostname.assign(hostname);
-                state->yield = &y;
-                state->port = port;
-
-                bool posted = ppp::threading::Executors::Post(addressof(context), strand,
-                    [state]() noexcept {
-                        try {
-                            state->timer->expires_after(std::chrono::seconds(5));
-                            state->timer->async_wait(
-                                [state](const boost::system::error_code& ec) noexcept {
-                                    if (ec) {
-                                        return;
-                                    }
-
-                                    int pending = 0;
-                                    if (state->completion.compare_exchange_strong(pending, 2)) {
-                                        state->yield->R();
-                                    }
-                                });
-
-                            boost::asio::post(GetAddressResolverThreadPool<TProtocol>(),
-                                [state]() noexcept {
-                                    protocol_endpoint result =
-                                        IPEndPoint::AnyAddressV4<TProtocol>(IPEndPoint::MinPort);
-                                    try {
-                                        boost::asio::io_context resolver_context;
-                                        protocol_resolver resolver(resolver_context);
-                                        result = ppp::net::asio::GetAddressByHostName<TProtocol>(
-                                            resolver, state->hostname.data(), state->port);
-                                    } catch (...) {
-                                    }
-
-                                    int pending = 0;
-                                    if (!state->completion.compare_exchange_strong(pending, 1)) {
-                                        return;
-                                    }
-
-                                    state->result = result;
-
-                                    try {
-                                        state->timer->cancel();
-                                    } catch (...) {
-                                    }
-                                    state->yield->R();
-                                });
-                        }
-                        catch (...) {
-                            int pending = 0;
-                            if (state->completion.compare_exchange_strong(pending, 3)) {
-                                try {
-                                    state->timer->cancel();
-                                } catch (...) {
-                                }
-                                state->yield->R();
+                bool posted = ppp::threading::Executors::Post(
+                    addressof(context), strand,
+                    [&y, &context, hostname, port, &processing, status]() noexcept {
+                        if (!Ipep::GetAddressByHostName(
+                                context, hostname, port, processing)) {
+                            if (!status->exchange(true)) {
+                                y.R();
                             }
                         }
                     });
@@ -324,7 +271,7 @@ namespace ppp {
                 }
 
                 y.Suspend();
-                return state->result;
+                return results;
             }
 #if defined(_WIN32)
 #pragma optimize("", on)
