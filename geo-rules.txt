@@ -34,6 +34,12 @@ domain,cloudflare-dns.com,main
 domain,dns.google,main
 domain,dns.quad9.net,main
 
+# Steam store page itself goes through the tunnel (blocked in CN).
+# Steam CDN images (Fastly/Akamai) are loaded directly for speed.
+domain,store.steampowered.com,main
+domain,steamcommunity.com,main
+domain-suffix,steamstatic.com,direct
+
 geosite,github,main
 geosite,microsoft,direct
 geoip,cn,direct

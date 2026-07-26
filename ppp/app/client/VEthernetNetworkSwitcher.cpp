@@ -1546,6 +1546,15 @@ namespace ppp {
                     extensions.AssignedIPv6Gateway.is_v6() ? extensions.AssignedIPv6Gateway.to_string().c_str() : "(none)",
                     extensions.AssignedIPv6Dns1.is_v6() ? extensions.AssignedIPv6Dns1.to_string().c_str() : "(none)",
                     extensions.AssignedIPv6Dns2.is_v6() ? extensions.AssignedIPv6Dns2.to_string().c_str() : "(none)");
+
+                // Proxy-only mode has no kernel TAP adapter, so IPv6 address
+                // assignment and route setup (::/1 + 8000::/1) are meaningless.
+                // The IPv6 server route (/128) is handled separately by
+                // EnsureWindowsIPv6ServerRoute in OpenTransmission.
+                if (IsProxyOnly()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: proxy-only mode, skipping IPv6 assignment");
+                    return;
+                }
                 if (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_None) {
                     // A reconnect can explicitly withdraw a previously assigned IPv6
                     // data plane.  Leaving the old TAP /1 routes or trusting the
@@ -3045,8 +3054,9 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::Open(const std::shared_ptr<ITap>& tap) noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: starting");
 #if !defined(_ANDROID) && !defined(_IPHONE)
-                if (!proxy_only_) {
                 // Get and retrieve the current underlying Ethernet interface information!
+                // This is needed in both TUN and proxy-only modes: proxy-only still
+                // requires the physical NIC info for IPv6 server route pinning.
 #if defined(_WIN32)
                 underlying_ni_ = Windows_GetUnderlyingNetowrkInterface(tap, preferred_nic_);
 #else
@@ -3065,6 +3075,7 @@ namespace ppp {
                     return false;
                 }
 
+                if (!proxy_only_) {
                 // Resolve direct_dns=local before any Windows DNS takeover.  This
                 // preserves the DHCP/static DNS snapshot of the selected physical
                 // interface and prevents reading our own virtual DNS later.
