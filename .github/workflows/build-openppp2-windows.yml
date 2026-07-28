@@ -185,7 +185,7 @@ jobs:
           Copy-Item $releaseExe "$PackageDir\ppp.exe"
           Copy-Item "${{ github.workspace }}\appsettings.json" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\dns-rules.txt" "$PackageDir\"
-          Copy-Item "${{ github.workspace }}\geo-rules.txt" "$PackageDir\"
+          Copy-Item "${{ github.workspace }}\geo-rules.yaml" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\firewall-rules.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ip.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ipv6.txt" "$PackageDir\"

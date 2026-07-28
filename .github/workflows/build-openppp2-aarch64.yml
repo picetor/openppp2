@@ -328,7 +328,7 @@ jobs:
           cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
           cp "${{ github.workspace }}/appsettings.json" "${PKG_DIR}/"
           cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/geo-rules.txt" "${PKG_DIR}/"
+          cp "${{ github.workspace }}/geo-rules.yaml" "${PKG_DIR}/"
           cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
           cp "${{ github.workspace }}/ipv6.txt" "${PKG_DIR}/"

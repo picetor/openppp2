@@ -194,6 +194,8 @@ namespace ppp {
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
+                virtual std::size_t                                                 GetIPListCount() noexcept;
+                virtual std::size_t                                                 GetIPList6Count() noexcept;
 
 #if defined(_ANDROID) || defined(_IPHONE)   
                 void                                                                SetBypassIpList(ppp::string&& bypass_ip_list) noexcept;
@@ -224,8 +226,6 @@ namespace ppp {
                     const boost::asio::ip::address&                                 gw6,
                     const ppp::string&                                              url) noexcept;
                 virtual ppp::string                                                 GetRemoteUri() noexcept;
-                virtual std::size_t                                                 GetIPListCount() noexcept;
-                virtual std::size_t                                                 GetIPList6Count() noexcept;
 #endif  
             public: 
                 virtual bool                                                        Open(const std::shared_ptr<ITap>& tap) noexcept override;

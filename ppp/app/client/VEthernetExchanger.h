@@ -114,8 +114,8 @@ namespace ppp {
                 virtual bool                                                            Update() noexcept;
 #if defined(PPP_LOG_VERBOSE)
                 void                                                                    GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept;
-                void                                                                    ResetDataChannels() noexcept;
 #endif
+                void                                                                    ResetDataChannels() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP) noexcept;
 
