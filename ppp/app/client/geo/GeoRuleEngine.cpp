@@ -78,6 +78,132 @@ namespace ppp {
                         return ToLower<ppp::string>(ATrim<ppp::string>(value));
                     }
 
+                    static bool IsYamlPath(const ppp::string& path) noexcept {
+                        ppp::string lower = ToLower<ppp::string>(path);
+                        return (lower.size() >= 5 && lower.compare(lower.size() - 5, 5, ".yaml") == 0) ||
+                            (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, ".yml") == 0);
+                    }
+
+                    static ppp::string UnquoteYamlScalar(const ppp::string& input) noexcept {
+                        ppp::string value = ATrim<ppp::string>(input);
+                        if (value.size() >= 2 &&
+                            ((value.front() == '"' && value.back() == '"') ||
+                             (value.front() == '\'' && value.back() == '\''))) {
+                            value = value.substr(1, value.size() - 2);
+                        }
+                        return ATrim<ppp::string>(value);
+                    }
+
+                    // Parse the deliberately small YAML 1.2 schema used by GEO
+                    // policy files. Keeping rule entries as scalar CSV strings
+                    // preserves first-match order and the existing rule compiler.
+                    static bool NormalizeGeoRulesDocument(const ppp::string& path,
+                        ppp::string& text, ppp::string& error) noexcept {
+                        if (!IsYamlPath(path)) return true;
+
+                        enum class Section { None, DirectDns, Outbounds, Rules };
+                        Section section = Section::None;
+                        ppp::vector<ppp::string> normalized;
+                        ppp::vector<ppp::string> dns;
+                        ppp::vector<ppp::string> lines;
+                        Tokenize<ppp::string>(text, lines, "\r\n");
+                        for (std::size_t line_number = 0; line_number < lines.size(); ++line_number) {
+                            ppp::string raw = lines[line_number];
+                            if (raw.find('\t') != ppp::string::npos) {
+                                error = "YAML tabs are not allowed at line " +
+                                    stl::to_string<ppp::string>(line_number + 1);
+                                return false;
+                            }
+                            std::size_t indent = 0;
+                            while (indent < raw.size() && raw[indent] == ' ') ++indent;
+                            ppp::string line = ATrim<ppp::string>(raw.substr(indent));
+                            std::size_t comment = line.find('#');
+                            if (comment != ppp::string::npos) {
+                                line = ATrim<ppp::string>(line.substr(0, comment));
+                            }
+                            if (line.empty()) continue;
+
+                            if (indent == 0) {
+                                section = Section::None;
+                                std::size_t colon = line.find(':');
+                                if (colon == ppp::string::npos) {
+                                    error = "invalid YAML mapping at line " +
+                                        stl::to_string<ppp::string>(line_number + 1);
+                                    return false;
+                                }
+                                ppp::string key = LowerTrim(line.substr(0, colon));
+                                ppp::string value = UnquoteYamlScalar(line.substr(colon + 1));
+                                if (key == "version") continue;
+                                if (key == "final") {
+                                    if (!value.empty()) normalized.emplace_back("final=" + value);
+                                }
+                                elif(key == "direct_dns") {
+                                    section = Section::DirectDns;
+                                    if (!value.empty()) dns.emplace_back(value);
+                                }
+                                elif(key == "outbounds") {
+                                    section = Section::Outbounds;
+                                }
+                                elif(key == "rules") {
+                                    section = Section::Rules;
+                                }
+                                else {
+                                    error = "unsupported GEO YAML key at line " +
+                                        stl::to_string<ppp::string>(line_number + 1) + ": " + key;
+                                    return false;
+                                }
+                                continue;
+                            }
+
+                            if (section == Section::DirectDns || section == Section::Rules) {
+                                if (line.compare(0, 1, "-") != 0) {
+                                    error = "expected YAML list item at line " +
+                                        stl::to_string<ppp::string>(line_number + 1);
+                                    return false;
+                                }
+                                ppp::string value = UnquoteYamlScalar(line.substr(1));
+                                if (value.empty()) {
+                                    error = "empty YAML list item at line " +
+                                        stl::to_string<ppp::string>(line_number + 1);
+                                    return false;
+                                }
+                                if (section == Section::DirectDns) dns.emplace_back(std::move(value));
+                                else normalized.emplace_back(std::move(value));
+                            }
+                            elif(section == Section::Outbounds) {
+                                std::size_t colon = line.find(':');
+                                if (colon == ppp::string::npos) {
+                                    error = "invalid outbound mapping at line " +
+                                        stl::to_string<ppp::string>(line_number + 1);
+                                    return false;
+                                }
+                                ppp::string tag = LowerTrim(line.substr(0, colon));
+                                ppp::string value = UnquoteYamlScalar(line.substr(colon + 1));
+                                normalized.emplace_back(tag + "=" + value);
+                            }
+                            else {
+                                error = "unexpected YAML indentation at line " +
+                                    stl::to_string<ppp::string>(line_number + 1);
+                                return false;
+                            }
+                        }
+
+                        if (!dns.empty()) {
+                            ppp::string value = "direct_dns=";
+                            for (std::size_t i = 0; i < dns.size(); ++i) {
+                                if (i > 0) value += ",";
+                                value += dns[i];
+                            }
+                            normalized.insert(normalized.begin(), std::move(value));
+                        }
+                        text.clear();
+                        for (const ppp::string& line : normalized) {
+                            text += line;
+                            text += "\n";
+                        }
+                        return true;
+                    }
+
                     static bool ReadBinaryFile(const ppp::string& path, ppp::vector<uint8_t>& bytes) noexcept {
                         bytes.clear();
                         if (path.empty()) {
@@ -365,7 +491,11 @@ namespace ppp {
                         outbound.clear();
                         if (action == "direct") return GeoRuleEngine::Action::Direct;
                         if (action == "tunnel") {
-                            outbound = "main";
+                            // "tunnel" means the outbound selected on the Servers
+                            // page.  Keep it distinct from an explicitly named
+                            // "main" outbound so hot switching can affect rules
+                            // and the final fallback without rewriting the YAML.
+                            outbound = "@active";
                             return GeoRuleEngine::Action::Tunnel;
                         }
                         if (outbound_tags.find(action) != outbound_tags.end()) {
@@ -444,6 +574,9 @@ namespace ppp {
                         static_cast<unsigned char>(text[1]) == 0xbb && static_cast<unsigned char>(text[2]) == 0xbf) {
                         text.erase(0, 3);
                     }
+                    if (!NormalizeGeoRulesDocument(rules_path, text, error)) {
+                        return false;
+                    }
 
                     ppp::unordered_set<ppp::string> tags;
                     bool has_final = false;
@@ -459,7 +592,7 @@ namespace ppp {
                         if (equals == ppp::string::npos) continue;
                         ppp::string tag = LowerTrim(line.substr(0, equals));
                         ppp::string value = ATrim<ppp::string>(line.substr(equals + 1));
-                        if (tag == "direct_dns") continue;
+                        if (tag == "direct_dns" || tag == "server_dir") continue;
                         if (tag == "final") {
                             if (has_final) {
                                 error = "duplicate final outbound at line " + stl::to_string<ppp::string>(line_number + 1);
@@ -494,10 +627,10 @@ namespace ppp {
                         configurations.emplace_back(OutboundConfiguration{ tag, path, tag == "main" });
                     }
 
-                    if (final_outbound == "tunnel") final_outbound = "main";
+                    if (final_outbound == "tunnel") final_outbound = "@active";
                     if (configurations.empty()) {
                         // Traditional geo mode has no outbound declarations.
-                        if (has_final && final_outbound != "main") {
+                        if (has_final && final_outbound != "main" && final_outbound != "@active") {
                             error = "final requires outbound declarations: " + final_outbound;
                             return false;
                         }
@@ -507,7 +640,7 @@ namespace ppp {
                         error = "multi-outbound geo rules must define main=<configuration.json>";
                         return false;
                     }
-                    if (tags.find(final_outbound) == tags.end()) {
+                    if (final_outbound != "@active" && tags.find(final_outbound) == tags.end()) {
                         error = "final references an undefined outbound: " + final_outbound;
                         return false;
                     }
@@ -563,6 +696,9 @@ namespace ppp {
                     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xef &&
                         static_cast<unsigned char>(text[1]) == 0xbb && static_cast<unsigned char>(text[2]) == 0xbf) {
                         text.erase(0, 3);
+                    }
+                    if (!NormalizeGeoRulesDocument(rules_path, text, error)) {
+                        return false;
                     }
 
                     ppp::unordered_set<ppp::string> wanted_sites;

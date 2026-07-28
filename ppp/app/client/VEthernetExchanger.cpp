@@ -377,6 +377,13 @@ namespace ppp {
                 }
 
 #if defined(_WIN32)
+                if (remoteIP.is_v4() && !remoteIP.is_loopback() &&
+                    !switcher_->EnsureWindowsIPv4ServerRoute(remoteIP)) {
+                    LOG_ERROR("VEthernetExchanger::OpenTransmission: cannot pin IPv4 server route, outbound=%s, remote=%s:%d",
+                        outbound_tag_.data(), address.data(), remotePort);
+                    return NULLPTR;
+                }
+
                 // The switcher intentionally suppresses the physical IPv6 default
                 // route while the peer has not provided an IPv6 data plane. The
                 // VPN transport itself is the exception: resolve it first, then pin
@@ -1087,6 +1094,24 @@ namespace ppp {
                 }
 
                 ppp::collections::Dictionary::ReleaseAllObjects(mappings);
+            }
+
+            void VEthernetExchanger::ResetDataChannels() noexcept {
+                VirtualEthernetMappingPortTable mappings;
+                VEthernetDatagramPortTable datagrams;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    mappings = std::move(mappings_);
+                    mappings_.clear();
+                    datagrams = std::move(datagrams_);
+                    datagrams_.clear();
+                }
+                Dictionary::ReleaseAllObjects(mappings);
+                Dictionary::ReleaseAllObjects(datagrams);
+                LOG_INFO("VEthernetExchanger::ResetDataChannels: outbound=%s, tcp=%llu, udp=%llu",
+                    outbound_tag_.data(),
+                    (unsigned long long)mappings.size(),
+                    (unsigned long long)datagrams.size());
             }
 
             bool VEthernetExchanger::OnLan(const ITransmissionPtr& transmission, uint32_t ip, uint32_t mask, YieldContext& y) noexcept {

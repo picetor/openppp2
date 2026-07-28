@@ -47,62 +47,62 @@
 | 模式 | 行为 |
 |------|------|
 | `ip` | 默认模式，继续读取 `ip.txt`、`ipv6.txt`、`dns-rules.txt` 及 `appsettings.json` 中的原有路由配置 |
-| `geo` | 读取 `geo-rules.txt`，并按需加载 Mihomo/V2Ray 格式的 `geosite.dat`、`geoip.dat` |
+| `geo` | 读取 `geo-rules.yaml`，并按需加载 Mihomo/V2Ray 格式的 `geosite.dat`、`geoip.dat` |
 | `no` | 不读取用户分流规则；VPN 服务器地址等维持隧道所必需的保护路由仍会保留 |
 
 ```bash
 ppp --mode=client --bypass-mode=geo
 
 ppp --mode=client --bypass-mode=geo \
-    --geo-rules=./geo-rules.txt \
+    --geo-rules=./geo-rules.yaml \
     --geosite=./geosite.dat \
     --geoip=./geoip.dat
 ```
 
-以上是原有的单出口 Geo 用法：`--config` 仍指向 JSON，规则动作使用 `direct` 或 `tunnel`（`tunnel` 等价于 `main`）。JSON 启动和 `--bypass-mode=ip|geo|no` 行为不变。
+`--config` 继续指向主 JSON；Geo 策略通过独立的 `--geo-rules` 参数传入。
+规则动作 `tunnel` 始终跟随 Servers 页面当前选择的节点。IP 模式不会读取此
+YAML 文件。
 
-### 单 TAP 多出口模式
+### Geo 策略与可选固定出口
 
-当 `--config` 直接指向 `.txt` 文件时，程序将其严格识别为“多出口 Geo 清单”；指向 `.json` 时仍是传统单配置模式。默认清单路径可放在工作目录，例如：
-
-```bash
-ppp --mode=client --config=./geo-rules.txt \
-    --geosite=./geosite.dat \
-    --geoip=./geoip.dat
+```yaml
+version: 1
+final: tunnel
+direct_dns:
+  - local
+outbounds:
+  main: ./appsettings.json
+  openai: ./outbounds/openai.json
+rules:
+  - geosite,cn,direct
+  - geoip,cn,direct
+  - geosite,openai,openai
 ```
 
-```ini
-# 出口声明：标签=JSON 配置路径
-main=./main.json
-tunnel1=./tunnel1.json
-tunnel2=./tunnel2.json
+策略规则如下：
 
-# 可选；未写时默认 main
-final=main
-direct_dns=local
-
-# 匹配规则：类型,值,出口标签|direct
-geosite,github,main
-geosite,openai,tunnel1
-geosite,microsoft,direct
-geosite,cn,direct
-geoip,cn,direct
-domain-suffix,example.com,tunnel2
-ip-cidr,192.0.2.0/24,tunnel1
-ip-cidr6,2001:db8::/32,tunnel2
-```
-
-清单规则如下：
-
-- 必须声明 `main=<JSON>`；其他出口标签只能包含小写字母、数字、`_`、`-`，不区分输入大小写。`direct`、`tunnel`、`reject` 为保留字。重复标签、未知动作、缺少文件或无规则均会拒绝启动。
-- JSON 路径按程序的当前工作目录解析，与 `geo-rules.txt` 放在哪个目录无关。每个 JSON 都会独立读取自己的 `client.server`、`client.guid`、协议密钥、传输密钥、WebSocket/TLS 参数及 `client.server-proxy`，因此各出口可以使用不同的 key。
-- 只创建一个 TAP。`main` 负责 TAP 地址、DNS、系统路由、本地 HTTP/SOCKS 监听等全局状态；各标签拥有独立的远端连接和重连状态。所有出口启动时都会创建，任一出口不可初始化时整体启动失败；选中的出口断线时不会自动泄漏或回退到 `main`。
+- 文件使用严格的 YAML 1.2 子集，完整字段、缩进和规则语法见
+  [`geo-rules.yaml`](geo-rules.yaml) 内的详细注释。
+- `outbounds` 可省略；若使用则必须声明 `main`。这些标签是规则专用的固定
+  出口，普通节点切换应使用 `tunnel` 动作。
+- JSON 路径按程序当前工作目录解析。每个固定出口独立读取服务器、GUID、
+  密钥、WebSocket/TLS 和可选的 `client.server-proxy`。
+- 全部模式只创建一个 TAP；主配置负责地址、DNS、系统路由和本地代理监听。
+  选中出口断线时不会泄漏或回退到其他出口。
 - TCP 连接在建立时固定出口；原始 TCP/UDP/ICMP 按目标地址维护活动粘滞，持续有流量时不会因 DNS TTL 到期切换到另一组 key，空闲 5 分钟后才重新按规则选择。
 - 多出口模式不支持 `--tun-static=yes`，因为旧静态 UDP 回声只有一套全局服务器/聚合器，无法隔离不同出口密钥；使用该组合会明确拒绝启动。传统 JSON 模式不受影响。
 
+### 服务器热切换
+
+使用 `--server-dir=<目录>` 从独立目录中的 JSON 生成 Servers 页面。每页显示
+10 个节点，可用上下键选择。确认切换时程序会重新读取目标 JSON、启动新连接、
+等待 2 秒后将新流量切到目标节点，并清理旧的非规则专用连接；即使目标尚未
+连通也会完成选择，不会静默退回旧节点。被 Geo 固定路由使用的配置显示为
+`used` 且不会被切换清理；`Template` 始终显示当前默认隧道实际使用的配置。
+
 ### 匹配语法和顺序
 
-规则格式为 `类型,值,动作`，支持 `geosite`（含 `@cn` 等属性）、`geoip`、`domain`/`full`、`domain-suffix`、`domain-keyword`、`domain-regex`/`regexp`、`ip-cidr`、`ip-cidr6`。动作可以是清单中已声明的出口标签或 `direct`；兼容动作 `tunnel` 等价于 `main`。
+规则格式为 `类型,值,动作`，支持 `geosite`（含 `@cn` 等属性）、`geoip`、`domain`/`full`、`domain-suffix`、`domain-keyword`、`domain-regex`/`regexp`、`ip-cidr`、`ip-cidr6`。动作可以是 `direct`、代表 Servers 页面当前节点的 `tunnel`，或 `outbounds` 中声明的固定出口标签。
 
 规则严格从上到下匹配，第一条命中生效。域名规则通过 DNS 应答中的 A/AAAA 记录建立带 TTL 的 IPv4/IPv6 地址策略；操作系统是否同时发起 A 和 AAAA 查询由系统解析器决定，程序不会强制“双查”。同一 CDN IP 被多个域名命中时，优先级更高（更靠前）的规则拥有该 IP 策略。`direct_dns` 只重定向命中 `direct` 的域名查询；其他域名仍使用 TAP/主配置 DNS，解析出的业务连接再按目标 IP 进入对应出口。纯 IP 连接只匹配 `geoip`/CIDR 规则，未命中时使用 `final`（默认 `main`）。
 
@@ -220,7 +220,7 @@ ppp --mode=client \
 Windows 只把 openppp2 自己的 TUN 网卡 DNS 设置为虚拟网关（例如 `192.168.12.1`）。ICS、WSL、Hyper-V、Docker、移动热点及其他虚拟网卡不会被改绑或清空。openppp2 在 TUN 内接收宿主查询：普通域名使用 TUN 实际下发的主 DNS，命中 `direct` 的域名使用 `direct_dns`。主 DNS 同时通过延迟隔离的 Static Echo UDP 通道和 `main` exchanger 兼容通道查询，首个有效响应立即返回；该 DNS 专用通道在 Windows 本地 DNS 开启时自动建立，不要求启用全局 `--tun-static=yes`，其他 UDP 流量仍保持原模式。普通主 DNS 查询不会自动创建 TCP/53 回退连接；本地直连 DNS 若 UDP 300 ms 未返回，只向同一台直连解析器尝试 TCP/53，不会把国内域名送往主 DNS。应用显式发出的 TCP DNS 查询仍按相同分流策略处理。该方式不监听宿主的 53 端口，避免与 ICS 等服务冲突；退出时恢复 TUN 原始 DNS。
 
 - 无需 DNS 模式开关，也无需额外启动参数。
-- Geo/IP 分流均可使用：命中 `direct` 的域名使用 `geo-rules.txt` 的 `direct_dns`；其他域名只使用 `main` DNS 及其同出口备用服务器，失败时不会回退到物理网卡 DNS。
+- Geo/IP 分流均可使用：命中 `direct` 的域名使用 `geo-rules.yaml` 的 `direct_dns`；其他域名只使用隧道 DNS 及其同出口备用服务器，失败时不会回退到物理网卡 DNS。
 - 只守护 TUN 网卡：运行期间将其 IPv4 DNS 固定到虚拟网关并清空其 IPv6 DNS；其他网卡保持不变。若应用主动绕过系统解析器，严格防泄露还需要可选的 Windows 过滤层，不能仅靠网卡 DNS 配置宣称完全无泄露。
 - `udp.dns.prefer_ipv4` 只处理隧道规则的 DNS 响应；命中 `direct` 的 DNS 响应保持原始 A/AAAA 记录。
 - `udp.dns.prefer_ipv4=true` 仅在已缓存 A 记录时移除 AAAA；没有 A 缓存时立即保留并返回 AAAA。
@@ -441,7 +441,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | `--bypass-ngw` | 指定绕过列表的网关 | `--bypass-ngw <IP>` | `0.0.0.0` |
 | `--virr` | 自动更新并生效 | `--virr [文件]/[国家]` | `./ip.txt/CN` |
 | `--dns-rules` | DNS规则 | `--dns-rules <文件>` | `./dns-rules.txt` |
-| `--geo-rules` | Geo 规则文件 | `--geo-rules <文件>` | `./geo-rules.txt` |
+| `--geo-rules` | Geo 规则文件 | `--geo-rules <文件>` | `./geo-rules.yaml` |
 | `--geosite` | geosite 数据文件 | `--geosite <文件>` | `./geosite.dat` |
 | `--geoip` | geoip 数据文件 | `--geoip <文件>` | `./geoip.dat` |
 
@@ -807,15 +807,16 @@ CDN 优选 IP 场景需额外配置 `client.websocket`：
 
 ## 🏗️ 构建系统
 
-本分支的 CI/CD 包含 8 个工作流（4 Release + 4 Debug ），覆盖 Windows / Linux (amd64/aarch64) / macOS (arm64/amd64)。
-
-
+本分支包含 9 个 GitHub Actions 工作流：8 个原生 Release/Debug 工作流，
+以及 1 个 Android Debug APK 工作流。所有工作流均检出触发运行的提交，
+不会固定到某个分支旧版本。
 | 平台 | 架构 | 构建类型 |
 |------|------|----------|
 | Windows | x64 | Release / Debug |
 | Linux | amd64 (7 variants) | Release / Debug |
 | Linux | aarch64 (4 variants) | Release / Debug |
 | macOS | arm64 + amd64 | Release / Debug |
+| Android | arm64-v8a + x86_64 | Debug APK + Flutter 测试 |
 
 > 隧道协议、路由策略和 PaperAirplane 等配置可参考上游文档。MUX 的启用方法和当前可用模式请参考上方“MUX 使用说明”。
 

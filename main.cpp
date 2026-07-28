@@ -55,6 +55,15 @@
 #include <common/aesni/aes.h>
 #include <common/chnroutes2/chnroutes2.h>
 
+// Console input includes for tab switching
+#if defined(_WIN32)
+#include <conio.h>
+#else
+#include <fcntl.h>
+#include <sys/select.h>
+#include <termios.h>
+#endif
+
 // Using declarations for cleaner code
 using ppp::configurations::AppConfiguration;
 using ppp::threading::Executors;
@@ -194,6 +203,22 @@ public:
         }
     }
 
+    template <class... A>
+    void                                            Highlighted(const char* format, A&&... args) noexcept
+    {
+        if (console_window_size->y <= *console_window_heights) return;
+        ppp::string line = PrintToString(console_window_size->x, ' ', format,
+            std::forward<A&&>(args)...);
+        if (console_window_size->tty)
+        {
+            line.insert(0, "\x1b[7m");
+            std::size_t ending = line.empty() ? 0 : line.size() - 1;
+            line.insert(ending, "\x1b[0m");
+        }
+        (*console_window_heights)++;
+        console_window_content->append(line);
+    }
+
 private:
     // Return the number of console cells occupied by a Unicode code point.
     // Windows Terminal renders CJK/full-width characters as two cells, while
@@ -295,11 +320,16 @@ private:
         {
             result.append(padding_length - display_width, padding_char);
         }
-            
+
         // Add line endings for non-terminal output
         if (!console_window_size->tty) 
         {
             result.append("\r\n");
+        }
+        else
+        {
+            // For TTY, use just \n to avoid issues with cursor positioning
+            result.append("\n");
         }
 
         return result;
@@ -359,10 +389,19 @@ private:
     {
         ppp::string                                     tag;
         std::shared_ptr<AppConfiguration>               configuration;
+        ppp::string                                     display_name;
+        bool                                            server_menu = false;
+        ppp::string                                     source_path;
+        bool                                            route_used = false;
     };
 
     // Load configuration file
     std::shared_ptr<AppConfiguration>               LoadConfiguration(int argc, const char* argv[], ppp::string& path) noexcept;
+    bool                                            LoadServerConfigurations(int argc, const char* argv[],
+                                                        const std::shared_ptr<AppConfiguration>& primary) noexcept;
+    bool                                            LoadGeoOutboundConfigurations(
+                                                        const std::shared_ptr<NetworkInterface>& network_interface,
+                                                        const std::shared_ptr<AppConfiguration>& primary) noexcept;
     // Determine if running in client or server mode
     bool                                            IsModeClientOrServer(int argc, const char* argv[]) noexcept;
     // Parse network interface configuration from arguments
@@ -386,10 +425,15 @@ private:
 private:
     // Get traffic statistics
     bool                                            GetTransmissionStatistics(uint64_t& incoming_traffic, uint64_t& outgoing_traffic, std::shared_ptr<ppp::transmissions::ITransmissionStatistics>& statistics_snapshot) noexcept;
+    // Handle keyboard input for tab switching
+    void                                            HandleConsoleInput() noexcept;
+    void                                            HandleServerSelection(int delta, bool activate) noexcept;
 
 private:
     ConsoleForegroundWindowSize                     console_window_size_last_;           // Previous console size
     std::size_t                                     console_window_buff_size_   = 0;     // Console buffer size
+    int                                             console_tab_page_           = 0;     // Current TUI tab page (0-4)
+    std::size_t                                     server_selection_           = 0;     // Selected row on Servers page
     bool                                            client_mode_                = false; // Current mode flag
     bool                                            proxy_mode_                 = false; // Local HTTP/SOCKS only; no TUN/routes/DNS
     bool                                            quic_                       = false; // Original QUIC setting (Windows)
@@ -399,6 +443,7 @@ private:
     std::shared_ptr<VirtualEthernetSwitcher>        server_;                             // Server switcher
     std::shared_ptr<VEthernetNetworkSwitcher>       client_;                             // Client switcher
     ppp::string                                     configuration_path_;                 // Configuration file path
+    ppp::string                                     server_directory_;                   // Independent server JSON directory
     std::shared_ptr<NetworkInterface>               network_interface_;                  // Network interface config
     std::shared_ptr<Timer>                          timeout_                    = 0;     // Periodic timer
     Stopwatch                                       stopwatch_;                          // Application uptime
@@ -793,6 +838,127 @@ void PppApplication::PullIPList(const ppp::string& command) noexcept
     }
 }
 
+// Handle keyboard input for tab switching (non-blocking, cross-platform)
+void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
+{
+    std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
+    if (NULLPTR == client)
+    {
+        server_selection_ = 0;
+        return;
+    }
+
+    auto statuses = client->GetOutboundStatuses();
+    ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
+    for (auto& status : statuses)
+    {
+        if (status.server_menu)
+        {
+            servers.emplace_back(std::move(status));
+        }
+    }
+
+    if (servers.empty())
+    {
+        server_selection_ = 0;
+        return;
+    }
+
+    if (server_selection_ >= servers.size())
+    {
+        server_selection_ = servers.size() - 1;
+    }
+    if (delta < 0)
+    {
+        server_selection_ = server_selection_ == 0 ?
+            servers.size() - 1 : server_selection_ - 1;
+    }
+    elif(delta > 0)
+    {
+        server_selection_ = (server_selection_ + 1) % servers.size();
+    }
+    if (activate)
+    {
+        client->SwitchOutbound(servers[server_selection_].tag);
+    }
+}
+
+void PppApplication::HandleConsoleInput() noexcept
+{
+#if !defined(_ANDROID)
+#if defined(_WIN32)
+    // Windows: use _kbhit/_getch (non-blocking)
+    while (_kbhit())
+    {
+        int ch = _getch();
+        if (ch == 0x09) // Tab key
+        {
+            console_tab_page_ = (console_tab_page_ + 1) % 5;
+        }
+        elif(ch == 0xE0) // Extended key prefix (arrows, F-keys)
+        {
+            int ext = _getch();
+            if (console_tab_page_ == 4 && ext == 0x48) { HandleServerSelection(-1, false); }
+            elif(console_tab_page_ == 4 && ext == 0x50) { HandleServerSelection(1, false); }
+            elif(ext == 0x4B) { console_tab_page_ = (console_tab_page_ + 4) % 5; }
+            elif(ext == 0x4D) { console_tab_page_ = (console_tab_page_ + 1) % 5; }
+        }
+        elif(console_tab_page_ == 4 && ch == 0x0D)
+        {
+            HandleServerSelection(0, true);
+        }
+    }
+#else
+    // Unix: use select+read (non-blocking, no echo)
+    static bool termios_initialized = false;
+    static struct termios old_term;
+    if (!termios_initialized)
+    {
+        termios_initialized = true;
+        struct termios new_term;
+        tcgetattr(STDIN_FILENO, &old_term);
+        new_term = old_term;
+        new_term.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+    }
+
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(STDIN_FILENO, &read_fds);
+    struct timeval tv = { 0, 0 };
+    if (select(STDIN_FILENO + 1, &read_fds, NULLPTR, NULLPTR, &tv) > 0)
+    {
+        char ch;
+        if (read(STDIN_FILENO, &ch, 1) > 0)
+        {
+            if (ch == '\t') // Tab key
+            {
+                console_tab_page_ = (console_tab_page_ + 1) % 5;
+            }
+            elif(console_tab_page_ == 4 && (ch == '\r' || ch == '\n'))
+            {
+                HandleServerSelection(0, true);
+            }
+            elif(console_tab_page_ == 4 && ch == '\x1b')
+            {
+                char sequence[2] = {};
+                if (read(STDIN_FILENO, sequence, sizeof(sequence)) == 2 && sequence[0] == '[')
+                {
+                    if (sequence[1] == 'A') { HandleServerSelection(-1, false); }
+                    elif(sequence[1] == 'B') { HandleServerSelection(1, false); }
+                    elif(sequence[1] == 'D') { console_tab_page_ = (console_tab_page_ + 4) % 5; }
+                    elif(sequence[1] == 'C') { console_tab_page_ = (console_tab_page_ + 1) % 5; }
+                }
+            }
+        }
+    }
+#endif
+#endif
+}
+
 // Print current application status to console
 bool PppApplication::PrintEnvironmentInformation() noexcept
 {
@@ -830,16 +996,17 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
     hosting_environment = (NULLPTR != client ? "client:" : "server:") + hosting_environment;
 
-    // Clear console if size changed
-    if (console_window_size_last_.x != console_window_size.x || console_window_size_last_.y != console_window_size.y)
+    // Clear console when tab page changes to remove leftover lines from previous content
+    static int last_console_tab_page = -1;
+    bool tab_changed = (last_console_tab_page != console_tab_page_);
+    if (tab_changed)
     {
-        console_window_size_last_ 
-            = console_window_size;
+        last_console_tab_page = console_tab_page_;
+    }
 
-        if (console_window_size.tty)
-        {
-            ppp::ClearConsoleOutputCharacter();
-        }
+    if (console_window_size.tty && tab_changed)
+    {
+        ppp::ClearConsoleOutputCharacter();
     }
 
     // Build console output
@@ -852,6 +1019,18 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     int console_window_heights = 0;
     PrintToConsoleForegroundWindow printfn = { &console_window_size, &console_window_content, &console_window_heights };
 
+    bool console_highlight = console_window_size.tty;
+#if defined(_WIN32)
+    if (console_highlight)
+    {
+        HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        console_highlight = output != INVALID_HANDLE_VALUE &&
+            GetConsoleMode(output, &mode) &&
+            SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+#endif
+
     // Create separator line
     ppp::string section_separator;
     section_separator = ppp::PaddingRight(section_separator, console_window_size.x, '-');
@@ -860,6 +1039,88 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     printfn("%s", PPP_APPLICATION_NAME);
     printfn("%s", section_separator.data());
     printfn("%s", "Application started. Press Ctrl+C to shut down.");
+
+    // Print tab bar (always visible, at top)
+    {
+        const char* tab_labels[] = { "Status", "Network", "Traffic", "Routes", "Servers" };
+        const int tab_count = 5;
+
+        // Calculate tab column width (evenly divide console width)
+        int col_width = console_window_size.x / tab_count;
+        int remainder = console_window_size.x % tab_count;
+
+        ppp::string tab_bar;
+        tab_bar.reserve(console_window_size.x);
+
+        for (int i = 0; i < tab_count; i++)
+        {
+            // Adjust last column to consume remainder
+            int this_col_width = col_width;
+            if (i == tab_count - 1) this_col_width += remainder;
+
+            // Get label display width
+            const char* label = tab_labels[i];
+            int label_width = 0;
+            while (*label)
+            {
+                unsigned char c = *label;
+                if ((c & 0x80) == 0) { label_width += 1; label++; }
+                elif((c & 0xE0) == 0xC0) { label_width += 2; label += 2; }
+                elif((c & 0xF0) == 0xE0) { label_width += 2; label += 3; }
+                else { label_width += 2; label += 4; }
+            }
+
+            // Calculate padding
+            int padding = this_col_width - label_width;
+            ppp::string segment;
+            if (i == console_tab_page_)
+            {
+                segment += " ";
+                segment += tab_labels[i];
+                padding -= 1;
+            }
+            else
+            {
+                segment += " ";
+                segment += tab_labels[i];
+                padding -= 1;
+            }
+
+            // Fill remaining space
+            if (padding > 0)
+            {
+                segment.append(padding, ' ');
+            }
+            if (i == console_tab_page_ && console_highlight)
+            {
+                tab_bar += "\x1b[7m";
+                tab_bar += segment;
+                tab_bar += "\x1b[0m";
+            }
+            else if (i == console_tab_page_)
+            {
+                if (!segment.empty()) segment[0] = '[';
+                if (!segment.empty()) segment.back() = ']';
+                tab_bar += segment;
+            }
+            else
+            {
+                tab_bar += segment;
+            }
+        }
+
+        if (console_highlight && console_window_size.y > console_window_heights)
+        {
+            console_window_content.append(tab_bar);
+            console_window_content.push_back('\n');
+            ++console_window_heights;
+        }
+        else
+        {
+            printfn("%s", tab_bar.c_str());
+        }
+    }
+
     printfn("Max Concurrent        : %d", configuration_->concurrent);
     printfn("Process               : %d", ppp::GetCurrentProcessId());
 
@@ -878,11 +1139,25 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
 #endif
 
     printfn("Cwd                   : %s", ppp::GetCurrentDirectoryPath().data());
-    printfn("Template              : %s", configuration_path_.data());
+    ppp::string active_configuration_path;
+    if (NULLPTR != client)
+    {
+        active_configuration_path = client->GetActiveOutboundSourcePath();
+    }
+    if (active_configuration_path.empty())
+    {
+        active_configuration_path = configuration_path_;
+    }
+    printfn("Template              : %s", active_configuration_path.data());
 
-    // Print server-specific information
+    // Tab 0: Full status overview (original display)
+    // Tab 1: Network interface details only
+    // Tab 2: Traffic statistics only
+    // Tab 3: Route statistics (placeholder)
+
+    // Print server-specific information (Tab 0 only)
     std::shared_ptr<VirtualEthernetSwitcher> server = server_;
-    if (NULLPTR != server)
+    if (NULLPTR != server && console_tab_page_ == 0)
     {
         // Displays the link status and link Uri of the VPN back-end management server.
         auto managed_server = server->GetManagedServer(); 
@@ -903,110 +1178,134 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         }
     }
 
-    // Print client-specific information
-    if (NULLPTR != client)
+    // Tab 0: Full status overview
+    if (console_tab_page_ == 0)
     {
-        // Remote server information
-        if (ppp::string remote_uri = client->GetRemoteUri(); remote_uri.size() > 0)
+        // Print client-specific information
+        if (NULLPTR != client)
         {
-            std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
-            if (client->IsProxyOnly())
+            // Remote server information
+            if (ppp::string remote_uri = client->GetRemoteUri(); remote_uri.size() > 0)
             {
-                printfn("VPN Server            : %s [%s] [proxy]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
-            }
-            else
-            {
-                printfn("VPN Server            : %s [%s]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
-            }
-        }
-
-        // Local proxy servers
-        struct 
-        {
-            const char*                                     proxy;
-            std::shared_ptr<VEthernetLocalProxySwitcher>    switcher;
-        } proxys[] = 
-            { 
-                { "Http Proxy            : %s/http", client->GetHttpProxy() }, 
-                { "Socks Proxy           : %s/socks", client->GetSocksProxy() }
-            };
-        for (auto& st : proxys)
-        {
-            std::shared_ptr<VEthernetLocalProxySwitcher> switcher = st.switcher;
-            if (NULLPTR == switcher) 
-            {
-                continue;
-            }
-            
-            boost::asio::ip::tcp::endpoint localEP = switcher->GetLocalEndPoint();
-            boost::asio::ip::address localIP = localEP.address();
-            if (localIP.is_unspecified())
-            {
-                if (auto ni = client->GetUnderlyingNetworkInterface(); NULLPTR != ni)
+                std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
+                if (client->IsProxyOnly())
                 {
-                    localIP = ni->IPAddress;
+                    printfn("VPN Server            : %s [%s] [proxy]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
+                }
+                else
+                {
+                    printfn("VPN Server            : %s [%s]", remote_uri.data(), NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? "static" : "dynamic");
                 }
             }
 
-            // Displays the address of the http/socks proxy server for the local virtual loopback.
-            ppp::string address_string = IPEndPoint::ToEndPoint(boost::asio::ip::tcp::endpoint(localIP, localEP.port())).ToString();
-            printfn(st.proxy, address_string.data());
-        }
-
-#if defined(_WIN32)
-        printfn("P/A Controller        : %s", client->GetPaperAirplaneController() ? "on" : "off");
-#endif
-    }
-
-    // Print server network information
-    if (std::shared_ptr<VirtualEthernetSwitcher> server = server_; NULLPTR != server)
-    {
-        using NAC = VirtualEthernetSwitcher::NetworkAcceptorCategories;
-
-        // Print the public IP address and interface IP address configured for the current virtual Ethernet server!
-        if (std::shared_ptr<AppConfiguration> configuration = configuration_; NULLPTR != configuration)
-        {
-            printfn("Public IP             : %s", configuration->ip.public_.data());
-            printfn("Interface IP          : %s", configuration->ip.interface_.data());
-        }
-
-        // List listening ports for various services
-        const char* categories[] = { "ppp+tcp", "ppp+udp", "ppp+ws", "ppp+wss", "cdn+1", "cdn+2" };
-        VirtualEthernetSwitcher::NetworkAcceptorCategories categoriess[] = 
-        { 
-            NAC::NetworkAcceptorCategories_Tcpip, 
-            NAC::NetworkAcceptorCategories_Udpip, 
-            NAC::NetworkAcceptorCategories_WebSocket, 
-            NAC::NetworkAcceptorCategories_WebSocketSSL,
-            NAC::NetworkAcceptorCategories_CDN1,
-            NAC::NetworkAcceptorCategories_CDN2,
-        };
-        for (int i = 0, j = 0; i < arraysizeof(categories); i++)
-        {
-            boost::asio::ip::tcp::endpoint serverEP = server->GetLocalEndPoint(categoriess[i]);
-            if (serverEP.port() <= IPEndPoint::MinPort || serverEP.port() > IPEndPoint::MaxPort)
+#if !defined(_ANDROID)
+            if (!client->IsProxyOnly())
             {
-                continue;
+                const char* split_mode = NULLPTR;
+                if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip)
+                {
+                    split_mode = "ip";
+                }
+                elif(network_interface->SplitMode == NetworkInterface::BypassMode::Geo)
+                {
+                    split_mode = "geo";
+                }
+
+                if (NULLPTR != split_mode)
+                {
+                    printfn("Split Routing         : %s", split_mode);
+                }
+            }
+#endif
+
+            // Local proxy servers
+            struct
+            {
+                const char*                                     proxy;
+                std::shared_ptr<VEthernetLocalProxySwitcher>    switcher;
+            } proxys[] =
+                {
+                    { "Http Proxy            : %s/http", client->GetHttpProxy() },
+                    { "Socks Proxy           : %s/socks", client->GetSocksProxy() }
+                };
+            for (auto& st : proxys)
+            {
+                std::shared_ptr<VEthernetLocalProxySwitcher> switcher = st.switcher;
+                if (NULLPTR == switcher)
+                {
+                    continue;
+                }
+
+                boost::asio::ip::tcp::endpoint localEP = switcher->GetLocalEndPoint();
+                boost::asio::ip::address localIP = localEP.address();
+                if (localIP.is_unspecified())
+                {
+                    if (auto ni = client->GetUnderlyingNetworkInterface(); NULLPTR != ni)
+                    {
+                        localIP = ni->IPAddress;
+                    }
+                }
+
+                // Displays the address of the http/socks proxy server for the local virtual loopback.
+                ppp::string address_string = IPEndPoint::ToEndPoint(boost::asio::ip::tcp::endpoint(localIP, localEP.port())).ToString();
+                printfn(st.proxy, address_string.data());
             }
 
-            ppp::string tmp = "Service ";
-            tmp += stl::to_string<ppp::string>(++j);
-            tmp = ppp::PaddingRight(tmp, 22, ' ');
-            tmp += ": " + IPEndPoint::ToEndPoint(serverEP).ToString();
-            tmp += "/";
-            tmp += categories[i];
-            printfn("%s", tmp.data());
+#if defined(_WIN32)
+            printfn("P/A Controller        : %s", client->GetPaperAirplaneController() ? "on" : "off");
+#endif
         }
+
+        // Print server network information
+        if (std::shared_ptr<VirtualEthernetSwitcher> server = server_; NULLPTR != server)
+        {
+            using NAC = VirtualEthernetSwitcher::NetworkAcceptorCategories;
+
+            // Print the public IP address and interface IP address configured for the current virtual Ethernet server!
+            if (std::shared_ptr<AppConfiguration> configuration = configuration_; NULLPTR != configuration)
+            {
+                printfn("Public IP             : %s", configuration->ip.public_.data());
+                printfn("Interface IP          : %s", configuration->ip.interface_.data());
+            }
+
+            // List listening ports for various services
+            const char* categories[] = { "ppp+tcp", "ppp+udp", "ppp+ws", "ppp+wss", "cdn+1", "cdn+2" };
+            VirtualEthernetSwitcher::NetworkAcceptorCategories categoriess[] =
+            {
+                NAC::NetworkAcceptorCategories_Tcpip,
+                NAC::NetworkAcceptorCategories_Udpip,
+                NAC::NetworkAcceptorCategories_WebSocket,
+                NAC::NetworkAcceptorCategories_WebSocketSSL,
+                NAC::NetworkAcceptorCategories_CDN1,
+                NAC::NetworkAcceptorCategories_CDN2,
+            };
+            for (int i = 0, j = 0; i < arraysizeof(categories); i++)
+            {
+                boost::asio::ip::tcp::endpoint serverEP = server->GetLocalEndPoint(categoriess[i]);
+                if (serverEP.port() <= IPEndPoint::MinPort || serverEP.port() > IPEndPoint::MaxPort)
+                {
+                    continue;
+                }
+
+                ppp::string tmp = "Service ";
+                tmp += stl::to_string<ppp::string>(++j);
+                tmp = ppp::PaddingRight(tmp, 22, ' ');
+                tmp += ": " + IPEndPoint::ToEndPoint(serverEP).ToString();
+                tmp += "/";
+                tmp += categories[i];
+                printfn("%s", tmp.data());
+            }
+        }
+
+        // Displays the current host environment type, in effect marking whether it is a released product or a development debug release.
+        printfn("Hosting Environment   : %s", hosting_environment.data());
+
+        // To print a blank line as a separator for major categories.
+        printfn("");
     }
 
-    // Displays the current host environment type, in effect marking whether it is a released product or a development debug release.
-    printfn("Hosting Environment   : %s", hosting_environment.data());
-
-    // To print a blank line as a separator for major categories.
-    printfn("");
-
-    // Print network interface details
-    if (NULLPTR != client)
+    // Tab 1: Network interface details
+    if (console_tab_page_ == 1 && NULLPTR != client)
     {
         if (client->IsProxyOnly())
         {
@@ -1256,21 +1555,141 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         TransmissionStatistics.statistics_snapshot = NULLPTR;
     }
 
-    // Print VPN statistics
-    printfn("%s", "VPN");
-    printfn("%s", section_separator.data());
-    printfn("Duration              : %s", stopwatch_.Elapsed().ToString("TT:mm:ss", false).data());
-    if (NULLPTR != server) 
+    // Tab 0 (Status) and Tab 2 (Traffic): Show traffic statistics
+    if (console_tab_page_ == 0 || console_tab_page_ == 2)
     {
-        printfn("Sessions              : %s", stl::to_string<ppp::string>(server->GetAllExchangerNumber()).data());
+        // Print VPN statistics
+        printfn("%s", "VPN");
+        printfn("%s", section_separator.data());
+        printfn("Duration              : %s", stopwatch_.Elapsed().ToString("TT:mm:ss", false).data());
+        if (NULLPTR != server)
+        {
+            printfn("Sessions              : %s", stl::to_string<ppp::string>(server->GetAllExchangerNumber()).data());
+        }
+
+        printfn("TX                    : %s", ppp::StrFormatByteSize(TransmissionStatistics.outgoing_traffic).data());
+        printfn("RX                    : %s", ppp::StrFormatByteSize(TransmissionStatistics.incoming_traffic).data());
+        if (auto statistics = TransmissionStatistics.statistics_snapshot; statistics)
+        {
+            printfn("IN                    : %s", ppp::StrFormatByteSize(statistics->IncomingTraffic).data());
+            printfn("OUT                   : %s", ppp::StrFormatByteSize(statistics->OutgoingTraffic).data());
+        }
     }
 
-    printfn("TX                    : %s", ppp::StrFormatByteSize(TransmissionStatistics.outgoing_traffic).data());
-    printfn("RX                    : %s", ppp::StrFormatByteSize(TransmissionStatistics.incoming_traffic).data());
-    if (auto statistics = TransmissionStatistics.statistics_snapshot; statistics)
+    // Tab 3: Route statistics
+    if (console_tab_page_ == 3)
     {
-        printfn("IN                    : %s", ppp::StrFormatByteSize(statistics->IncomingTraffic).data());
-        printfn("OUT                   : %s", ppp::StrFormatByteSize(statistics->OutgoingTraffic).data());
+        printfn("%s", "ROUTES");
+        printfn("%s", section_separator.data());
+        printfn("Bypass Mode           : %s",
+            network_interface->SplitMode == NetworkInterface::BypassMode::Ip ? "ip" :
+            network_interface->SplitMode == NetworkInterface::BypassMode::Geo ? "geo" : "no");
+        if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo)
+        {
+            printfn("GEO Policy YAML       : %s", network_interface->GeoRules.data());
+            printfn("GeoSite Database      : %s", network_interface->GeoSite.data());
+            printfn("GeoIP Database        : %s", network_interface->GeoIP.data());
+        }
+        elif(network_interface->SplitMode == NetworkInterface::BypassMode::Ip)
+        {
+            printfn("Bypass IPv4 File      : %s", network_interface->Bypass->size() > 0 ?
+                network_interface->Bypass->begin()->data() : "(none)");
+            printfn("Bypass IPv6 File      : %s", network_interface->Bypass6->size() > 0 ?
+                network_interface->Bypass6->begin()->data() : "(none)");
+            printfn("Bypass Gateway        : %s", network_interface->BypassNgw.to_string().data());
+            printfn("Bypass Gateway IPv6   : %s", network_interface->BypassNgw6.to_string().data());
+            printfn("DNS Rules File        : %s", network_interface->DNSRules.data());
+            if (NULLPTR != client)
+            {
+                printfn("IP List Entries       : %zu", client->GetIPListCount());
+                printfn("IPv6 List Entries     : %zu", client->GetIPList6Count());
+            }
+        }
+        else
+        {
+            printfn("%s", "Split-routing files are not used in global mode.");
+        }
+    }
+
+    // Tab 4: live outbound selection. All configured exchangers remain open;
+    // switching changes only the default tunnel used by newly created flows.
+    if (console_tab_page_ == 4)
+    {
+        printfn("%s", "SERVERS");
+        printfn("%s", section_separator.data());
+        printfn("%s", "Use Up/Down to select and Enter to switch.");
+        printfn("%s", "Existing sessions keep their current connection.");
+        if (NULLPTR == client)
+        {
+            printfn("%s", "No VPN client is running.");
+        }
+        else
+        {
+            auto statuses = client->GetOutboundStatuses();
+            ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
+            for (auto& status : statuses)
+            {
+                if (status.server_menu)
+                {
+                    servers.emplace_back(std::move(status));
+                }
+            }
+            if (servers.empty())
+            {
+                printfn("%s", "No server menu is configured. Use --server-dir=<directory>.");
+            }
+            else
+            {
+                if (server_selection_ >= servers.size())
+                {
+                    server_selection_ = servers.size() - 1;
+                }
+                static constexpr std::size_t page_size = 10;
+                std::size_t page_count = (servers.size() + page_size - 1) / page_size;
+                std::size_t page = server_selection_ / page_size;
+                std::size_t first = page * page_size;
+                std::size_t last = std::min<std::size_t>(servers.size(), first + page_size);
+                printfn("Servers               : %zu  Page %zu/%zu  (%zu-%zu)",
+                    servers.size(), page + 1, page_count, first + 1, last);
+                auto server_endpoint = [](const ppp::string& uri) noexcept -> ppp::string
+                {
+                    ppp::string value = ppp::ATrim<ppp::string>(uri);
+                    std::size_t authority = value.find("://");
+                    std::size_t slash = value.find('/',
+                        authority == ppp::string::npos ? 0 : authority + 3);
+                    if (slash != ppp::string::npos) value.erase(slash);
+                    return value;
+                };
+                for (std::size_t i = first; i < last; ++i)
+                {
+                    const auto& outbound = servers[i];
+                    bool connected = outbound.state ==
+                        VEthernetExchanger::NetworkState_Established;
+                    const char* usage = outbound.route_used ? " used" :
+                        (connected ? " connected" : "");
+                    ppp::string endpoint = server_endpoint(outbound.server);
+                    if (i == server_selection_ && console_highlight)
+                    {
+                        printfn.Highlighted(">%-1c %-24s%s",
+                            outbound.active ? '*' : ' ',
+                            outbound.display_name.data(),
+                            usage);
+                        printfn.Highlighted("   %s",
+                            endpoint.empty() ? "(not configured)" : endpoint.data());
+                    }
+                    else
+                    {
+                        printfn("%c%c %-24s%s",
+                            i == server_selection_ ? '>' : ' ',
+                            outbound.active ? '*' : ' ',
+                            outbound.display_name.data(),
+                            usage);
+                        printfn("   %s",
+                            endpoint.empty() ? "(not configured)" : endpoint.data());
+                    }
+                }
+            }
+        }
     }
 
     // Update buffer size for next render
@@ -1404,7 +1823,9 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
                 {
                     outbounds.emplace_back(VEthernetNetworkSwitcher::OutboundConfiguration{
-                        outbound.tag, outbound.configuration });
+                        outbound.tag, outbound.configuration,
+                        outbound.display_name, outbound.server_menu,
+                        outbound.source_path, outbound.route_used });
                 }
                 if (!ethernet->SetOutboundConfigurations(outbounds))
                 {
@@ -1640,6 +2061,11 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         proxy_mode_ = mode == "proxy";
         client_mode_ = proxy_mode_ || IsModeClientOrServer(argc, argv);
 
+        if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration))
+        {
+            return -1;
+        }
+
         if (proxy_mode_)
         {
             // Listener addresses and default ports come from the JSON
@@ -1747,6 +2173,12 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     {
         network_interface->SplitMode = NetworkInterface::BypassMode::Geo;
         network_interface->GeoRules = geo_configuration_path_;
+    }
+
+    if (client_mode_ && !proxy_mode_ &&
+        !LoadGeoOutboundConfigurations(network_interface, configuration))
+    {
+        return -1;
     }
 
     network_interface_ = network_interface;
@@ -2121,7 +2553,12 @@ void PppApplication::PrintHelpInformation() noexcept
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--geo-rules=<file>",
         col_description_width, "Geo routing rules",
-        col_default_width, "./geo-rules.txt");
+        col_default_width, "./geo-rules.yaml");
+
+    printf("  %-*s  %-*s  %-*s\r\n",
+        col_option_width, "--server-dir=<directory>",
+        col_description_width, "Server JSON directory for live switching",
+        col_default_width, "disabled");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--geosite=<file>",
@@ -2413,7 +2850,7 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         }
 
         ni->GeoRules = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
-            "--geo-rules", argc, argv, "./geo-rules.txt").data()).data());
+            "--geo-rules", argc, argv, "./geo-rules.yaml").data()).data());
         ni->GeoSite = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
             "--geosite", argc, argv, "./geosite.dat").data()).data());
         ni->GeoIP = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
@@ -2590,6 +3027,9 @@ bool PppApplication::OnTick(uint64_t now) noexcept
     using RouteIPListTablePtr = VEthernetNetworkSwitcher::RouteIPListTablePtr;
     using NetworkState        = VEthernetExchanger::NetworkState;
 
+    // Handle console keyboard input for tab switching
+    HandleConsoleInput();
+
     // Update console display
     PrintEnvironmentInformation();
 
@@ -2719,6 +3159,215 @@ std::shared_ptr<AppConfiguration> PppApplication::GetConfiguration() noexcept
     return configuration_;
 }
 
+bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
+    const std::shared_ptr<AppConfiguration>& primary) noexcept
+{
+    server_directory_.clear();
+    ppp::string value = ppp::ATrim<ppp::string>(
+        ppp::GetCommandArgument("--server-dir", argc, argv));
+    if (value.empty())
+    {
+        return true;
+    }
+    if (NULLPTR == primary)
+    {
+        return false;
+    }
+
+    bool has_main = false;
+    for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
+    {
+        if (ppp::ToLower<ppp::string>(outbound.tag) == "main")
+        {
+            has_main = true;
+            break;
+        }
+    }
+    if (!has_main)
+    {
+        outbound_configurations_.insert(outbound_configurations_.begin(),
+            ClientOutboundConfiguration{ "main", primary, "main", false, ppp::string(), false });
+    }
+
+    server_directory_ = File::GetFullPath(File::RewritePath(value.data()).data());
+    ppp::vector<ppp::string> files;
+    if (server_directory_.empty() ||
+        !File::GetAllFileNames(server_directory_.data(), false, files))
+    {
+        fprintf(stdout, "Server configuration directory cannot be read: %s\r\n",
+            value.data());
+        return false;
+    }
+    std::sort(files.begin(), files.end());
+
+    ppp::unordered_set<ppp::string> tags;
+    std::size_t loaded = 0;
+    for (const ppp::string& file : files)
+    {
+        ppp::string file_name = File::GetFileName(file.data());
+        ppp::string lower_name = ppp::ToLower<ppp::string>(file_name);
+        if (lower_name.size() < 6 ||
+            lower_name.compare(lower_name.size() - 5, 5, ".json") != 0)
+        {
+            continue;
+        }
+
+        ppp::string display_name = file_name.substr(0, file_name.size() - 5);
+        ppp::string tag_base = "server:" + ppp::ToLower<ppp::string>(display_name);
+        ppp::string tag = tag_base;
+        for (std::size_t suffix = 2; !tags.emplace(tag).second; ++suffix)
+        {
+            tag = tag_base + "-" + stl::to_string<ppp::string>(suffix);
+        }
+
+        std::shared_ptr<AppConfiguration> configuration =
+            ppp::make_shared_object<AppConfiguration>();
+        if (NULLPTR == configuration || !configuration->Load(file))
+        {
+            fprintf(stdout, "Failed to load server configuration: %s\r\n", file.data());
+            return false;
+        }
+
+        // Do not open the primary configuration twice when its JSON also lives
+        // in --server-dir. Duplicate sessions with the same GUID/server can make
+        // the control (main) handshake lose to its menu copy, leaving network
+        // takeover waiting forever even though secondary links are connected.
+        if (configuration->client.guid == primary->client.guid &&
+            configuration->client.server == primary->client.server)
+        {
+            for (ClientOutboundConfiguration& outbound : outbound_configurations_)
+            {
+                if (ppp::ToLower<ppp::string>(outbound.tag) == "main")
+                {
+                    outbound.display_name = display_name;
+                    outbound.server_menu = true;
+                    outbound.source_path = file;
+                    break;
+                }
+            }
+            ++loaded;
+            continue;
+        }
+
+#if defined(_WIN32)
+        bool initialize_allocator = configuration->vmem.size > 0;
+#else
+        bool initialize_allocator = configuration->vmem.path.size() > 0 &&
+            configuration->vmem.size > 0;
+#endif
+        if (initialize_allocator)
+        {
+            std::shared_ptr<BufferswapAllocator> allocator =
+                ppp::make_shared_object<BufferswapAllocator>(
+                    configuration->vmem.path,
+                    std::max<int64_t>((int64_t)1LL << (int64_t)25LL,
+                        (int64_t)configuration->vmem.size << (int64_t)20LL));
+            if (NULLPTR != allocator && allocator->IsVaild())
+            {
+                configuration->SetBufferAllocator(allocator);
+            }
+        }
+
+        outbound_configurations_.emplace_back(ClientOutboundConfiguration{
+            tag, configuration, display_name, true, file, false });
+        ++loaded;
+    }
+
+    if (loaded == 0)
+    {
+        fprintf(stdout, "Server configuration directory contains no JSON files: %s\r\n",
+            server_directory_.data());
+        return false;
+    }
+    return true;
+}
+
+bool PppApplication::LoadGeoOutboundConfigurations(
+    const std::shared_ptr<NetworkInterface>& network_interface,
+    const std::shared_ptr<AppConfiguration>& primary) noexcept
+{
+    using GeoRuleEngine = ppp::app::client::geo::GeoRuleEngine;
+    if (NULLPTR == network_interface || NULLPTR == primary ||
+        network_interface->SplitMode != NetworkInterface::BypassMode::Geo ||
+        network_interface->GeoRules.empty())
+    {
+        return true;
+    }
+
+    ppp::vector<GeoRuleEngine::OutboundConfiguration> declarations;
+    ppp::string final_outbound;
+    ppp::string error;
+    if (!GeoRuleEngine::ParseOutboundConfigurations(
+        network_interface->GeoRules, declarations, final_outbound, error))
+    {
+        fprintf(stdout, "Geo rules error: %s\r\n", error.data());
+        return false;
+    }
+    if (declarations.empty())
+    {
+        return true;
+    }
+
+    bool has_main = false;
+    for (ClientOutboundConfiguration& outbound : outbound_configurations_)
+    {
+        if (ppp::ToLower<ppp::string>(outbound.tag) == "main")
+        {
+            has_main = true;
+            break;
+        }
+    }
+    if (!has_main)
+    {
+        outbound_configurations_.insert(outbound_configurations_.begin(),
+            ClientOutboundConfiguration{ "main", primary, "main", false, ppp::string(), false });
+    }
+
+    for (const GeoRuleEngine::OutboundConfiguration& declaration : declarations)
+    {
+        if (declaration.primary)
+        {
+            continue;
+        }
+
+        std::shared_ptr<AppConfiguration> configuration =
+            ppp::make_shared_object<AppConfiguration>();
+        if (NULLPTR == configuration || !configuration->Load(declaration.path))
+        {
+            fprintf(stdout, "Failed to load geo outbound '%s': %s\r\n",
+                declaration.tag.data(), declaration.path.data());
+            return false;
+        }
+
+        ClientOutboundConfiguration* matched = NULLPTR;
+        for (ClientOutboundConfiguration& outbound : outbound_configurations_)
+        {
+            if (NULLPTR != outbound.configuration &&
+                outbound.configuration->client.guid == configuration->client.guid &&
+                outbound.configuration->client.server == configuration->client.server)
+            {
+                matched = &outbound;
+                break;
+            }
+        }
+
+        if (NULLPTR != matched)
+        {
+            // Reuse the server-directory connection under the stable YAML tag.
+            // This avoids opening the same GUID/server twice and makes a rule
+            // such as "geosite,openai,us" select the visible zgo menu entry.
+            matched->tag = declaration.tag;
+            matched->source_path = declaration.path;
+            matched->route_used = true;
+            continue;
+        }
+
+        outbound_configurations_.emplace_back(ClientOutboundConfiguration{
+            declaration.tag, configuration, declaration.tag, false, declaration.path, true });
+    }
+    return true;
+}
+
 // Load configuration from file
 std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, const char* argv[], ppp::string& path) noexcept
 {
@@ -2803,7 +3452,8 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
                 if (NULLPTR != allocator && allocator->IsVaild()) configuration->SetBufferAllocator(allocator);
             }
 
-            outbound_configurations_.emplace_back(ClientOutboundConfiguration{ declaration.tag, configuration });
+            outbound_configurations_.emplace_back(ClientOutboundConfiguration{
+                declaration.tag, configuration, declaration.tag, false, declaration.path, true });
             if (declaration.primary) primary = configuration;
         }
 

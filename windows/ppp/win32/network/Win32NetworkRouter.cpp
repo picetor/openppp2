@@ -151,8 +151,22 @@ namespace ppp
 
             bool Router::Add(uint32_t destination, uint32_t mask, uint32_t gw, int metric, int interface_index) noexcept
             {
+                return Add(destination, mask, gw, metric, interface_index, NULLPTR);
+            }
+
+            bool Router::Add(uint32_t destination, uint32_t mask, uint32_t gw, int metric, int interface_index, DWORD* error) noexcept
+            {
+                if (error)
+                {
+                    *error = NO_ERROR;
+                }
+
                 if (interface_index < 0)
                 {
+                    if (error)
+                    {
+                        *error = ERROR_INVALID_PARAMETER;
+                    }
                     return false;
                 }
 
@@ -186,6 +200,10 @@ namespace ppp
                 int err = ::GetIpInterfaceEntry(&mib);
                 if (err != NO_ERROR)
                 {
+                    if (error)
+                    {
+                        *error = static_cast<DWORD>(err);
+                    }
                     return false;
                 }
                 elif((int64_t)metric < (int64_t)mib.Metric)
@@ -193,7 +211,12 @@ namespace ppp
                     route.dwForwardMetric1 = mib.Metric;
                 }
 
-                return Router::Add(route);
+                err = ::CreateIpForwardEntry(&route);
+                if (error)
+                {
+                    *error = static_cast<DWORD>(err);
+                }
+                return err == NO_ERROR;
             }
 
             bool Router::Add(MIB_IPFORWARDROW& route) noexcept

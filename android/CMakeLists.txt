@@ -5,13 +5,14 @@ SET(NAME openppp2)
 PROJECT(${NAME} C CXX) # CMAKE_CURRENT_SOURCE_DIR
 
 # C/CXX compiler configurations.
-SET(CMAKE_C_FLAGS "-fPIC -fvisibility=hidden -Wno-format -Wno-implicit-function-declaration")
-SET(CMAKE_CXX_FLAGS "-fPIC -stdlib=libc++ -fvisibility=hidden -Wno-#pragma-messages -Wno-format -Wno-inconsistent-missing-override -Wno-pointer-bool-conversion -Wno-unsequenced -Wno-null-dereference -Wno-gnu-variable-sized-type-not-at-end -Wno-tautological-undefined-compare -Wno-deprecated-declarations -Wno-shift-count-overflow")
+SET(CMAKE_C_FLAGS "-fPIC -fvisibility=hidden -Wno-format -Wno-implicit-function-declaration -Ulinux")
+SET(CMAKE_CXX_FLAGS "-fPIC -stdlib=libc++ -fvisibility=hidden -Wno-#pragma-messages -Wno-format -Wno-inconsistent-missing-override -Wno-pointer-bool-conversion -Wno-unsequenced -Wno-null-dereference -Wno-gnu-variable-sized-type-not-at-end -Wno-tautological-undefined-compare -Wno-deprecated-declarations -Wno-shift-count-overflow -Wno-enum-constexpr-conversion -Ulinux")
 
 # Configure predefined compilation macros.
 ADD_DEFINITIONS(-D_ANDROID)
 ADD_DEFINITIONS(-DBUDDY_ALLOC_IMPLEMENTATION)
 ADD_DEFINITIONS(-D_ANDROID_REDEF_STD_IN_OUT_ERR)
+ADD_DEFINITIONS(-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION)
 SET(PROJECT_ROOT_DIR "${PROJECT_SOURCE_DIR}/../")
 
 # ENV.
@@ -76,8 +77,11 @@ SET(CMAKE_CXX_STANDARD 17)
 # -rdynamic -Wl,-Bstatic -Wl,-Bdynamic -lstdc++ -lpthread -ldl -lz -lrt
 SET(CMAKE_EXE_LINKER_FLAGS "-static-libstdc++ -rdynamic -Wl,-Bstatic") 
 
-# Set the tripartite library directorys.
-SET(THIRD_PARTY_LIBRARY_DIR /root/android)
+# Set the third-party library directory. Allow callers to override the
+# historical Linux default so the native client can also be built on Windows.
+IF(NOT THIRD_PARTY_LIBRARY_DIR)
+    SET(THIRD_PARTY_LIBRARY_DIR /root/android)
+ENDIF()
 
 # Set the compiled header file search directorys.
 INCLUDE_DIRECTORIES(
@@ -138,10 +142,11 @@ TARGET_LINK_LIBRARIES(${NAME}
     libcrypto.a 
 
     dl
+    log
 
     libboost_system.a
     libboost_coroutine.a 
     libboost_thread.a 
     libboost_context.a 
     libboost_regex.a
-    libboost_filesystem.a) 
+    libboost_filesystem.a)

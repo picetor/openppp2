@@ -47,59 +47,68 @@ Use `--bypass-mode` on the client to select the routing engine:
 | Mode | Behavior |
 |------|----------|
 | `ip` | Default. Loads `ip.txt`, `ipv6.txt`, `dns-rules.txt`, and the IP routes from `appsettings.json` |
-| `geo` | Loads `geo-rules.txt` plus Mihomo/V2Ray-compatible `geosite.dat` and `geoip.dat` as needed |
+| `geo` | Loads `geo-rules.yaml` plus Mihomo/V2Ray-compatible `geosite.dat` and `geoip.dat` as needed |
 | `no` | Disables user split-routing rules while retaining mandatory routes such as VPN server reachability |
 
 ```bash
 ppp --mode=client --bypass-mode=geo
 
 ppp --mode=client --bypass-mode=geo \
-    --geo-rules=./geo-rules.txt \
+    --geo-rules=./geo-rules.yaml \
     --geosite=./geosite.dat \
     --geoip=./geoip.dat
 ```
 
-The commands above retain the single-outbound Geo mode: `--config` still points to JSON and rule actions use `direct` or `tunnel` (`tunnel` is an alias for `main`). Existing JSON startup and `--bypass-mode=ip|geo|no` behavior is unchanged.
+`--config` continues to point to the primary JSON. The Geo policy is supplied
+independently with `--geo-rules`; `tunnel` follows the node currently selected
+on the Servers page. IP mode does not load this YAML file.
 
-### Multi-outbound mode on one TAP
+### Geo policy and optional fixed outbounds
 
-When `--config` points directly to a `.txt` file, it is strictly interpreted as a multi-outbound Geo manifest. A `.json` value continues to select traditional single-configuration mode.
-
-```bash
-ppp --mode=client --config=./geo-rules.txt \
-    --geosite=./geosite.dat \
-    --geoip=./geoip.dat
+```yaml
+version: 1
+final: tunnel
+direct_dns:
+  - local
+outbounds:
+  main: ./appsettings.json
+  openai: ./outbounds/openai.json
+rules:
+  - geosite,cn,direct
+  - geoip,cn,direct
+  - geosite,openai,openai
 ```
 
-```ini
-main=./main.json
-tunnel1=./tunnel1.json
-tunnel2=./tunnel2.json
+Policy rules:
 
-final=main
-direct_dns=local
-
-geosite,github,main
-geosite,openai,tunnel1
-geosite,microsoft,direct
-geosite,cn,direct
-geoip,cn,direct
-domain-suffix,example.com,tunnel2
-ip-cidr,192.0.2.0/24,tunnel1
-ip-cidr6,2001:db8::/32,tunnel2
-```
-
-Manifest rules:
-
-- `main=<JSON>` is mandatory. Other tags may contain lowercase letters, digits, `_`, and `-`; input is case-insensitive. `direct`, `tunnel`, and `reject` are reserved. Duplicate tags, unknown actions, missing files, or an empty rule set fail startup.
-- JSON paths are resolved from the process working directory, not from the manifest's directory. Every JSON independently supplies its server, GUID, protocol/transport keys, WebSocket/TLS settings, and optional `client.server-proxy`, so different outbounds may use different keys.
-- Only one TAP is created. `main` owns TAP addressing, DNS, system routes, and local HTTP/SOCKS listeners; each tag owns an independent remote connection and reconnection state. All outbounds are created at startup. Initialization failure aborts startup, and a disconnected selected outbound never leaks or falls back to `main`.
+- The file uses a documented, strict YAML 1.2 subset. See the comments in
+  [`geo-rules.yaml`](geo-rules.yaml) for the complete syntax.
+- `outbounds` is optional. If present, it must declare `main`; each tag is a
+  fixed Geo route and owns an independent remote connection. Ordinary server
+  selection should use the `tunnel` action instead.
+- JSON paths are resolved from the process working directory. Every fixed
+  outbound independently supplies its server, GUID, keys, WebSocket/TLS
+  settings, and optional `client.server-proxy`.
+- Only one TAP is created. The primary configuration owns TAP addressing, DNS,
+  system routes, and local HTTP/SOCKS listeners. A disconnected selected
+  outbound never leaks or falls back to another route.
 - TCP connections pin their outbound when established. Raw TCP/UDP/ICMP maintains active destination affinity, so DNS TTL expiry cannot move active traffic to a differently keyed tunnel; selection is recalculated after five minutes of inactivity.
 - Multi-outbound mode rejects `--tun-static=yes`, because the legacy static UDP echo path has one global server/aggregator set and cannot isolate independent keys. Traditional JSON mode is unaffected.
 
+### Live server switching
+
+Use `--server-dir=<directory>` to populate the independent Servers page from
+JSON files in that directory. The menu shows ten entries per page and supports
+arrow-key selection. Switching reloads the selected JSON from disk, starts the
+new connection, waits two seconds for activation, then makes it the default for
+new flows and cleans up the previous non-route connection. Fixed Geo outbounds
+are marked `used` and remain available for their rules. The displayed
+`Template` always identifies the configuration currently selected for the
+default tunnel.
+
 ### Matching syntax and order
 
-Rules use `type,value,action`. Supported types are `geosite` (including attributes such as `@cn`), `geoip`, `domain`/`full`, `domain-suffix`, `domain-keyword`, `domain-regex`/`regexp`, `ip-cidr`, and `ip-cidr6`. An action is a declared outbound tag or `direct`; legacy `tunnel` means `main`.
+Rules use `type,value,action`. Supported types are `geosite` (including attributes such as `@cn`), `geoip`, `domain`/`full`, `domain-suffix`, `domain-keyword`, `domain-regex`/`regexp`, `ip-cidr`, and `ip-cidr6`. An action is `direct`, `tunnel` (the currently selected server), or a declared fixed outbound tag.
 
 Rules are evaluated top to bottom and the first match wins. Domain rules learn TTL-bound IPv4/IPv6 policies from DNS A/AAAA answers. Whether both query types are issued is decided by the OS resolver; the application does not force both. If domains share a CDN IP, the earlier rule owns that address policy. `direct_dns` redirects only queries for domains matched as `direct`; other queries use the TAP/main DNS, then the resulting connection is sent through the outbound selected for its destination IP. Literal-IP connections use only `geoip`/CIDR rules. Unmatched traffic uses `final` (default `main`).
 
@@ -210,7 +219,7 @@ Works automatically — no extra configuration needed.
 Windows configures only the openppp2 TUN adapter with the virtual DNS gateway (for example `192.168.12.1`). ICS, WSL, Hyper-V, Docker, Mobile Hotspot, and other virtual adapters are neither rebound nor cleared. openppp2 receives host queries inside TUN: ordinary domains use the resolver actually assigned to the TUN, while domains matched as `direct` use `direct_dns`. Main DNS races a latency-isolated Static Echo UDP path against the compatible `main` exchanger path and immediately returns the first valid response. This DNS-only channel is established automatically when Windows local DNS is enabled; it does not require global `--tun-static=yes`, and other UDP traffic keeps its original mode. Ordinary main DNS queries do not create TCP/53 fallback connections. If a local direct resolver has not answered over UDP after 300 ms, TCP/53 is attempted only against that same direct resolver, so domestic queries are not exposed to main DNS. DNS-over-TCP explicitly requested by an application still follows the same routing policy. Nothing listens on a host port 53, avoiding conflicts with services such as ICS. The original TUN DNS settings are restored on exit.
 
 - No DNS mode switch or extra startup option is required.
-- Both Geo and IP split-tunneling modes are supported. Domains matched as `direct` use `direct_dns` from `geo-rules.txt`; other domains use only main DNS and same-outbound backups, never the physical-interface resolver as a failure fallback.
+- Both Geo and IP split-tunneling modes are supported. Domains matched as `direct` use `direct_dns` from `geo-rules.yaml`; other domains use only tunnel DNS and same-outbound backups, never the physical-interface resolver as a failure fallback.
 - Only the TUN adapter is guarded: its IPv4 DNS is locked to the virtual gateway and its IPv6 DNS list is cleared during the session. Other adapters remain untouched. Strict prevention of applications that explicitly bypass the system resolver requires the optional Windows filtering layer; adapter DNS configuration alone is not described as leak-proof.
 - `udp.dns.prefer_ipv4` processes only DNS responses for tunneled rules; responses matched as `direct` retain their original A/AAAA records.
 - With `udp.dns.prefer_ipv4=true`, AAAA is removed only when an A response is already cached; otherwise AAAA is returned immediately.
@@ -440,7 +449,7 @@ The complete upstream CLI reference — fully compatible with this fork.
 | `--bypass-ngw` | Bypass list gateway | `--bypass-ngw <IP>` | `0.0.0.0` |
 | `--virr` | Auto-update & apply | `--virr [file]/[country]` | `./ip.txt/CN` |
 | `--dns-rules` | DNS rules | `--dns-rules <file>` | `./dns-rules.txt` |
-| `--geo-rules` | Geo rule file | `--geo-rules <file>` | `./geo-rules.txt` |
+| `--geo-rules` | Geo rule file | `--geo-rules <file>` | `./geo-rules.yaml` |
 | `--geosite` | geosite data file | `--geosite <file>` | `./geosite.dat` |
 | `--geoip` | geoip data file | `--geoip <file>` | `./geoip.dat` |
 
@@ -709,9 +718,9 @@ CDN optimized IP scenario — add `client.websocket`:
 
 ## 🏗️ Build System
 
-This fork's CI/CD includes 9 workflows (4 Release + 4 Debug + 1 Release packaging), covering Windows / Linux (amd64/aarch64) / macOS (arm64/amd64).
-
-Each build automatically cleans up old workflow runs, keeping only the last 10 per workflow.
+This fork has nine GitHub Actions workflows: eight native Release/Debug
+workflows plus one Android Debug APK workflow. Every workflow checks out the
+triggering commit instead of a hard-coded branch revision.
 
 | Platform | Architecture | Build Type |
 |----------|-------------|------------|
@@ -719,6 +728,7 @@ Each build automatically cleans up old workflow runs, keeping only the last 10 p
 | Linux | amd64 (7 variants) | Release / Debug |
 | Linux | aarch64 (4 variants) | Release / Debug |
 | macOS | arm64 + amd64 | Release / Debug |
+| Android | arm64-v8a + x86_64 | Debug APK + Flutter tests |
 
 > All other features (tunnel protocols, routing policies, MUX multiplexing, PaperAirplane acceleration, etc.) are identical to the original. Please refer to the upstream documentation.
 

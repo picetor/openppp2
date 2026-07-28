@@ -1657,6 +1657,55 @@ namespace ppp
                 return any;
             }
 
+            RouteAddStatistics AddAllRoutes(
+                std::shared_ptr<ppp::net::native::RouteInformationTable> rib,
+                const ppp::unordered_map<uint32_t, int>& gateway_interfaces) noexcept
+            {
+                RouteAddStatistics statistics;
+                if (NULLPTR == rib)
+                {
+                    return statistics;
+                }
+
+                for (auto&& [_, entries] : rib->GetAllRoutes())
+                {
+                    for (auto&& entry : entries)
+                    {
+                        ++statistics.Total;
+                        uint32_t mask = ppp::net::IPEndPoint::PrefixToNetmask(entry.Prefix);
+                        int interface_index = -1;
+                        auto mapped_interface = gateway_interfaces.find(entry.NextHop);
+                        if (mapped_interface != gateway_interfaces.end())
+                        {
+                            interface_index = mapped_interface->second;
+                        }
+                        else
+                        {
+                            interface_index = ppp::win32::network::Router::GetBestInterface(entry.NextHop);
+                        }
+                        DWORD error = NO_ERROR;
+                        if (ppp::win32::network::Router::Add(
+                            entry.Destination, mask, entry.NextHop, 1, interface_index, &error))
+                        {
+                            ++statistics.Succeeded;
+                        }
+                        elif(error == ERROR_OBJECT_ALREADY_EXISTS)
+                        {
+                            // Route takeover is intentionally idempotent. A route
+                            // retained by Windows or installed by another entry in
+                            // the same RIB already represents the requested state.
+                            ++statistics.Succeeded;
+                        }
+                        else
+                        {
+                            ++statistics.Failed;
+                            ++statistics.Errors[error];
+                        }
+                    }
+                }
+                return statistics;
+            }
+
             bool AddAllRoutes(ppp::vector<MIB_IPFORWARDROW>& routes) noexcept
             {
                 bool any = false;

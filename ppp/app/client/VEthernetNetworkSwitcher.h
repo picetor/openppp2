@@ -88,8 +88,23 @@ namespace ppp {
                 struct OutboundConfiguration final {
                     ppp::string                                                     tag;
                     std::shared_ptr<ppp::configurations::AppConfiguration>          configuration;
+                    ppp::string                                                     display_name;
+                    bool                                                            server_menu = false;
+                    ppp::string                                                     source_path;
+                    bool                                                            route_used = false;
+                };
+                struct OutboundStatus final {
+                    ppp::string                                                     tag;
+                    ppp::string                                                     display_name;
+                    ppp::string                                                     server;
+                    int                                                             state = 0;
+                    int                                                             reconnects = 0;
+                    bool                                                            active = false;
+                    bool                                                            server_menu = false;
+                    bool                                                            route_used = false;
                 };
                 typedef ppp::vector<OutboundConfiguration>                         OutboundConfigurationList;
+                typedef ppp::vector<OutboundStatus>                                OutboundStatusList;
                 typedef ppp::unordered_map<ppp::string, std::shared_ptr<VEthernetExchanger>> OutboundExchangerTable;
                 class NetworkInterface {    
                 public: 
@@ -172,12 +187,19 @@ namespace ppp {
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
                 bool                                                                LoadGeoRules(const ppp::string& rules_path, const ppp::string& geosite_path, const ppp::string& geoip_path) noexcept;
                 bool                                                                SetOutboundConfigurations(const OutboundConfigurationList& configurations) noexcept;
+                OutboundStatusList                                                  GetOutboundStatuses() noexcept;
+                ppp::string                                                         GetActiveOutbound() noexcept;
+                ppp::string                                                         GetActiveOutboundSourcePath() noexcept;
+                bool                                                                SwitchOutbound(const ppp::string& tag) noexcept;
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
 
 #if defined(_ANDROID) || defined(_IPHONE)   
                 void                                                                SetBypassIpList(ppp::string&& bypass_ip_list) noexcept;
+                std::shared_ptr<NetworkInterface>                                   GetTapNetworkInterface()        noexcept { return tun_ni_; }
+                std::shared_ptr<NetworkInterface>                                   GetUnderlyingNetworkInterface() noexcept { return underlying_ni_; }
+                virtual ppp::string                                                 GetRemoteUri() noexcept;
 #else   
 #if defined(_LINUX)
                 bool                                                                ProtectMode(bool* protect_mode) noexcept;
@@ -202,6 +224,8 @@ namespace ppp {
                     const boost::asio::ip::address&                                 gw6,
                     const ppp::string&                                              url) noexcept;
                 virtual ppp::string                                                 GetRemoteUri() noexcept;
+                virtual std::size_t                                                 GetIPListCount() noexcept;
+                virtual std::size_t                                                 GetIPList6Count() noexcept;
 #endif  
             public: 
                 virtual bool                                                        Open(const std::shared_ptr<ITap>& tap) noexcept override;
@@ -212,6 +236,9 @@ namespace ppp {
                 bool                                                                ProxyOnly(bool* value = NULLPTR) noexcept;
                 bool                                                                IsProxyOnly() const noexcept { return proxy_only_; }
 #if defined(_WIN32)
+                // Keep the VPN's own IPv4 transport on the physical interface
+                // before the main outbound has established network takeover.
+                bool                                                                EnsureWindowsIPv4ServerRoute(const boost::asio::ip::address& address) noexcept;
                 // Keep the VPN's own IPv6 transport reachable after the physical
                 // interface default route has been suppressed for leak prevention.
                 bool                                                                EnsureWindowsIPv6ServerRoute(const boost::asio::ip::address& address) noexcept;
@@ -236,6 +263,11 @@ namespace ppp {
                 virtual std::shared_ptr<VEthernetExchanger>                         NewExchanger(
                     const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration,
                     const ppp::string& tag, bool primary) noexcept;
+                std::shared_ptr<VEthernetExchanger>                                 EnsureOutbound(const ppp::string& tag) noexcept;
+                std::shared_ptr<ppp::configurations::AppConfiguration>              ReloadOutboundConfiguration(
+                                                                                        OutboundConfiguration& outbound) noexcept;
+                bool                                                                IsRouteOutbound(const ppp::string& tag) const noexcept;
+                void                                                                CompletePendingOutboundSwitch(uint64_t now) noexcept;
                 virtual std::shared_ptr<ppp::ethernet::VNetstack>                   NewNetstack() noexcept override;
                 virtual VEthernetHttpProxySwitcherPtr                               NewHttpProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
                 virtual VEthernetSocksProxySwitcherPtr                              NewSocksProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
@@ -326,8 +358,10 @@ namespace ppp {
 #if defined(_WIN32)
                 bool                                                                ApplyWindowsIPv6LeakBlockRoutes() noexcept;
                 void                                                                RemoveWindowsIPv6LeakBlock() noexcept;
+                void                                                                RemoveWindowsIPv4ServerRoutes() noexcept;
                 void                                                                RemoveWindowsIPv6ServerRoutes() noexcept;
                 int                                                                 DeleteWindowsIPv6BypassRoutes() noexcept;
+#endif
 #endif
                 bool                                                                ApplyGeoStaticRoutes() noexcept;
                 bool                                                                RefreshDirectDnsServers() noexcept;
@@ -335,7 +369,6 @@ namespace ppp {
                 void                                                                ObserveGeoDnsResponse(const void* packet, int packet_size) noexcept;
                 void                                                                AddGeoDynamicRoute(const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept;
                 void                                                                DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept;
-#endif
                 void                                                                Finalize() noexcept;
 #if defined(PPP_LOG_VERBOSE)
                 void                                                                StopDebugWatchdog() noexcept;
@@ -360,6 +393,10 @@ namespace ppp {
                 OutboundConfigurationList                                           outbound_configurations_;
                 OutboundExchangerTable                                              outbound_exchangers_;
                 ppp::string                                                         final_outbound_ = "main";
+                ppp::string                                                         active_outbound_ = "main";
+                ppp::string                                                         pending_outbound_;
+                uint64_t                                                            pending_outbound_deadline_ = 0;
+                std::shared_ptr<VEthernetExchanger>                                 pending_outbound_exchanger_;
                 struct OutboundAffinity final {
                     ppp::string                                                     tag;
                     uint64_t                                                        expires_at = 0;
@@ -433,7 +470,7 @@ namespace ppp {
 
 #if defined(_ANDROID) || defined(_IPHONE)   
                 ppp::string                                                         bypass_ip_list_;
-#else
+#endif
                 std::atomic<bool>                                                   route_added_   = false;
                 std::atomic<bool>                                                   network_takeover_worker_ = false;
                 std::atomic<bool>                                                   network_takeover_stopping_ = false;
@@ -478,6 +515,13 @@ namespace ppp {
                 bool                                                                ipv6_ignore_default_routes_captured_ = false;
                 bool                                                                ipv6_original_ignore_default_routes_ = false;
                 ppp::vector<MIB_IPFORWARD_ROW2>                                     ipv6_physical_default_routes_;
+                struct IPv4ServerRoute final {
+                    uint32_t                                                        address = 0;
+                    uint32_t                                                        gateway = 0;
+                    int                                                             interface_index = -1;
+                    bool                                                            owned = false;
+                };
+                ppp::vector<IPv4ServerRoute>                                        ipv4_server_routes_;
                 struct IPv6ServerRoute final {
                     boost::asio::ip::address                                        address;
                     boost::asio::ip::address                                        gateway;
@@ -516,7 +560,6 @@ namespace ppp {
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
-#endif
 #endif
             };
         }

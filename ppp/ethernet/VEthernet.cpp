@@ -291,7 +291,11 @@ namespace ppp
                 return false;
             }
 
-            if (!tap->IsOpen())
+            // TapLinux::From() wraps an already-established Android VPN fd, but
+            // the ITap read loop is not started until Open() is called. Desktop
+            // bootstrap paths open their TAP before constructing VEthernet;
+            // Android hands the wrapped fd directly to this method.
+            if (!tap->IsOpen() && !tap->Open())
             {
                 return false;
             }

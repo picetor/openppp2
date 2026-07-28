@@ -36,6 +36,7 @@
 /Release
 /x64/Debug
 /x64/Release
+/x64/DebugProxy
 
 /sln/client/Debug
 /sln/server/Debug
@@ -54,6 +55,7 @@
 bin/
 build/
 android/build/
+android/android/keystore/
 
 .vscode/*
 !.vscode/settings.json
@@ -85,6 +87,18 @@ vcpkg/
 
 # Downloaded packages
 *.deb
+
+# Project-local SDKs used for reproducible Android builds
+.toolchains/
+
+# Local Android packages and install metadata
+*.apk
+*.idsig
+
+# Local runtime/test output and private server configurations
+/*.log
+/help-test.txt
+/servers/
 
 # TLS certs (machine-specific)
 *.key

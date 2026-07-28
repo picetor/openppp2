@@ -211,6 +211,10 @@ public:
     std::shared_ptr<libopenppp2_network_interface>                          network_interface_;
     std::shared_ptr<ppp::string>                                            bypass_ip_list_;
     std::shared_ptr<ppp::string>                                            dns_rules_list_;
+    std::shared_ptr<ppp::string>                                            geo_rules_path_;
+    std::shared_ptr<ppp::string>                                            geosite_path_;
+    std::shared_ptr<ppp::string>                                            geoip_path_;
+    std::shared_ptr<boost::asio::io_context>                                run_context_;
     ppp::transmissions::ITransmissionStatistics                             transmission_statistics_;
 
 private:
@@ -498,10 +502,29 @@ bool                                                                        libo
     if (NULLPTR != timeout) {
         timeout->Dispose();
     }
+
+    // run() owns a work guard, so its private io_context cannot drain on its
+    // own. Stop it explicitly before tearing down the client. This also makes
+    // stop() resilient when a later exchanger cleanup stalls: the Java VPN
+    // worker can still leave run() and finish its service-side cleanup.
+    std::shared_ptr<boost::asio::io_context> run_context = std::move(run_context_);
+    if (NULLPTR != run_context) {
+        any = true;
+        run_context->stop();
+    }
     
     std::shared_ptr<VEthernetNetworkSwitcher> client = std::move(client_); 
     if (NULLPTR != client) {
         any = true;
+
+        // Android transfers ownership of ParcelFileDescriptor.detachFd() to
+        // native code. Close the TAP descriptor before the broader asynchronous
+        // object graph is released, otherwise Android can retain a ghost VPN
+        // after the Service itself has already stopped.
+        std::shared_ptr<ITap> tap = client->GetTap();
+        if (NULLPTR != tap) {
+            tap->Dispose();
+        }
         client->Dispose();
     }
 
@@ -511,6 +534,9 @@ bool                                                                        libo
     network_interface_.reset();
     bypass_ip_list_.reset();
     dns_rules_list_.reset();
+    geo_rules_path_.reset();
+    geosite_path_.reset();
+    geoip_path_.reset();
     transmission_statistics_.Clear();
     return any;
 }
@@ -926,6 +952,23 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1i
 }
 
 // package: supersocksr.ppp.android.c
+// public final class libopenpppp2
+// public native bool set_root_path(string path)
+//
+// Android starts application processes with "/" as the working directory.
+// Anchor relative GeoIP, GeoSite and generated rule paths in filesDir.
+__LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1root_1path(JNIEnv* env, jobject* this_, jstring path) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    std::shared_ptr<ppp::string> root_path = JNIENV_GetStringUTFChars(env, path);
+    if (NULLPTR == root_path || root_path->empty()) {
+        return false;
+    }
+
+    return chdir(root_path->data()) == 0;
+}
+
+// package: supersocksr.ppp.android.c
 // public final class libopenpppp2 
 // public native bool set_bypass_ip_list(string iplist)
 __LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1bypass_1ip_1list(JNIEnv* env, jobject* this_, jstring iplist) noexcept {
@@ -1009,6 +1052,40 @@ __LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1dns_1b
     ppp::net::asio::vdns::ttl = ttl;
     ppp::net::asio::vdns::servers = addresses;
     return true;
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
+// public native bool set_geo_rules(string rules, string geosite, string geoip)
+__LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1geo_1rules(
+    JNIEnv* env,
+    jobject* this_,
+    jstring rules,
+    jstring geosite,
+    jstring geoip) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    std::shared_ptr<ppp::string> rules_path = JNIENV_GetStringUTFChars(env, rules);
+    std::shared_ptr<ppp::string> geosite_path = JNIENV_GetStringUTFChars(env, geosite);
+    std::shared_ptr<ppp::string> geoip_path = JNIENV_GetStringUTFChars(env, geoip);
+    if (NULLPTR == rules_path || rules_path->empty() ||
+        NULLPTR == geosite_path || geosite_path->empty() ||
+        NULLPTR == geoip_path || geoip_path->empty()) {
+        return false;
+    }
+
+    return libopenppp2_application::Invoke(
+        [&rules_path, &geosite_path, &geoip_path]() noexcept -> int {
+            std::shared_ptr<libopenppp2_application> app = libopenppp2_application::GetDefault();
+            if (NULLPTR == app) {
+                return LIBOPENPPP2_ERROR_APPLICATIION_UNINITIALIZED;
+            }
+
+            app->geo_rules_path_ = rules_path;
+            app->geosite_path_ = geosite_path;
+            app->geoip_path_ = geoip_path;
+            return LIBOPENPPP2_ERROR_SUCCESS;
+        }) == LIBOPENPPP2_ERROR_SUCCESS;
 }
 
 // package: supersocksr.ppp.android.c
@@ -1138,6 +1215,15 @@ static int                                                                      
         client->LoadAllDnsRules(std::move(*dns_rules_list), false);
     }
 
+    std::shared_ptr<ppp::string> geo_rules_path = std::move(app->geo_rules_path_);
+    std::shared_ptr<ppp::string> geosite_path = std::move(app->geosite_path_);
+    std::shared_ptr<ppp::string> geoip_path = std::move(app->geoip_path_);
+    if (NULLPTR != geo_rules_path && NULLPTR != geosite_path && NULLPTR != geoip_path) {
+        if (!client->LoadGeoRules(*geo_rules_path, *geosite_path, *geoip_path)) {
+            return LIBOPENPPP2_ERROR_OPEN_VETHERNET_FAIL;
+        }
+    }
+
     bool ok = client->Open(tap);
     if (!ok) {
         return LIBOPENPPP2_ERROR_OPEN_VETHERNET_FAIL;
@@ -1224,6 +1310,7 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_run(JNIEnv* env
                         return LIBOPENPPP2_ERROR_UNKNOWN;
                     }
 
+                    app->run_context_ = context;
                     return LIBOPENPPP2_ERROR_SUCCESS;
                 };
 
@@ -1292,6 +1379,9 @@ __LIBOPENPPP2__(void) Java_supersocksr_ppp_android_c_libopenppp2_clear_1configur
             if (NULLPTR != app) {
                 app->bypass_ip_list_.reset();
                 app->dns_rules_list_.reset();
+                app->geo_rules_path_.reset();
+                app->geosite_path_.reset();
+                app->geoip_path_.reset();
                 app->configuration_.reset();
                 app->network_interface_.reset();
             }

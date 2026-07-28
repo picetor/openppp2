@@ -97,7 +97,16 @@ namespace ppp
             int                                                 SetAllNicsDnsAddresses(ppp::unordered_map<int, ppp::vector<boost::asio::ip::address>>& addresses) noexcept;
             int                                                 SetAllNicsDnsAddresses(ppp::vector<boost::asio::ip::address>& servers, ppp::unordered_map<int, ppp::vector<boost::asio::ip::address>>& addresses) noexcept;
 
+            struct RouteAddStatistics final
+            {
+                uint64_t                                    Total = 0;
+                uint64_t                                    Succeeded = 0;
+                uint64_t                                    Failed = 0;
+                ppp::unordered_map<DWORD, uint64_t>         Errors;
+            };
+
             bool                                                AddAllRoutes(std::shared_ptr<ppp::net::native::RouteInformationTable> rib) noexcept;
+            RouteAddStatistics                                  AddAllRoutes(std::shared_ptr<ppp::net::native::RouteInformationTable> rib, const ppp::unordered_map<uint32_t, int>& gateway_interfaces) noexcept;
             bool                                                AddAllRoutes(ppp::vector<MIB_IPFORWARDROW>& routes) noexcept;
             bool                                                DeleteAllRoutes(std::shared_ptr<ppp::net::native::RouteInformationTable> rib) noexcept;
             void                                                DeleteAllDefaultGatewayRoutes(boost::asio::ip::address gw) noexcept;
