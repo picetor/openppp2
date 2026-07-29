@@ -186,6 +186,8 @@ namespace ppp {
                 struct {
                     bool                                                    enabled;        ///< Enables direct policy distribution from OpenPPP2 Management.
                     ppp::string                                             endpoint;       ///< Management panel base HTTP/HTTPS URL.
+                    ppp::string                                             node_id;        ///< Node identifier configured in the management panel.
+                    ppp::string                                             communication_key; ///< Fixed key shared by the panel and all nodes.
                     ppp::string                                             token;          ///< Node bearer token (prefer token_file in production).
                     ppp::string                                             token_file;     ///< File containing the node bearer token.
                     ppp::string                                             cache_file;     ///< Last-known-good policy cache.

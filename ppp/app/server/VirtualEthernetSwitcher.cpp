@@ -2867,8 +2867,10 @@ namespace ppp {
              */
             bool VirtualEthernetSwitcher::OpenManagedServerIfNeed() noexcept {
                 const bool management_enabled =
-                    configuration_->server.management.enabled &&
-                    !configuration_->server.management.endpoint.empty();
+                    !configuration_->server.management.endpoint.empty() &&
+                    (configuration_->server.management.enabled ||
+                        (!configuration_->server.management.node_id.empty() &&
+                            !configuration_->server.management.communication_key.empty()));
                 const bool legacy_backend_enabled =
                     configuration_->server.node > 0 &&
                     !configuration_->server.backend.empty();

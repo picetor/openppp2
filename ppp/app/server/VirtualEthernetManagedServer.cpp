@@ -70,8 +70,14 @@ namespace ppp {
             }
 
             bool VirtualEthernetManagedServer::ManagementEnabled() const noexcept {
-                return configuration_->server.management.enabled &&
-                    !configuration_->server.management.endpoint.empty();
+                const auto& management = configuration_->server.management;
+                if (management.endpoint.empty()) {
+                    return false;
+                }
+                if (management.enabled) {
+                    return true;
+                }
+                return !management.node_id.empty() && !management.communication_key.empty();
             }
 
             bool VirtualEthernetManagedServer::OpenManagementPolicy() noexcept {
@@ -793,7 +799,10 @@ namespace ppp {
                     path.clear();
                 }
 
-                token = LTrim(RTrim(management.token));
+                token = LTrim(RTrim(management.communication_key));
+                if (token.empty()) {
+                    token = LTrim(RTrim(management.token));
+                }
                 if (token.empty() && !management.token_file.empty()) {
                     token = LTrim(RTrim(File::ReadAllText(management.token_file.data())));
                 }
@@ -824,6 +833,9 @@ namespace ppp {
 
                 HttpClient::Headers headers;
                 headers["Authorization"] = "Bearer " + token;
+                if (!configuration_->server.management.node_id.empty()) {
+                    headers["X-OpenPPP2-Node-ID"] = configuration_->server.management.node_id;
+                }
                 headers["Accept"] = "application/json";
                 HttpClient client(host, configuration_->server.management.cacert_file);
 
@@ -837,8 +849,10 @@ namespace ppp {
                 bool applied = ApplyManagementPolicy(json, true);
 
                 int heartbeat_status = 0;
-                const char heartbeat[] = "{}";
-                client.Post(path + "/api/v1/node/heartbeat", heartbeat, sizeof(heartbeat) - 1, headers, heartbeat_status);
+                Json::Value heartbeat;
+                heartbeat["config"] = configuration_->ToJson();
+                ppp::string heartbeat_body = JsonAuxiliary::ToString(heartbeat);
+                client.Post(path + "/api/v1/node/heartbeat", heartbeat_body.data(), heartbeat_body.size(), headers, heartbeat_status);
                 return applied;
             }
 
@@ -884,6 +898,9 @@ namespace ppp {
 
                 HttpClient::Headers headers;
                 headers["Authorization"] = "Bearer " + token;
+                if (!configuration_->server.management.node_id.empty()) {
+                    headers["X-OpenPPP2-Node-ID"] = configuration_->server.management.node_id;
+                }
                 headers["Accept"] = "application/json";
                 HttpClient client(host, configuration_->server.management.cacert_file);
                 int status = 0;

@@ -663,21 +663,19 @@ ppp --help
 
 ```json
 "management": {
-    "enabled": true,
     "endpoint": "https://panel.example.com",
-    "token": "",
-    "token-file": "./node-token",
+    "node-id": "hk01",
+    "communication-key": "填写面板显示的固定通讯密钥",
     "cache-file": "./management-cache.json",
     "local-blacklist-file": "./guid-blacklist.txt",
-    "cacert-file": "./cacert.pem",
-    "pull-interval": 60,
+    "pull-interval": 20,
     "report-online": true
 }
 ```
 
-把面板创建节点时显示的一次性令牌写入 `node-token`，文件只放一行令牌。
-如果反代使用公共可信证书，`cacert-file` 指向随程序提供的 CA 文件；使用
-自签名证书时应改为对应 CA 证书。
+`node-id` 填面板中创建的节点标识，`communication-key` 填面板显示的固定
+通讯密钥。通常只需要填写这三项；缓存、拉取周期和在线上报都有默认值。
+使用系统或程序自带的公共 CA 时无需填写 `cacert-file`，只有自签名证书才需要指定。
 
 - 默认黑名单模式：未录入面板的 GUID 也可连接，仅拒绝命中黑名单的 GUID。
 - 白名单模式：只允许该节点已分配且启用的 GUID。

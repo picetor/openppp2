@@ -333,12 +333,14 @@ namespace ppp {
             config.server.backend_key = "";
             config.server.management.enabled = false;
             config.server.management.endpoint = "";
+            config.server.management.node_id = "";
+            config.server.management.communication_key = "";
             config.server.management.token = "";
             config.server.management.token_file = "./node-token";
             config.server.management.cache_file = "./management-cache.json";
             config.server.management.local_blacklist_file = "./guid-blacklist.txt";
             config.server.management.cacert_file = "./cacert.pem";
-            config.server.management.pull_interval = 60;
+            config.server.management.pull_interval = 20;
             config.server.management.report_online = true;
             config.server.ipv6.mode = AppConfiguration::IPv6Mode_None;
             config.server.ipv6.cidr = "";
@@ -1385,6 +1387,8 @@ namespace ppp {
             config.server.backend_key = JsonAuxiliary::AsValue<ppp::string>(json["server"]["backend-key"]);
             AssignBoolIfPresent(config.server.management.enabled, json["server"]["management"]["enabled"]);
             AssignIfPresent(config.server.management.endpoint, json["server"]["management"]["endpoint"]);
+            AssignIfPresent(config.server.management.node_id, json["server"]["management"]["node-id"]);
+            AssignIfPresent(config.server.management.communication_key, json["server"]["management"]["communication-key"]);
             AssignIfPresent(config.server.management.token, json["server"]["management"]["token"]);
             AssignIfPresent(config.server.management.token_file, json["server"]["management"]["token-file"]);
             AssignIfPresent(config.server.management.cache_file, json["server"]["management"]["cache-file"]);
@@ -1605,6 +1609,8 @@ namespace ppp {
             server["backend-key"] = config.server.backend_key;
             server["management"]["enabled"] = config.server.management.enabled;
             server["management"]["endpoint"] = config.server.management.endpoint;
+            server["management"]["node-id"] = config.server.management.node_id;
+            server["management"]["communication-key"] = config.server.management.communication_key;
             server["management"]["token"] = config.server.management.token;
             server["management"]["token-file"] = config.server.management.token_file;
             server["management"]["cache-file"] = config.server.management.cache_file;
