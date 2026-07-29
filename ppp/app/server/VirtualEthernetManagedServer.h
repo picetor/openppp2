@@ -98,6 +98,7 @@ namespace ppp {
                 virtual void                                                        UploadTrafficToManagedServer(const ppp::Int128& session_id, int64_t rx, int64_t tx) noexcept;
                 virtual void                                                        SessionOnline(const ppp::Int128& session_id) noexcept;
                 virtual void                                                        SessionOffline(const ppp::Int128& session_id) noexcept;
+                bool                                                                IsSessionAuthorized(const ppp::Int128& session_id) noexcept;
 
             protected:
                 bool                                                                SendToManagedServer(const ppp::Int128& session_id, int cmd, int id) noexcept;

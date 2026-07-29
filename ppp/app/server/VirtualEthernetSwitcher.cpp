@@ -1583,6 +1583,30 @@ namespace ppp {
                 return Dictionary::FindObjectByKey(exchangers_, session_id);
             }
 
+            void VirtualEthernetSwitcher::EnforceManagementPolicy() noexcept {
+                VirtualEthernetManagedServerPtr managed_server;
+                ppp::vector<VirtualEthernetExchangerPtr> denied;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    managed_server = managed_server_;
+                    if (!managed_server) {
+                        return;
+                    }
+                    for (const auto& entry : exchangers_) {
+                        const VirtualEthernetExchangerPtr& exchanger = entry.second;
+                        if (exchanger && !managed_server->IsSessionAuthorized(entry.first)) {
+                            denied.emplace_back(exchanger);
+                        }
+                    }
+                }
+
+                for (const VirtualEthernetExchangerPtr& exchanger : denied) {
+                    if (exchanger) {
+                        exchanger->Dispose();
+                    }
+                }
+            }
+
             /**
              * @brief Creates, opens, and registers a new exchanger for a session.
              * @param transmission Transport bound to exchanger.

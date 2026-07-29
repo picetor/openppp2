@@ -690,6 +690,10 @@ namespace ppp {
                 return true;
             }
 
+            bool VirtualEthernetManagedServer::IsSessionAuthorized(const ppp::Int128& session_id) noexcept {
+                return AuthorizeByManagementPolicy(session_id);
+            }
+
             bool VirtualEthernetManagedServer::LoadLocalManagementBlacklist(ManagementPolicy& policy) noexcept {
                 const ppp::string& path = configuration_->server.management.local_blacklist_file;
                 if (path.empty()) {
@@ -767,6 +771,10 @@ namespace ppp {
                     management_policy_ = std::move(policy);
                 }
 
+                if (switcher_) {
+                    switcher_->EnforceManagementPolicy();
+                }
+
                 if (persist) {
                     const ppp::string& path = configuration_->server.management.cache_file;
                     ppp::string content = JsonAuxiliary::ToString(json);
@@ -828,6 +836,9 @@ namespace ppp {
                 ppp::string path;
                 ppp::string token;
                 if (!GetManagementHttpTarget(host, path, token)) {
+                    fprintf(stderr, "[management] invalid endpoint or missing credential: endpoint=%s node-id=%s\n",
+                        configuration_->server.management.endpoint.data(),
+                        configuration_->server.management.node_id.data());
                     return false;
                 }
 
@@ -842,6 +853,10 @@ namespace ppp {
                 int status = 0;
                 std::string response = client.Get(path + "/api/v1/node/policy", headers, status);
                 if (status < 200 || status >= 300 || response.empty()) {
+                    fprintf(stderr, "[management] policy request failed: endpoint=%s node-id=%s status=%d\n",
+                        configuration_->server.management.endpoint.data(),
+                        configuration_->server.management.node_id.data(),
+                        status);
                     return false;
                 }
 
@@ -863,6 +878,12 @@ namespace ppp {
                 }
                 ppp::string heartbeat_body = JsonAuxiliary::ToString(heartbeat);
                 client.Post(path + "/api/v1/node/heartbeat", heartbeat_body.data(), heartbeat_body.size(), headers, heartbeat_status);
+                if (heartbeat_status < 200 || heartbeat_status >= 300) {
+                    fprintf(stderr, "[management] heartbeat request failed: endpoint=%s node-id=%s status=%d\n",
+                        configuration_->server.management.endpoint.data(),
+                        configuration_->server.management.node_id.data(),
+                        heartbeat_status);
+                }
                 return applied;
             }
 

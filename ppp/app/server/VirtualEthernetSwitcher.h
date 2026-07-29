@@ -451,6 +451,10 @@ namespace ppp {
                  */
                 VirtualEthernetExchangerPtr                             GetExchanger(const Int128& session_id) noexcept;
                 /**
+                 * @brief Disconnects active sessions rejected by the latest management policy.
+                 */
+                void                                                    EnforceManagementPolicy() noexcept;
+                /**
                  * @brief Creates and registers a new exchanger for a session.
                  * @param transmission Active transmission channel.
                  * @param session_id   Session identifier.
