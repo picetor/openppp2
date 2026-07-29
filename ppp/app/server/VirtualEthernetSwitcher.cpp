@@ -1757,7 +1757,11 @@ namespace ppp {
                 if (run) {
                     VirtualEthernetManagedServerPtr managed_server = managed_server_;
                     if (NULLPTR != managed_server) {
-                        managed_server->SessionOnline(session_id);
+                        ppp::string remote_ip;
+                        if (transmission) {
+                            remote_ip = transmission->GetRemoteEndPoint().address().to_string();
+                        }
+                        managed_server->SessionOnline(session_id, remote_ip);
                     }
 
                     VirtualEthernetLoggerPtr logger = GetLogger();

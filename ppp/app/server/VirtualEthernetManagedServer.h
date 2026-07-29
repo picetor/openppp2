@@ -96,7 +96,7 @@ namespace ppp {
             public:
                 virtual bool                                                        AuthenticationToManagedServer(const ppp::Int128& session_id, const AuthenticationToManagedServerAsyncCallback& ac) noexcept;
                 virtual void                                                        UploadTrafficToManagedServer(const ppp::Int128& session_id, int64_t rx, int64_t tx) noexcept;
-                virtual void                                                        SessionOnline(const ppp::Int128& session_id) noexcept;
+                virtual void                                                        SessionOnline(const ppp::Int128& session_id, const ppp::string& remote_ip) noexcept;
                 virtual void                                                        SessionOffline(const ppp::Int128& session_id) noexcept;
                 bool                                                                IsSessionAuthorized(const ppp::Int128& session_id) noexcept;
 
@@ -120,8 +120,8 @@ namespace ppp {
                 bool                                                                PullManagementPolicyAsync() noexcept;
                 bool                                                                PullManagementPolicy() noexcept;
                 bool                                                                TickManagementPolicy(UInt64 now) noexcept;
-                bool                                                                ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept;
-                bool                                                                ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept;
+                bool                                                                ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx, const ppp::string& remote_ip = "") noexcept;
+                bool                                                                ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx, const ppp::string& remote_ip = "") noexcept;
                 bool                                                                GetManagementHttpTarget(ppp::string& host, ppp::string& path, ppp::string& token) noexcept;
 
             private:

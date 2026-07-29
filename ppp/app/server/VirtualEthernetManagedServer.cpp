@@ -607,9 +607,9 @@ namespace ppp {
                 }
             }
 
-            void VirtualEthernetManagedServer::SessionOnline(const ppp::Int128& session_id) noexcept {
+            void VirtualEthernetManagedServer::SessionOnline(const ppp::Int128& session_id, const ppp::string& remote_ip) noexcept {
                 if (ManagementEnabled() && configuration_->server.management.report_online && session_id != 0) {
-                    ReportManagementSessionAsync(session_id, "online", 0, 0);
+                    ReportManagementSessionAsync(session_id, "online", 0, 0, remote_ip);
                 }
             }
 
@@ -898,21 +898,22 @@ namespace ppp {
                 return false;
             }
 
-            bool VirtualEthernetManagedServer::ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept {
+            bool VirtualEthernetManagedServer::ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx, const ppp::string& remote_ip) noexcept {
                 if (!ManagementEnabled() || disposed_ || session_id == 0 || NULLPTR == event) {
                     return false;
                 }
 
                 auto self = shared_from_this();
                 ppp::string event_copy = event;
-                std::thread([self, this, session_id, event_copy, rx, tx]() noexcept {
+                ppp::string remote_ip_copy = remote_ip;
+                std::thread([self, this, session_id, event_copy, rx, tx, remote_ip_copy]() noexcept {
                     ppp::SetThreadName("presence");
-                    ReportManagementSession(session_id, event_copy.data(), rx, tx);
+                    ReportManagementSession(session_id, event_copy.data(), rx, tx, remote_ip_copy);
                 }).detach();
                 return true;
             }
 
-            bool VirtualEthernetManagedServer::ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept {
+            bool VirtualEthernetManagedServer::ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx, const ppp::string& remote_ip) noexcept {
                 ppp::string host;
                 ppp::string path;
                 ppp::string token;
@@ -925,6 +926,7 @@ namespace ppp {
                 json["guid"] = StringAuxiliary::Int128ToGuidString(session_id);
                 json["rxBytes"] = Json::UInt64(rx > 0 ? static_cast<uint64_t>(rx) : 0);
                 json["txBytes"] = Json::UInt64(tx > 0 ? static_cast<uint64_t>(tx) : 0);
+                json["remoteIp"] = remote_ip;
                 ppp::string body = JsonAuxiliary::ToString(json);
 
                 HttpClient::Headers headers;
