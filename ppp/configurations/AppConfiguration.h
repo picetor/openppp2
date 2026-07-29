@@ -326,6 +326,10 @@ namespace ppp {
              */
             ppp::string                                                     ToString() noexcept;
             /**
+             * @brief Returns the absolute path of the JSON file used by Load(path).
+             */
+            const ppp::string&                                              GetSourcePath() const noexcept { return _source_path; }
+            /**
              * @brief Emits a startup security diagnostics report.
              *
              * Scans the loaded configuration for weak/default/short keys and
@@ -369,6 +373,7 @@ namespace ppp {
             int                                                             _lcgmods[LCGMOD_TYPE_MAX]; ///< Precomputed LCG modifier values indexed by `LcgmodType`.
             std::shared_ptr<ppp::threading::BufferswapAllocator>            _BufferAllocator;           ///< Shared buffer pool for packet allocation; may be null until explicitly set.
             ppp::string                                                     _mux_mode_diagnostic;       ///< Transient note set by Loaded() when mux.mode was normalized; emitted at startup.
+            ppp::string                                                     _source_path;                ///< Original JSON file path, retained so management can upload the exact source text.
             std::atomic<int>                                                _mux_mode_runtime_override{ -1 }; ///< Debug-only runtime scheduler override (-1=none, else mux::vmux_net::mux_mode); set by remote mux-mode-set, survives session rebuilds.
 
         public:

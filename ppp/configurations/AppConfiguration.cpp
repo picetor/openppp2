@@ -249,6 +249,7 @@ namespace ppp {
          */
         void AppConfiguration::Clear() noexcept {
             AppConfiguration& config = *this;
+            config._source_path.clear();
             config.concurrent = Thread::GetProcessorCount();
             config.cdn[0] = IPEndPoint::MinPort;
             config.cdn[1] = IPEndPoint::MinPort;
@@ -1037,6 +1038,9 @@ namespace ppp {
                 bool loaded = Load(json);
                 if (!loaded && ppp::diagnostics::ErrorCode::Success == ppp::diagnostics::GetLastErrorCode()) {
                     return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::ConfigLoadFailed);
+                }
+                if (loaded) {
+                    _source_path = file_path;
                 }
                 return loaded;
             }

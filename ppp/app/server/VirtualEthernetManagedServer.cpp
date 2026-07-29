@@ -850,7 +850,17 @@ namespace ppp {
 
                 int heartbeat_status = 0;
                 Json::Value heartbeat;
-                heartbeat["config"] = configuration_->ToJson();
+                ppp::string config_text;
+                const ppp::string& source_path = configuration_->GetSourcePath();
+                if (!source_path.empty()) {
+                    config_text = File::ReadAllText(source_path.data());
+                }
+                if (!config_text.empty()) {
+                    heartbeat["configText"] = config_text;
+                }
+                else {
+                    heartbeat["config"] = configuration_->ToJson();
+                }
                 ppp::string heartbeat_body = JsonAuxiliary::ToString(heartbeat);
                 client.Post(path + "/api/v1/node/heartbeat", heartbeat_body.data(), heartbeat_body.size(), headers, heartbeat_status);
                 return applied;
