@@ -331,6 +331,15 @@ namespace ppp {
             config.server.mapping = true;
             config.server.backend = "";
             config.server.backend_key = "";
+            config.server.management.enabled = false;
+            config.server.management.endpoint = "";
+            config.server.management.token = "";
+            config.server.management.token_file = "./node-token";
+            config.server.management.cache_file = "./management-cache.json";
+            config.server.management.local_blacklist_file = "./guid-blacklist.txt";
+            config.server.management.cacert_file = "./cacert.pem";
+            config.server.management.pull_interval = 60;
+            config.server.management.report_online = true;
             config.server.ipv6.mode = AppConfiguration::IPv6Mode_None;
             config.server.ipv6.cidr = "";
             config.server.ipv6.prefix_length = ppp::ipv6::IPv6_MAX_PREFIX_LENGTH;
@@ -441,6 +450,12 @@ namespace ppp {
                     &config.vmem.path,
                     &config.server.backend,
                     &config.server.backend_key,
+                    &config.server.management.endpoint,
+                    &config.server.management.token,
+                    &config.server.management.token_file,
+                    &config.server.management.cache_file,
+                    &config.server.management.local_blacklist_file,
+                    &config.server.management.cacert_file,
                     &config.server.log,
                     &config.server.ipv6.cidr,
                     &config.server.ipv6.gateway,
@@ -588,6 +603,7 @@ namespace ppp {
             }
 
             config.server.node = std::max<int>(0, config.server.node);
+            config.server.management.pull_interval = std::max<int>(10, config.server.management.pull_interval);
             config.server.ipv6.prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, config.server.ipv6.prefix_length));
             config.udp.dns.ttl = std::max<int>(0, config.udp.dns.ttl);
 
@@ -1367,6 +1383,15 @@ namespace ppp {
             AssignBoolIfPresent(config.server.mapping, json["server"]["mapping"]);
             config.server.backend = JsonAuxiliary::AsValue<ppp::string>(json["server"]["backend"]);
             config.server.backend_key = JsonAuxiliary::AsValue<ppp::string>(json["server"]["backend-key"]);
+            AssignBoolIfPresent(config.server.management.enabled, json["server"]["management"]["enabled"]);
+            AssignIfPresent(config.server.management.endpoint, json["server"]["management"]["endpoint"]);
+            AssignIfPresent(config.server.management.token, json["server"]["management"]["token"]);
+            AssignIfPresent(config.server.management.token_file, json["server"]["management"]["token-file"]);
+            AssignIfPresent(config.server.management.cache_file, json["server"]["management"]["cache-file"]);
+            AssignIfPresent(config.server.management.local_blacklist_file, json["server"]["management"]["local-blacklist-file"]);
+            AssignIfPresent(config.server.management.cacert_file, json["server"]["management"]["cacert-file"]);
+            AssignIfPresent(config.server.management.pull_interval, json["server"]["management"]["pull-interval"]);
+            AssignBoolIfPresent(config.server.management.report_online, json["server"]["management"]["report-online"]);
             config.server.ipv6.mode = ParseIPv6Mode(JsonAuxiliary::AsValue<ppp::string>(json["server"]["ipv6"]["mode"]));
             AssignIfPresent(config.server.ipv6.cidr, json["server"]["ipv6"]["cidr"]);
             AssignIfPresent(config.server.ipv6.gateway, json["server"]["ipv6"]["gateway"]);
@@ -1578,6 +1603,15 @@ namespace ppp {
             server["mapping"] = config.server.mapping;
             server["backend"] = config.server.backend; /* ws://192.168.0.24/ppp/webhook */
             server["backend-key"] = config.server.backend_key;
+            server["management"]["enabled"] = config.server.management.enabled;
+            server["management"]["endpoint"] = config.server.management.endpoint;
+            server["management"]["token"] = config.server.management.token;
+            server["management"]["token-file"] = config.server.management.token_file;
+            server["management"]["cache-file"] = config.server.management.cache_file;
+            server["management"]["local-blacklist-file"] = config.server.management.local_blacklist_file;
+            server["management"]["cacert-file"] = config.server.management.cacert_file;
+            server["management"]["pull-interval"] = config.server.management.pull_interval;
+            server["management"]["report-online"] = config.server.management.report_online;
             server["ipv6"]["mode"] = IPv6ModeToString(config.server.ipv6.mode);
             server["ipv6"]["cidr"] = config.server.ipv6.cidr;
             server["ipv6"]["gateway"] = config.server.ipv6.gateway;

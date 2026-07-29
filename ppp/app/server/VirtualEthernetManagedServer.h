@@ -41,6 +41,16 @@ namespace ppp {
                     int64_t                                                         tx = 0;
                 };
                 typedef ppp::unordered_map<Int128, UploadTrafficTask>               UploadTrafficTaskTable;
+                struct ManagementPolicy {
+                    uint64_t                                                        revision = 0;
+                    bool                                                            loaded = false;
+                    bool                                                            enabled = true;
+                    bool                                                            whitelist = false;
+                    bool                                                            replace_duplicate = true;
+                    ppp::unordered_set<Int128>                                      blacklist;
+                    ppp::unordered_set<Int128>                                      whitelist_guids;
+                    ppp::unordered_set<Int128>                                      local_blacklist;
+                };
                 typedef ppp::net::asio::websocket                                   WebSocket;
                 typedef ppp::net::asio::sslwebsocket                                WebSocketSsl;
                 struct IWebSocket { // Composite 
@@ -75,15 +85,19 @@ namespace ppp {
                 ppp::string                                                         GetUri() noexcept;
                 bool                                                                LinkIsAvailable() noexcept;
                 bool                                                                LinkIsReconnecting() noexcept;
+                bool                                                                ShouldReplaceDuplicateGuid(const ppp::Int128& session_id) noexcept;
                 virtual void                                                        Dispose() noexcept;
                 virtual bool                                                        TryVerifyUriAsync(const ppp::string& url, const TryVerifyUriAsyncCallback& ac) noexcept;
                 virtual bool                                                        ConnectToManagedServer(const ppp::string& url) noexcept;
+                virtual bool                                                        OpenManagementPolicy() noexcept;
                 virtual bool                                                        Update(UInt64 now) noexcept;
                 virtual int                                                         NewId() noexcept;
 
             public:
                 virtual bool                                                        AuthenticationToManagedServer(const ppp::Int128& session_id, const AuthenticationToManagedServerAsyncCallback& ac) noexcept;
                 virtual void                                                        UploadTrafficToManagedServer(const ppp::Int128& session_id, int64_t rx, int64_t tx) noexcept;
+                virtual void                                                        SessionOnline(const ppp::Int128& session_id) noexcept;
+                virtual void                                                        SessionOffline(const ppp::Int128& session_id) noexcept;
 
             protected:
                 bool                                                                SendToManagedServer(const ppp::Int128& session_id, int cmd, int id) noexcept;
@@ -97,6 +111,17 @@ namespace ppp {
                 void                                                                RunInner(const ppp::string& url, YieldContext& y) noexcept;
                 ppp::string                                                         GetManagedServerEndPoint(const ppp::string& url, ppp::string& host, ppp::string& path, boost::asio::ip::tcp::endpoint& remoteEP, bool& ssl, YieldContext& y) noexcept;
                 bool                                                                TickAllUploadTrafficToManagedServer(UInt64 now) noexcept;
+                bool                                                                ManagementEnabled() const noexcept;
+                bool                                                                AuthorizeByManagementPolicy(const ppp::Int128& session_id) noexcept;
+                bool                                                                LoadManagementPolicyCache() noexcept;
+                bool                                                                LoadLocalManagementBlacklist(ManagementPolicy& policy) noexcept;
+                bool                                                                ApplyManagementPolicy(const Json::Value& json, bool persist) noexcept;
+                bool                                                                PullManagementPolicyAsync() noexcept;
+                bool                                                                PullManagementPolicy() noexcept;
+                bool                                                                TickManagementPolicy(UInt64 now) noexcept;
+                bool                                                                ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept;
+                bool                                                                ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept;
+                bool                                                                GetManagementHttpTarget(ppp::string& host, ppp::string& path, ppp::string& token) noexcept;
 
             private:
                 void                                                                Run(IWebScoketPtr& websocket, YieldContext& y) noexcept;
@@ -114,6 +139,7 @@ namespace ppp {
                 std::atomic<int>                                                    aid_           = 0;
                 UInt64                                                              echotest_next_ = 0;
                 UInt64                                                              traffics_next_ = 0;
+                UInt64                                                              management_pull_next_ = 0;
                 ppp::string                                                         url_;
                 std::shared_ptr<VirtualEthernetSwitcher>                            switcher_;
                 std::shared_ptr<boost::asio::io_context>                            context_;
@@ -122,6 +148,8 @@ namespace ppp {
                 AppConfigurationPtr                                                 configuration_;
                 UploadTrafficTaskTable                                              traffics_;
                 AuthenticationWaitableTable                                         authentications_;
+                ManagementPolicy                                                    management_policy_;
+                std::atomic<bool>                                                   management_pulling_ = false;
             };
         }
     }

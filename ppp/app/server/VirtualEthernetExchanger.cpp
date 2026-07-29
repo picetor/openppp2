@@ -143,6 +143,9 @@ namespace ppp {
                 }
 
                 UploadTrafficToManagedServer();
+                if (NULLPTR != managed_server_) {
+                    managed_server_->SessionOffline(GetId());
+                }
                 Dictionary::ReleaseAllObjects(static_echo_datagram_ports);
 
                 static_allocated_context_.reset();

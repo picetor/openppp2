@@ -18,7 +18,7 @@ namespace ppp {
                 }
             }
 
-            std::string HttpClient::HttpGetOrPostImpl(bool post, const ppp::string& api, const char* data, size_t size, int& status) noexcept {
+            std::string HttpClient::HttpGetOrPostImpl(bool post, const ppp::string& api, const char* data, size_t size, int& status, const Headers& request_headers, const ppp::string& content_type) noexcept {
                 status = 0;
 
                 if (this->_host.empty() || (NULLPTR == data && size != 0)) {
@@ -42,9 +42,12 @@ namespace ppp {
                 headers.insert(std::make_pair("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"));
                 headers.insert(std::make_pair("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"));
                 headers.insert(std::make_pair("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.104 Safari/537.36"));
+                for (const auto& pair : request_headers) {
+                    headers.insert(std::make_pair(pair.first.data(), pair.second.data()));
+                }
             
                 auto res = post ? 
-                    cli.Post(api.data(), headers, data, size, "application/x-www-form-urlencoded; charset=UTF-8") : 
+                    cli.Post(api.data(), headers, data, size, content_type.data()) :
                     cli.Get(api.data(), headers);
                 if (!res) {
                     return "";

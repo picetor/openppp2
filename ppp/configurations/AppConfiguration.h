@@ -184,6 +184,17 @@ namespace ppp {
                 ppp::string                                                 backend;        ///< URL or address of the authentication/management backend.
                 ppp::string                                                 backend_key;    ///< HMAC key used to sign backend API requests.
                 struct {
+                    bool                                                    enabled;        ///< Enables direct policy distribution from OpenPPP2 Management.
+                    ppp::string                                             endpoint;       ///< Management panel base HTTP/HTTPS URL.
+                    ppp::string                                             token;          ///< Node bearer token (prefer token_file in production).
+                    ppp::string                                             token_file;     ///< File containing the node bearer token.
+                    ppp::string                                             cache_file;     ///< Last-known-good policy cache.
+                    ppp::string                                             local_blacklist_file; ///< Local emergency GUID blacklist.
+                    ppp::string                                             cacert_file;    ///< CA bundle used to verify the management endpoint.
+                    int                                                     pull_interval;  ///< Policy refresh interval in seconds.
+                    bool                                                    report_online;  ///< Reports GUID presence and traffic to the panel.
+                }                                                           management;
+                struct {
                     IPv6Mode                                                mode;           ///< IPv6 provisioning strategy for connected clients.
                     ppp::string                                             cidr;           ///< IPv6 CIDR prefix pool from which client addresses are allocated.
                     int                                                     prefix_length;  ///< Prefix length delegated to each client (e.g. 64 for /64).

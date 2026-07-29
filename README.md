@@ -653,6 +653,46 @@ ppp --help
 
 ---
 
+## 🧭 管理面板直连
+
+服务端可以直接从 OpenPPP2 Management 拉取 GUID 策略并上报在线状态，
+不需要额外安装 Agent。面板只负责分发策略和订阅；节点保留本地配置，
+面板暂时不可用时继续使用最后一次成功拉取的缓存。
+
+在服务端配置的 `server` 中加入：
+
+```json
+"management": {
+    "enabled": true,
+    "endpoint": "https://panel.example.com",
+    "token": "",
+    "token-file": "./node-token",
+    "cache-file": "./management-cache.json",
+    "local-blacklist-file": "./guid-blacklist.txt",
+    "cacert-file": "./cacert.pem",
+    "pull-interval": 60,
+    "report-online": true
+}
+```
+
+把面板创建节点时显示的一次性令牌写入 `node-token`，文件只放一行令牌。
+如果反代使用公共可信证书，`cacert-file` 指向随程序提供的 CA 文件；使用
+自签名证书时应改为对应 CA 证书。
+
+- 默认黑名单模式：未录入面板的 GUID 也可连接，仅拒绝命中黑名单的 GUID。
+- 白名单模式：只允许该节点已分配且启用的 GUID。
+- `guid-blacklist.txt` 是节点本地紧急黑名单，每行一个 GUID，优先级最高。
+- 同一 GUID 可以用于不同节点；同一节点出现重复 GUID 时默认新连接替换旧连接，
+  面板可改为拒绝新连接。
+- 策略在内存中完成鉴权，并写入 `management-cache.json`；面板断开不会影响
+  已缓存策略下的节点独立运行。
+- `report-online` 开启后，节点会上报 GUID 的上线、心跳、流量增量和下线状态，
+  面板可按节点显示当前在线 GUID。
+
+`endpoint` 可以包含反向代理的路径前缀，但不要以 `/api/v1` 结尾。
+节点需要访问 `GET /api/v1/node/policy`、`POST /api/v1/node/heartbeat`
+和 `POST /api/v1/node/sessions`。
+
 ## 🔍 Debug 日志版本
 
 Release 构建（默认）只输出 TUI 仪表盘，不输出调试日志。**Debug 构建**额外启用 `PPP_LOG_VERBOSE` 宏，输出详细的 `LOG_DEBUG` / `LOG_INFO` 日志，用于排查连接、路由、DNS 等问题。

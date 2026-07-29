@@ -5,6 +5,8 @@
 #include <ppp/auxiliary/StringAuxiliary.h>
 #include <ppp/net/Socket.h>
 #include <ppp/net/IPEndPoint.h>
+#include <ppp/net/http/HttpClient.h>
+#include <ppp/io/File.h>
 #include <ppp/threading/Timer.h>
 #include <ppp/threading/Executors.h>
 #include <ppp/coroutines/asio/asio.h>
@@ -16,6 +18,8 @@ using ppp::auxiliary::JsonAuxiliary;
 using ppp::auxiliary::StringAuxiliary;
 using ppp::net::Socket;
 using ppp::net::IPEndPoint;
+using ppp::net::http::HttpClient;
+using ppp::io::File;
 using ppp::threading::Timer;
 
 namespace ppp {
@@ -65,6 +69,28 @@ namespace ppp {
                     });
             }
 
+            bool VirtualEthernetManagedServer::ManagementEnabled() const noexcept {
+                return configuration_->server.management.enabled &&
+                    !configuration_->server.management.endpoint.empty();
+            }
+
+            bool VirtualEthernetManagedServer::OpenManagementPolicy() noexcept {
+                if (!ManagementEnabled() || disposed_) {
+                    return false;
+                }
+
+                ManagementPolicy initial_policy;
+                LoadLocalManagementBlacklist(initial_policy);
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    management_policy_ = std::move(initial_policy);
+                }
+
+                LoadManagementPolicyCache();
+                PullManagementPolicyAsync();
+                return true;
+            }
+
             ppp::string VirtualEthernetManagedServer::GetUri() noexcept {
                 return url_;
             }
@@ -76,6 +102,13 @@ namespace ppp {
 
                 if (NULLPTR == ac) {
                     return false;
+                }
+
+                if (ManagementEnabled()) {
+                    bool allowed = AuthorizeByManagementPolicy(session_id);
+                    VirtualEthernetInformationPtr information;
+                    ac(allowed, information);
+                    return true;
                 }
 
                 UInt64 next = Executors::GetTickCount() + PACKET_TIMEOUT_AUTHENTICATION; {
@@ -171,6 +204,10 @@ namespace ppp {
                     return false;
                 }
 
+                if (ManagementEnabled()) {
+                    return true;
+                }
+
                 IWebScoketPtr websocket = server_;
                 if (NULLPTR == websocket) {
                     return false;
@@ -191,7 +228,12 @@ namespace ppp {
                 auto self = shared_from_this();
                 boost::asio::post(*context_, 
                     [self, this, now]() noexcept {
-                        TickEchoToManagedServer(now);
+                        if (ManagementEnabled()) {
+                            TickManagementPolicy(now);
+                        }
+                        else {
+                            TickEchoToManagedServer(now);
+                        }
                         TickAllAuthenticationToManagedServer(now);
                         TickAllUploadTrafficToManagedServer(now);
                     });
@@ -537,11 +579,31 @@ namespace ppp {
             }
 
             void VirtualEthernetManagedServer::UploadTrafficToManagedServer(const ppp::Int128& session_id, int64_t rx, int64_t tx) noexcept {
-                if ((session_id != 0) && (rx != 0 || tx != 0)) {
+                if ((session_id != 0) && (ManagementEnabled() || rx != 0 || tx != 0)) {
                     SynchronizedObjectScope scope(syncobj_);
                     UploadTrafficTask& task = traffics_[session_id];
                     task.rx += rx;
                     task.tx += tx;
+                }
+            }
+
+            void VirtualEthernetManagedServer::SessionOffline(const ppp::Int128& session_id) noexcept {
+                if (ManagementEnabled() && configuration_->server.management.report_online && session_id != 0) {
+                    UploadTrafficTask task; {
+                        SynchronizedObjectScope scope(syncobj_);
+                        auto tail = traffics_.find(session_id);
+                        if (tail != traffics_.end()) {
+                            task = tail->second;
+                            traffics_.erase(tail);
+                        }
+                    }
+                    ReportManagementSessionAsync(session_id, "offline", task.tx, task.rx);
+                }
+            }
+
+            void VirtualEthernetManagedServer::SessionOnline(const ppp::Int128& session_id) noexcept {
+                if (ManagementEnabled() && configuration_->server.management.report_online && session_id != 0) {
+                    ReportManagementSessionAsync(session_id, "online", 0, 0);
                 }
             }
 
@@ -565,6 +627,14 @@ namespace ppp {
                 }
 
                 for (auto&& [guid, task] : traffics) {
+                    if (ManagementEnabled()) {
+                        if (configuration_->server.management.report_online) {
+                            // Incoming server traffic is client TX; outgoing server traffic is client RX.
+                            ReportManagementSessionAsync(guid, "heartbeat", task.tx, task.rx);
+                        }
+                        continue;
+                    }
+
                     Json::Value json_value;
                     json_value["Guid"] = StringAuxiliary::Int128ToGuidString(guid);
                     json_value["RX"] = stl::to_string<ppp::string>(task.tx); // server:tx = client:rx
@@ -573,12 +643,252 @@ namespace ppp {
                 }
 
                 traffics_next_ = now + PACKET_TIMEOUT_TRAFFIC;
-                if (json_array.isArray()) {
+                if (!ManagementEnabled() && json_array.isArray()) {
                     int id = NewId();
                     SendToManagedServer(0, PACKET_CMD_TRAFFIC, id, JsonAuxiliary::ToString(json));
                 }
 
                 return true;
+            }
+
+            bool VirtualEthernetManagedServer::ShouldReplaceDuplicateGuid(const ppp::Int128& session_id) noexcept {
+                if (!ManagementEnabled()) {
+                    return true;
+                }
+                if (!AuthorizeByManagementPolicy(session_id)) {
+                    return false;
+                }
+                SynchronizedObjectScope scope(syncobj_);
+                return management_policy_.replace_duplicate;
+            }
+
+            bool VirtualEthernetManagedServer::AuthorizeByManagementPolicy(const ppp::Int128& session_id) noexcept {
+                if (session_id == 0) {
+                    return false;
+                }
+
+                SynchronizedObjectScope scope(syncobj_);
+                const ManagementPolicy& policy = management_policy_;
+                if (!policy.enabled) {
+                    return false;
+                }
+                if (policy.local_blacklist.find(session_id) != policy.local_blacklist.end()) {
+                    return false;
+                }
+                if (policy.blacklist.find(session_id) != policy.blacklist.end()) {
+                    return false;
+                }
+                if (policy.whitelist) {
+                    return policy.whitelist_guids.find(session_id) != policy.whitelist_guids.end();
+                }
+                return true;
+            }
+
+            bool VirtualEthernetManagedServer::LoadLocalManagementBlacklist(ManagementPolicy& policy) noexcept {
+                const ppp::string& path = configuration_->server.management.local_blacklist_file;
+                if (path.empty()) {
+                    return true;
+                }
+
+                ppp::vector<ppp::string> lines;
+                File::ReadAllLines(path.data(), lines);
+                for (const ppp::string& line : lines) {
+                    ppp::string guid = LTrim(RTrim(line));
+                    if (guid.empty() || guid[0] == '#') {
+                        continue;
+                    }
+                    Int128 value = StringAuxiliary::GuidStringToInt128(guid);
+                    if (value != 0) {
+                        policy.local_blacklist.emplace(value);
+                    }
+                }
+                return true;
+            }
+
+            bool VirtualEthernetManagedServer::LoadManagementPolicyCache() noexcept {
+                const ppp::string& path = configuration_->server.management.cache_file;
+                if (path.empty()) {
+                    return false;
+                }
+
+                ppp::string content = File::ReadAllText(path.data());
+                if (content.empty()) {
+                    return false;
+                }
+
+                Json::Value json = JsonAuxiliary::FromString(content);
+                return ApplyManagementPolicy(json, false);
+            }
+
+            bool VirtualEthernetManagedServer::ApplyManagementPolicy(const Json::Value& json, bool persist) noexcept {
+                if (!json.isObject()) {
+                    return false;
+                }
+                if (JsonAuxiliary::AsString(json["schema"]) != "openppp2-node-policy") {
+                    return false;
+                }
+                if (JsonAuxiliary::AsValue<int>(json["version"]) != 1) {
+                    return false;
+                }
+
+                ManagementPolicy policy;
+                policy.loaded = true;
+                policy.enabled = json["enabled"].isNull() || JsonAuxiliary::AsValue<bool>(json["enabled"]);
+                policy.revision = JsonAuxiliary::AsValue<uint64_t>(json["revision"]);
+                policy.whitelist = ToLower(JsonAuxiliary::AsString(json["accessMode"])) == "whitelist";
+                policy.replace_duplicate = ToLower(JsonAuxiliary::AsString(json["duplicateGuidPolicy"])) != "reject_new";
+                LoadLocalManagementBlacklist(policy);
+
+                auto load_guids = [](const Json::Value& array, ppp::unordered_set<Int128>& output) noexcept {
+                    if (!array.isArray()) {
+                        return;
+                    }
+                    for (Json::ArrayIndex i = 0; i < array.size(); i++) {
+                        Int128 guid = StringAuxiliary::GuidStringToInt128(JsonAuxiliary::AsString(array[i]));
+                        if (guid != 0) {
+                            output.emplace(guid);
+                        }
+                    }
+                };
+                load_guids(json["blacklist"], policy.blacklist);
+                load_guids(json["whitelist"], policy.whitelist_guids);
+
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    if (management_policy_.loaded && policy.revision < management_policy_.revision) {
+                        return false;
+                    }
+                    management_policy_ = std::move(policy);
+                }
+
+                if (persist) {
+                    const ppp::string& path = configuration_->server.management.cache_file;
+                    ppp::string content = JsonAuxiliary::ToString(json);
+                    if (!path.empty() && !content.empty()) {
+                        File::WriteAllBytes(path.data(), content.data(), static_cast<int>(content.size()));
+                    }
+                }
+                return true;
+            }
+
+            bool VirtualEthernetManagedServer::GetManagementHttpTarget(ppp::string& host, ppp::string& path, ppp::string& token) noexcept {
+                const auto& management = configuration_->server.management;
+                ppp::string hostname;
+                int port = IPEndPoint::MinPort;
+                bool https = false;
+                if (!HttpClient::VerifyUri(management.endpoint, &hostname, &port, &path, &https)) {
+                    return false;
+                }
+
+                host = (https ? "https://" : "http://") + hostname;
+                int default_port = https ? PPP_HTTPS_SYS_PORT : PPP_HTTP_SYS_PORT;
+                if (port > IPEndPoint::MinPort && port != default_port) {
+                    host += ":" + stl::to_string<ppp::string>(port);
+                }
+
+                while (path.size() > 1 && path.back() == '/') {
+                    path.pop_back();
+                }
+                if (path == "/") {
+                    path.clear();
+                }
+
+                token = LTrim(RTrim(management.token));
+                if (token.empty() && !management.token_file.empty()) {
+                    token = LTrim(RTrim(File::ReadAllText(management.token_file.data())));
+                }
+                return !host.empty() && !token.empty();
+            }
+
+            bool VirtualEthernetManagedServer::PullManagementPolicyAsync() noexcept {
+                if (!ManagementEnabled() || disposed_ || management_pulling_.exchange(true)) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                std::thread([self, this]() noexcept {
+                    ppp::SetThreadName("management");
+                    PullManagementPolicy();
+                    management_pulling_ = false;
+                }).detach();
+                return true;
+            }
+
+            bool VirtualEthernetManagedServer::PullManagementPolicy() noexcept {
+                ppp::string host;
+                ppp::string path;
+                ppp::string token;
+                if (!GetManagementHttpTarget(host, path, token)) {
+                    return false;
+                }
+
+                HttpClient::Headers headers;
+                headers["Authorization"] = "Bearer " + token;
+                headers["Accept"] = "application/json";
+                HttpClient client(host, configuration_->server.management.cacert_file);
+
+                int status = 0;
+                std::string response = client.Get(path + "/api/v1/node/policy", headers, status);
+                if (status < 200 || status >= 300 || response.empty()) {
+                    return false;
+                }
+
+                Json::Value json = JsonAuxiliary::FromString(stl::transform<ppp::string>(response));
+                bool applied = ApplyManagementPolicy(json, true);
+
+                int heartbeat_status = 0;
+                const char heartbeat[] = "{}";
+                client.Post(path + "/api/v1/node/heartbeat", heartbeat, sizeof(heartbeat) - 1, headers, heartbeat_status);
+                return applied;
+            }
+
+            bool VirtualEthernetManagedServer::TickManagementPolicy(UInt64 now) noexcept {
+                if (!ManagementEnabled()) {
+                    return false;
+                }
+                if (management_pull_next_ == 0 || now >= management_pull_next_) {
+                    management_pull_next_ = now + static_cast<UInt64>(configuration_->server.management.pull_interval) * 1000;
+                    return PullManagementPolicyAsync();
+                }
+                return false;
+            }
+
+            bool VirtualEthernetManagedServer::ReportManagementSessionAsync(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept {
+                if (!ManagementEnabled() || disposed_ || session_id == 0 || NULLPTR == event) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                ppp::string event_copy = event;
+                std::thread([self, this, session_id, event_copy, rx, tx]() noexcept {
+                    ppp::SetThreadName("presence");
+                    ReportManagementSession(session_id, event_copy.data(), rx, tx);
+                }).detach();
+                return true;
+            }
+
+            bool VirtualEthernetManagedServer::ReportManagementSession(const ppp::Int128& session_id, const char* event, int64_t rx, int64_t tx) noexcept {
+                ppp::string host;
+                ppp::string path;
+                ppp::string token;
+                if (!GetManagementHttpTarget(host, path, token)) {
+                    return false;
+                }
+
+                Json::Value json;
+                json["event"] = event;
+                json["guid"] = StringAuxiliary::Int128ToGuidString(session_id);
+                json["rxBytes"] = Json::UInt64(rx > 0 ? static_cast<uint64_t>(rx) : 0);
+                json["txBytes"] = Json::UInt64(tx > 0 ? static_cast<uint64_t>(tx) : 0);
+                ppp::string body = JsonAuxiliary::ToString(json);
+
+                HttpClient::Headers headers;
+                headers["Authorization"] = "Bearer " + token;
+                headers["Accept"] = "application/json";
+                HttpClient client(host, configuration_->server.management.cacert_file);
+                int status = 0;
+                client.Post(path + "/api/v1/node/sessions", body.data(), body.size(), headers, status);
+                return status >= 200 && status < 300;
             }
 
             VirtualEthernetManagedServer::IWebScoketPtr VirtualEthernetManagedServer::NewWebSocketConnectToManagedServer2(const ppp::string& url, YieldContext& y) noexcept {

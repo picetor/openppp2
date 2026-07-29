@@ -1476,6 +1476,10 @@ namespace ppp {
 
                 VirtualEthernetExchanger* exchanger = GetExchanger(session_id).get();
                 if (NULLPTR != exchanger) {
+                    if (!managed_server->ShouldReplaceDuplicateGuid(session_id)) {
+                        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::SessionCreateFailed);
+                        return STATUS_ERROR;
+                    }
                     return Establish(transmission, session_id, NULLPTR, y) ? STATUS_RUNING : STATUS_ERROR;
                 }
 
@@ -1727,6 +1731,11 @@ namespace ppp {
                 }
 
                 if (run) {
+                    VirtualEthernetManagedServerPtr managed_server = managed_server_;
+                    if (NULLPTR != managed_server) {
+                        managed_server->SessionOnline(session_id);
+                    }
+
                     VirtualEthernetLoggerPtr logger = GetLogger();
                     if (NULLPTR != logger) {
                         logger->Vpn(session_id, transmission);
@@ -2857,7 +2866,13 @@ namespace ppp {
              * @return true if managed mode is connected or not required.
              */
             bool VirtualEthernetSwitcher::OpenManagedServerIfNeed() noexcept {
-                if (configuration_->server.node < 1 || configuration_->server.backend.empty()) {
+                const bool management_enabled =
+                    configuration_->server.management.enabled &&
+                    !configuration_->server.management.endpoint.empty();
+                const bool legacy_backend_enabled =
+                    configuration_->server.node > 0 &&
+                    !configuration_->server.backend.empty();
+                if (!management_enabled && !legacy_backend_enabled) {
                     return true;
                 }
 
@@ -2868,6 +2883,21 @@ namespace ppp {
                 VirtualEthernetManagedServerPtr server = NewManagedServer();
                 if (NULLPTR == server) {
                     return false;
+                }
+
+                if (management_enabled) {
+                    if (!server->OpenManagementPolicy()) {
+                        server->Dispose();
+                        return false;
+                    }
+
+                    SynchronizedObjectScope scope(syncobj_);
+                    if (disposed_) {
+                        server->Dispose();
+                        return false;
+                    }
+                    managed_server_ = server;
+                    return true;
                 }
 
                 auto self = shared_from_this();
