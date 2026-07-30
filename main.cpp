@@ -886,12 +886,14 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
 void PppApplication::HandleConsoleInput() noexcept
 {
 #if !defined(_ANDROID)
-    const int console_tab_count = NULLPTR != client_ ? 4 : 2;
-    static constexpr int servers_tab_page = 3;
-    if (console_tab_page_ >= console_tab_count)
+    if (NULLPTR == client_)
     {
         console_tab_page_ = 0;
+        return;
     }
+
+    static constexpr int console_tab_count = 4;
+    static constexpr int servers_tab_page = 3;
 #if defined(_WIN32)
     // Windows: use _kbhit/_getch (non-blocking)
     while (_kbhit())
@@ -1040,10 +1042,11 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     printfn("%s", section_separator.data());
     printfn("%s", "Application started. Press Ctrl+C to shut down.");
 
-    // Print tab bar (always visible, at top)
+    // Client pages remain switchable; the server always shows Status without a tab bar.
+    if (NULLPTR != client)
     {
         const char* tab_labels[] = { "Status", "Network", "Routes", "Servers" };
-        const int tab_count = NULLPTR != client ? 4 : 2;
+        const int tab_count = 4;
 
         // Calculate tab column width (evenly divide console width)
         int col_width = console_window_size.x / tab_count;
@@ -1172,7 +1175,14 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             }
 
             ppp::string link_url = managed_server->GetUri();
-            printfn("Managed Server        : %s %s", link_url.data(), link_state);
+            if (link_url.empty())
+            {
+                printfn("Managed Server        : %s", link_state);
+            }
+            else
+            {
+                printfn("Managed Server        : %s %s", link_url.data(), link_state);
+            }
         }
         else
         {
@@ -1337,36 +1347,6 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         printfn("Duration              : %s", stopwatch_.Elapsed().ToString("TT:mm:ss", false).data());
 
         // To print a blank line as a separator for major categories.
-        printfn("");
-    }
-
-    // Tab 1: Server outbound interface.
-    if (console_tab_page_ == 1 && NULLPTR == client)
-    {
-        ppp::string interface_name;
-#if defined(_WIN32)
-        interface_name = ppp::win32::network::GetInterfaceName(
-            ppp::win32::network::Router::GetBestInterface(IPEndPoint("8.8.8.8", 0).GetAddress()));
-#elif defined(_MACOS)
-        uint32_t interface_address = ppp::unix__::UnixAfx::GetDefaultNetworkInterface();
-        if (interface_address != IPEndPoint::NoneAddress)
-        {
-            interface_name = ppp::unix__::UnixAfx::GetInterfaceName(IPEndPoint(interface_address, 0));
-        }
-#else
-        uint32_t interface_address = IPEndPoint::NoneAddress;
-        uint32_t interface_gateway = IPEndPoint::NoneAddress;
-        uint32_t interface_mask = IPEndPoint::NoneAddress;
-        ppp::tap::TapLinux::GetPreferredNetworkInterface(
-            interface_name,
-            interface_address,
-            interface_mask,
-            interface_gateway,
-            network_interface->Nic);
-#endif
-        printfn("%s", "NETWORK");
-        printfn("%s", section_separator.data());
-        printfn("Interface             : %s", interface_name.empty() ? "unavailable" : interface_name.data());
         printfn("");
     }
 
