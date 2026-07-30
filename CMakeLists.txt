@@ -4,6 +4,8 @@ CMAKE_MINIMUM_REQUIRED(VERSION 3.0.0)
 SET(NAME ppp)
 PROJECT(${NAME} C CXX) # CMAKE_CURRENT_SOURCE_DIR
 
+OPTION(USE_MUSL "Build a fully static Linux binary with musl libc" OFF)
+
 # C/CXX compiler configurations.
 SET(CMAKE_C_FLAGS "-fPIE -fvisibility=hidden -Wno-format -Wno-implicit-function-declaration")
 SET(CMAKE_CXX_FLAGS "-fPIE -fvisibility=hidden -Wno-format -Wno-inconsistent-missing-override -Wno-pointer-bool-conversion -Wno-unsequenced -Wno-null-dereference -Wno-gnu-variable-sized-type-not-at-end -Wno-tautological-undefined-compare -Wno-deprecated-declarations -Wno-shift-count-overflow")
@@ -23,14 +25,18 @@ ADD_DEFINITIONS(-DBUDDY_ALLOC_IMPLEMENTATION)
 # If linux/time_types.h is not available
 # ADD_DEFINITIONS(-DUAPI_LINUX_IO_URING_H_SKIP_LINUX_TIME_TYPES_H)
 
-# When compiling with the musl-libc standard library, 
-# You need to define the _MUSL__ preprocessor macro to ensure correct compilation.
-# https://wiki.musl-libc.org/faq
-# ADD_DEFINITIONS(-D__MUSL__)
+IF(USE_MUSL)
+    EXECUTE_PROCESS(
+        COMMAND ${CMAKE_C_COMPILER} -dumpmachine
+        OUTPUT_VARIABLE COMPILER_TARGET_TRIPLE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    IF(NOT COMPILER_TARGET_TRIPLE MATCHES "musl")
+        MESSAGE(FATAL_ERROR "USE_MUSL requires a compiler targeting musl libc")
+    ENDIF()
 
-# When using the musl-libc standard library, the _LARGEFILE64_SOURCE macro is not defined by default on some platforms. 
-# If 64-bit functions extended by _LARGEFILE64_SOURCE, such as lseek64, are required, it needs to be explicitly defined.
-# ADD_DEFINITIONS(-D_LARGEFILE64_SOURCE)
+    ADD_DEFINITIONS(-D__MUSL__ -D_LARGEFILE64_SOURCE)
+ENDIF()
 
 # ENV.
 SET(PLATFORM_DEBUG FALSE)
@@ -130,9 +136,9 @@ ELSE()
         MESSAGE(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++ 17 support. Please use a different C++ compiler.")
     ENDIF()
     
-    # When the __MUSL__ macro is enabled and compilation errors are encountered, you can add the connector option: -static
-    # -rdynamic -Wl,-Bstatic -Wl,-Bdynamic -lstdc++ -lpthread -ldl -lz -lrt
-    IF(NOT CMAKE_EXE_LINKER_FLAGS)
+    IF(USE_MUSL)
+        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -no-pie -Wl,--gc-sections -rdynamic")
+    ELSEIF(NOT CMAKE_EXE_LINKER_FLAGS)
         SET(CMAKE_EXE_LINKER_FLAGS "-static -no-pie -Wl,--gc-sections -s -nodefaultlibs -rdynamic -Wl,-Bstatic")
     ELSE()
         STRING(REPLACE "-rdynamic" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
@@ -265,6 +271,17 @@ ELSEIF(PLATFORM_COMPILER_CLANG)
         libboost_regex.a 
         libboost_filesystem.a) 
 ELSE()
+    SET(_LINUX_RUNTIME_LIBS)
+    IF(USE_MUSL)
+        SET(_LINUX_RUNTIME_LIBS atomic)
+    ELSE()
+        SET(_LINUX_RUNTIME_LIBS
+            libc.a
+            ${CMAKE_SOURCE_DIR}/libglibc_compat.a
+            -Wl,-Bstatic -lstdc++ -lgcc -lgcc_eh -latomic -lm -lmvec -lc
+            -Wl,-Bdynamic -ldl -lpthread)
+    ENDIF()
+
     TARGET_LINK_LIBRARIES(${NAME} 
         libssl.a 
         libcrypto.a 
@@ -276,7 +293,6 @@ ELSE()
 
         dl
         pthread
-        libc.a
 
         libboost_system.a
         libboost_coroutine.a 
@@ -284,9 +300,5 @@ ELSE()
         libboost_context.a 
         libboost_regex.a
         libboost_filesystem.a
-        ${CMAKE_SOURCE_DIR}/libglibc_compat.a
-
-        # 完全静态链接所需的标准库
-        -Wl,-Bstatic -lstdc++ -lgcc -lgcc_eh -latomic -lm -lmvec -lc
-        -Wl,-Bdynamic -ldl -lpthread) 
+        ${_LINUX_RUNTIME_LIBS})
 ENDIF()

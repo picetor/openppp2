@@ -1,161 +1,69 @@
-﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
-# Description: Build openppp2 Linux amd64 - 7 variants (base, simd, io-uring, io-uring-simd,
-#              tc-simd, tc-io-uring, tc-io-uring-simd) using prebuilt 3rd-party libs.
-# Author     : picetor
-# Date-Time  : 2026/06/24
-
-name: Build openppp2 (Linux amd64)
+name: Build openppp2 (Linux amd64 musl)
 
 on:
   push:
-    branches: [ inet6 ]
+    branches: [inet6]
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - '**.txt'
       - '**.json'
-  workflow_dispatch:      # 手动触发
+  workflow_dispatch:
     inputs:
       build_amd64:
-        description: 'Build amd64 variants'
+        description: Build amd64 variants
         type: boolean
         default: false
 
 jobs:
   build-amd64:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_amd64 }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         variant:
-          # variant name        | SIMD? | IO_URING? | TC?
-          - name: base
-            simd: "OFF"
-            iouring: "OFF"
-            tc: "OFF"
-          - name: simd
-            simd: "ON"
-            iouring: "OFF"
-            tc: "OFF"
-          - name: io-uring
-            simd: "OFF"
-            iouring: "ON"
-            tc: "OFF"
-          - name: io-uring-simd
-            simd: "ON"
-            iouring: "ON"
-            tc: "OFF"
-          - name: tc-simd
-            simd: "ON"
-            iouring: "OFF"
-            tc: "ON"
-          - name: tc-io-uring
-            simd: "OFF"
-            iouring: "ON"
-            tc: "ON"
-          - name: tc-io-uring-simd
-            simd: "ON"
-            iouring: "ON"
-            tc: "ON"
-
-    runs-on: ubuntu-latest
-    env:
-      THIRD_PARTY_DIR: ${{ github.workspace }}/3rd/amd64
+          - base
+          - simd
+          - io-uring
+          - io-uring-simd
+          - tc-simd
+          - tc-io-uring
+          - tc-io-uring-simd
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install system dependencies
+      - name: Build ${{ matrix.variant }} with musl
+        env:
+          ARCHITECTURE: amd64
+          VARIANT: ${{ matrix.variant }}
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential cmake autoconf automake libtool \
-            zip unzip curl wget git python3 \
-            libssl-dev libzstd-dev \
-            liburing-dev libbpf-dev libelf-dev
+          docker run --rm \
+            -e ARCHITECTURE -e VARIANT \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            alpine:3.21 sh -exc '
+              sh tools/ci/prepare-musl-deps.sh /tmp/openppp2-3rd
+              sh tools/ci/build-musl.sh "$ARCHITECTURE" "$VARIANT" Release /tmp/openppp2-3rd
+              sh tools/ci/test-musl-network.sh
+            '
 
-      - name: Download prebuilt 3rd-party libraries (amd64)
+      - name: Package artifact
+        env:
+          VARIANT: ${{ matrix.variant }}
         run: |
-          git clone https://github.com/liulilittle/openppp2-ubuntu-3rd-environment.git 3rd
-          echo "3rd-party libraries downloaded to ${{ env.THIRD_PARTY_DIR }}"
-          ls -la "${{ env.THIRD_PARTY_DIR }}" || echo "WARNING: amd64 dir not found, trying root"
-          ls -la "${{ github.workspace }}/3rd/" || echo "WARNING: 3rd dir empty"
-
-      - name: Build variant ${{ matrix.variant.name }}
-        id: build
-        run: |
-          TS=$(date '+%Y%m%d_%H%M')
-          VARIANT="${{ matrix.variant.name }}"
-          SIMD="${{ matrix.variant.simd }}"
-          IOURING="${{ matrix.variant.iouring }}"
-          TC="${{ matrix.variant.tc }}"
-          THIRD_PARTY_DIR="${{ env.THIRD_PARTY_DIR }}"
-
-          echo "=== Building: ${VARIANT} ==="
-          echo "SIMD=${SIMD}, IO_URING=${IOURING}, TC=${TC}"
-          echo "THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
-
-          # Build CMake flags
-          CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DTHIRD_PARTY_LIBRARY_DIR=${THIRD_PARTY_DIR}"
-
-          # SIMD: NOT_HAVE_SIMD=ON disables SIMD
-          if [ "${SIMD}" = "OFF" ]; then
-            CMAKE_FLAGS="${CMAKE_FLAGS} -DNOT_HAVE_SIMD=ON"
-          fi
-
-          # IO_URING
-          if [ "${IOURING}" = "ON" ]; then
-            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_IO_URING=ON"
-          fi
-
-          # TC
-          if [ "${TC}" = "ON" ]; then
-            CMAKE_FLAGS="${CMAKE_FLAGS} -DENABLE_TC=ON"
-          fi
-
-          # Build
-          rm -rf build && mkdir build && cd build
-          cmake .. ${CMAKE_FLAGS}
-          make -j$(nproc)
-
-          # Check binary
-          if [ ! -f "../bin/ppp" ]; then
-            echo "ERROR: bin/ppp not found!"
-            find .. -name ppp -type f 2>/dev/null
-            exit 1
-          fi
-
-          # Name output
-          SUFFIX=""
-          if [ "${VARIANT}" != "base" ]; then
-            SUFFIX="-${VARIANT}"
-          fi
-          ZIP_NAME="openppp2-linux-amd64${SUFFIX}"
-          ARTIFACT_NAME="${ZIP_NAME}_${TS}"
-          cp ../bin/ppp "${ARTIFACT_NAME}"
-          file "${ARTIFACT_NAME}"
-
-          # Package into complete release zip
-          echo "=== Packaging ${ZIP_NAME}.zip ==="
-          PKG_DIR="${ZIP_NAME}"
-          mkdir -p "${PKG_DIR}"
-          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
-          cp "${{ github.workspace }}/appsettings.json" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/dns-rules.txt" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/geo-rules.yaml" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/firewall-rules.txt" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/ip.txt" "${PKG_DIR}/"
-          cp "${{ github.workspace }}/ipv6.txt" "${PKG_DIR}/"
-          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
-          echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
+          suffix="-${VARIANT}"
+          if [ "$VARIANT" = base ]; then suffix=""; fi
+          package="openppp2-linux-amd64${suffix}"
+          mkdir -p "build/${package}"
+          cp bin/ppp "build/${package}/ppp"
+          cp appsettings.json dns-rules.txt geo-rules.yaml firewall-rules.txt ip.txt ipv6.txt "build/${package}/"
+          echo "PACKAGE=$package" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: openppp2-linux-amd64-${{ matrix.variant.name }}
-          path: build/${{ env.PKG_DIR }}/
+          name: openppp2-linux-amd64-${{ matrix.variant }}
+          path: build/${{ env.PACKAGE }}/
           if-no-files-found: error
-
-  # Debug build moved to build-openppp2-amd64-debug.yml
