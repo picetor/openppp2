@@ -11,4 +11,5 @@ if readelf -l /tmp/musl-network-smoke | grep -q 'INTERP' ||
     exit 1
 fi
 
-/tmp/musl-network-smoke
+echo "Running musl network smoke test (60s timeout)"
+timeout 60s /tmp/musl-network-smoke

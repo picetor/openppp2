@@ -38,18 +38,22 @@ binary="bin/ppp"
 test -x "${binary}"
 file "${binary}"
 
+echo "Checking ELF program headers"
 if readelf -l "${binary}" | grep -q 'INTERP'; then
     echo "PT_INTERP found in ${binary}" >&2
     exit 1
 fi
+echo "Checking ELF dynamic section"
 if readelf -d "${binary}" | grep -q 'NEEDED'; then
     echo "DT_NEEDED found in ${binary}" >&2
     exit 1
 fi
+echo "Checking static loader status"
 if ! ldd "${binary}" 2>&1 | grep -Eqi 'not a dynamic executable|statically linked|not a valid dynamic program'; then
     echo "ldd did not identify ${binary} as static" >&2
     ldd "${binary}" >&2 || true
     exit 1
 fi
 
-"${binary}" --help >/dev/null
+echo "Checking --help runtime"
+timeout 30s "${binary}" --help >/dev/null
