@@ -805,7 +805,7 @@ namespace ppp {
     }
 
     bool IsNaN(double d) noexcept {
-        if (isnan(d)) {
+        if (std::isnan(d)) {
             return true;
         }
 
