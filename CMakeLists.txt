@@ -137,7 +137,7 @@ ELSE()
     ENDIF()
     
     IF(USE_MUSL)
-        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -no-pie -Wl,--gc-sections -rdynamic")
+        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libstdc++ -static-libgcc -no-pie -Wl,--gc-sections -rdynamic")
     ELSEIF(NOT CMAKE_EXE_LINKER_FLAGS)
         SET(CMAKE_EXE_LINKER_FLAGS "-static -no-pie -Wl,--gc-sections -s -nodefaultlibs -rdynamic -Wl,-Bstatic")
     ELSE()
@@ -273,7 +273,7 @@ ELSEIF(PLATFORM_COMPILER_CLANG)
 ELSE()
     SET(_LINUX_RUNTIME_LIBS)
     IF(USE_MUSL)
-        SET(_LINUX_RUNTIME_LIBS atomic)
+        SET(_LINUX_RUNTIME_LIBS -Wl,-Bstatic -latomic)
     ELSE()
         SET(_LINUX_RUNTIME_LIBS
             libc.a
