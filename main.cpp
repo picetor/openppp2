@@ -886,8 +886,12 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
 void PppApplication::HandleConsoleInput() noexcept
 {
 #if !defined(_ANDROID)
-    static constexpr int console_tab_count = 4;
+    const int console_tab_count = NULLPTR != client_ ? 4 : 2;
     static constexpr int servers_tab_page = 3;
+    if (console_tab_page_ >= console_tab_count)
+    {
+        console_tab_page_ = 0;
+    }
 #if defined(_WIN32)
     // Windows: use _kbhit/_getch (non-blocking)
     while (_kbhit())
@@ -998,15 +1002,9 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
     hosting_environment = (NULLPTR != client ? "client:" : "server:") + hosting_environment;
 
-    // Clear console when tab page changes to remove leftover lines from previous content
-    static int last_console_tab_page = -1;
-    bool tab_changed = (last_console_tab_page != console_tab_page_);
-    if (tab_changed)
-    {
-        last_console_tab_page = console_tab_page_;
-    }
-
-    if (console_window_size.tty && tab_changed)
+    // Clear the previous frame before every TTY refresh so stale trailing rows
+    // cannot remain when the next frame contains fewer lines.
+    if (console_window_size.tty)
     {
         ppp::ClearConsoleOutputCharacter();
     }
@@ -1045,7 +1043,7 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     // Print tab bar (always visible, at top)
     {
         const char* tab_labels[] = { "Status", "Network", "Routes", "Servers" };
-        const int tab_count = 4;
+        const int tab_count = NULLPTR != client ? 4 : 2;
 
         // Calculate tab column width (evenly divide console width)
         int col_width = console_window_size.x / tab_count;
@@ -1174,7 +1172,7 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             }
 
             ppp::string link_url = managed_server->GetUri();
-            printfn("Managed Server        : %s @(%s)", link_url.data(), link_state);
+            printfn("Managed Server        : %s %s", link_url.data(), link_state);
         }
         else
         {
@@ -1300,17 +1298,10 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             printfn("Mux State             : %s", mux_state.data());
         }
 
-        // Print server network information
+        // Print server listening services.
         if (std::shared_ptr<VirtualEthernetSwitcher> server = server_; NULLPTR != server)
         {
             using NAC = VirtualEthernetSwitcher::NetworkAcceptorCategories;
-
-            // Print the public IP address and interface IP address configured for the current virtual Ethernet server!
-            if (std::shared_ptr<AppConfiguration> configuration = configuration_; NULLPTR != configuration)
-            {
-                printfn("Public IP             : %s", configuration->ip.public_.data());
-                printfn("Interface IP          : %s", configuration->ip.interface_.data());
-            }
 
             // List listening ports for various services
             const char* categories[] = { "ppp+tcp", "ppp+udp", "ppp+ws", "ppp+wss", "cdn+1", "cdn+2" };
@@ -1349,7 +1340,37 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         printfn("");
     }
 
-    // Tab 1: Network interface details
+    // Tab 1: Server outbound interface.
+    if (console_tab_page_ == 1 && NULLPTR == client)
+    {
+        ppp::string interface_name;
+#if defined(_WIN32)
+        interface_name = ppp::win32::network::GetInterfaceName(
+            ppp::win32::network::Router::GetBestInterface(IPEndPoint("8.8.8.8", 0).GetAddress()));
+#elif defined(_MACOS)
+        uint32_t interface_address = ppp::unix__::UnixAfx::GetDefaultNetworkInterface();
+        if (interface_address != IPEndPoint::NoneAddress)
+        {
+            interface_name = ppp::unix__::UnixAfx::GetInterfaceName(IPEndPoint(interface_address, 0));
+        }
+#else
+        uint32_t interface_address = IPEndPoint::NoneAddress;
+        uint32_t interface_gateway = IPEndPoint::NoneAddress;
+        uint32_t interface_mask = IPEndPoint::NoneAddress;
+        ppp::tap::TapLinux::GetPreferredNetworkInterface(
+            interface_name,
+            interface_address,
+            interface_mask,
+            interface_gateway,
+            network_interface->Nic);
+#endif
+        printfn("%s", "NETWORK");
+        printfn("%s", section_separator.data());
+        printfn("Interface             : %s", interface_name.empty() ? "unavailable" : interface_name.data());
+        printfn("");
+    }
+
+    // Tab 1: Client network interface details.
     if (console_tab_page_ == 1 && NULLPTR != client)
     {
         if (client->IsProxyOnly())
