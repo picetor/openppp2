@@ -3968,21 +3968,31 @@ int main(int argc, const char* argv[]) noexcept
     // Initialize global state
     ppp::global::cctor();
 
-    // Check io_uring compatibility on Linux
-#if BOOST_ASIO_HAS_IO_URING != 0
-    if (!ppp::diagnostics::IfIOUringKernelVersion()) 
-    {
-        fprintf(stdout, "%s\r\n", "Enable io-uring, the kernel version must be 5.10.0 or higher.");
-        return -1;
-    }
-#endif
-
     // Create application instance
     std::shared_ptr<PppApplication> APP = ppp::make_shared_object<PppApplication>();
     DEFAULT_ = APP;
 
     // Prepare environment and run
     int prepared_status = APP->PreparedArgumentEnvironment(argc, argv);
+
+    // Help and argument errors do not need the event loop or kernel features.
+    if (prepared_status != 0)
+    {
+        APP->PrintHelpInformation();
+        int result_code = prepared_status > 0 ? 0 : -1;
+        APP->Release();
+        return result_code;
+    }
+
+    // Check io_uring compatibility on Linux after command-line handling.
+#if BOOST_ASIO_HAS_IO_URING != 0
+    if (!ppp::diagnostics::IfIOUringKernelVersion()) 
+    {
+        fprintf(stdout, "%s\r\n", "Enable io-uring, the kernel version must be 5.10.0 or higher.");
+        APP->Release();
+        return -1;
+    }
+#endif
 
     // When --log-file is specified, redirect LOG_TAG output to file instead of stdout.
     // The dashboard UI (fprintf to stdout) stays on console; only debug/info logs go to file.
