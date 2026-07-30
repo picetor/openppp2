@@ -2078,7 +2078,7 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     // Show help if requested
     if (ppp::IsInputHelpCommand(argc, argv))
     {
-        return -1;
+        return 1;
     }
 
     // Load configuration
@@ -3934,7 +3934,7 @@ static int Run(const std::shared_ptr<PppApplication>& APP, int prepared_status, 
     if (prepared_status != 0)
     {
         APP->PrintHelpInformation();
-        return -1;
+        return prepared_status > 0 ? 0 : -1;
     }
 
     // Register shutdown handlers
