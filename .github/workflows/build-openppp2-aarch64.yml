@@ -38,6 +38,7 @@ jobs:
               sh tools/ci/build-musl.sh aarch64 "$VARIANT" Release /tmp/openppp2-3rd
               sh tools/ci/test-musl-network.sh
             '
+          sudo chown -R "$(id -u):$(id -g)" bin build
 
       - name: Package artifact
         env:
