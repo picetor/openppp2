@@ -42,10 +42,16 @@
 /sln/server/Debug
 /sln/client/Release
 /sln/server/Release
+/sln/client/client/Debug/
+/sln/client/client/Release/
+/sln/client/client/x64/
 
 /sln/PaperAirplane/Debug
 /sln/PaperAirplane/Release
 /sln/PaperAirplane/x64
+/sln/PaperAirplane/PaperAirplane/Debug/
+/sln/PaperAirplane/PaperAirplane/Release/
+/sln/PaperAirplane/PaperAirplane/x64/
 
 /sln/sysproxy32/Debug
 /sln/sysproxy32/Release
