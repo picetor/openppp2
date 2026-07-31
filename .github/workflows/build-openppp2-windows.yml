@@ -46,7 +46,7 @@ jobs:
 
       - name: Cache vcpkg packages
         id: cache-vcpkg
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             ${{ github.workspace }}/vcpkg/packages
@@ -65,6 +65,15 @@ jobs:
             openssl jemalloc `
             --triplet ${{ matrix.platform.vcpkg_triplet }} `
             --x-install-root=${{ github.workspace }}\..\vcpkg_installed
+
+      - name: Save vcpkg packages
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/packages
+            ${{ github.workspace }}/vcpkg/downloads
+          key: ${{ steps.cache-vcpkg.outputs.cache-primary-key }}
 
       - name: Download cacert.pem
         run: |
