@@ -1254,7 +1254,9 @@ namespace ppp {
                 statuses.reserve(outbound_exchangers_.size());
                 for (const OutboundConfiguration& outbound : outbound_configurations_) {
                     ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
-                    auto current = outbound_exchangers_.find(tag);
+                    ppp::string exchanger_tag = outbound.server_menu && tag == primary_outbound_ ?
+                        ppp::string("main") : tag;
+                    auto current = outbound_exchangers_.find(exchanger_tag);
                     OutboundStatus status;
                     status.tag = tag;
                     status.display_name = outbound.display_name.empty() ? tag : outbound.display_name;
@@ -1264,7 +1266,8 @@ namespace ppp {
                         static_cast<int>(current->second->GetNetworkState()) : -1;
                     status.reconnects = current != outbound_exchangers_.end() && NULLPTR != current->second ?
                         current->second->GetReconnectionCount() : 0;
-                    status.active = tag == active_outbound_;
+                    status.active = outbound.server_menu ?
+                        tag == primary_outbound_ : tag == active_outbound_;
                     status.server_menu = outbound.server_menu;
                     status.route_used = outbound.route_used;
                     statuses.emplace_back(std::move(status));
@@ -1304,6 +1307,7 @@ namespace ppp {
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     active = active_outbound_.empty() ? ppp::string("main") : active_outbound_;
+                    if (active == "main") active = primary_outbound_;
                 }
                 for (const OutboundConfiguration& outbound : outbound_configurations_) {
                     if (ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag)) == active) {
@@ -1346,6 +1350,7 @@ namespace ppp {
                     abandoned = std::move(pending_outbound_exchanger_);
                     pending_outbound_ = tag;
                     pending_outbound_exchanger_ = target;
+                    pending_primary_switch_ = false;
                     pending_outbound_deadline_ =
                         ppp::threading::Executors::GetTickCount() + 2000;
                 }
@@ -1354,6 +1359,44 @@ namespace ppp {
                 LOG_INFO("VEthernetNetworkSwitcher::SwitchOutbound: target=%s, configuration_reloaded=%d, activation_delay_ms=2000, state=%d",
                     tag.data(), tag != "main",
                     (int)target->GetNetworkState());
+                return true;
+            }
+
+            bool VEthernetNetworkSwitcher::SwitchPrimaryOutbound(const ppp::string& value) noexcept {
+                ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(value));
+                if (tag.empty() || tag == "direct") return false;
+
+                OutboundConfiguration* definition = NULLPTR;
+                for (OutboundConfiguration& outbound : outbound_configurations_) {
+                    if (outbound.server_menu &&
+                        ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag)) == tag) {
+                        definition = &outbound;
+                        break;
+                    }
+                }
+                if (NULLPTR == definition) return false;
+
+                std::shared_ptr<ppp::configurations::AppConfiguration> configuration =
+                    ReloadOutboundConfiguration(*definition);
+                if (NULLPTR == configuration) return false;
+                std::shared_ptr<VEthernetExchanger> target =
+                    NewExchanger(configuration, "main", true);
+                if (NULLPTR == target || !target->Open()) return false;
+
+                std::shared_ptr<VEthernetExchanger> abandoned;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    abandoned = std::move(pending_outbound_exchanger_);
+                    pending_outbound_ = tag;
+                    pending_outbound_exchanger_ = target;
+                    pending_primary_switch_ = true;
+                    pending_outbound_deadline_ =
+                        ppp::threading::Executors::GetTickCount() + 2000;
+                }
+                if (NULLPTR != abandoned && abandoned != target &&
+                    abandoned != exchanger_) abandoned->Dispose();
+                LOG_INFO("VEthernetNetworkSwitcher::SwitchPrimaryOutbound: target=%s, activation_delay_ms=2000, state=%d",
+                    tag.data(), (int)target->GetNetworkState());
                 return true;
             }
 
@@ -1434,6 +1477,7 @@ namespace ppp {
                 std::shared_ptr<VEthernetExchanger> previous;
                 std::shared_ptr<VEthernetExchanger> replaced;
                 bool preserve_previous = false;
+                bool primary_switch = false;
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     if (pending_outbound_.empty() || now < pending_outbound_deadline_) return;
@@ -1442,32 +1486,52 @@ namespace ppp {
                     preserve_previous = IsRouteOutbound(previous_tag);
                     std::shared_ptr<VEthernetExchanger> target =
                         std::move(pending_outbound_exchanger_);
+                    primary_switch = pending_primary_switch_;
                     if (NULLPTR == target) {
                         pending_outbound_.clear();
                         pending_outbound_deadline_ = 0;
+                        pending_primary_switch_ = false;
                         return;
                     }
-                    auto old = outbound_exchangers_.find(previous_tag);
-                    if (old != outbound_exchangers_.end()) previous = old->second;
-                    auto target_old = outbound_exchangers_.find(target_tag);
-                    if (target_old != outbound_exchangers_.end()) {
-                        replaced = target_old->second;
-                        target_old->second = target;
+                    if (primary_switch) {
+                        previous_tag = "main";
+                        previous = exchanger_;
+                        auto main = outbound_exchangers_.find("main");
+                        if (main != outbound_exchangers_.end()) main->second = target;
+                        else outbound_exchangers_.emplace("main", target);
+                        exchanger_ = target;
+                        primary_outbound_ = target_tag;
+                        active_outbound_ = "main";
                     }
                     else {
-                        outbound_exchangers_.emplace(target_tag, target);
+                        auto old = outbound_exchangers_.find(previous_tag);
+                        if (old != outbound_exchangers_.end()) previous = old->second;
+                        auto target_old = outbound_exchangers_.find(target_tag);
+                        if (target_old != outbound_exchangers_.end()) {
+                            replaced = target_old->second;
+                            target_old->second = target;
+                        }
+                        else {
+                            outbound_exchangers_.emplace(target_tag, target);
+                        }
+                        active_outbound_ = target_tag;
+                        if (previous_tag != "main" && previous_tag != target_tag &&
+                            !preserve_previous) {
+                            outbound_exchangers_.erase(previous_tag);
+                        }
                     }
-                    active_outbound_ = target_tag;
                     pending_outbound_.clear();
                     pending_outbound_deadline_ = 0;
+                    pending_primary_switch_ = false;
                     outbound_affinities_.clear();
-                    if (previous_tag != "main" && previous_tag != target_tag &&
-                        !preserve_previous) {
-                        outbound_exchangers_.erase(previous_tag);
-                    }
                 }
 
-                if (NULLPTR != previous && previous_tag != target_tag) {
+                if (primary_switch) {
+                    if (NULLPTR != http_proxy_) http_proxy_->SetExchanger(exchanger_);
+                    if (NULLPTR != socks_proxy_) socks_proxy_->SetExchanger(exchanger_);
+                    if (NULLPTR != previous && previous != exchanger_) previous->Dispose();
+                }
+                else if (NULLPTR != previous && previous_tag != target_tag) {
                     if (previous_tag == "main") previous->ResetDataChannels();
                     else if (!preserve_previous) previous->Dispose();
                 }

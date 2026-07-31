@@ -879,7 +879,7 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
     }
     if (activate)
     {
-        client->SwitchOutbound(servers[server_selection_].tag);
+        client->SwitchPrimaryOutbound(servers[server_selection_].tag);
     }
 }
 

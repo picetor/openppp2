@@ -27,6 +27,16 @@ namespace ppp {
                     Finalize();
                 }
 
+                std::shared_ptr<VEthernetExchanger> VEthernetLocalProxySwitcher::GetExchanger() noexcept {
+                    SynchronizedObjectScope scope(syncobj_);
+                    return exchanger_;
+                }
+
+                void VEthernetLocalProxySwitcher::SetExchanger(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept {
+                    SynchronizedObjectScope scope(syncobj_);
+                    exchanger_ = exchanger;
+                }
+
                 void VEthernetLocalProxySwitcher::Finalize() noexcept {
                     VEthernetLocalProxyConnectionTable connections;
                     for (;;) {
@@ -138,7 +148,7 @@ namespace ppp {
                         [self, this](ppp::net::SocketAcceptor*, ppp::net::SocketAcceptor::AcceptSocketEventArgs& e) noexcept {
                             int sockfd = e.Socket;
                             while (!disposed_) {
-                                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                                std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
                                 if (NULLPTR == exchanger) {
                                     break;
                                 }

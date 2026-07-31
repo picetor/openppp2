@@ -191,6 +191,7 @@ namespace ppp {
                 ppp::string                                                         GetActiveOutbound() noexcept;
                 ppp::string                                                         GetActiveOutboundSourcePath() noexcept;
                 bool                                                                SwitchOutbound(const ppp::string& tag) noexcept;
+                bool                                                                SwitchPrimaryOutbound(const ppp::string& tag) noexcept;
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
@@ -394,9 +395,11 @@ namespace ppp {
                 OutboundExchangerTable                                              outbound_exchangers_;
                 ppp::string                                                         final_outbound_ = "main";
                 ppp::string                                                         active_outbound_ = "main";
+                ppp::string                                                         primary_outbound_ = "main";
                 ppp::string                                                         pending_outbound_;
                 uint64_t                                                            pending_outbound_deadline_ = 0;
                 std::shared_ptr<VEthernetExchanger>                                 pending_outbound_exchanger_;
+                bool                                                                pending_primary_switch_ = false;
                 struct OutboundAffinity final {
                     ppp::string                                                     tag;
                     uint64_t                                                        expires_at = 0;
