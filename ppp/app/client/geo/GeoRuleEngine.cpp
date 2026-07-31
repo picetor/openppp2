@@ -560,7 +560,8 @@ namespace ppp {
                 bool GeoRuleEngine::ParseOutboundConfigurations(const ppp::string& rules_path,
                     ppp::vector<OutboundConfiguration>& configurations,
                     ppp::string& final_outbound,
-                    ppp::string& error) noexcept {
+                    ppp::string& error,
+                    bool require_main) noexcept {
                     configurations.clear();
                     final_outbound = "main";
                     error.clear();
@@ -636,11 +637,12 @@ namespace ppp {
                         }
                         return true;
                     }
-                    if (tags.find("main") == tags.end()) {
+                    if (require_main && tags.find("main") == tags.end()) {
                         error = "multi-outbound geo rules must define main=<configuration.json>";
                         return false;
                     }
-                    if (final_outbound != "@active" && tags.find(final_outbound) == tags.end()) {
+                    if (final_outbound != "main" && final_outbound != "@active" &&
+                        tags.find(final_outbound) == tags.end()) {
                         error = "final references an undefined outbound: " + final_outbound;
                         return false;
                     }
@@ -684,6 +686,7 @@ namespace ppp {
                         return false;
                     }
                     ppp::unordered_set<ppp::string> outbound_tags;
+                    outbound_tags.emplace("main");
                     for (const OutboundConfiguration& outbound : outbound_configurations_) {
                         outbound_tags.emplace(outbound.tag);
                     }

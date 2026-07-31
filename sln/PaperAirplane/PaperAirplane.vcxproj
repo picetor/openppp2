@@ -72,41 +72,66 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <OutDir>$(SolutionDir)$(Configuration)\Driver\x86</OutDir>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\..\..\common;$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir>$(SolutionDir)$(Configuration)\Driver\x86</OutDir>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\..\..\common;$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)\..\..\..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)$(Configuration)\Driver\x64</OutDir>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\..\..\common;$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <LibraryPath>$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\lib;$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)$(Configuration)\Driver\x64</OutDir>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\..\..\common;$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <LibraryPath>$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\lib;$(ProjectDir)\..\..\..\vcpkg_installed\x64-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <VcpkgConfiguration>$(Configuration)</VcpkgConfiguration>
+    <VcpkgEnabled>true</VcpkgEnabled>
     <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <VcpkgConfiguration>$(Configuration)</VcpkgConfiguration>
+    <VcpkgEnabled>true</VcpkgEnabled>
     <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <VcpkgConfiguration>$(Configuration)</VcpkgConfiguration>
+    <VcpkgEnabled>true</VcpkgEnabled>
     <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <VcpkgConfiguration>$(Configuration)</VcpkgConfiguration>
+    <VcpkgEnabled>true</VcpkgEnabled>
     <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_CONSOLE;_ITERATOR_DEBUG_LEVEL=0;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>PaperAirplane.def</ModuleDefinitionFile>
+      <AdditionalDependencies>boost_context-vc145-mt-x32-1_91.lib;boost_coroutine-vc145-mt-x32-1_91.lib;boost_thread-vc145-mt-x32-1_91.lib;boost_filesystem-vc145-mt-x32-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -128,21 +153,23 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>PaperAirplane.def</ModuleDefinitionFile>
+      <AdditionalDependencies>boost_context-vc145-mt-x32-1_91.lib;boost_coroutine-vc145-mt-x32-1_91.lib;boost_thread-vc145-mt-x32-1_91.lib;boost_filesystem-vc145-mt-x32-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_CONSOLE;_ITERATOR_DEBUG_LEVEL=0;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>PaperAirplane.def</ModuleDefinitionFile>
+      <AdditionalDependencies>boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -164,6 +191,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>PaperAirplane.def</ModuleDefinitionFile>
+      <AdditionalDependencies>boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -51,7 +51,8 @@ namespace ppp {
                     static bool ParseOutboundConfigurations(const ppp::string& rules_path,
                         ppp::vector<OutboundConfiguration>& configurations,
                         ppp::string& final_outbound,
-                        ppp::string& error) noexcept;
+                        ppp::string& error,
+                        bool require_main = false) noexcept;
 
                     bool Load(const ppp::string& rules_path,
                         const ppp::string& geosite_path,

@@ -976,6 +976,16 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         return false;
     }
 
+#if defined(_WIN32)
+    // Console writes block in Quick Edit selection mode. Skip this frame so
+    // the networking event loop keeps running while arbitrary text is copied.
+    CONSOLE_SELECTION_INFO selection{};
+    if (GetConsoleSelectionInfo(&selection) && selection.dwFlags != CONSOLE_NO_SELECTION)
+    {
+        return true;
+    }
+#endif
+
     // Get console window size
     ConsoleForegroundWindowSize console_window_size;
     if (isatty(fileno(stdout)) == 0 || !ppp::GetConsoleWindowSize(console_window_size.x, console_window_size.y)) 
@@ -1746,6 +1756,7 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
 
     // Output to console
     fprintf(stdout, "%s", console_window_content.data());
+    fflush(stdout);
     return true;
 }
 
@@ -3072,11 +3083,22 @@ bool PppApplication::OnTick(uint64_t now) noexcept
     using RouteIPListTablePtr = VEthernetNetworkSwitcher::RouteIPListTablePtr;
     using NetworkState        = VEthernetExchanger::NetworkState;
 
-    // Handle console keyboard input for tab switching
-    HandleConsoleInput();
+#if defined(_WIN32)
+    CONSOLE_SELECTION_INFO selection{};
+    bool console_selection_active =
+        GetConsoleSelectionInfo(&selection) && selection.dwFlags != CONSOLE_NO_SELECTION;
+#else
+    constexpr bool console_selection_active = false;
+#endif
 
-    // Update console display
-    PrintEnvironmentInformation();
+    // Handle console keyboard input for tab switching
+    if (!console_selection_active)
+    {
+        HandleConsoleInput();
+
+        // Update console display
+        PrintEnvironmentInformation();
+    }
 
     // Check auto-restart timer
     if (GLOBAL_.auto_restart > 0)
@@ -3398,6 +3420,25 @@ bool PppApplication::LoadGeoOutboundConfigurations(
 
         if (NULLPTR != matched)
         {
+            bool matched_primary =
+                ppp::ToLower<ppp::string>(matched->tag) == "main" &&
+                matched->configuration == primary;
+            if (matched_primary)
+            {
+                // Keep the runtime primary under "main" and expose the GEO
+                // tag as an alias. The switcher maps this alias back to main,
+                // so the same GUID/server never opens a second control link.
+                ppp::string display_name = matched->display_name;
+                bool server_menu = matched->server_menu;
+                matched->display_name = "main";
+                matched->server_menu = false;
+                outbound_configurations_.emplace_back(ClientOutboundConfiguration{
+                    declaration.tag, matched->configuration,
+                    display_name.empty() ? declaration.tag : display_name,
+                    server_menu, declaration.path, true });
+                continue;
+            }
+
             // Reuse the server-directory connection under the stable YAML tag.
             // This avoids opening the same GUID/server twice and makes a rule
             // such as "geosite,openai,us" select the visible zgo menu entry.
@@ -3437,8 +3478,13 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
         }
 
         ppp::string argument_lower = ppp::ToLower<ppp::string>(argument_value);
-        bool requested_geo_manifest = argument_lower.size() >= 4 &&
-            argument_lower.compare(argument_lower.size() - 4, 4, ".txt") == 0;
+        bool requested_geo_manifest =
+            (argument_lower.size() >= 4 &&
+             argument_lower.compare(argument_lower.size() - 4, 4, ".txt") == 0) ||
+            (argument_lower.size() >= 5 &&
+             argument_lower.compare(argument_lower.size() - 5, 5, ".yaml") == 0) ||
+            (argument_lower.size() >= 4 &&
+             argument_lower.compare(argument_lower.size() - 4, 4, ".yml") == 0);
         if (requested_geo_manifest && !File::CanAccess(argument_value.data(), FileAccess::Read))
         {
             fprintf(stdout, "Geo configuration cannot be read: %s\r\n", argument_value.data());
@@ -3452,19 +3498,26 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
         }
     }
 
-    // A .txt file passed as --config is a geo multi-outbound manifest.  It is
-    // parsed before the normal JSON configuration because its main= entry
-    // identifies the primary AppConfiguration used for all system-level state.
+    // A .txt / .yaml / .yml file passed as --config is a geo multi-outbound
+    // manifest.  It is parsed before the normal JSON configuration because its
+    // main= entry identifies the primary AppConfiguration used for all system-
+    // level state.
     ppp::string selected_lower = ppp::ToLower<ppp::string>(path);
-    bool geo_manifest = selected_lower.size() >= 4 &&
-        selected_lower.compare(selected_lower.size() - 4, 4, ".txt") == 0;
+    bool geo_manifest =
+        (selected_lower.size() >= 4 &&
+         selected_lower.compare(selected_lower.size() - 4, 4, ".txt") == 0) ||
+        (selected_lower.size() >= 5 &&
+         selected_lower.compare(selected_lower.size() - 5, 5, ".yaml") == 0) ||
+        (selected_lower.size() >= 4 &&
+         selected_lower.compare(selected_lower.size() - 4, 4, ".yml") == 0);
     if (geo_manifest)
     {
         using GeoRuleEngine = ppp::app::client::geo::GeoRuleEngine;
         ppp::vector<GeoRuleEngine::OutboundConfiguration> declarations;
         ppp::string final_outbound;
         ppp::string error;
-        if (!GeoRuleEngine::ParseOutboundConfigurations(path, declarations, final_outbound, error) || declarations.empty())
+        if (!GeoRuleEngine::ParseOutboundConfigurations(
+            path, declarations, final_outbound, error, true) || declarations.empty())
         {
             if (error.empty()) error = "geo configuration contains no outbound declarations";
             fprintf(stdout, "Geo configuration error: %s\r\n", error.data());

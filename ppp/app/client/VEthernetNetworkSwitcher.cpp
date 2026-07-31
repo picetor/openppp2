@@ -1244,6 +1244,15 @@ namespace ppp {
                 }
                 if (!has_main) return false;
                 outbound_configurations_ = configurations;
+                primary_outbound_ = "main";
+                for (const OutboundConfiguration& outbound : configurations) {
+                    ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
+                    if (tag != "main" && outbound.route_used &&
+                        outbound.configuration == configuration_) {
+                        primary_outbound_ = tag;
+                        break;
+                    }
+                }
                 return true;
             }
 
@@ -1254,9 +1263,13 @@ namespace ppp {
                 statuses.reserve(outbound_exchangers_.size());
                 for (const OutboundConfiguration& outbound : outbound_configurations_) {
                     ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
-                    ppp::string exchanger_tag = outbound.server_menu && tag == primary_outbound_ ?
-                        ppp::string("main") : tag;
-                    auto current = outbound_exchangers_.find(exchanger_tag);
+                    ppp::string exchanger_tag = tag;
+                    if (outbound.server_menu) {
+                        if (tag == primary_outbound_) exchanger_tag = "main";
+                        elif(!outbound.route_used || tag == "main") exchanger_tag.clear();
+                    }
+                    auto current = exchanger_tag.empty() ? outbound_exchangers_.end() :
+                        outbound_exchangers_.find(exchanger_tag);
                     OutboundStatus status;
                     status.tag = tag;
                     status.display_name = outbound.display_name.empty() ? tag : outbound.display_name;
@@ -1496,6 +1509,11 @@ namespace ppp {
                     if (primary_switch) {
                         previous_tag = "main";
                         previous = exchanger_;
+                        auto target_old = outbound_exchangers_.find(target_tag);
+                        if (target_old != outbound_exchangers_.end()) {
+                            if (target_old->second != previous) replaced = target_old->second;
+                            outbound_exchangers_.erase(target_old);
+                        }
                         auto main = outbound_exchangers_.find("main");
                         if (main != outbound_exchangers_.end()) main->second = target;
                         else outbound_exchangers_.emplace("main", target);
@@ -1615,6 +1633,7 @@ namespace ppp {
                         if (affinity->second.expires_at > now) {
                             affinity->second.expires_at = now + affinity_timeout;
                             tag = affinity->second.tag;
+                            if (tag == primary_outbound_) tag = "main";
                             auto selected = outbound_exchangers_.find(tag);
                             if (selected == outbound_exchangers_.end()) {
                                 LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, requested_outbound=%s, selected_outbound=none, affinity=1, reason=outbound_not_found",
@@ -1632,6 +1651,15 @@ namespace ppp {
                     LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=direct, rule=%d, rule_priority=%llu",
                         address_key.data(), (int)decision.Matched(), (unsigned long long)decision.priority);
                     return NULLPTR;
+                }
+
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    if (tag == primary_outbound_) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, requested_outbound=%s, selected_outbound=main, reason=primary_outbound_alias",
+                            address_key.data(), tag.data());
+                        tag = "main";
+                    }
                 }
 
                 // A named GEO outbound may not have been opened yet. Start it
