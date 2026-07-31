@@ -74,9 +74,11 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <LibraryPath>$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x64-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
