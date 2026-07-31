@@ -18,6 +18,16 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: amd64
+            vcpkg_triplet: x64-windows-static
+            msbuild_platform: x64
+          - name: i386
+            vcpkg_triplet: x86-windows-static
+            msbuild_platform: Win32
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
@@ -41,9 +51,9 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg/packages
             ${{ github.workspace }}/vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-boost1.91-openssl3-jemalloc
+          key: vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-boost1.91-openssl3-jemalloc
           restore-keys: |
-            vcpkg-${{ runner.os }}-
+            vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-
 
       - name: Install dependencies via vcpkg
         if: steps.cache-vcpkg.outputs.cache-hit != 'true'
@@ -53,7 +63,7 @@ jobs:
             boost-asio boost-beast boost-json boost-program-options boost-system boost-thread `
             boost-lockfree boost-uuid boost-coroutine boost-filesystem boost-stacktrace `
             openssl jemalloc `
-            --triplet x64-windows-static `
+            --triplet ${{ matrix.platform.vcpkg_triplet }} `
             --x-install-root=${{ github.workspace }}\..\vcpkg_installed
 
       - name: Download cacert.pem
@@ -118,7 +128,7 @@ jobs:
           # Boost headers remain in vcpkg/packages/boost-xxx_x64-windows-static/include/.
           # We must copy them manually so ppp.vcxproj's IncludePath can find them.
           Write-Output "=== Copying boost headers to vcpkg_installed ==="
-          $vcpkgInstalled = "${{ github.workspace }}\..\vcpkg_installed\x64-windows-static"
+          $vcpkgInstalled = "${{ github.workspace }}\..\vcpkg_installed\${{ matrix.platform.vcpkg_triplet }}"
           $vcpkgPackages = "${{ github.workspace }}\vcpkg\packages"
           if (-not (Test-Path "$vcpkgInstalled\include")) {
             New-Item -ItemType Directory -Path "$vcpkgInstalled\include" -Force | Out-Null
@@ -151,10 +161,10 @@ jobs:
             "# placeholder" | Out-File -FilePath "${{ github.workspace }}\starrylink.net.pem"
           }
 
-          Write-Output "=== Building Windows x64 (Release) ==="
+          Write-Output "=== Building Windows ${{ matrix.platform.msbuild_platform }} (Release) ==="
 
           # Build Release
-          msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=x64 `
+          msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=${{ matrix.platform.msbuild_platform }} `
             "/t:Clean;Build" `
             /p:VcpkgEnableManifest=false `
             /m
@@ -165,7 +175,7 @@ jobs:
           }
 
           # Find the Release executable
-          $releaseExe = "x64\Release\ppp.exe"
+          $releaseExe = "${{ matrix.platform.msbuild_platform }}\Release\ppp.exe"
           if (-not (Test-Path $releaseExe)) {
             $releaseExe = "Release\ppp.exe"
           }
@@ -178,7 +188,7 @@ jobs:
           Write-Output "Found Release ppp.exe at: $releaseExe"
 
           # Create package directory with all supporting files (like Linux release)
-          $PackageDir = "openppp2-windows-x64"
+          $PackageDir = "openppp2-windows-${{ matrix.platform.name }}"
           if (Test-Path $PackageDir) { Remove-Item -Recurse -Force $PackageDir }
           New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
 
@@ -199,8 +209,8 @@ jobs:
       - name: Upload Release artifact
         uses: actions/upload-artifact@v6
         with:
-          name: openppp2-windows-x64
-          path: ${{ github.workspace }}/openppp2-windows-x64
+          name: openppp2-windows-${{ matrix.platform.name }}
+          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}
           if-no-files-found: error
 
   # Debug build moved to build-openppp2-windows-debug.yml

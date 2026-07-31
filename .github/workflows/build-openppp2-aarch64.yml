@@ -55,6 +55,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: openppp2-linux-aarch64-${{ matrix.variant }}
+          name: ${{ env.PACKAGE }}
           path: build/${{ env.PACKAGE }}/
           if-no-files-found: error
