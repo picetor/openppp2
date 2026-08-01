@@ -17,13 +17,14 @@ class _ProfilesPageState extends State<ProfilesPage> {
   List<ConfigProfile> _profiles = const [];
   String? _activeId;
   bool _loading = true;
+  bool _importingSubscription = false;
 
   @override
   void initState() {
     super.initState();
     _load();
     _store.changes.listen((_) {
-      if (mounted) _load();
+      if (mounted && !_importingSubscription) _load();
     });
   }
 
@@ -82,14 +83,23 @@ class _ProfilesPageState extends State<ProfilesPage> {
     final url = await _askSubscriptionUrl();
     if (url == null || url.isEmpty) return;
 
+    _importingSubscription = true;
     var progressShown = false;
+    Future<void>? progressDialog;
     if (mounted) {
       progressShown = true;
-      showDialog<void>(
+      progressDialog = showDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
+    }
+
+    Future<void> dismissProgressDialog() async {
+      if (!progressShown || !mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await progressDialog;
+      progressShown = false;
     }
 
     try {
@@ -99,14 +109,17 @@ class _ProfilesPageState extends State<ProfilesPage> {
         subscription: subscription,
       );
       if (!mounted) return;
-      if (progressShown) Navigator.of(context, rootNavigator: true).pop();
+      await dismissProgressDialog();
+      if (!mounted) return;
       await _load();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已导入/更新 $count 个节点')),
       );
     } catch (e) {
       if (!mounted) return;
-      if (progressShown) Navigator.of(context, rootNavigator: true).pop();
+      await dismissProgressDialog();
+      if (!mounted) return;
       await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -120,6 +133,8 @@ class _ProfilesPageState extends State<ProfilesPage> {
           ],
         ),
       );
+    } finally {
+      _importingSubscription = false;
     }
   }
 

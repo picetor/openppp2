@@ -8,11 +8,16 @@ name: Build openppp2 (Windows)
 on:
   push:
     branches: [ inet6 ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '**.txt'
-      - '**.json'
+    paths:
+      - 'common/**'
+      - 'ppp/**'
+      - 'windows/**'
+      - 'CMakeLists.txt'
+      - 'main.cpp'
+      - 'ppp.vcxproj'
+      - 'ppp.vcxproj.filters'
+      - 'resource.*'
+      - 'glibc_compat.h'
   workflow_dispatch:      # 手动触发
 
 jobs:

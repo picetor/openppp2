@@ -8,11 +8,13 @@ name: Build openppp2 (macOS Debug)
 on:
   push:
     branches: [ inet6 ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '**.txt'
-      - '**.json'
+    paths:
+      - 'common/**'
+      - 'ppp/**'
+      - 'darwin/**'
+      - 'CMakeLists.txt'
+      - 'main.cpp'
+      - 'glibc_compat.h'
   workflow_dispatch:
 
 jobs:

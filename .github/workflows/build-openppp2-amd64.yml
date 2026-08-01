@@ -3,11 +3,14 @@ name: Build openppp2 (Linux amd64 musl)
 on:
   push:
     branches: [inet6]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '**.txt'
-      - '**.json'
+    paths:
+      - 'common/**'
+      - 'ppp/**'
+      - 'linux/**'
+      - 'tools/**'
+      - 'CMakeLists.txt'
+      - 'main.cpp'
+      - 'glibc_compat.h'
   workflow_dispatch:
     inputs:
       build_amd64:
