@@ -104,6 +104,25 @@ class _SettingsPageState extends State<SettingsPage> {
     await _refresh();
   }
 
+  /// Builds the diagnostic export file, shares it via the system sheet and
+  /// reports the on-device path. Returns true on success.
+  Future<bool> _exportLog() async {
+    final path = await _vpnService.exportLog();
+    if (path == null || path.isEmpty) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('导出日志失败')),
+      );
+      return false;
+    }
+    final shared = await _vpnService.shareFile(path);
+    if (!mounted) return false;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('日志已导出: $path')),
+    );
+    return shared;
+  }
+
   Future<void> _stopVpn() async {
     await _vpnService.disconnect();
     await _refresh();
@@ -232,6 +251,14 @@ class _SettingsPageState extends State<SettingsPage> {
                     );
                   },
                 ),
+                const Divider(height: 0),
+                ListTile(
+                  leading: const Icon(Icons.ios_share_rounded),
+                  title: const Text('导出诊断日志'),
+                  subtitle: const Text('包含设备信息、VPN 日志与 native 日志，可分享或保存'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => unawaited(_exportLog()),
+                ),
               ],
             ),
           ),
@@ -245,6 +272,7 @@ class _SettingsPageState extends State<SettingsPage> {
               onCopy: _copyLog,
               onClear: _clearLog,
               onStop: _stopVpn,
+              onExport: () => unawaited(_exportLog()),
               runtimeSnapshot: _vpnService.runtimeStore.state,
             ),
           ],

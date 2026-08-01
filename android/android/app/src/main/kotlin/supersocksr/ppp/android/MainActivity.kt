@@ -69,6 +69,22 @@ class MainActivity : FlutterActivity() {
                         PppLog.clear(this)
                         result.success(true)
                     }
+                    "exportLog" -> {
+                        val path = PppLog.export(this)
+                        if (path == null) {
+                            result.error("EXPORT_FAILED", "log export failed", null)
+                        } else {
+                            result.success(path)
+                        }
+                    }
+                    "shareFile" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrEmpty()) {
+                            result.error("INVALID_ARG", "path is required", null)
+                        } else {
+                            shareFile(path, result)
+                        }
+                    }
                     "getRuntimeSnapshot" -> {
                         // Mirrored by PppVpnService from the `:vpn` process;
                         // null while that process is not alive.
@@ -191,6 +207,37 @@ class MainActivity : FlutterActivity() {
             startActivityForResult(vpnIntent, VPN_PERMISSION_REQUEST)
         } else {
             result.success(true) // Already granted
+        }
+    }
+
+    /**
+     * Shares a file (e.g. an exported diagnostic log) to any app through the
+     * system chooser. The file must live in a path exposed by the FileProvider
+     * (Download/OpenPPP2 exports or the private files dir).
+     */
+    private fun shareFile(path: String, result: MethodChannel.Result) {
+        try {
+            val file = File(path)
+            if (!file.exists()) {
+                result.error("NOT_FOUND", "file not found: $path", null)
+                return
+            }
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                file,
+            )
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, file.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, "导出日志"))
+            result.success(true)
+        } catch (e: Throwable) {
+            PppLog.write(this, "shareFile failed", e)
+            result.error("SHARE_FAILED", e.message ?: e.javaClass.name, null)
         }
     }
 

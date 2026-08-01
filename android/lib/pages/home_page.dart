@@ -364,6 +364,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _refreshDebugInfo();
   }
 
+  Future<void> _exportDebugLog() async {
+    final path = await _vpnService.exportLog();
+    if (path == null || path.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('导出日志失败')),
+      );
+      return;
+    }
+    await _vpnService.shareFile(path);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('日志已导出: $path')),
+    );
+  }
+
   Future<void> _stopVpnForDebug() async {
     final generation = _runtimeStore.state.generation;
     if (_pendingStopGeneration == generation) return;
@@ -676,6 +692,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 onCopy: _copyDebugInfo,
                 onClear: _clearDebugLog,
                 onStop: _stopVpnForDebug,
+                onExport: () => unawaited(_exportDebugLog()),
                 runtimeSnapshot: _runtimeStore.state,
               ),
             ],

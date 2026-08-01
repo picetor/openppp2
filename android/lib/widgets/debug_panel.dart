@@ -15,6 +15,7 @@ class DebugPanel extends StatelessWidget {
   final VoidCallback onCopy;
   final VoidCallback onClear;
   final VoidCallback onStop;
+  final VoidCallback onExport;
   final RuntimeSnapshot runtimeSnapshot;
 
   const DebugPanel({
@@ -26,6 +27,7 @@ class DebugPanel extends StatelessWidget {
     required this.onCopy,
     required this.onClear,
     required this.onStop,
+    required this.onExport,
     required this.runtimeSnapshot,
   });
 
@@ -86,6 +88,11 @@ class DebugPanel extends StatelessWidget {
                   tooltip: '复制全部原始日志',
                   onPressed: onCopy,
                   icon: const Icon(Icons.copy),
+                ),
+                IconButton(
+                  tooltip: '导出日志文件',
+                  onPressed: onExport,
+                  icon: const Icon(Icons.ios_share),
                 ),
                 IconButton(
                   tooltip: '清空',

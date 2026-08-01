@@ -258,6 +258,28 @@ class VpnService with WidgetsBindingObserver {
     }
   }
 
+  /// Writes a self-contained diagnostic export (device info + vpn.log +
+  /// native logcat) to Download/OpenPPP2 and returns its absolute path,
+  /// or null on failure.
+  Future<String?> exportLog() async {
+    try {
+      return await _channel.invokeMethod<String>('exportLog');
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// Opens the system share sheet for a previously exported file.
+  /// Returns true if the chooser was launched.
+  Future<bool> shareFile(String path) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('shareFile', {'path': path});
+      return ok ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   /// Milliseconds since the `:vpn` process last wrote its link-state
   /// heartbeat file. Returns -1 if no VPN session has started yet, or
   /// a large value when `:vpn` is dead/crashed. The UI uses this as a
