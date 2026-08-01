@@ -53,6 +53,10 @@
 #include "ProtectorNetwork.h"
 #include "ancillary/ancillary.h"
 
+#if defined(_ANDROID)
+#include <android/OpenPPP2VpnProtectBridge.h>
+#endif
+
 #include <common/unix/UnixAfx.h>
 
 using ppp::net::Socket;
@@ -419,6 +423,35 @@ namespace ppp
 #if defined(_ANDROID)
             return ProtectorNetwork::Sendfd(dev_.data(), sockfd);
 #else
+            return ::setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, dev_.data(), dev_.size()) > -1;
+#endif
+        }
+
+        bool ProtectorNetwork::Protect(int sockfd) noexcept
+        {
+            if (sockfd == -1)
+            {
+                return false;
+            }
+
+            ProtectEventHandler e = ProtectEvent;
+            if (NULLPTR != e)
+            {
+                return e(sockfd);
+            }
+
+#if defined(_ANDROID)
+            // Synchronous protect for sockets created on arbitrary native
+            // threads.  ProtectSocketFd attaches to the JVM by itself so it is
+            // safe to call without a JNIEnv owned by this thread, and without a
+            // YieldContext to suspend on.
+            return ppp::android::ProtectSocketFd(sockfd);
+#else
+            if (dev_.empty())
+            {
+                return false;
+            }
+
             return ::setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, dev_.data(), dev_.size()) > -1;
 #endif
         }

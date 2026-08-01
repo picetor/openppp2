@@ -337,12 +337,14 @@ namespace ppp {
                     const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback) noexcept;
                 ppp::vector<boost::asio::ip::address>                              SelectLocalDnsServers(const void* packet, int packet_size) noexcept;
                 struct LocalDnsUpstream;
+                bool                                                                RegisterTunnelDnsHandler(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
                 bool                                                                SendLocalDnsUdp(const boost::asio::ip::address& server,
                     const std::shared_ptr<ppp::string>& query,
                     const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
                     bool through_tunnel, ppp::string& upstream_key, uint16_t& upstream_id) noexcept;
                 void                                                                ReceiveLocalDnsUpstream(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
                 void                                                                CancelLocalDnsUdp(const ppp::vector<std::pair<ppp::string, uint16_t>>& requests) noexcept;
+                void                                                                RebindTunnelDnsUpstreams() noexcept;
 #endif  
                 void                                                                AddRouteWithDnsServers() noexcept;
                 void                                                                DeleteRouteWithDnsServers() noexcept;

@@ -767,6 +767,18 @@ class PppVpnService : VpnService() {
                 return
             }
 
+            // Enable the native VpnService.protect(fd) bridge.  Direct DNS
+            // upstream sockets (geo direct DNS, bypass IP DNS) are created on
+            // arbitrary native threads and must be protect()ed so their packets
+            // do not loop back into the TUN (0.0.0.0/0 -> tun0). Without this
+            // every direct query times out and domestic sites become unreachable.
+            try {
+                libopenppp2.set_protect_enabled(true)
+                PppLog.write(this, "protect bridge enabled")
+            } catch (e: Throwable) {
+                PppLog.write(this, "set_protect_enabled failed: ${e.message ?: e.javaClass.name}")
+            }
+
             // detachFd() transfers ownership of the file descriptor to native code.
             // Using .fd directly causes fdsan SIGABRT when native close() runs because
             // ParcelFileDescriptor still claims ownership.

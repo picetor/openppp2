@@ -1555,6 +1555,13 @@ namespace ppp {
                     if (NULLPTR != http_proxy_) http_proxy_->SetExchanger(exchanger_);
                     if (NULLPTR != socks_proxy_) socks_proxy_->SetExchanger(exchanger_);
                     if (NULLPTR != previous && previous != exchanger_) previous->Dispose();
+#if defined(_WIN32)
+                    // The previous primary exchanger is now disposed, so any tunnel
+                    // DNS upstream that still references it can no longer send.
+                    // Rebind every tunnel DNS upstream to the new primary exchanger
+                    // and re-register its datagram handler on that exchanger.
+                    RebindTunnelDnsUpstreams();
+#endif
                 }
                 else if (NULLPTR != previous && previous_tag != target_tag) {
                     if (previous_tag == "main") previous->ResetDataChannels();
@@ -2751,6 +2758,97 @@ namespace ppp {
                 return result;
             }
 
+            bool VEthernetNetworkSwitcher::RegisterTunnelDnsHandler(
+                const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept {
+                if (NULLPTR == upstream || NULLPTR == upstream->exchanger) {
+                    return false;
+                }
+                auto weak_self = std::weak_ptr<VEthernetNetworkSwitcher>(
+                    std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this()));
+                auto weak_upstream = std::weak_ptr<LocalDnsUpstream>(upstream);
+                return upstream->exchanger->RegisterDatagramHandler(upstream->tunnel_source,
+                    [weak_self, weak_upstream](const boost::asio::ip::udp::endpoint&,
+                        const boost::asio::ip::udp::endpoint& destination, void* packet, int packet_length) noexcept {
+                        auto self = weak_self.lock();
+                        auto current = weak_upstream.lock();
+                        if (NULLPTR == self || NULLPTR == current) {
+                            return true;
+                        }
+                        if (NULLPTR == packet || packet_length < 2 ||
+                            destination.address() != current->server ||
+                            destination.port() != PPP_DNS_SYS_PORT) {
+                            return true;
+                        }
+                        const Byte* bytes = static_cast<const Byte*>(packet);
+                        const uint16_t id = static_cast<uint16_t>(
+                            (static_cast<uint16_t>(bytes[0]) << 8) | bytes[1]);
+                        ppp::function<void(const std::shared_ptr<ppp::string>&)> response_callback;
+                        {
+                            SynchronizedObjectScope response_scope(self->GetSynchronizedObject());
+                            auto request = current->requests.find(id);
+                            if (request != current->requests.end()) {
+                                response_callback = std::move(request->second);
+                                current->requests.erase(request);
+                            }
+                        }
+                        if (response_callback) {
+                            response_callback(make_shared_object<ppp::string>(
+                                reinterpret_cast<const char*>(packet), packet_length));
+                        }
+                        return true;
+                    });
+            }
+
+            void VEthernetNetworkSwitcher::RebindTunnelDnsUpstreams() noexcept {
+                auto current = exchanger_;
+                if (NULLPTR == current) {
+                    return;
+                }
+                ppp::vector<std::shared_ptr<LocalDnsUpstream>> upstreams;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    for (const auto& [key, upstream] : local_dns_upstreams_) {
+                        (void)key;
+                        if (NULLPTR == upstream || !upstream->through_tunnel) {
+                            continue;
+                        }
+                        if (upstream->exchanger == current) {
+                            continue;
+                        }
+                        upstreams.emplace_back(upstream);
+                    }
+                }
+                for (const auto& upstream : upstreams) {
+                    if (NULLPTR == upstream) continue;
+                    auto old = upstream->exchanger;
+                    if (NULLPTR != old && old != current) {
+                        old->ReleaseDatagramHandler(upstream->tunnel_source);
+                    }
+                    upstream->exchanger = current;
+                    bool registered = RegisterTunnelDnsHandler(upstream);
+                    if (!registered) {
+                        // Port collision on the fresh exchanger is unlikely, but
+                        // fall back to allocating another synthetic source port.
+                        auto tap = GetTap();
+                        if (NULLPTR != tap) {
+                            const boost::asio::ip::address source_address = Ipep::ToAddress(tap->GatewayServer);
+                            for (int i = 0; i < 16384 && !registered; ++i) {
+                                if (++local_dns_tunnel_port_ < 20000 || local_dns_tunnel_port_ > 29999) {
+                                    local_dns_tunnel_port_ = 20000;
+                                }
+                                upstream->tunnel_source = boost::asio::ip::udp::endpoint(
+                                    source_address, local_dns_tunnel_port_);
+                                registered = RegisterTunnelDnsHandler(upstream);
+                            }
+                        }
+                    }
+                    if (!registered) {
+                        LOG_WARN("VEthernetNetworkSwitcher::RebindTunnelDnsUpstreams: cannot rebind tunnel DNS handler, server=%s",
+                            upstream->server.to_string().data());
+                    }
+                }
+            }
+
             bool VEthernetNetworkSwitcher::SendLocalDnsUdp(
                 const boost::asio::ip::address& server,
                 const std::shared_ptr<ppp::string>& query,
@@ -2795,46 +2893,13 @@ namespace ppp {
                             // handler cannot collide with an ordinary Windows UDP flow.
                             const boost::asio::ip::address source_address = Ipep::ToAddress(tap->GatewayServer);
                             bool registered = false;
-                            auto weak_self = std::weak_ptr<VEthernetNetworkSwitcher>(
-                                std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this()));
-                            auto weak_upstream = std::weak_ptr<LocalDnsUpstream>(upstream);
                             for (int i = 0; i < 16384 && !registered; ++i) {
                                 if (++local_dns_tunnel_port_ < 20000 || local_dns_tunnel_port_ > 29999) {
                                     local_dns_tunnel_port_ = 20000;
                                 }
                                 upstream->tunnel_source = boost::asio::ip::udp::endpoint(
                                     source_address, local_dns_tunnel_port_);
-                                registered = upstream->exchanger->RegisterDatagramHandler(upstream->tunnel_source,
-                                    [weak_self, weak_upstream](const boost::asio::ip::udp::endpoint&,
-                                        const boost::asio::ip::udp::endpoint& destination, void* packet, int packet_length) noexcept {
-                                        auto self = weak_self.lock();
-                                        auto current = weak_upstream.lock();
-                                        if (NULLPTR == self || NULLPTR == current) {
-                                            return true;
-                                        }
-                                        if (NULLPTR == packet || packet_length < 2 ||
-                                            destination.address() != current->server ||
-                                            destination.port() != PPP_DNS_SYS_PORT) {
-                                            return true;
-                                        }
-                                        const Byte* bytes = static_cast<const Byte*>(packet);
-                                        const uint16_t id = static_cast<uint16_t>(
-                                            (static_cast<uint16_t>(bytes[0]) << 8) | bytes[1]);
-                                        ppp::function<void(const std::shared_ptr<ppp::string>&)> response_callback;
-                                        {
-                                            SynchronizedObjectScope response_scope(self->GetSynchronizedObject());
-                                            auto request = current->requests.find(id);
-                                            if (request != current->requests.end()) {
-                                                response_callback = std::move(request->second);
-                                                current->requests.erase(request);
-                                            }
-                                        }
-                                        if (response_callback) {
-                                            response_callback(make_shared_object<ppp::string>(
-                                                reinterpret_cast<const char*>(packet), packet_length));
-                                        }
-                                        return true;
-                                    });
+                                registered = RegisterTunnelDnsHandler(upstream);
                             }
                             if (!registered) {
                                 LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: cannot allocate tunnel DNS source, server=%s",
@@ -2848,6 +2913,20 @@ namespace ppp {
                             upstream->socket->open(server.is_v4() ? boost::asio::ip::udp::v4() : boost::asio::ip::udp::v6(), ec);
                             if (!ec) upstream->socket->connect({ server, PPP_DNS_SYS_PORT }, ec);
                             if (ec) return false;
+#if defined(_ANDROID)
+                            // VpnService routes 0.0.0.0/0 through the TUN. A
+                            // direct DNS socket that is not protect()ed sends
+                            // its query back into the tunnel where the native
+                            // layer re-dispatches it as yet another DNS query,
+                            // so the domestic resolver (e.g. 223.5.5.5) never
+                            // sees it and the query eventually times out. Bind
+                            // the socket to the physical network so the direct
+                            // resolver can actually reply.
+                            auto protector_network = GetProtectorNetwork();
+                            if (NULLPTR != protector_network) {
+                                protector_network->Protect(upstream->socket->native_handle());
+                            }
+#endif
                         }
                         local_dns_upstreams_[upstream_key] = upstream;
                     }

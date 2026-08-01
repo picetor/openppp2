@@ -29,6 +29,11 @@ namespace ppp
 
         public:             
             virtual bool                                            Protect(int sockfd, YieldContext& y) noexcept;
+            // Thread-safe synchronous protect.  Unlike the coroutine overload it
+            // does not require a JNIEnv owned by the calling thread (Android)
+            // nor a YieldContext, so it can protect sockets created on any
+            // native thread (e.g. the direct DNS upstream sockets).
+            virtual bool                                            Protect(int sockfd) noexcept;
 
         public:             
             static int                                              Recvfd(const char* unix_path, int milliSecondsTimeout = 3000, bool sync = true) noexcept;
