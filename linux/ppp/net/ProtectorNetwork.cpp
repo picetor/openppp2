@@ -367,6 +367,20 @@ namespace ppp
             boost::asio::post(*context, 
                 [self, this, context, &ok, &y, sockfd]() noexcept
                 {
+#if defined(_ANDROID)
+                    // The posted handler may run on ANY of the io_context
+                    // worker threads, but JNIEnv is strictly thread-bound:
+                    // reusing the env captured by JoinJNI() on a foreign
+                    // thread makes FindClass/CallStaticBooleanMethod fail
+                    // (returns false, silently cleared), so callers like
+                    // RedirectDnsServer believe protect failed, skip
+                    // send_to(), and the direct DNS query is never
+                    // transmitted (GeoSite DNS direct keeps retrying every
+                    // few seconds while no packet ever leaves the host).
+                    // ProtectSocketFd attaches to the JVM on the executing
+                    // thread, so it is safe to call from any worker thread.
+                    ok = ppp::android::ProtectSocketFd(sockfd);
+#else
                     // Reverse-calling the Java class member static function protects the socket without passing through VPNService / Android-Ko.
                     std::shared_ptr<boost::asio::io_context> jni;
                     {
@@ -382,6 +396,7 @@ namespace ppp
                             }
                         }
                     }
+#endif
 
                     // Wake up the coroutine waiting for this protect network socket service to prevent coroutines from getting stuck.
                     y.R();
