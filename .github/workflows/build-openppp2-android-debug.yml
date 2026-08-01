@@ -149,6 +149,24 @@ jobs:
           path: ~/.android/debug.keystore
           key: android-debug-keystore-v1
 
+      - name: Restore signing keystore from secrets
+        shell: bash
+        working-directory: android
+        run: |
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "No signing keystore secret; using cached debug keystore"
+            exit 0
+          fi
+          mkdir -p android/android/keystore
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/android/keystore/yav-release.keystore
+          cat > android/android/keystore/yav-release-key.properties <<EOF
+          storeFile=keystore/yav-release.keystore
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+          echo "signing keystore restored from secret"
+
       - name: Install Flutter dependencies
         shell: bash
         working-directory: android
