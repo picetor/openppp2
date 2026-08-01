@@ -119,5 +119,8 @@ tmp_test_*.cmake
 # Corrupted filenames
 MISSING*
 
+# One-off debug scripts in repo root (moved to tests/tools/)
+/_*.py
+
 # Allow libglibc_compat.a to be tracked
 !libglibc_compat.a
