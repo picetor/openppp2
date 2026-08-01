@@ -740,10 +740,10 @@ These projects work alongside this repo, covering rule generation, one-click dep
 
 ### DNS Rule Generator — `dns-rules_geosite_generator`
 
-[dns-rules_geosite_generator](https://github.com/picetor/dns-rules_geosite_generator) converts [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) geosite classifications into `dns-rules.txt` bypass lists for this project.
+[dns-rules_geosite_generator](https://github.com/picetor/dns-rules_geosite_generator) converts [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat) geosite classifications into `dns-rules.txt` bypass lists for this project.
 
 ```
-geosite classifications (MetaCubeX)  ──→  geosite2dns.py  ──→  dns-rules.txt
+geosite classifications (Loyalsoldier)  ──→  geosite2dns.py  ──→  dns-rules.txt
 ```
 
 - Supports 3 data sources: GitHub source files, geosite.dat Protobuf, mosdns unpack

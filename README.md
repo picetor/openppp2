@@ -866,10 +866,10 @@ CDN 优选 IP 场景需额外配置 `client.websocket`：
 
 ### DNS 规则生成 — `dns-rules_geosite_generator`
 
-[dns-rules_geosite_generator](https://github.com/picetor/dns-rules_geosite_generator) 将 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) 的 geosite 分类数据转换为本项目的 `dns-rules.txt` 绕过列表。
+[dns-rules_geosite_generator](https://github.com/picetor/dns-rules_geosite_generator) 将 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat) 的 geosite 分类数据转换为本项目的 `dns-rules.txt` 绕过列表。
 
 ```
-geosite 分类 (MetaCubeX)  ──→  geosite2dns.py  ──→  dns-rules.txt
+geosite 分类 (Loyalsoldier)  ──→  geosite2dns.py  ──→  dns-rules.txt
 ```
 
 - 支持 GitHub 源文件、geosite.dat Protobuf、mosdns 解包三种数据源

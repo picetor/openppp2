@@ -200,9 +200,9 @@ cdnst.net          /cloudflare/tun''';
       'geoipDat': './rules/GeoIP.dat',
       'geositeDat': './rules/GeoSite.dat',
       'geoipDownloadUrl':
-          'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat',
+          'https://testingcf.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat',
       'geositeDownloadUrl':
-          'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat',
+          'https://testingcf.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat',
       // Newline-separated lists of source file paths.
       'geoipFiles': './rules/geoip-cn.txt',
       'geositeFiles': './rules/geosite-cn.txt',
