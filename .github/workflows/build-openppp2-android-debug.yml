@@ -139,6 +139,16 @@ jobs:
           test -s ../bin/android/arm64-v8a/libopenppp2.so
           test -s ../bin/android/x86_64/libopenppp2.so
 
+      - name: Cache Android debug keystore
+        # flutter debug builds sign with ~/.android/debug.keystore; a fresh
+        # runner would generate a new keystore on every run, changing the APK
+        # signature each build and breaking `adb install -r` over an existing
+        # install. Cache the keystore so every build shares one signature.
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Install Flutter dependencies
         shell: bash
         working-directory: android
