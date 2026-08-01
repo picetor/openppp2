@@ -1,0 +1,4 @@
+# Downloaded geo dataset binaries — do not commit (large, regenerable)
+*.dat
+*.dlc
+__pycache__/
