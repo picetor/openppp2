@@ -367,7 +367,7 @@ class HomeStatusCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                _StatusDot(color: accent, pulse: !isConnected && !isBusy),
+                _StatusDot(color: accent),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -488,72 +488,24 @@ class HomeStatusCard extends StatelessWidget {
   }
 }
 
-class _StatusDot extends StatefulWidget {
+class _StatusDot extends StatelessWidget {
   final Color color;
-  final bool pulse;
 
-  const _StatusDot({required this.color, required this.pulse});
-
-  @override
-  State<_StatusDot> createState() => _StatusDotState();
-}
-
-class _StatusDotState extends State<_StatusDot>
-    with SingleTickerProviderStateMixin {
-  AnimationController? _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _syncAnimation();
-  }
-
-  @override
-  void didUpdateWidget(covariant _StatusDot oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.pulse != widget.pulse) _syncAnimation();
-  }
-
-  void _syncAnimation() {
-    if (widget.pulse) {
-      _controller ??= AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 1600),
-      )..repeat(reverse: true);
-    } else {
-      _controller?.dispose();
-      _controller = null;
-    }
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _controller?.dispose();
-    super.dispose();
-  }
+  const _StatusDot({required this.color});
 
   @override
   Widget build(BuildContext context) {
-    final opacity = widget.pulse && _controller != null
-        ? Tween<double>(begin: 0.38, end: 1).animate(
-            CurvedAnimation(parent: _controller!, curve: Curves.easeInOut),
-          )
-        : const AlwaysStoppedAnimation(1.0);
-    return FadeTransition(
-      opacity: opacity,
-      child: Container(
-        width: 12,
-        height: 12,
-        decoration: BoxDecoration(
-          color: widget.color,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: widget.color.withValues(alpha: 0.42),
-              blurRadius: 10,
-            ),
-          ],
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        color: widget.color,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: widget.color.withValues(alpha: 0.42),
+            blurRadius: 10,
+          ),
         ),
       ),
     );
