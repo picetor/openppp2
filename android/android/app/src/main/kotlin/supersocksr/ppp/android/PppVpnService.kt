@@ -280,6 +280,10 @@ class PppVpnService : VpnService() {
                 "rules/geo-rules.yaml" to "geo-rules.yaml",
                 "rules/geoip.dat" to "GeoIP.dat",
                 "rules/geosite.dat" to "GeoSite.dat",
+                // 基础分流模式使用的桌面三文件（首次安装复制，用户导入后不再覆盖）
+                "rules/ip.txt" to "ip.txt",
+                "rules/ipv6.txt" to "ipv6.txt",
+                "rules/dns-rules.txt" to "dns-rules.txt",
             )
             for ((assetPath, destName) in pairs) {
                 val dest = java.io.File(rulesDir, destName)
@@ -344,8 +348,15 @@ class PppVpnService : VpnService() {
      * [customRules] is an optional user-authored geo-rules.yaml body. When
      * non-blank it is written verbatim (the user takes full responsibility
      * for the YAML); otherwise the default country preset is generated.
+     *
+     * [directDns] overrides the direct DNS list (from the launch options
+     * dnsDirect1/dnsDirect2). When empty the country defaults apply.
      */
-    private fun writeGeoRulesPreset(country: String, customRules: String = ""): Boolean {
+    private fun writeGeoRulesPreset(
+        country: String,
+        customRules: String = "",
+        directDns: List<String> = emptyList(),
+    ): Boolean {
         return try {
             val rulesDir = java.io.File(filesDir, "rules")
             if (!rulesDir.exists() && !rulesDir.mkdirs()) return false
@@ -356,7 +367,9 @@ class PppVpnService : VpnService() {
             val content = if (customRules.isNotBlank()) {
                 customRules.trim() + "\n"
             } else {
-                val dnsList = if (country == "cn") {
+                val dnsList = if (directDns.isNotEmpty()) {
+                    directDns
+                } else if (country == "cn") {
                     listOf("local", "223.5.5.5", "119.29.29.29")
                 } else {
                     listOf("local", "1.1.1.1", "8.8.8.8")
@@ -385,7 +398,7 @@ class PppVpnService : VpnService() {
             rulesFile.writeText(content, Charsets.UTF_8)
             PppLog.write(
                 this,
-                "generated geo preset country=$country custom=${customRules.isNotBlank()} path=${rulesFile.absolutePath} size=${rulesFile.length()}"
+                "generated geo preset country=$country custom=${customRules.isNotBlank()} dns=${dnsList.joinToString(",")} path=${rulesFile.absolutePath} size=${rulesFile.length()}"
             )
             rulesFile.isFile && rulesFile.length() > 0L
         } catch (e: Throwable) {
@@ -479,18 +492,62 @@ class PppVpnService : VpnService() {
             val routePrefix = options.optInt("routePrefix", 0)
             val dns1 = options.optString("dns1", "8.8.8.8")
             val dns2 = options.optString("dns2", "8.8.4.4")
+            val dnsDirect1 = options.optString("dnsDirect1", "")
+            val dnsDirect2 = options.optString("dnsDirect2", "")
             val mtu = options.optInt("mtu", 1400)
             val mark = options.optInt("mark", 0)
-            val mux = options.optInt("mux", 0)
+            var mux = options.optInt("mux", 0)
             val vnet = options.optBoolean("vnet", false)
             val blockQuic = options.optBoolean("blockQuic", false)
             val staticMode = options.optBoolean("staticMode", false)
             val proxyOnly = options.optBoolean("proxyOnly", false)
-            val bypassIpList = options.optString("bypassIpList", "")
-            val dnsRulesList = options.optString("dnsRulesList", "")
+            var bypassIpList = options.optString("bypassIpList", "")
+            var dnsRulesList = options.optString("dnsRulesList", "")
+            val routeMode = options.optString("routeMode", "")
+            val extraArgs = options.optString("extraArgs", "")
+            // 基础分流（ip）模式：优先使用 files/rules/ 下的桌面三文件。
+            if (routeMode == "basic") {
+                val rulesDir = java.io.File(filesDir, "rules")
+                val ipFile = java.io.File(rulesDir, "ip.txt")
+                if (ipFile.isFile && ipFile.length() > 0L) {
+                    val ipv6File = java.io.File(rulesDir, "ipv6.txt")
+                    val combined = buildString {
+                        append(ipFile.readText(Charsets.UTF_8).trim())
+                        if (ipv6File.isFile && ipv6File.length() > 0L) {
+                            append("\n")
+                            append(ipv6File.readText(Charsets.UTF_8).trim())
+                        }
+                    }
+                    bypassIpList = combined
+                }
+                val dnsFile = java.io.File(rulesDir, "dns-rules.txt")
+                if (dnsFile.isFile && dnsFile.length() > 0L) {
+                    dnsRulesList = dnsFile.readText(Charsets.UTF_8)
+                }
+            }
+            // 自定义补充启动命令（桌面 CLI 格式 --xxx=value）。
+            // 识别 --tun-mux-acceleration=N 与 --tun-mux=N，其余忽略。
+            var muxAcceleration = -1
+            for (arg in extraArgs.split(Regex("\\s+"))) {
+                val trimmed = arg.trim()
+                if (trimmed.startsWith("--tun-mux-acceleration=")) {
+                    trimmed.removePrefix("--tun-mux-acceleration=")
+                        .trim()
+                        .toIntOrNull()
+                        ?.let { muxAcceleration = it }
+                } else if (trimmed.startsWith("--tun-mux=")) {
+                    trimmed.removePrefix("--tun-mux=")
+                        .trim()
+                        .toIntOrNull()
+                        ?.let { if (it > 0) mux = it }
+                }
+            }
+            val directDns = listOf(dnsDirect1, dnsDirect2)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
             PppLog.write(
                 this,
-                "vpn options tunIp=$vpnIp tunMask=$vpnMask tunPrefix=$vpnPrefix route=$route/$routePrefix dns1=$dns1 dns2=$dns2 mtu=$mtu mark=$mark mux=$mux vnet=$vnet blockQuic=$blockQuic staticMode=$staticMode proxyOnly=$proxyOnly bypassIpList=${bypassIpList.isNotBlank()} dnsRulesList=${dnsRulesList.isNotBlank()}"
+                "vpn options tunIp=$vpnIp tunMask=$vpnMask tunPrefix=$vpnPrefix route=$route/$routePrefix dns1=$dns1 dns2=$dns2 directDns=$directDns mtu=$mtu mark=$mark mux=$mux vnet=$vnet blockQuic=$blockQuic staticMode=$staticMode proxyOnly=$proxyOnly routeMode=$routeMode muxAcceleration=$muxAcceleration bypassIpList=${bypassIpList.isNotBlank()} dnsRulesList=${dnsRulesList.isNotBlank()} extraArgs=${extraArgs.isNotBlank()}"
             )
 
             // Anchor relative paths inside the AppConfiguration JSON
@@ -553,7 +610,7 @@ class PppVpnService : VpnService() {
             if (geoEnabled) {
                 val geoCountry = normalizeGeoCountry(geoRules?.optString("country", "cn"))
                 val geoCustomRules = geoRules?.optString("customRules", "") ?: ""
-                if (!writeGeoRulesPreset(geoCountry, geoCustomRules)) {
+                if (!writeGeoRulesPreset(geoCountry, geoCustomRules, directDns)) {
                     notifyError("generate GEO preset failed: $geoCountry")
                     notifyStateChanged(0)
                     stopForeground(true)
@@ -736,6 +793,17 @@ class PppVpnService : VpnService() {
                 stopForeground(true)
                 stopSelf()
                 return
+            }
+
+            // ---- Mux acceleration (from --tun-mux-acceleration=N) ----
+            if (muxAcceleration > 0) {
+                val accelResult = try {
+                    libopenppp2.set_mux_acceleration(muxAcceleration)
+                } catch (e: UnsatisfiedLinkError) {
+                    PppLog.write(this, "set_mux_acceleration unavailable in this .so")
+                    -1
+                }
+                PppLog.write(this, "set_mux_acceleration value=$muxAcceleration result=$accelResult")
             }
 
             // Start VPN in background thread (run() is blocking)

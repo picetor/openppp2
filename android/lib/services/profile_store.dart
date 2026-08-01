@@ -147,6 +147,14 @@ cdnst.net          /cloudflare/tun''';
     'routePrefix': 0,
     'dns1': '8.8.8.8',
     'dns2': '1.1.1.1',
+    // Direct (GEO direct_dns) DNS servers used by the GEO preset when the
+    // country rule matches. Maps to `direct_dns` in geo-rules.yaml.
+    'dnsDirect1': '223.5.5.5',
+    'dnsDirect2': '119.29.29.29',
+    // Free-form supplemental launch arguments in desktop CLI style, e.g.
+    // "--tun-mux-acceleration=3". Parsed by PppVpnService at connect time;
+    // recognized flags are mapped to native knobs, unknown flags are ignored.
+    'extraArgs': '',
     'mtu': 1400,
     'mark': 0,
     'mux': 0,
@@ -210,6 +218,8 @@ cdnst.net          /cloudflare/tun''';
       'dnsProviderForeign': 'cloudflare',
       'outputBypass': './generated/bypass-cn.txt',
       'outputDnsRules': './generated/dns-rules-cn.txt',
+      // User-authored geo-rules.yaml body (bypass country CN by default).
+      'customRules': '',
     },
   };
 
@@ -321,6 +331,17 @@ cdnst.net          /cloudflare/tun''';
       putIfNonEmpty('dns-provider-foreign', gc['dnsProviderForeign']);
       putIfNonEmpty('output-bypass', gc['outputBypass']);
       putIfNonEmpty('output-dns-rules', gc['outputDnsRules']);
+
+      // 直连 DNS（一级页面的 dnsDirect1/dnsDirect2）→ geo-rules direct-dns。
+      // native GeoRuleEngine 实际从 geo-rules.yaml 的 direct_dns 读取，
+      // 此字段作为预设/配置记录并透传给 PppVpnService 生成 preset。
+      final directDns = <String>[
+        if ((options['dnsDirect1'] ?? '').toString().trim().isNotEmpty)
+          (options['dnsDirect1'] ?? '').toString().trim(),
+        if ((options['dnsDirect2'] ?? '').toString().trim().isNotEmpty)
+          (options['dnsDirect2'] ?? '').toString().trim(),
+      ];
+      if (directDns.isNotEmpty) gr['direct-dns'] = directDns;
 
       List<String> splitLines(dynamic value) => (value ?? '')
           .toString()

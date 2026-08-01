@@ -278,6 +278,47 @@ class VpnService with WidgetsBindingObserver {
     }
   }
 
+  /// 基础分流三文件（ip.txt / ipv6.txt / dns-rules.txt）与 GEO 文件的
+  /// 本地状态，返回 `{ 文件名: 可读大小或 '未导入' }`。
+  Future<Map<String, String>> getRuleFileSizes() async {
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'getRuleFileSizes',
+      );
+      if (raw == null) return const {};
+      return raw.map((k, v) => MapEntry(k, v.toString()));
+    } on PlatformException {
+      return const {};
+    }
+  }
+
+  /// 从 URL 下载更新 GeoIP.dat / GeoSite.dat 到 files/rules/。
+  /// 返回结果描述字符串。
+  Future<String> updateGeoFiles({
+    required String geoipUrl,
+    required String geositeUrl,
+  }) async {
+    final result = await _channel.invokeMethod<String>('updateGeoFiles', {
+      'geoipUrl': geoipUrl,
+      'geositeUrl': geositeUrl,
+    });
+    return result ?? '已更新';
+  }
+
+  /// 通过系统文件选择器（SAF）导入一个文件到 files/rules/<destName>。
+  /// 用户取消时返回 null。
+  Future<String?> pickAndImportRuleFile({required String destName}) async {
+    try {
+      final name = await _channel.invokeMethod<String>(
+        'pickAndImportRuleFile',
+        {'destName': destName},
+      );
+      return name;
+    } on PlatformException catch (e) {
+      throw Exception('导入失败: ${e.message}');
+    }
+  }
+
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _runtimePollTimer?.cancel();

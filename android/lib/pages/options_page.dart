@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/config_profile.dart';
-import '../models/launch_route_mode.dart';
 import '../services/profile_store.dart';
 import '../widgets/app_section_card.dart';
-import 'options_advanced_page.dart';
+import 'options_routing_page.dart';
 
 /// Per-profile launch options aligned with the iOS Options screen layout.
+///
+/// 一级「启动参数」页：代理 / DNS（直连+隧道）/ 其他启动命令 / TUN 接口，
+/// 分流配置在二级页（OptionsRoutingPage）中编辑。
 class OptionsPage extends StatefulWidget {
   const OptionsPage({super.key});
 
@@ -17,6 +19,32 @@ class OptionsPage extends StatefulWidget {
 class _OptionsPageState extends State<OptionsPage> {
   final _store = ProfileStore();
 
+  // ---- 代理 ----
+  final _httpProxyPort = TextEditingController(text: '8080');
+  final _socksProxyPort = TextEditingController(text: '1080');
+  bool _allowLan = false;
+  bool _blockQuic = false;
+
+  // ---- DNS ----
+  final _dns1 = TextEditingController();
+  final _dns2 = TextEditingController();
+  final _dnsDirect1 = TextEditingController();
+  final _dnsDirect2 = TextEditingController();
+  final _dnsRulesList = TextEditingController();
+
+  // ---- 其他启动命令 ----
+  final _mux = TextEditingController();
+  final _mark = TextEditingController();
+  final _extraArgs = TextEditingController();
+  bool _vnet = false;
+  bool _staticMode = true;
+  bool _proxyOnly = false;
+  bool _perAppProxyEnabled = false;
+  String _perAppProxyMode = 'allow';
+  List<String> _perAppProxyApps = const <String>[];
+  String _muxMode = 'compat';
+
+  // ---- TUN 接口 ----
   final _tunIp = TextEditingController();
   final _tunMask = TextEditingController();
   final _tunPrefix = TextEditingController();
@@ -24,28 +52,6 @@ class _OptionsPageState extends State<OptionsPage> {
   final _mtu = TextEditingController();
   final _route = TextEditingController();
   final _routePrefix = TextEditingController();
-  final _dns1 = TextEditingController();
-  final _dns2 = TextEditingController();
-  final _dnsRulesList = TextEditingController();
-  final _bypassIpList = TextEditingController();
-  final _dnsDomestic = TextEditingController();
-  final _dnsForeign = TextEditingController();
-  final _dnsEcsOverride = TextEditingController();
-  final _dnsStunCandidates = TextEditingController();
-  final _geoCountry = TextEditingController();
-  final _geoIpDat = TextEditingController();
-  final _geoSiteDat = TextEditingController();
-  final _httpProxyPort = TextEditingController(text: '8080');
-  final _socksProxyPort = TextEditingController(text: '1080');
-
-  bool _allowLan = false;
-  bool _blockQuic = false;
-  bool _dnsInterceptUnmatched = true;
-  bool _dnsFakeIpEnabled = false;
-  final _dnsFakeIpRange = TextEditingController(text: '198.18.0.1/16');
-  bool _dnsEcsEnabled = true;
-  bool _dnsTlsVerifyPeer = true;
-  LaunchRouteMode _routeMode = LaunchRouteMode.geo;
 
   ConfigProfile? _profile;
   bool _loading = true;
@@ -94,81 +100,77 @@ class _OptionsPageState extends State<OptionsPage> {
   }
 
   void _hydrate(Map<String, dynamic> m) {
+    // 代理
+    _httpProxyPort.text = (m['httpProxyPort'] ?? '8080').toString();
+    _socksProxyPort.text = (m['socksProxyPort'] ?? '1080').toString();
+    _allowLan = m['allowLan'] == true;
+    _blockQuic = m['blockQuic'] == true;
+
+    // DNS：隧道 = dns1/dns2；直连 = dnsDirect1/dnsDirect2（GEO direct_dns）
+    _dns1.text = (m['dns1'] ?? '').toString();
+    _dns2.text = (m['dns2'] ?? '').toString();
+    _dnsDirect1.text = (m['dnsDirect1'] ?? '').toString();
+    _dnsDirect2.text = (m['dnsDirect2'] ?? '').toString();
+    _dnsRulesList.text = (m['dnsRulesList'] ?? '').toString();
+
+    // 其他启动命令
+    _mux.text = (m['mux'] ?? '0').toString();
+    _mark.text = (m['mark'] ?? '0').toString();
+    _extraArgs.text = (m['extraArgs'] ?? '').toString();
+    _vnet = m['vnet'] == true;
+    _staticMode = m['staticMode'] == true;
+    _proxyOnly = m['proxyOnly'] == true;
+    _perAppProxyEnabled = m['perAppProxyEnabled'] == true;
+    final mode = (m['perAppProxyMode'] ?? 'allow').toString();
+    _perAppProxyMode = mode == 'deny' ? 'deny' : 'allow';
+    final apps = m['perAppProxyApps'];
+    _perAppProxyApps = (apps is List)
+        ? apps.whereType<String>().where((s) => s.isNotEmpty).toList()
+        : const <String>[];
+    _muxMode = (m['muxMode'] ?? 'compat').toString();
+
+    // TUN 接口
     _tunIp.text = (m['tunIp'] ?? '').toString();
     _tunMask.text = (m['tunMask'] ?? '').toString();
     _tunPrefix.text = (m['tunPrefix'] ?? '24').toString();
     _gateway.text = (m['gateway'] ?? '').toString();
+    _mtu.text = (m['mtu'] ?? '1400').toString();
     _route.text = (m['route'] ?? '').toString();
     _routePrefix.text = (m['routePrefix'] ?? '0').toString();
-    _dns1.text = (m['dns1'] ?? '').toString();
-    _dns2.text = (m['dns2'] ?? '').toString();
-    _mtu.text = (m['mtu'] ?? '1400').toString();
-    _bypassIpList.text = (m['bypassIpList'] ?? '').toString();
-    _dnsRulesList.text = (m['dnsRulesList'] ?? '').toString();
-    _allowLan = m['allowLan'] == true;
-    _blockQuic = m['blockQuic'] == true;
-    _httpProxyPort.text = (m['httpProxyPort'] ?? '8080').toString();
-    _socksProxyPort.text = (m['socksProxyPort'] ?? '1080').toString();
-    _routeMode = LaunchRouteMode.fromOptions(m);
-
-    final dnsCfg = (m['dnsConfig'] is Map)
-        ? Map<String, dynamic>.from(m['dnsConfig'] as Map)
-        : <String, dynamic>{};
-    _dnsDomestic.text = (dnsCfg['domestic'] ?? '').toString();
-    _dnsForeign.text = (dnsCfg['foreign'] ?? '').toString();
-    _dnsEcsOverride.text = (dnsCfg['ecsOverrideIp'] ?? '').toString();
-    _dnsStunCandidates.text = (dnsCfg['stunCandidates'] ?? '').toString();
-    _dnsInterceptUnmatched = dnsCfg['interceptUnmatched'] ?? true;
-    _dnsFakeIpEnabled = dnsCfg['fakeIpEnabled'] ?? false;
-    _dnsFakeIpRange.text = (dnsCfg['fakeIpRange'] ?? '198.18.0.1/16').toString();
-    _dnsEcsEnabled = dnsCfg['ecsEnabled'] ?? true;
-    _dnsTlsVerifyPeer = dnsCfg['tlsVerifyPeer'] ?? true;
-
-    final geo = (m['geoRules'] is Map)
-        ? Map<String, dynamic>.from(m['geoRules'] as Map)
-        : <String, dynamic>{};
-    _geoCountry.text = (geo['country'] ?? '').toString();
-    _geoIpDat.text = (geo['geoipDat'] ?? '').toString();
-    _geoSiteDat.text = (geo['geositeDat'] ?? '').toString();
   }
 
   Map<String, dynamic> _readForm(Map<String, dynamic> base) {
-    var options = Map<String, dynamic>.from(base);
+    final options = Map<String, dynamic>.from(base);
     options
+      // 代理
+      ..['httpProxyPort'] = int.tryParse(_httpProxyPort.text.trim()) ?? 8080
+      ..['socksProxyPort'] = int.tryParse(_socksProxyPort.text.trim()) ?? 1080
+      ..['allowLan'] = _allowLan
+      ..['blockQuic'] = _blockQuic
+      // DNS：隧道 = dns1/dns2；直连 = dnsDirect1/dnsDirect2（GEO direct_dns）
+      ..['dns1'] = _dns1.text.trim()
+      ..['dns2'] = _dns2.text.trim()
+      ..['dnsDirect1'] = _dnsDirect1.text.trim()
+      ..['dnsDirect2'] = _dnsDirect2.text.trim()
+      ..['dnsRulesList'] = _dnsRulesList.text
+      // 其他启动命令
+      ..['mux'] = int.tryParse(_mux.text.trim()) ?? 0
+      ..['mark'] = int.tryParse(_mark.text.trim()) ?? 0
+      ..['extraArgs'] = _extraArgs.text
+      ..['vnet'] = _vnet
+      ..['staticMode'] = _staticMode
+      ..['proxyOnly'] = _proxyOnly
+      ..['perAppProxyEnabled'] = _perAppProxyEnabled
+      ..['perAppProxyMode'] = _perAppProxyMode
+      ..['perAppProxyApps'] = List<String>.from(_perAppProxyApps)
+      // TUN 接口
       ..['tunIp'] = _tunIp.text.trim()
       ..['tunMask'] = _tunMask.text.trim()
       ..['tunPrefix'] = int.tryParse(_tunPrefix.text.trim()) ?? 24
       ..['gateway'] = _gateway.text.trim()
       ..['route'] = _route.text.trim()
       ..['routePrefix'] = int.tryParse(_routePrefix.text.trim()) ?? 0
-      ..['dns1'] = _dns1.text.trim()
-      ..['dns2'] = _dns2.text.trim()
-      ..['mtu'] = int.tryParse(_mtu.text.trim()) ?? 1400
-      ..['allowLan'] = _allowLan
-      ..['blockQuic'] = _blockQuic
-      ..['bypassIpList'] = _bypassIpList.text
-      ..['dnsRulesList'] = _dnsRulesList.text
-      ..['httpProxyPort'] = int.tryParse(_httpProxyPort.text.trim()) ?? 8080
-      ..['socksProxyPort'] = int.tryParse(_socksProxyPort.text.trim()) ?? 1080
-      ..['dnsConfig'] = {
-        'domestic': _dnsDomestic.text.trim(),
-        'foreign': _dnsForeign.text.trim(),
-        'interceptUnmatched': _dnsInterceptUnmatched,
-        'fakeIpEnabled': _dnsFakeIpEnabled,
-        'fakeIpRange': _dnsFakeIpRange.text.trim(),
-        'ecsEnabled': _dnsEcsEnabled,
-        'ecsOverrideIp': _dnsEcsOverride.text.trim(),
-        'tlsVerifyPeer': _dnsTlsVerifyPeer,
-        'stunCandidates': _dnsStunCandidates.text,
-      };
-    final geo = (options['geoRules'] is Map)
-        ? Map<String, dynamic>.from(options['geoRules'] as Map)
-        : <String, dynamic>{};
-    geo['country'] = _geoCountry.text.trim();
-    geo['geoipDat'] = _geoIpDat.text.trim();
-    geo['geositeDat'] = _geoSiteDat.text.trim();
-    options['geoRules'] = geo;
-    options = LaunchRouteMode.applyTo(options, _routeMode);
+      ..['mtu'] = int.tryParse(_mtu.text.trim()) ?? 1400;
     return options;
   }
 
@@ -226,17 +228,12 @@ class _OptionsPageState extends State<OptionsPage> {
       _routePrefix,
       _dns1,
       _dns2,
-      _mtu,
-      _bypassIpList,
+      _dnsDirect1,
+      _dnsDirect2,
       _dnsRulesList,
-      _dnsDomestic,
-      _dnsForeign,
-      _dnsEcsOverride,
-      _dnsFakeIpRange,
-      _dnsStunCandidates,
-      _geoCountry,
-      _geoIpDat,
-      _geoSiteDat,
+      _mux,
+      _mark,
+      _extraArgs,
       _httpProxyPort,
       _socksProxyPort,
     ]) {
@@ -282,6 +279,7 @@ class _OptionsPageState extends State<OptionsPage> {
                   padding: const EdgeInsets.all(16),
                   children: [
                     _activeBanner(theme),
+                    // ---- 代理 ----
                     AppSectionCard(
                       title: '代理',
                       icon: Icons.account_tree_rounded,
@@ -325,119 +323,128 @@ class _OptionsPageState extends State<OptionsPage> {
                       ],
                     ),
                     const SizedBox(height: 12),
+                    // ---- DNS ----
                     AppSectionCard(
                       title: 'DNS',
                       icon: Icons.dns_rounded,
                       children: [
+                        Text('直连 DNS（GEO direct_dns）',
+                            style: theme.textTheme.bodyMedium),
+                        const SizedBox(height: 6),
                         Row(
                           children: [
                             Expanded(
-                                child: _text(_dns1, 'DNS 1', onChanged: _markDirty)),
+                              child: _text(_dnsDirect1, '直连 DNS 1',
+                                  onChanged: _markDirty),
+                            ),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: _text(_dns2, 'DNS 2', onChanged: _markDirty)),
+                              child: _text(_dnsDirect2, '直连 DNS 2',
+                                  onChanged: _markDirty),
+                            ),
+                          ],
+                        ),
+                        Text('隧道 DNS', style: theme.textTheme.bodyMedium),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _text(_dns1, '隧道 DNS 1',
+                                  onChanged: _markDirty),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _text(_dns2, '隧道 DNS 2',
+                                  onChanged: _markDirty),
+                            ),
                           ],
                         ),
                         _multiline(_dnsRulesList, label: 'DNS 规则列表',
                             onChanged: _markDirty),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: _text(_dnsDomestic, '国内 DNS',
-                                  onChanged: _markDirty),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: _text(_dnsForeign, '国外 DNS',
-                                  onChanged: _markDirty),
-                            ),
-                          ],
-                        ),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          value: _dnsFakeIpEnabled,
-                          title: const Text('Fake-IP'),
-                          subtitle: const Text('Clash 风格即时假 IP，后台解析真实地址'),
-                          onChanged: (v) => setState(() {
-                            _dnsFakeIpEnabled = v;
-                            _markDirty();
-                          }),
-                        ),
-                        if (_dnsFakeIpEnabled)
-                          _text(_dnsFakeIpRange, 'Fake-IP 地址池 (CIDR)',
-                              onChanged: _markDirty),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          value: _dnsEcsEnabled,
-                          title: const Text('ECS (EDNS Client Subnet)'),
-                          onChanged: (v) => setState(() {
-                            _dnsEcsEnabled = v;
-                            _markDirty();
-                          }),
-                        ),
-                        if (_dnsEcsEnabled)
-                          _text(_dnsEcsOverride, 'ECS Override IP (可选)',
-                              onChanged: _markDirty),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          value: _dnsTlsVerifyPeer,
-                          title: const Text('TLS 校验'),
-                          onChanged: (v) => setState(() {
-                            _dnsTlsVerifyPeer = v;
-                            _markDirty();
-                          }),
-                        ),
-                        _multiline(_dnsStunCandidates, label: 'STUN 候选',
-                            onChanged: _markDirty, height: 100),
                       ],
                     ),
                     const SizedBox(height: 12),
+                    // ---- 其他启动命令 ----
                     AppSectionCard(
-                      title: 'Geo / Bypass',
-                      icon: Icons.public_rounded,
-                      tint: Colors.orange,
+                      title: '其他启动命令',
+                      icon: Icons.terminal_rounded,
+                      tint: Colors.indigo,
                       children: [
-                        Text('路由模式', style: theme.textTheme.bodyMedium),
-                        const SizedBox(height: 6),
-                        SegmentedButton<LaunchRouteMode>(
-                          showSelectedIcon: false,
-                          segments: [
-                            for (final mode in LaunchRouteMode.values)
-                              ButtonSegment(
-                                value: mode,
-                                label: Text(mode.label),
-                              ),
-                          ],
-                          selected: {_routeMode},
-                          onSelectionChanged: (s) {
-                            if (s.isEmpty) return;
-                            setState(() {
-                              _routeMode = s.first;
-                              _markDirty();
-                            });
-                          },
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: _vnet,
+                          title: const Text('VNet'),
+                          subtitle: const Text('虚拟以太网交换机'),
+                          onChanged: (v) => setState(() {
+                            _vnet = v;
+                            _markDirty();
+                          }),
                         ),
-                        const SizedBox(height: 8),
-                        _text(_geoCountry, 'Geo Country (如 cn)',
-                            onChanged: _markDirty),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: _staticMode,
+                          title: const Text('Static Mode'),
+                          subtitle: const Text('静态模式（固定出口）'),
+                          onChanged: (v) => setState(() {
+                            _staticMode = v;
+                            _markDirty();
+                          }),
+                        ),
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.auto_awesome_motion_rounded),
+                          title: const Text('VMUX 模式'),
+                          subtitle: Text(
+                            _muxMode == 'compat'
+                                ? 'Compatibility mode（只读，由配置决定）'
+                                : '$_muxMode（只读，由配置决定）',
+                          ),
+                          trailing: const Icon(Icons.lock_outline_rounded),
+                          onTap: null,
+                        ),
                         Row(
                           children: [
                             Expanded(
-                              child: _text(_geoIpDat, 'GeoIP.dat',
+                              child: _text(_mux, 'tun-mux 连接数',
+                                  keyboardType: TextInputType.number,
                                   onChanged: _markDirty),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: _text(_geoSiteDat, 'GeoSite.dat',
+                              child: _text(_mark, 'Mark',
+                                  keyboardType: TextInputType.number,
                                   onChanged: _markDirty),
                             ),
                           ],
                         ),
-                        _multiline(_bypassIpList,
-                            label: 'Bypass IP / CIDR', onChanged: _markDirty),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: _proxyOnly,
+                          title: const Text('仅代理模式'),
+                          subtitle: const Text('只暴露 HTTP/SOCKS，不创建 TUN'),
+                          onChanged: (v) => setState(() {
+                            _proxyOnly = v;
+                            _markDirty();
+                          }),
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: _perAppProxyEnabled,
+                          title: const Text('分应用代理'),
+                          subtitle: Text(_perAppProxySubtitle()),
+                          onChanged: (v) => setState(() {
+                            _perAppProxyEnabled = v;
+                            _markDirty();
+                          }),
+                        ),
+                        _multiline(_extraArgs,
+                            label: '自定义补充启动命令 (桌面格式 --xxx=value)',
+                            onChanged: _markDirty,
+                            height: 90),
                       ],
                     ),
                     const SizedBox(height: 12),
+                    // ---- TUN 接口 ----
                     AppSectionCard(
                       title: 'TUN 接口',
                       icon: Icons.lan_outlined,
@@ -483,18 +490,20 @@ class _OptionsPageState extends State<OptionsPage> {
                       ],
                     ),
                     const SizedBox(height: 12),
+                    // ---- 分流入口（二级页） ----
                     Card(
                       child: ListTile(
-                        leading: const Icon(Icons.tune_rounded),
-                        title: const Text('高级参数'),
-                        subtitle: const Text('VNet、Block QUIC、分应用代理、Geo 规则生成器等'),
+                        leading: const Icon(Icons.alt_route_rounded),
+                        title: const Text('分流'),
+                        subtitle: const Text('GEO 分流 / 基础分流 / 全局分流'),
                         trailing: const Icon(Icons.chevron_right_rounded),
                         onTap: () async {
+                          final navigator = Navigator.of(context);
                           if (_dirty) await _save(showSnack: false);
                           if (!mounted) return;
-                          await Navigator.of(context).push(
+                          await navigator.push(
                             MaterialPageRoute(
-                              builder: (_) => const OptionsAdvancedPage(),
+                              builder: (_) => const OptionsRoutingPage(),
                             ),
                           );
                           await _load();
@@ -518,6 +527,13 @@ class _OptionsPageState extends State<OptionsPage> {
                   ],
                 ),
     );
+  }
+
+  String _perAppProxySubtitle() {
+    if (!_perAppProxyEnabled) return '未启用';
+    final n = _perAppProxyApps.length;
+    final modeLabel = _perAppProxyMode == 'deny' ? '排除选中' : '仅代理选中';
+    return '$modeLabel · 已选 $n 个应用';
   }
 
   Widget _activeBanner(ThemeData theme) {

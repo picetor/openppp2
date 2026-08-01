@@ -9,7 +9,7 @@ import '../services/theme_controller.dart';
 import '../vpn_service.dart';
 import '../widgets/app_section_card.dart';
 import '../widgets/debug_panel.dart';
-import 'options_advanced_page.dart';
+import 'options_routing_page.dart';
 import 'telemetry_settings_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -220,14 +220,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 const Divider(height: 0),
                 ListTile(
-                  leading: const Icon(Icons.tune_rounded),
-                  title: const Text('高级启动参数'),
-                  subtitle: const Text('分应用代理、Geo 规则生成器等 Android 扩展项'),
+                  leading: const Icon(Icons.alt_route_rounded),
+                  title: const Text('分流'),
+                  subtitle: const Text('GEO 分流 / 基础分流 / 全局分流'),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => const OptionsAdvancedPage(),
+                        builder: (_) => const OptionsRoutingPage(),
                       ),
                     );
                   },

@@ -110,6 +110,9 @@ class libopenppp2 {
         ): Int
 
         @JvmStatic
+        external fun set_mux_acceleration(value: Int): Int
+
+        @JvmStatic
         external fun get_network_interface(): String?
 
         @JvmStatic

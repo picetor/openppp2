@@ -9,13 +9,19 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.provider.OpenableColumns
 import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
@@ -23,11 +29,14 @@ class MainActivity : FlutterActivity() {
         private const val METHOD_CHANNEL = "supersocksr.ppp/vpn"
         private const val VPN_PERMISSION_REQUEST = 1001
         private const val NOTIFICATION_PERMISSION_REQUEST = 1002
+        private const val IMPORT_FILE_REQUEST = 1003
     }
 
     private var pendingConfig: String? = null
     private var pendingVpnOptions: String? = null
     private var methodResult: MethodChannel.Result? = null
+    private var pendingImportDest: String? = null
+    private var pendingImportResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -96,6 +105,24 @@ class MainActivity : FlutterActivity() {
                     }
                     "requestPermission" -> {
                         requestVpnPermission(result)
+                    }
+                    "getRuleFileSizes" -> {
+                        result.success(ruleFileSizes())
+                    }
+                    "updateGeoFiles" -> {
+                        val geoipUrl = call.argument<String>("geoipUrl").orEmpty()
+                        val geositeUrl = call.argument<String>("geositeUrl").orEmpty()
+                        result.success(updateGeoFiles(geoipUrl, geositeUrl))
+                    }
+                    "pickAndImportRuleFile" -> {
+                        val destName = call.argument<String>("destName").orEmpty()
+                        if (destName.isEmpty()) {
+                            result.error("INVALID_ARG", "destName is required", null)
+                        } else {
+                            pendingImportDest = destName
+                            pendingImportResult = result
+                            openFilePicker()
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -280,6 +307,173 @@ class MainActivity : FlutterActivity() {
             pendingConfig = null
             pendingVpnOptions = null
             methodResult = null
+            return
+        }
+        if (requestCode == IMPORT_FILE_REQUEST) {
+            val dest = pendingImportDest
+            val result = pendingImportResult
+            pendingImportDest = null
+            pendingImportResult = null
+            if (resultCode == Activity.RESULT_OK && data != null && dest != null) {
+                try {
+                    val uri = data.data
+                    if (uri != null) {
+                        val saved = importPickedFile(uri, dest)
+                        result.success(saved)
+                    } else {
+                        result.error("IMPORT_FAILED", "No file selected", null)
+                    }
+                } catch (e: Throwable) {
+                    PppLog.write(this, "import file failed", e)
+                    result.error("IMPORT_FAILED", e.message ?: e.javaClass.name, null)
+                }
+            } else {
+                result.success(null) // User cancelled
+            }
+        }
+    }
+
+    // ---- Rule file management ----
+
+    private fun rulesDir(): File {
+        val dir = File(filesDir, "rules")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun readableSize(bytes: Long): String {
+        return when {
+            bytes <= 0 -> "0 B"
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+            bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
+            else -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
+        }
+    }
+
+    /** Returns `{ fileName: readable size or '未导入' }` for the rule files. */
+    private fun ruleFileSizes(): Map<String, String> {
+        val names = listOf(
+            "ip.txt",
+            "ipv6.txt",
+            "dns-rules.txt",
+            "GeoIP.dat",
+            "GeoSite.dat",
+            "geo-rules.yaml",
+        )
+        val dir = rulesDir()
+        return names.associateWith { name ->
+            val f = File(dir, name)
+            if (f.exists() && f.length() > 0) {
+                if (name.endsWith(".dat")) {
+                    readableSize(f.length())
+                } else {
+                    "已导入 (${readableSize(f.length())})"
+                }
+            } else {
+                "未导入"
+            }
+        }
+    }
+
+    /**
+     * Downloads GeoIP.dat / GeoSite.dat from [geoipUrl] / [geositeUrl] into
+     * files/rules/. Returns a human-readable summary.
+     */
+    private fun updateGeoFiles(geoipUrl: String, geositeUrl: String): String {
+        var geoipOk = false
+        var geositeOk = false
+        if (geoipUrl.isNotBlank()) geoipOk = downloadToRules(geoipUrl, "GeoIP.dat")
+        if (geositeUrl.isNotBlank()) geositeOk = downloadToRules(geositeUrl, "GeoSite.dat")
+        val parts = mutableListOf<String>()
+        if (geoipOk) parts.add("GeoIP.dat")
+        if (geositeOk) parts.add("GeoSite.dat")
+        return if (parts.isEmpty()) {
+            "没有可用的下载地址"
+        } else {
+            "已更新 ${parts.joinToString("、")}"
+        }
+    }
+
+    private fun downloadToRules(urlStr: String, destName: String): Boolean {
+        return try {
+            val conn = URL(urlStr).openConnection() as HttpURLConnection
+            try {
+                conn.connectTimeout = 15000
+                conn.readTimeout = 60000
+                conn.instanceFollowRedirects = true
+                conn.requestMethod = "GET"
+                val code = conn.responseCode
+                if (code !in 200..299) return false
+                val input = conn.inputStream
+                val tmp = File.createTempFile(destName, ".tmp", cacheDir)
+                try {
+                    FileOutputStream(tmp).use { out -> input.copyTo(out) }
+                    if (tmp.length() == 0L) return false
+                    val dest = File(rulesDir(), destName)
+                    tmp.copyTo(dest, overwrite = true)
+                    return true
+                } finally {
+                    tmp.delete()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Throwable) {
+            PppLog.write(this, "download $destName failed", e)
+            false
+        }
+    }
+
+    /** Opens the system document picker (SAF) for a rule file import. */
+    private fun openFilePicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        try {
+            startActivityForResult(intent, IMPORT_FILE_REQUEST)
+        } catch (e: Throwable) {
+            pendingImportResult?.error("IMPORT_FAILED", e.message ?: e.javaClass.name, null)
+            pendingImportResult = null
+            pendingImportDest = null
+        }
+    }
+
+    /** Copies the picked content:// URI into files/rules/<destName>. */
+    private fun importPickedFile(uri: Uri, destName: String): String {
+        // Whitelist the target names to avoid path traversal.
+        val allowed = setOf("ip.txt", "ipv6.txt", "dns-rules.txt", "GeoIP.dat", "GeoSite.dat")
+        if (destName !in allowed) {
+            throw IllegalArgumentException("unsupported dest name: $destName")
+        }
+        val displayName = queryDisplayName(uri) ?: destName
+        val input = contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("cannot open picked file")
+        val tmp = File.createTempFile(destName, ".tmp", cacheDir)
+        try {
+            FileOutputStream(tmp).use { out -> input.copyTo(out) }
+            if (tmp.length() == 0L) {
+                throw IllegalStateException("picked file is empty")
+            }
+            val dest = File(rulesDir(), destName)
+            tmp.copyTo(dest, overwrite = true)
+        } finally {
+            tmp.delete()
+            input.close()
+        }
+        PppLog.write(this, "imported $destName <- $displayName (${destName})")
+        return destName
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+            }
+        } catch (_: Throwable) {
+            null
         }
     }
 }

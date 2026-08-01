@@ -416,6 +416,7 @@ using ppp::IDisposable;
 struct libopenppp2_network_interface final {
     int                                                                     VTun       = -1;
     uint16_t                                                                VMux       = 0;
+    uint8_t                                                                 VMuxAcceleration = 0;
     bool                                                                    VNet       = false;
     bool                                                                    StaticMode = false;
     bool                                                                    BlockQUIC  = false;
@@ -1416,6 +1417,39 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1i
 
 // package: supersocksr.ppp.android.c
 // public final class libopenpppp2
+// public native int set_mux_acceleration(int value)
+//
+// Sets the VMUX acceleration flag (PPP_MUX_ACCELERATION_REMOTE=1, LOCAL=2,
+// MAX=3) on the already-configured network interface. The value is applied
+// when the switcher is opened in libopenppp_try_open_ethernet_switcher_new.
+// Returns LIBOPENPPP2_ERROR_SUCCESS (0) on success.
+__LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1mux_1acceleration(JNIEnv* env, jobject* this_, jint value) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::Success);
+
+    std::shared_ptr<libopenppp2_application> app = libopenppp2_application::GetDefault();
+    if (NULLPTR == app) {
+        return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::AppContextUnavailable, LIBOPENPPP2_ERROR_APPLICATIION_UNINITIALIZED);
+    }
+
+    const int clamped = std::min<int>(std::max<int>(0, value), 3);
+    int err = libopenppp2_application::Invoke(
+        [&app, clamped]() noexcept {
+            std::shared_ptr<libopenppp2_network_interface> network_interface = app->network_interface_;
+            if (NULLPTR == network_interface) {
+                return LIBOPENPPP2_ERROR_NETWORK_INTERFACE_NOT_CONFIGURED;
+            }
+            network_interface->VMuxAcceleration = (uint8_t)clamped;
+            return LIBOPENPPP2_ERROR_SUCCESS;
+        });
+    __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
+        "set_mux_acceleration: value=%d err=%d", clamped, err);
+    return libopenppp2_set_last_error_for_result(err);
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
 // public native bool set_root_path(string path)
 //
 // Changes the process working directory so that relative paths embedded in
@@ -1769,6 +1803,7 @@ static int                                                                      
     }
     else {
         client->Mux(&network_interface->VMux);
+        client->MuxAcceleration(&network_interface->VMuxAcceleration);
         bool static_mode = ppp::app::NormalizeClientStaticMode(network_interface->StaticMode, proxy_only_runtime);
         client->StaticMode(&static_mode);
         client->BlockQUIC(network_interface->BlockQUIC);
