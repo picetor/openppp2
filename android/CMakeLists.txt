@@ -2,6 +2,16 @@ CMAKE_MINIMUM_REQUIRED(VERSION 3.0.0)
 
 # Define the solutions name.
 SET(NAME openppp2)
+
+# Reuse object files across CI builds when ccache is available. Must be set
+# before PROJECT() enables the C/CXX languages for the launcher to apply.
+# Local dev builds benefit automatically when ccache is installed.
+FIND_PROGRAM(CCACHE_PROGRAM ccache)
+IF(CCACHE_PROGRAM)
+    SET(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "ccache launcher")
+    SET(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "ccache launcher")
+ENDIF()
+
 PROJECT(${NAME} C CXX) # CMAKE_CURRENT_SOURCE_DIR
 
 # C/CXX compiler configurations.
