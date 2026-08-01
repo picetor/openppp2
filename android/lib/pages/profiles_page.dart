@@ -46,42 +46,29 @@ class _ProfilesPageState extends State<ProfilesPage> {
     if (ok == true) await _load();
   }
 
-  Future<String?> _askSubscriptionUrl() async {
-    final controller = TextEditingController();
-    try {
-      return await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('导入远程订阅'),
-          content: TextField(
-            controller: controller,
-            keyboardType: TextInputType.url,
-            autofocus: true,
-            decoration: const InputDecoration(
-              labelText: '订阅 URL',
-              hintText: 'https://example.com/openppp2.json',
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-              child: const Text('导入'),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      controller.dispose();
-    }
+  Future<String?> _askSubscriptionUrl() {
+    // 注意：dialog 必须在 _SubscriptionUrlDialog 内部管理 TextEditingController。
+    // 之前在此处 finally { controller.dispose() } 会在 dialog 退出动画尚未结束、
+    // TextField 仍挂在树上时销毁 controller，导致动画帧 rebuild 抛
+    // "used after being disposed"，进而触发 InheritedElement 的
+    // 'dependents isEmpty' 断言。
+    return showDialog<String>(
+      context: context,
+      builder: (_) => const _SubscriptionUrlDialog(),
+    );
   }
 
   Future<void> _importSubscription() async {
     final url = await _askSubscriptionUrl();
     if (url == null || url.isEmpty) return;
+
+    // showDialog 的 Future 在 Navigator.pop() 时立即 resolve，但 dialog 的
+    // 退出动画（约 200ms）仍在播放、其 element 还挂在 Overlay 上。此时立刻
+    // push 新的 progress dialog，会让两个 route 的 element 树在同一帧内
+    // 同时增删，破坏 InheritedElement 的 dependents 清理顺序，触发
+    // 'dependents isEmpty' 断言。必须等旧 route 完全退场再显示新 dialog。
+    await Future<void>.delayed(kThemeAnimationDuration);
+    if (!mounted) return;
 
     _importingSubscription = true;
     var progressShown = false;
@@ -99,6 +86,9 @@ class _ProfilesPageState extends State<ProfilesPage> {
       if (!progressShown || !mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
       await progressDialog;
+      // 同样等待 progress dialog 的退出动画结束，避免后续 _load()/SnackBar
+      // 与正在退场的 route element 树交错。
+      await Future<void>.delayed(kThemeAnimationDuration);
       progressShown = false;
     }
 
@@ -240,6 +230,60 @@ class _ProfilesPageState extends State<ProfilesPage> {
         tooltip: '新增配置',
         child: const Icon(Icons.add_rounded),
       ),
+    );
+  }
+}
+
+/// 订阅 URL 输入对话框。
+///
+/// [TextEditingController] 的生命周期由本 State 管理：只有当整个 dialog
+/// （含退出动画）从 Overlay 上完全移除、element 被 unmount 时才会调用
+/// [State.dispose]。这避免了在 dialog 仍挂在树上时销毁 controller 而触发
+/// 的 framework 断言（'dependents isEmpty'）。
+class _SubscriptionUrlDialog extends StatefulWidget {
+  const _SubscriptionUrlDialog();
+
+  @override
+  State<_SubscriptionUrlDialog> createState() => _SubscriptionUrlDialogState();
+}
+
+class _SubscriptionUrlDialogState extends State<_SubscriptionUrlDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    Navigator.of(context).pop(_controller.text.trim());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('导入远程订阅'),
+      content: TextField(
+        controller: _controller,
+        keyboardType: TextInputType.url,
+        autofocus: true,
+        onSubmitted: (_) => _submit(),
+        decoration: const InputDecoration(
+          labelText: '订阅 URL',
+          hintText: 'https://example.com/openppp2.json',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('导入'),
+        ),
+      ],
     );
   }
 }
