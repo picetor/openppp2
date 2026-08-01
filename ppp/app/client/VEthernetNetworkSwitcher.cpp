@@ -1,6 +1,7 @@
 ﻿#include <ppp/app/client/VEthernetNetworkTcpipStack.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
+#include <ppp/app/client/PeerPrefixRouteManager.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxyConnection.h>
 #include <ppp/IDisposable.h>
@@ -137,6 +138,11 @@ namespace ppp {
                 static_mode_     = false;
                 block_quic_      = false;
                 icmppackets_aid_ = RandomNext();
+
+                peer_prefix_routes_ = std::make_unique<PeerPrefixRouteManager>();
+                if (NULLPTR != peer_prefix_routes_) {
+                    peer_prefix_routes_->Bind(this);
+                }
 
 #if defined(PPP_LOG_VERBOSE)
                 std::shared_ptr<boost::asio::io_context> debug_context = context;
@@ -370,7 +376,15 @@ namespace ppp {
 
                 if (destination != ppp::net::native::ip_hdr::IP_ADDR_BROADCAST_VALUE) {
                     if ((destination & mask) != (gw & mask)) {
-                        return false;
+                        // Peer-prefix site-to-site routing: a packet targeting a
+                        // remote site prefix outside the local TAP subnet is routed
+                        // via the announcing gateway peer's virtual address.  The
+                        // server performs the longest-prefix gateway lookup, so the
+                        // client only needs to accept the packet when it matches an
+                        // applied peer prefix route.
+                        if (NULLPTR == FindAppliedPeerPrefixRoute(destination)) {
+                            return false;
+                        }
                     }
                 }
 
@@ -2226,6 +2240,40 @@ namespace ppp {
                     }
                 }
 #endif
+            }
+
+            void VEthernetNetworkSwitcher::ClearPeerPrefixRoutes() noexcept {
+                if (NULLPTR != peer_prefix_routes_) {
+                    peer_prefix_routes_->Clear();
+                }
+            }
+
+            bool VEthernetNetworkSwitcher::ApplyPeerPrefixRoutes(const VirtualEthernetInformationExtensions& extensions) noexcept {
+                if (NULLPTR == peer_prefix_routes_) {
+                    return false;
+                }
+
+                return peer_prefix_routes_->Apply(extensions);
+            }
+
+            const ppp::net::native::RouteEntry* VEthernetNetworkSwitcher::FindAppliedPeerPrefixRoute(uint32_t destination) noexcept {
+                const ppp::net::native::RouteEntry* best = NULLPTR;
+                for (const auto& route : applied_peer_prefix_routes_) {
+                    if (route.Prefix <= 0 || route.Prefix > ppp::net::native::MAX_PREFIX_VALUE_V4) {
+                        continue;
+                    }
+
+                    uint32_t mask = ppp::net::IPEndPoint::PrefixToNetmask(route.Prefix);
+                    if ((destination & mask) != (route.Destination & mask)) {
+                        continue;
+                    }
+
+                    if (NULLPTR == best || route.Prefix > best->Prefix) {
+                        best = &route;
+                    }
+                }
+
+                return best;
             }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
@@ -5985,6 +6033,9 @@ namespace ppp {
                 fib_ = NULLPTR;
                 fib6_ = NULLPTR;
 #endif
+
+                // Remove peer-prefix host routes installed for site-to-site routing.
+                ClearPeerPrefixRoutes();
 
                 // Clear all route tables and forwarding tables held by the current object.
                 LoadAllIPListWithFilePaths(boost::asio::ip::address_v4::any());

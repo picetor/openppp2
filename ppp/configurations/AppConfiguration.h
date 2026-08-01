@@ -252,6 +252,20 @@ namespace ppp {
                     ppp::string                                     network;     ///< IPv4 network address (e.g. "10.0.0.0").
                     ppp::string                                     mask;        ///< IPv4 subnet mask (e.g. "255.255.255.0").
                 }                                                           ipv4_pool;
+                /**
+                 * @brief Server-side peer prefix routing policy.
+                 *
+                 * When enabled, the server accepts peer prefix announcements
+                 * from clients, maintains a gateway RIB keyed by client virtual
+                 * address, and (optionally) pushes route snapshots to every
+                 * connected client so they can reach remote site prefixes via
+                 * the announcing gateway peer.
+                 */
+                struct {
+                    bool                                                    enabled;        ///< Enable peer prefix routing on the server.
+                    bool                                                    distribute;     ///< Push route snapshots to all connected clients.
+                    ppp::vector<PeerPrefixRouteConfiguration>               allowed_routes; ///< Fail-closed per-client announce allowlist (guid+network+prefix).
+                }                                                           peer_routing;
             }                                                               server;         ///< Server-mode specific parameters.
             struct {
                 ppp::string                                                 guid;           ///< Client GUID string used for authentication and session tracking.
@@ -274,6 +288,9 @@ namespace ppp {
                 ppp::vector<MappingConfiguration>                           mappings;       ///< List of static port mapping rules activated on connect.
                 ppp::vector<RouteConfiguration>                             routes;         ///< List of route sources imported after tunnel establishment.
                 ClientRoutingConfiguration                                  routing;        ///< Canonical routing policy; legacy route fields remain mirrored during migration.
+                ppp::vector<PeerPrefixRouteConfiguration>                   peer_routes;    ///< Static peer-gateway routes installed on connect.
+                ppp::vector<PeerPrefixRouteConfiguration>                   peer_route_announce; ///< Prefixes this client advertises as a gateway.
+                bool                                                        peer_gateway_forward = false; ///< Forward received remote-prefix packets to the local LAN.
                 struct {
                     int                                                     port;           ///< HTTP proxy listen port; 0 disables the local HTTP proxy.
                     ppp::string                                             bind;           ///< HTTP proxy bind address; empty = loopback only.

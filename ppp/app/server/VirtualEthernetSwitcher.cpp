@@ -3,6 +3,7 @@
 #include <ppp/app/server/VirtualEthernetNetworkTcpipConnection.h>
 #include <ppp/app/server/VirtualEthernetManagedServer.h>
 #include <ppp/app/server/VirtualEthernetNamespaceCache.h>
+#include <ppp/app/server/PeerRouteAnnouncePolicy.h>
 #include <ppp/IDisposable.h>
 #include <ppp/auxiliary/StringAuxiliary.h>
 #include <ppp/cryptography/digest.h>
@@ -20,6 +21,8 @@
 #include <ppp/ipv6/IPv6Auxiliary.h>
 #include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/diagnostics/Error.h>
+#include <ppp/diagnostics/TelemetryFwd.h>
+#include <ppp/diagnostics/Telemetry.h>
 
 #include <openssl/rand.h>
 #include <chrono>
@@ -270,6 +273,12 @@ namespace ppp {
                         std::string mask_str = r.mask.to_string();
                         envelope.Extensions.ClientIPv4Assign.mask = ppp::string(mask_str.data(), mask_str.size());
                     }
+                }
+
+                // Peer prefix routing: include the current route snapshot so a
+                // newly connected client immediately learns all remote prefixes.
+                if (IsPeerRoutingEnabled()) {
+                    BuildPeerRouteTableSnapshot(envelope.Extensions.PeerRouteTable, &session_id);
                 }
 
                 envelope.ExtendedJson = envelope.Extensions.ToJson();
@@ -3891,6 +3900,264 @@ namespace ppp {
 
                 nats_.erase(tail);
                 return true;
+            }
+
+            /**
+             * @brief Returns true when server peer prefix routing is enabled.
+             * @return true when enabled and subnet advertisement is active.
+             */
+            bool VirtualEthernetSwitcher::IsPeerRoutingEnabled() const noexcept {
+                return NULLPTR != configuration_ &&
+                    configuration_->server.peer_routing.enabled &&
+                    configuration_->server.subnet;
+            }
+
+            /**
+             * @brief Rebuilds the peer prefix RIB from all gateway records.
+             * @note Must be called with syncobj_ held.
+             */
+            void VirtualEthernetSwitcher::RebuildPeerPrefixRibLocked() noexcept {
+                peer_prefix_rib_.Clear();
+                for (const auto& kv : peer_prefix_gateways_) {
+                    const PeerPrefixGatewayRecord& record = kv.second;
+                    if (record.VirtualIP == 0) {
+                        continue;
+                    }
+
+                    for (const auto& prefix : record.Prefixes) {
+                        if (prefix.prefix <= 0 || prefix.prefix > net::native::MAX_PREFIX_VALUE_V4) {
+                            continue;
+                        }
+
+                        uint32_t network = prefix.NetworkHost();
+                        if (network == 0) {
+                            continue;
+                        }
+                        peer_prefix_rib_.AddRoute(network, prefix.prefix, record.VirtualIP);
+                    }
+                }
+            }
+
+            /**
+             * @brief Fills a peer-route-table snapshot for clients.
+             * @param table Output route table message.
+             * @param exclude_session_id Optional session to exclude from the snapshot.
+             */
+            void VirtualEthernetSwitcher::BuildPeerRouteTableSnapshot(ppp::app::protocol::PeerRouteTableMessage& table, const Int128* exclude_session_id) noexcept {
+                table.Clear();
+                if (!IsPeerRoutingEnabled()) {
+                    return;
+                }
+
+                table.enabled = true;
+                table.action = "snapshot";
+
+                SynchronizedObjectScope scope(syncobj_);
+                for (const auto& kv : peer_prefix_gateways_) {
+                    if (NULLPTR != exclude_session_id && kv.first == *exclude_session_id) {
+                        continue;
+                    }
+
+                    const PeerPrefixGatewayRecord& record = kv.second;
+                    for (const auto& prefix : record.Prefixes) {
+                        table.routes.emplace_back(BindPeerRouteGateway(prefix, record.VirtualIP));
+                    }
+                }
+            }
+
+            /**
+             * @brief Resolves the gateway peer virtual IP for a destination address.
+             * @param destination Destination IPv4 address (host byte order).
+             * @return Gateway virtual IP, or 0 when not found.
+             */
+            uint32_t VirtualEthernetSwitcher::FindGatewayVirtualIPForDestination(uint32_t destination) noexcept {
+                if (!IsPeerRoutingEnabled()) {
+                    return 0;
+                }
+
+                SynchronizedObjectScope scope(syncobj_);
+                if (!peer_prefix_rib_.IsAvailable()) {
+                    return 0;
+                }
+
+                return net::native::ForwardInformationTable::GetNextHop(destination, peer_prefix_rib_.GetAllRoutes());
+            }
+
+            /**
+             * @brief Removes prefix gateway state for a disconnected session.
+             * @param session_id Session identifier.
+             * @return True when a record was removed.
+             */
+            bool VirtualEthernetSwitcher::DeletePeerPrefixGateway(const Int128& session_id) noexcept {
+                bool removed = false;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    removed = peer_prefix_gateways_.erase(session_id) > 0;
+                    if (removed) {
+                        RebuildPeerPrefixRibLocked();
+                    }
+                }
+
+                if (removed && NULLPTR != configuration_ && configuration_->server.peer_routing.distribute) {
+                    BroadcastPeerRouteTable(nullof<YieldContext>());
+                }
+                return removed;
+            }
+
+            /**
+             * @brief Registers or refreshes peer prefix gateway announcements.
+             * @param exchanger Announcing exchanger.
+             * @param request Request extensions.
+             * @param response Response extensions (echoes accepted prefixes).
+             * @return True when at least one prefix was registered.
+             */
+            bool VirtualEthernetSwitcher::UpdatePeerRouteAnnounce(
+                const std::shared_ptr<VirtualEthernetExchanger>& exchanger,
+                const VirtualEthernetInformationExtensions& request,
+                VirtualEthernetInformationExtensions& response) noexcept {
+
+                response.PeerRouteAnnounce = request.PeerRouteAnnounce;
+                if (!IsPeerRoutingEnabled()) {
+                    response.PeerRouteAnnounce.action = "reject";
+                    response.PeerRouteAnnounce.enabled = false;
+                    return false;
+                }
+
+                if (!request.PeerRouteAnnounce.enabled || request.PeerRouteAnnounce.action != "register") {
+                    return false;
+                }
+
+                if (NULLPTR == exchanger || exchanger->IsDisposed()) {
+                    return false;
+                }
+
+                Int128 session_id = exchanger->GetId();
+                uint32_t virtual_ip = 0;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    for (const auto& kv : nats_) {
+                        if (NULLPTR != kv.second && kv.second->Exchanger.get() == exchanger.get()) {
+                            virtual_ip = kv.first;
+                            break;
+                        }
+                    }
+                }
+
+                if (virtual_ip == 0 || IPEndPoint::IsInvalid(IPEndPoint(virtual_ip, IPEndPoint::MinPort))) {
+                    response.PeerRouteAnnounce.action = "reject";
+                    return false;
+                }
+
+                PeerPrefixGatewayRecord record;
+                record.SessionId = session_id;
+                record.VirtualIP = virtual_ip;
+                record.Exchanger = exchanger;
+
+                const ppp::string session_guid =
+                    auxiliary::StringAuxiliary::Int128ToGuidString(session_id);
+                ppp::vector<PeerRouteAllowEntry> allowed_routes;
+                if (NULLPTR != configuration_) {
+                    allowed_routes.reserve(
+                        configuration_->server.peer_routing.allowed_routes.size());
+                    for (const auto& route : configuration_->server.peer_routing.allowed_routes) {
+                        PeerRouteAllowEntry row;
+                        row.network = route.network;
+                        row.prefix = route.prefix;
+                        row.guid = route.guid;
+                        allowed_routes.emplace_back(std::move(row));
+                    }
+                }
+                int dropped = 0;
+                for (const auto& prefix : request.PeerRouteAnnounce.prefixes) {
+                    if (!prefix.HasAny()) {
+                        continue;
+                    }
+                    PeerRouteAnnounceEntry announced;
+                    announced.network = prefix.network;
+                    announced.prefix = prefix.prefix;
+                    if (!IsPeerRouteAnnouncementAllowed(allowed_routes, session_guid, announced)) {
+                        ++dropped;
+                        continue;
+                    }
+                    record.Prefixes.emplace_back(prefix);
+                }
+
+                if (record.Prefixes.empty()) {
+                    response.PeerRouteAnnounce.action = "reject";
+                    response.PeerRouteAnnounce.prefixes.clear();
+                    if (dropped > 0) {
+                        ppp::telemetry::Count("server.peer_route.announce_rejected", dropped);
+                    }
+                    return false;
+                }
+
+                if (dropped > 0) {
+                    ppp::telemetry::Count("server.peer_route.announce_rejected", dropped);
+                }
+
+                // Echo only accepted prefixes so the client cannot believe a
+                // filtered announcement was fully installed.
+                response.PeerRouteAnnounce.prefixes = record.Prefixes;
+                response.PeerRouteAnnounce.action = "registered";
+
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    peer_prefix_gateways_[session_id] = std::move(record);
+                    RebuildPeerPrefixRibLocked();
+                }
+
+                BuildPeerRouteTableSnapshot(response.PeerRouteTable, &session_id);
+
+                if (NULLPTR != configuration_ && configuration_->server.peer_routing.distribute) {
+                    BroadcastPeerRouteTable(nullof<YieldContext>());
+                }
+
+                return true;
+            }
+
+            /**
+             * @brief Pushes the current peer-route-table snapshot to all connected clients.
+             * @param y Coroutine yield context.
+             */
+            void VirtualEthernetSwitcher::BroadcastPeerRouteTable(YieldContext& y) noexcept {
+                if (!IsPeerRoutingEnabled() || NULLPTR == configuration_ || !configuration_->server.peer_routing.distribute) {
+                    return;
+                }
+
+                VirtualEthernetInformation info;
+                info.Clear();
+                info.BandwidthQoS = 0;
+                info.IncomingTraffic = std::numeric_limits<UInt64>::max();
+                info.OutgoingTraffic = std::numeric_limits<UInt64>::max();
+                info.ExpiredTime = std::numeric_limits<UInt32>::max();
+
+                ppp::vector<VirtualEthernetExchangerPtr> targets;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    targets.reserve(exchangers_.size());
+                    for (const auto& kv : exchangers_) {
+                        if (NULLPTR != kv.second && !kv.second->IsDisposed()) {
+                            targets.emplace_back(kv.second);
+                        }
+                    }
+                }
+
+                InformationEnvelope envelope;
+                envelope.Base = info;
+                envelope.Extensions.Clear();
+                for (const auto& target : targets) {
+                    ITransmissionPtr transmission = target->GetTransmission();
+                    if (NULLPTR == transmission) {
+                        continue;
+                    }
+                    ppp::app::protocol::PeerRouteTableMessage table;
+                    Int128 session_id = target->GetId();
+                    BuildPeerRouteTableSnapshot(table, &session_id);
+
+                    envelope.Extensions.PeerRouteTable = table;
+                    envelope.ExtendedJson = envelope.Extensions.ToJson();
+                    target->DoInformation(transmission, envelope, y);
+                }
             }
 
             /**

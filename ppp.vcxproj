@@ -325,6 +325,7 @@
     <ClCompile Include="ppp\net\rinetd\RinetdConnection.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetDatagramPort.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetExchanger.cpp" />
+    <ClCompile Include="ppp\app\client\PeerPrefixRouteManager.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkSwitcher.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkTcpipConnection.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkTcpipStack.cpp" />
@@ -350,6 +351,7 @@
     <ClCompile Include="ppp\cryptography\ssea.cpp" />
     <ClCompile Include="ppp\DateTime.cpp" />
     <ClCompile Include="ppp\diagnostics\Stopwatch.cpp" />
+    <ClCompile Include="ppp\diagnostics\Telemetry.cpp" />
     <ClCompile Include="ppp\ethernet\VEthernet.cpp" />
     <ClCompile Include="ppp\ethernet\VNetstack.cpp" />
     <ClCompile Include="ppp\io\File.cpp" />

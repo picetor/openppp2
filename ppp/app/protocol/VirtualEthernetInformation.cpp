@@ -87,6 +87,8 @@ namespace ppp {
                 IPv6StatusMessage.clear();
                 ClientIPv4Req.Clear();
                 ClientIPv4Assign.Clear();
+                PeerRouteAnnounce.Clear();
+                PeerRouteTable.Clear();
             }
 
             bool VirtualEthernetInformationExtensions::HasAny() const noexcept {
@@ -103,7 +105,9 @@ namespace ppp {
                     IPv6StatusCode != IPv6Status_None ||
                     !IPv6StatusMessage.empty() ||
                     ClientIPv4Req.HasAny() ||
-                    ClientIPv4Assign.HasAny();
+                    ClientIPv4Assign.HasAny() ||
+                    PeerRouteAnnounce.HasAny() ||
+                    PeerRouteTable.HasAny();
             }
 
             void VirtualEthernetInformationExtensions::ToJson(Json::Value& json) const noexcept {
@@ -149,6 +153,16 @@ namespace ppp {
                     Json::Value ipv4_assign;
                     ClientIPv4Assign.ToJson(ipv4_assign);
                     json["client-ipv4"] = ipv4_assign;
+                }
+                if (PeerRouteAnnounce.HasAny()) {
+                    Json::Value announce;
+                    PeerRouteAnnounce.ToJson(announce);
+                    json["peer-route-announce"] = announce;
+                }
+                if (PeerRouteTable.HasAny()) {
+                    Json::Value table;
+                    PeerRouteTable.ToJson(table);
+                    json["peer-route-table"] = table;
                 }
             }
 
@@ -226,6 +240,12 @@ namespace ppp {
                 }
                 if (json.isMember("client-ipv4") && json["client-ipv4"].isObject()) {
                     ClientIPv4Assignment::FromJson(value.ClientIPv4Assign, json["client-ipv4"]);
+                }
+                if (json.isMember("peer-route-announce") && json["peer-route-announce"].isObject()) {
+                    PeerRouteAnnounceMessage::FromJson(value.PeerRouteAnnounce, json["peer-route-announce"]);
+                }
+                if (json.isMember("peer-route-table") && json["peer-route-table"].isObject()) {
+                    PeerRouteTableMessage::FromJson(value.PeerRouteTable, json["peer-route-table"]);
                 }
                 return value.HasAny();
             }

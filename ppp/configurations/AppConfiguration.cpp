@@ -7,6 +7,7 @@
 #include <ppp/ssl/SSL.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
+#include <ppp/net/native/rib.h>
 #include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/net/http/HttpClient.h>
 #include <ppp/auxiliary/JsonAuxiliary.h>
@@ -356,6 +357,10 @@ namespace ppp {
             config.server.ipv4_pool.network = "";
             config.server.ipv4_pool.mask = "";
 
+            config.server.peer_routing.enabled = false;
+            config.server.peer_routing.distribute = true;
+            config.server.peer_routing.allowed_routes.clear();
+
             config.client.mappings.clear();
             config.client.guid = StringAuxiliary::Int128ToGuidString(MAKE_OWORD(UINT64_MAX, UINT64_MAX));
             config.client.server = "";
@@ -380,6 +385,9 @@ namespace ppp {
             config.client.routing.routes.clear();
             config.client.routing.peer_routes.clear();
             config.client.routing.dns_rules.clear();
+            config.client.peer_routes.clear();
+            config.client.peer_route_announce.clear();
+            config.client.peer_gateway_forward = false;
 
             config.telemetry.enabled = false;
             config.telemetry.level = 0;
@@ -1317,6 +1325,43 @@ namespace ppp {
         }
 
         /**
+         * @brief Parses one peer prefix route configuration object.
+         * @param route Output peer prefix route object.
+         * @param json Source JSON node.
+         * @return True when route data is valid.
+         */
+        static bool ReadJsonToPeerPrefixRoute(AppConfiguration::PeerPrefixRouteConfiguration& route, const Json::Value& json) noexcept {
+            if (!json.isObject()) {
+                return false;
+            }
+
+            route.network = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["network"])));
+            route.prefix = static_cast<int>(JsonAuxiliary::AsInt64(json["prefix"], 0));
+            route.via = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["via"])));
+            route.guid = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(json["guid"])));
+            return !route.network.empty() && route.prefix > 0 && route.prefix <= ppp::net::native::MAX_PREFIX_VALUE_V4;
+        }
+
+        /**
+         * @brief Loads peer prefix route configuration list from JSON.
+         * @param routes Output peer prefix route vector.
+         * @param json Source JSON node.
+         */
+        static void LoadAllPeerPrefixRoutes(ppp::vector<AppConfiguration::PeerPrefixRouteConfiguration>& routes, const Json::Value& json) noexcept {
+            routes.clear();
+            if (!json.isArray()) {
+                return;
+            }
+
+            for (const auto& item : json) {
+                AppConfiguration::PeerPrefixRouteConfiguration route;
+                if (ReadJsonToPeerPrefixRoute(route, item)) {
+                    routes.emplace_back(std::move(route));
+                }
+            }
+        }
+
+        /**
          * @brief Loads configuration from a JSON object.
          * @param json Source JSON object.
          * @return True when loading and normalization succeed.
@@ -1454,8 +1499,23 @@ namespace ppp {
                 }
             }
 
+            // Parse server.peer-routing: peer prefix routing policy.
+            {
+                const Json::Value& peer_routing_json = json["server"]["peer-routing"];
+                if (peer_routing_json.isObject()) {
+                    AssignBoolIfPresent(config.server.peer_routing.enabled, peer_routing_json["enabled"]);
+                    AssignBoolIfPresent(config.server.peer_routing.distribute, peer_routing_json["distribute"]);
+                    LoadAllPeerPrefixRoutes(
+                        config.server.peer_routing.allowed_routes,
+                        peer_routing_json["allowed-routes"]);
+                }
+            }
+
             LoadAllMappings(config, json["client"]["mappings"]);
             LoadAllRoutes(config.client.routes, json["client"]["routes"]);
+            LoadAllPeerPrefixRoutes(config.client.peer_routes, json["client"]["peer-routes"]);
+            LoadAllPeerPrefixRoutes(config.client.peer_route_announce, json["client"]["peer-route-announce"]);
+            AssignBoolIfPresent(config.client.peer_gateway_forward, json["client"]["peer-gateway-forward"]);
 
             config.client.reconnections.timeout = JsonAuxiliary::AsValue<int>(json["client"]["reconnections"]["timeout"]);
             config.client.guid = JsonAuxiliary::AsValue<ppp::string>(json["client"]["guid"]);
@@ -1744,6 +1804,27 @@ namespace ppp {
                 ipv4_pool["mask"]    = config.server.ipv4_pool.mask;
                 server["ipv4-pool"] = ipv4_pool;
             }
+            if (config.server.peer_routing.enabled ||
+                !config.server.peer_routing.allowed_routes.empty()) {
+                Json::Value peer_routing;
+                peer_routing["enabled"] = config.server.peer_routing.enabled;
+                peer_routing["distribute"] = config.server.peer_routing.distribute;
+                Json::Value& allowed_routes = peer_routing["allowed-routes"];
+                for (const PeerPrefixRouteConfiguration& route :
+                    config.server.peer_routing.allowed_routes) {
+                    Json::Value jo;
+                    jo["network"] = route.network;
+                    jo["prefix"] = route.prefix;
+                    if (!route.via.empty()) {
+                        jo["via"] = route.via;
+                    }
+                    if (!route.guid.empty()) {
+                        jo["guid"] = route.guid;
+                    }
+                    allowed_routes.append(jo);
+                }
+                server["peer-routing"] = peer_routing;
+            }
             root["server"] = server;
 
             // Set client structure
@@ -1832,6 +1913,32 @@ namespace ppp {
                 }
                 client["routing"] = routing;
             }
+
+            // Legacy top-level client.peer-routes, client.peer-route-announce
+            // and client.peer-gateway-forward are written to preserve the
+            // announced gateway policy and the LAN-forwarding switch.
+            if (!config.client.peer_routes.empty()) {
+                Json::Value& peer_routes = client["peer-routes"];
+                for (const PeerPrefixRouteConfiguration& route : config.client.peer_routes) {
+                    Json::Value jo;
+                    jo["network"] = route.network;
+                    jo["prefix"] = route.prefix;
+                    if (!route.via.empty()) {
+                        jo["via"] = route.via;
+                    }
+                    peer_routes.append(jo);
+                }
+            }
+            if (!config.client.peer_route_announce.empty()) {
+                Json::Value& peer_route_announce = client["peer-route-announce"];
+                for (const PeerPrefixRouteConfiguration& route : config.client.peer_route_announce) {
+                    Json::Value jo;
+                    jo["network"] = route.network;
+                    jo["prefix"] = route.prefix;
+                    peer_route_announce.append(jo);
+                }
+            }
+            client["peer-gateway-forward"] = config.client.peer_gateway_forward;
 
             root["client"] = client;
 

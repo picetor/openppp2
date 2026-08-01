@@ -137,6 +137,14 @@ namespace ppp {
                 typedef ppp::unordered_map<Int128, IPv6RequestEntry>     IPv6RequestTable;
                 typedef ppp::unordered_map<Int128, IPv6LeaseEntry>       IPv6LeaseTable;
 
+                struct PeerPrefixGatewayRecord {
+                    Int128                                               SessionId = 0;            ///< Session that owns the gateway prefixes.
+                    uint32_t                                             VirtualIP = 0;            ///< Gateway peer virtual IPv4 in network byte order.
+                    ppp::vector<ppp::app::protocol::PeerPrefixRouteEntry> Prefixes;              ///< Prefixes reachable via this gateway peer.
+                    std::weak_ptr<VirtualEthernetExchanger>              Exchanger;                ///< Owning exchanger.
+                };
+                typedef ppp::unordered_map<Int128, PeerPrefixGatewayRecord> PeerPrefixGatewayTable;
+
             private:
                 typedef ppp::cryptography::Ciphertext                   Ciphertext;
                 typedef std::shared_ptr<Ciphertext>                     CiphertextPtr;
@@ -771,7 +779,20 @@ namespace ppp {
                  * @return Shared pointer to the new entry; null if insertion fails.
                  */
                 NatInformationPtr                                       AddNatInformation(const std::shared_ptr<VirtualEthernetExchanger>& exchanger, uint32_t ip, uint32_t mask) noexcept;
+                /** @brief Registers or refreshes peer prefix gateway announcements. */
+                bool                                                    UpdatePeerRouteAnnounce(const std::shared_ptr<VirtualEthernetExchanger>& exchanger, const VirtualEthernetInformationExtensions& request, VirtualEthernetInformationExtensions& response) noexcept;
+                /** @brief Removes prefix gateway state for a disconnected session. */
+                bool                                                    DeletePeerPrefixGateway(const Int128& session_id) noexcept;
+                /** @brief Returns true when server peer prefix routing is enabled. */
+                bool                                                    IsPeerRoutingEnabled() const noexcept;
+                /** @brief Resolves the gateway peer virtual IP for a destination address. */
+                uint32_t                                                FindGatewayVirtualIPForDestination(uint32_t destination) noexcept;
+                /** @brief Fills a peer-route-table snapshot for clients. */
+                void                                                    BuildPeerRouteTableSnapshot(ppp::app::protocol::PeerRouteTableMessage& table, const Int128* exclude_session_id = NULLPTR) noexcept;
+                /** @brief Pushes the current peer-route-table snapshot to all connected clients. */
+                void                                                    BroadcastPeerRouteTable(YieldContext& y) noexcept;
             private:
+                void                                                    RebuildPeerPrefixRibLocked() noexcept;
                 template <typename TTransmission>
                 typename std::enable_if<std::is_base_of<ITransmission, TTransmission>::value, std::shared_ptr<TTransmission>/**/>::type
                 /**
@@ -842,6 +863,8 @@ namespace ppp {
                 boost::asio::ip::udp::endpoint                          static_echo_source_ep_;         ///< Most-recently-received static-echo source EP.
                 VirtualEthernetStaticEchoAllocatedTable                 static_echo_allocateds_;        ///< Active static-echo allocation slots.
                 IPv4LeasePool                                           ipv4_pool_;                     ///< IPv4 address lease pool for automatic/manual client assignment.
+                PeerPrefixGatewayTable                                  peer_prefix_gateways_;          ///< Prefix gateway records keyed by session_id.
+                ppp::net::native::RouteInformationTable                 peer_prefix_rib_;               ///< Prefix → gateway virtual IP lookup table.
 
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>         acceptors_[NetworkAcceptorCategories_Max]; ///< One acceptor per category.
             };

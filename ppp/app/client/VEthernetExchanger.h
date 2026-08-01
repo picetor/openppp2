@@ -203,6 +203,7 @@ namespace ppp {
                 bool                                                                    RegisterMappingPort(ppp::configurations::AppConfiguration::MappingConfiguration& mapping) noexcept;
                 void                                                                    UnregisterAllMappingPorts() noexcept;
                 bool                                                                    RegisterAllMappingPorts() noexcept;
+                bool                                                                    SendRequestedPeerRouteAnnounce(const ITransmissionPtr& transmission, YieldContext& y) noexcept;
                 bool                                                                    ReleaseDeadlineTimer(const boost::asio::deadline_timer* deadline_timer) noexcept;
                 bool                                                                    NewDeadlineTimer(const ContextPtr& context, int64_t timeout, const ppp::function<void(bool)>& event) noexcept;
 #if defined(_ANDROID)

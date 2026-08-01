@@ -20,6 +20,7 @@
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/transmissions/ITcpipTransmission.h>
 #include <ppp/transmissions/IWebsocketTransmission.h>
+#include <ppp/diagnostics/Telemetry.h>
 
 typedef ppp::app::protocol::VirtualEthernetInformation              VirtualEthernetInformation;
 typedef ppp::app::protocol::VirtualEthernetPacket                   VirtualEthernetPacket;
@@ -643,6 +644,7 @@ namespace ppp {
                                 LOG_DEBUG("VEthernetExchanger::Loopback: link established, entering data loop");
                                 ExchangeToEstablishState(); {
                                     transmission_ = transmission; {
+                                        SendRequestedPeerRouteAnnounce(transmission, y);
                                         RegisterAllMappingPorts();
                                         if (StaticEchoAllocatedToRemoteExchanger(y) && Run(transmission, y)) {
                                             run_once = true;
@@ -1128,12 +1130,68 @@ namespace ppp {
                 bool is_ipv6 = NULLPTR != packet && packet_length >= ppp::ipv6::IPv6_HEADER_MIN_SIZE &&
                     (packet[0] >> 4) == ppp::ipv6::IPv6_VERSION;
                 if (vnet || is_ipv6) {
+                    // Peer gateway forward gate: unless client.peer-gateway-forward
+                    // is enabled, inbound packets must be addressed to this host's
+                    // own virtual address.  Otherwise a malicious peer could use
+                    // this client as an open relay through the gateway session.
+                    AppConfigurationPtr configuration = GetConfiguration();
+                    std::shared_ptr<ppp::tap::ITap> tap = switcher_->GetTap();
+                    if (NULLPTR != configuration && NULLPTR != tap && !configuration->client.peer_gateway_forward) {
+                        bool destination_matches = false;
+                        const Byte version = packet[0] >> 4;
+                        if (version == ppp::net::native::ip_hdr::IP_VER) {
+                            int ip_length = packet_length;
+                            ppp::net::native::ip_hdr* ip = ppp::net::native::ip_hdr::Parse(packet, ip_length);
+                            destination_matches = NULLPTR != ip && ip->dest == tap->IPAddress;
+                        }
+                        elif (version == ppp::ipv6::IPv6_VERSION) {
+                            boost::asio::ip::address_v6 source;
+                            boost::asio::ip::address_v6 destination;
+                            boost::asio::ip::address assigned = assigned_ipv6_address_;
+                            destination_matches = assigned.is_v6() &&
+                                ppp::ipv6::TryParsePacket(packet, packet_length, source, destination) &&
+                                destination == assigned.to_v6();
+                        }
+
+                        if (!destination_matches) {
+                            ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "client_exchanger", "peer gateway forward rejected");
+                            ppp::telemetry::Count("client.peer_gateway_forward.rejected", 1);
+                            return false;
+                        }
+                    }
                     if (!TranslateIPv6Packet(packet, packet_length, false)) return false;
                     return switcher_->Output(packet, packet_length);
                 }
                 else {
                     return false; // Immediate return false and forcefully close the connection due to a suspected malicious attack on the client.
                 }
+            }
+
+            /** @brief Sends the configured peer prefix gateway announcement to the server. */
+            bool VEthernetExchanger::SendRequestedPeerRouteAnnounce(const ITransmissionPtr& transmission, YieldContext& y) noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration || NULLPTR == transmission) {
+                    return false;
+                }
+
+                InformationEnvelope envelope;
+                if (!configuration->client.peer_route_announce.empty()) {
+                    envelope.Extensions.PeerRouteAnnounce.enabled = true;
+                    envelope.Extensions.PeerRouteAnnounce.action = "register";
+                    for (const auto& item : configuration->client.peer_route_announce) {
+                        ppp::app::protocol::PeerPrefixRouteEntry entry;
+                        entry.network = item.network;
+                        entry.prefix = item.prefix;
+                        envelope.Extensions.PeerRouteAnnounce.prefixes.emplace_back(entry);
+                    }
+                }
+
+                if (!envelope.Extensions.HasAny()) {
+                    return false;
+                }
+
+                envelope.ExtendedJson = envelope.Extensions.ToJson();
+                return DoInformation(transmission, envelope, y);
             }
 
             bool VEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
@@ -1250,6 +1308,7 @@ namespace ppp {
                                 (int)information.Extensions.AssignedIPv6Mode);
                             if (primary_outbound_ && !information.ExtendedJson.empty()) {
                                 switcher_->ApplyIPv6Assignment(information.Extensions);
+                                switcher_->ApplyPeerPrefixRoutes(information.Extensions);
                             }
                         }
                     });

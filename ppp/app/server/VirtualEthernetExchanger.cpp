@@ -7,6 +7,7 @@
 #include <ppp/app/server/VirtualEthernetDatagramPortStatic.h>
 #include <ppp/auxiliary/StringAuxiliary.h>
 #include <ppp/collections/Dictionary.h>
+#include <ppp/diagnostics/Error.h>
 #include <ppp/threading/Timer.h>
 #include <ppp/threading/Executors.h>
 #include <ppp/IDisposable.h>
@@ -151,6 +152,7 @@ namespace ppp {
                 static_allocated_context_.reset();
                 switcher_->DeleteExchanger(this);
                 switcher_->DeleteNatInformation(this, address_);
+                switcher_->DeletePeerPrefixGateway(GetId());
                 switcher_->StaticEchoUnallocated(static_echo_session_id_.exchange(0));
             }
 
@@ -1053,17 +1055,27 @@ namespace ppp {
 
                 static const auto forward = 
                     [](VirtualEthernetSwitcher* switcher, uint32_t destination, Byte* packet, int packet_length, YieldContext& y) noexcept -> int {
+                        bool via_gateway = false;
                         VES::NatInformationPtr nat = switcher->FindNatInformation(destination);
+                        if (NULLPTR == nat && switcher->IsPeerRoutingEnabled()) {
+                            uint32_t via = switcher->FindGatewayVirtualIPForDestination(destination);
+                            if (via != 0) {
+                                nat = switcher->FindNatInformation(via);
+                                via_gateway = (NULLPTR != nat);
+                            }
+                        }
                         if (NULLPTR == nat) {
                             return 0;
                         }
 
-                        uint32_t mask = nat->SubmaskAddress;
-                        std::shared_ptr<VirtualEthernetExchanger>& exchanger = nat->Exchanger;
-
-                        if ((destination & mask) != (nat->IPAddress & mask)) {
-                            return 0;
+                        if (!via_gateway) {
+                            uint32_t mask = nat->SubmaskAddress;
+                            if ((destination & mask) != (nat->IPAddress & mask)) {
+                                return 0;
+                            }
                         }
+
+                        std::shared_ptr<VirtualEthernetExchanger>& exchanger = nat->Exchanger;
 
                         ITransmissionPtr transmission = exchanger->GetTransmission(); 
                         if (NULLPTR != transmission) {
@@ -1578,7 +1590,71 @@ namespace ppp {
             }
 
             bool VirtualEthernetExchanger::OnInformation(const ITransmissionPtr& transmission, const InformationEnvelope& information, YieldContext& y) noexcept {
-                return false;
+                if (disposed_ || NULLPTR == switcher_ || NULLPTR == transmission) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::SessionDisposed);
+                    return false;
+                }
+
+                const VirtualEthernetInformationExtensions& request = information.Extensions;
+                bool has_ipv6_request = request.RequestedIPv6Address.is_v6();
+                bool has_ipv4_request = request.ClientIPv4Req.enabled;
+                bool has_peer_route_request = request.PeerRouteAnnounce.HasAny();
+                bool is_server_response = request.AssignedIPv6Address.is_v6() || request.IPv6StatusCode != VirtualEthernetInformationExtensions::IPv6Status_None;
+                if (is_server_response) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolPacketActionInvalid);
+                    return false;
+                }
+
+                if (!has_ipv6_request && !has_ipv4_request && !has_peer_route_request) {
+                    return OnInformation(transmission, information.Base, y);
+                }
+
+                VirtualEthernetInformationExtensions response;
+                response.Clear();
+
+                // Process IPv6 request if present.
+                if (has_ipv6_request) {
+                    switcher_->UpdateIPv6Request(GetId(), request, response);
+                }
+
+                // Process IPv4 request if present.
+                if (has_ipv4_request) {
+                    switcher_->UpdateIPv4Request(GetId(), request, response);
+                }
+
+                // Process peer prefix route announcement if present.
+                if (has_peer_route_request) {
+                    auto self = std::dynamic_pointer_cast<VirtualEthernetExchanger>(shared_from_this());
+                    switcher_->UpdatePeerRouteAnnounce(self, request, response);
+                }
+
+                if (switcher_->IsPeerRoutingEnabled()) {
+                    switcher_->BuildPeerRouteTableSnapshot(response.PeerRouteTable);
+                }
+
+                // The base info quota/expire fields MUST satisfy the client-side
+                // VirtualEthernetInformation::Valid() invariant
+                // (IncomingTraffic > 0 && OutgoingTraffic > 0 && ExpiredTime > now);
+                // otherwise the client treats this response as "session expired"
+                // immediately after IPv4 assignment and tears the link down,
+                // producing the silent ~5s reconnect loop observed in the field.
+                //
+                // For unmanaged sessions (no managed-server backend) we mirror the
+                // fallback values that VirtualEthernetSwitcher::Establish() already
+                // uses on the *first* INFO push: unbounded quotas and the maximum
+                // representable expiration timestamp.
+                VirtualEthernetInformation info;
+                info.Clear();
+                info.BandwidthQoS    = 0;
+                info.IncomingTraffic = std::numeric_limits<UInt64>::max();
+                info.OutgoingTraffic = std::numeric_limits<UInt64>::max();
+                info.ExpiredTime     = std::numeric_limits<UInt32>::max();
+
+                VirtualEthernetSwitcher::InformationEnvelope envelope;
+                envelope.Base = info;
+                envelope.Extensions = response;
+                envelope.ExtendedJson = response.ToJson();
+                return DoInformation(transmission, envelope, y);
             }
 
             bool VirtualEthernetExchanger::ForwardIPv6PacketToDestination(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
