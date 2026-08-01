@@ -723,6 +723,21 @@ namespace ppp {
                                                 ppp::net::Socket::SetTypeOfService(handle);
                                                 ppp::net::Socket::SetSignalPipeline(handle, false);
                                                 ppp::net::Socket::ReuseSocketAddress(handle, true);
+#if defined(_LINUX)
+                                                // ColorOS also routes IPv6 through the
+                                                // VPN (ip -6 rule 13000 -> table 1291
+                                                // -> tun0), so a direct DNS socket over
+                                                // IPv6 needs the same protect() as its
+                                                // IPv4 counterpart to reach the physical
+                                                // network. Without it the query loops
+                                                // back into the tunnel and times out.
+                                                if (!redirect_server.is_loopback()) {
+                                                    auto protector_network = GetProtectorNetwork();
+                                                    if (NULLPTR != protector_network) {
+                                                        protector_network->Protect(handle);
+                                                    }
+                                                }
+#endif
 
                                                 socket->send_to(boost::asio::buffer(packet + UDP_PAYLOAD_OFFSET, udp_payload_len),
                                                     serverEP, 0, ec);
@@ -6347,16 +6362,20 @@ namespace ppp {
                 ppp::net::Socket::ReuseSocketAddress(handle, true);
 
 #if defined(_LINUX)
-                // If IPV4 is not a loop IP address, it needs to be linked to a physical network adapter.
-                // IPV6 does not need to be linked, because VPN is IPV4,
-                // And IPV6 does not affect the physical layer network communication of the VPN.
+                // Direct DNS servers are by definition reachable on the
+                // physical network (SelectDirectDnsServer only returns them
+                // for geo Direct decisions), so they must bypass the VPN.
+                // On ColorOS the ip rule 13000 set hijacks any unmarked
+                // socket back into the tunnel (IPv4 lands in an empty route
+                // table and the query is dropped), and the VPN also claims
+                // IPv6 via its ip -6 rules. Protect unconditionally - the
+                // IsBypassIpAddress() geo/FIB gate is unreliable here and
+                // previously skipped protect() for 223.5.5.5/119.29.29.29.
                 if (!serverIP.is_loopback()) {
-                    if (IsBypassIpAddress(serverIP)) {
-                        auto protector_network = GetProtectorNetwork(); 
-                        if (NULLPTR != protector_network) {
-                            if (!protector_network->Protect(handle, y)) {
-                                return false;
-                            }
+                    auto protector_network = GetProtectorNetwork(); 
+                    if (NULLPTR != protector_network) {
+                        if (!protector_network->Protect(handle, y)) {
+                            return false;
                         }
                     }
                 }
