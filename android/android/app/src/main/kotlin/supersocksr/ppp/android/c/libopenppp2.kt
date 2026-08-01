@@ -25,8 +25,46 @@ class libopenppp2 {
                 return false
             }
 
+            // VpnService.protect() alone is not enough on some OEM ROMs
+            // (ColorOS/realme): the per-app VPN rule at priority 13000
+            // (fwmark 0x0/0x20000) matches BEFORE the physical-network rule
+            // (16000, fwmark 0x101ab/0x1ffff) as long as bit 17 (0x20000,
+            // NETWORK_FORCE_NO_VPN) is clear.  VpnService.protect() only sets
+            // the netId mark (0x101ab), so the socket is still routed into the
+            // tunnel and the direct DNS query loops back into the TUN until it
+            // times out.  Network.bindSocket() goes through the full system
+            // binder path which also raises the NO_VPN bit, so the socket then
+            // matches rule 16000 and actually leaves via the physical NIC.
             val ok = service.protect(sockfd)
-            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok")
+            var bound = false
+            if (ok) {
+                var pfd: android.os.ParcelFileDescriptor? = null
+                try {
+                    // getNetworkForUid is a hidden API; getActiveNetwork()
+                    // returns the device's default (physical, non-VPN) network
+                    // for this process, which is the network we want the direct
+                    // DNS upstream socket to leave through.
+                    val cm = service.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+                            as? android.net.ConnectivityManager
+                    val network = cm?.activeNetwork
+                    if (network != null) {
+                        pfd = android.os.ParcelFileDescriptor.adoptFd(sockfd)
+                        network.bindSocket(pfd.fileDescriptor)
+                        bound = true
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.w("openppp2", "protect bindSocket failed fd=$sockfd: ${e.message}")
+                } finally {
+                    // adoptFd() took ownership of sockfd; detach it so the
+                    // native side can keep close()ing it without fdsan trips.
+                    try {
+                        pfd?.detachFd()
+                    } catch (e: Throwable) {
+                        // best effort; native will handle a closed fd
+                    }
+                }
+            }
+            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok bound=$bound")
             return ok
         }
 
