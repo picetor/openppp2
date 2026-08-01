@@ -57,8 +57,11 @@ void main() {
     final ws = client['websocket'] as Map<String, dynamic>;
     expect(ws['host'], 'tun.example.com');
     expect(ws['sni'], 'tun.example.com');
-    // 不应写入顶层 websocket（那是服务端配置）
-    expect(root['websocket'], isNot(contains('host')));
+    // 不应写入顶层 websocket（那是服务端配置）：host 保持默认空值、
+    // sni 不存在，优选 IP 的 host/sni 只进入 client.websocket。
+    final rootWs = root['websocket'] as Map<String, dynamic>;
+    expect(rootWs['host'], isEmpty);
+    expect(rootWs, isNot(contains('sni')));
   });
 
   test('skips disabled nodes', () {
