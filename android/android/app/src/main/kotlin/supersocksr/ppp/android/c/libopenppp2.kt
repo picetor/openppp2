@@ -32,39 +32,22 @@ class libopenppp2 {
             // NETWORK_FORCE_NO_VPN) is clear.  VpnService.protect() only sets
             // the netId mark (0x101ab), so the socket is still routed into the
             // tunnel and the direct DNS query loops back into the TUN until it
-            // times out.  Network.bindSocket() goes through the full system
-            // binder path which also raises the NO_VPN bit, so the socket then
-            // matches rule 16000 and actually leaves via the physical NIC.
+            // times out.
+            //
+            // NOTE: Network.bindSocket() was tried as a follow-up (commit
+            // 11b81c57) but had to be reverted: after the VpnService is
+            // established, ConnectivityManager.getActiveNetwork() returns the
+            // VPN network (tun0) itself, so bindSocket() bound *every*
+            // protected socket - including the tunnel transport UDP socket
+            // (IPv6 2400:c620::1) - into the VPN network.  The handshake
+            // packets then looped back into the TUN and the tunnel never
+            // established (no HANDSHAKE OK in ppp-client.log).  Plain
+            // VpnService.protect() is what keeps the tunnel transport
+            // working; the direct-DNS problem on ColorOS must be solved
+            // separately (e.g. by routing DNS over the tunnel instead of a
+            // physical direct socket).
             val ok = service.protect(sockfd)
-            var bound = false
-            if (ok) {
-                var pfd: android.os.ParcelFileDescriptor? = null
-                try {
-                    // getNetworkForUid is a hidden API; getActiveNetwork()
-                    // returns the device's default (physical, non-VPN) network
-                    // for this process, which is the network we want the direct
-                    // DNS upstream socket to leave through.
-                    val cm = service.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
-                            as? android.net.ConnectivityManager
-                    val network = cm?.activeNetwork
-                    if (network != null) {
-                        pfd = android.os.ParcelFileDescriptor.adoptFd(sockfd)
-                        network.bindSocket(pfd.fileDescriptor)
-                        bound = true
-                    }
-                } catch (e: Throwable) {
-                    android.util.Log.w("openppp2", "protect bindSocket failed fd=$sockfd: ${e.message}")
-                } finally {
-                    // adoptFd() took ownership of sockfd; detach it so the
-                    // native side can keep close()ing it without fdsan trips.
-                    try {
-                        pfd?.detachFd()
-                    } catch (e: Throwable) {
-                        // best effort; native will handle a closed fd
-                    }
-                }
-            }
-            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok bound=$bound")
+            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok")
             return ok
         }
 
