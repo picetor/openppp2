@@ -1120,7 +1120,14 @@ namespace ppp {
 
             bool VEthernetExchanger::OnNat(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
                 bool vnet = switcher_->IsVNet();
-                if (vnet) {
+                // Android keeps vnet=false but still forwards IPv6: the
+                // inbound (server -> TUN) translation below only rewrites
+                // IPv6 headers, and IPv4 never reaches OnNat unless vnet is
+                // enabled. TranslateIPv6Packet() passes non-IPv6 packets
+                // through untouched, so the vnet branch below is unchanged.
+                bool is_ipv6 = NULLPTR != packet && packet_length >= ppp::ipv6::IPv6_HEADER_MIN_SIZE &&
+                    (packet[0] >> 4) == ppp::ipv6::IPv6_VERSION;
+                if (vnet || is_ipv6) {
                     if (!TranslateIPv6Packet(packet, packet_length, false)) return false;
                     return switcher_->Output(packet, packet_length);
                 }

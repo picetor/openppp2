@@ -119,6 +119,9 @@ class libopenppp2 {
         external fun set_dns_rules_list(rules: String): Boolean
 
         @JvmStatic
+        external fun set_geo_rules(rules: String, geosite: String, geoip: String): Boolean
+
+        @JvmStatic
         external fun set_dns_bcl(turbo: Boolean, ttl: Int, dns: String): Boolean
 
         @JvmStatic

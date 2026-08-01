@@ -394,8 +394,15 @@ namespace ppp {
 
             bool VEthernetNetworkSwitcher::OnIPv6PacketInput(Byte* packet, int packet_length) noexcept {
                 if (!IsVNet()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: SKIP, IsVNet()=false");
+                    LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: IsVNet()=false");
+#if !defined(_ANDROID)
+                    // The desktop client only serves the IPv6 data plane while
+                    // vnet is enabled. Android keeps vnet=false (its IPv4 path
+                    // runs on the netstack) but still needs the IPv6 plane:
+                    // the forwarding logic below (GetExchanger -> Nat) does
+                    // not depend on the lwip netstack at all.
                     return false;
+#endif
                 }
                 if (NULLPTR == packet || packet_length < (int)sizeof(ppp::ipv6::PacketHeader)) {
                     LOG_DEBUG("VEthernetNetworkSwitcher::OnIPv6PacketInput: SKIP, invalid packet=%p, len=%d",

@@ -1,0 +1,19 @@
+# OpenPPP2 Android routing policy for the picetor core.
+# Rules are first-match. Domestic destinations use the physical network;
+# everything else falls through to the primary tunnel (single outbound).
+# The service regenerates this file from the profile's `geoRules` block
+# before each connect; this copy is only the bundled fallback.
+direct_dns=local,223.5.5.5,119.29.29.29
+
+ip-cidr,10.0.0.0/8,direct
+ip-cidr,100.64.0.0/10,direct
+ip-cidr,127.0.0.0/8,direct
+ip-cidr,169.254.0.0/16,direct
+ip-cidr,172.16.0.0/12,direct
+ip-cidr,192.168.0.0/16,direct
+# Country-code domains are unambiguously domestic and should not depend on a
+# previously cached overseas CDN answer. GeoSite remains authoritative for
+# domestic domains under .com/.net and other suffixes.
+domain-suffix,cn,direct
+geosite,cn,direct
+geoip,cn,direct

@@ -457,6 +457,9 @@ public:
     std::shared_ptr<libopenppp2_network_interface>                          network_interface_;
     std::shared_ptr<ppp::string>                                            bypass_ip_list_;
     std::shared_ptr<ppp::string>                                            dns_rules_list_;
+    std::shared_ptr<ppp::string>                                            geo_rules_path_;
+    std::shared_ptr<ppp::string>                                            geosite_path_;
+    std::shared_ptr<ppp::string>                                            geoip_path_;
     ppp::transmissions::ITransmissionStatistics                             transmission_statistics_;
     struct {
         uint64_t                                                            tx = UINT64_MAX;
@@ -828,6 +831,9 @@ bool                                                                        libo
     network_interface_.reset();
     bypass_ip_list_.reset();
     dns_rules_list_.reset();
+    geo_rules_path_.reset();
+    geosite_path_.reset();
+    geoip_path_.reset();
     transmission_statistics_.Clear();
     last_reported_statistics_ = {};
     stats_perf_log_ticks_ = 0;
@@ -1474,6 +1480,38 @@ __LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1dns_1r
 
 // package: supersocksr.ppp.android.c
 // public final class libopenpppp2
+// public native bool set_geo_rules(string rules, string geosite, string geoip)
+__LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1geo_1rules(
+    JNIEnv* env,
+    jobject* this_,
+    jstring rules,
+    jstring geosite,
+    jstring geoip) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    std::shared_ptr<libopenppp2_application> app = libopenppp2_application::GetDefault();
+    if (NULLPTR == app) {
+        ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::AppContextUnavailable);
+        return false;
+    }
+
+    std::shared_ptr<ppp::string> rules_path = JNIENV_GetStringUTFChars(env, rules);
+    std::shared_ptr<ppp::string> geosite_path = JNIENV_GetStringUTFChars(env, geosite);
+    std::shared_ptr<ppp::string> geoip_path = JNIENV_GetStringUTFChars(env, geoip);
+    if (NULLPTR == rules_path || rules_path->empty() ||
+        NULLPTR == geosite_path || geosite_path->empty() ||
+        NULLPTR == geoip_path || geoip_path->empty()) {
+        return false;
+    }
+
+    app->geo_rules_path_ = rules_path;
+    app->geosite_path_ = geosite_path;
+    app->geoip_path_ = geoip_path;
+    return true;
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
 // public native bool set_dns_bcl(bool turbo, int ttl, string dns)
 __LIBOPENPPP2__(jboolean) Java_supersocksr_ppp_android_c_libopenppp2_set_1dns_1bcl(JNIEnv* env, jobject* this_, jboolean turbo, jint ttl, jstring dns) noexcept {
     __LIBOPENPPP2_MAIN__;
@@ -1785,15 +1823,29 @@ static int                                                                      
         }
     }
 
-    // Phase G: GeoIP/GeoSite rule generation pipeline.
+    // Phase G: load the GEO policy into the local ppp core.
     //
-    // Miaocchi 的桌面端在 ApplicationInitialize.cpp 中通过
-    // GeoRuleGenerator 生成 bypass/dns 规则文件。本地 openppp2 主线没有
-    // 该生成器（geo 规则生成已独立为 picetor/openppp2-geo-rules 项目），
-    // 因此 Android 上不执行生成；geo-rules 配置仅在桌面端消费。
-    if (configuration->geo_rules.enabled) {
-        __android_log_print(ANDROID_LOG_WARN, "libopenppp2",
-            "open_switcher: geo-rules enabled but generator is unavailable on Android; ignored");
+    // The Flutter profile carries the geo policy (`geoRules` block); the
+    // service materializes `./rules/geo-rules.txt` and calls set_geo_rules()
+    // before run(). The GeoRuleEngine here is the same engine the desktop
+    // client uses, so "country direct / everything else tunnel" (single
+    // outbound) works on Android too. GeoRuleEngine also resolves the
+    // `./rules/GeoSite.dat` / `./rules/GeoIP.dat` relative paths against the
+    // root path installed by set_root_path() (the app filesDir).
+    std::shared_ptr<ppp::string> geo_rules_path = std::move(app->geo_rules_path_);
+    std::shared_ptr<ppp::string> geosite_path = std::move(app->geosite_path_);
+    std::shared_ptr<ppp::string> geoip_path = std::move(app->geoip_path_);
+    if (NULLPTR != geo_rules_path && NULLPTR != geosite_path && NULLPTR != geoip_path) {
+        __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
+            "open_switcher: loading geo rules rules=%s geosite=%s geoip=%s",
+            geo_rules_path->data(), geosite_path->data(), geoip_path->data());
+        if (!client->LoadGeoRules(*geo_rules_path, *geosite_path, *geoip_path)) {
+            __android_log_print(ANDROID_LOG_ERROR, "libopenppp2",
+                "open_switcher: failed to load geo rules");
+            return LIBOPENPPP2_ERROR_OPEN_VETHERNET_FAIL;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
+            "open_switcher: geo rules loaded ok");
     }
 
     if (canonical_routing_configured) {
@@ -2116,6 +2168,9 @@ __LIBOPENPPP2__(void) Java_supersocksr_ppp_android_c_libopenppp2_clear_1configur
             if (NULLPTR != app) {
                 app->bypass_ip_list_.reset();
                 app->dns_rules_list_.reset();
+                app->geo_rules_path_.reset();
+                app->geosite_path_.reset();
+                app->geoip_path_.reset();
                 app->configuration_.reset();
                 app->network_interface_.reset();
             }
