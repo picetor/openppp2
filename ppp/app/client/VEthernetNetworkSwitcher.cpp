@@ -5539,6 +5539,48 @@ namespace ppp {
 #endif
 
 #if defined(_ANDROID) || defined(_IPHONE)
+            bool VEthernetNetworkSwitcher::RefreshDirectDnsServers() noexcept {
+                direct_dns_servers_.clear();
+                direct_dns_server_index_.store(0);
+                if (!geo_rules_) {
+                    return true;
+                }
+
+                auto append = [this](boost::asio::ip::address address) noexcept {
+                    if (IPEndPoint::IsInvalid(address) || address.is_unspecified() ||
+                        address.is_multicast() || address.is_loopback()) {
+                        return;
+                    }
+                    if (std::find(direct_dns_servers_.begin(), direct_dns_servers_.end(), address) == direct_dns_servers_.end()) {
+                        direct_dns_servers_.emplace_back(std::move(address));
+                    }
+                };
+
+                if (geo_rules_->UsesLocalDirectDns()) {
+                    if (underlying_ni_) {
+                        for (const auto& address : underlying_ni_->DnsAddresses) {
+                            append(address);
+                        }
+                    }
+                }
+                for (const auto& address : geo_rules_->GetDirectDnsServers()) {
+                    append(address);
+                }
+
+                for (const auto& address : direct_dns_servers_) {
+                    LOG_INFO("Direct DNS: server=%s, source=%s",
+                        address.to_string().data(),
+                        geo_rules_->UsesLocalDirectDns() && underlying_ni_ &&
+                            std::find(underlying_ni_->DnsAddresses.begin(), underlying_ni_->DnsAddresses.end(), address) != underlying_ni_->DnsAddresses.end()
+                            ? "local" : "configured");
+                }
+                if (geo_rules_->UsesLocalDirectDns() && direct_dns_servers_.empty()) {
+                    LOG_ERROR("Direct DNS: direct_dns=local but the selected physical interface has no usable IPv4/IPv6 DNS server");
+                    return false;
+                }
+                return true;
+            }
+
             void VEthernetNetworkSwitcher::ObserveGeoDnsResponse(
                 const void* packet, int packet_size) noexcept {
                 if (!geo_rules_) {
