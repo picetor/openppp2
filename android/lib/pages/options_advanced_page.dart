@@ -508,7 +508,7 @@ rules:
                                   const SizedBox(width: 6),
                                   Expanded(
                                     child: Text(
-                                      '已启用自定义 geo 分流文件（${_geoCustomRules.trim().split('\n').length} 行）',
+                                      '已启用自定义 geo 分流文件（${_geoCustomRules.trim().split("\n").length} 行）',
                                       style: Theme.of(context)
                                           .textTheme
                                           .bodySmall,
