@@ -499,11 +499,11 @@ class _StatusDot extends StatelessWidget {
       width: 12,
       height: 12,
       decoration: BoxDecoration(
-        color: widget.color,
+        color: color,
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: widget.color.withValues(alpha: 0.42),
+            color: color.withValues(alpha: 0.42),
             blurRadius: 10,
           ),
         ),
