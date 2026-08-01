@@ -77,8 +77,7 @@ void main() {
       expect(TelemetrySettings.logsUrl('not-a-url'), isNull);
     });
 
-    test('nativeEngineEndpoint returns base URL when native telemetry enabled',
-        () {
+    test('nativeEngineEndpoint returns base URL when native telemetry enabled', () {
       const settings = TelemetrySettings(
         uploadEnabled: true,
         destination: TelemetryDestination.custom,
@@ -91,9 +90,7 @@ void main() {
       );
     });
 
-    test(
-        'nativeEngineEndpoint is null when upload or native telemetry disabled',
-        () {
+    test('nativeEngineEndpoint is null when upload or native telemetry disabled', () {
       const uploadOff = TelemetrySettings(
         destination: TelemetryDestination.custom,
         customEndpoint: 'https://otel.example.com',

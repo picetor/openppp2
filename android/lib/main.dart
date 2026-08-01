@@ -1,22 +1,11 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'app_shell.dart';
 import 'services/theme_controller.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ThemeController.instance.load();
   runApp(const OpenPPP2App());
-  unawaited(_restoreTheme());
-}
-
-Future<void> _restoreTheme() async {
-  try {
-    await ThemeController.instance.load().timeout(const Duration(seconds: 3));
-  } catch (_) {
-    // Theme persistence is optional. Never hold the first Flutter frame on a
-    // plugin/storage failure; the default system theme remains usable.
-  }
 }
 
 class OpenPPP2App extends StatelessWidget {

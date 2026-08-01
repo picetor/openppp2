@@ -32,7 +32,9 @@ class _OptionsPageState extends State<OptionsPage> {
   final _dnsForeign = TextEditingController();
   final _dnsEcsOverride = TextEditingController();
   final _dnsStunCandidates = TextEditingController();
-  final _geoCountry = TextEditingController(text: 'cn');
+  final _geoCountry = TextEditingController();
+  final _geoIpDat = TextEditingController();
+  final _geoSiteDat = TextEditingController();
   final _httpProxyPort = TextEditingController(text: '8080');
   final _socksProxyPort = TextEditingController(text: '1080');
 
@@ -118,15 +120,16 @@ class _OptionsPageState extends State<OptionsPage> {
     _dnsStunCandidates.text = (dnsCfg['stunCandidates'] ?? '').toString();
     _dnsInterceptUnmatched = dnsCfg['interceptUnmatched'] ?? true;
     _dnsFakeIpEnabled = dnsCfg['fakeIpEnabled'] ?? false;
-    _dnsFakeIpRange.text =
-        (dnsCfg['fakeIpRange'] ?? '198.18.0.1/16').toString();
+    _dnsFakeIpRange.text = (dnsCfg['fakeIpRange'] ?? '198.18.0.1/16').toString();
     _dnsEcsEnabled = dnsCfg['ecsEnabled'] ?? true;
     _dnsTlsVerifyPeer = dnsCfg['tlsVerifyPeer'] ?? true;
 
     final geo = (m['geoRules'] is Map)
         ? Map<String, dynamic>.from(m['geoRules'] as Map)
         : <String, dynamic>{};
-    _geoCountry.text = ProfileStore.normalizeGeoCountry(geo['country']);
+    _geoCountry.text = (geo['country'] ?? '').toString();
+    _geoIpDat.text = (geo['geoipDat'] ?? '').toString();
+    _geoSiteDat.text = (geo['geositeDat'] ?? '').toString();
   }
 
   Map<String, dynamic> _readForm(Map<String, dynamic> base) {
@@ -161,13 +164,10 @@ class _OptionsPageState extends State<OptionsPage> {
     final geo = (options['geoRules'] is Map)
         ? Map<String, dynamic>.from(options['geoRules'] as Map)
         : <String, dynamic>{};
-    options['geoRules'] = <String, dynamic>{
-      'enabled': geo['enabled'] == true,
-      'country': ProfileStore.normalizeGeoCountry(_geoCountry.text),
-      'rulesPath': './rules/geo-rules.txt',
-      'geoipDat': './rules/GeoIP.dat',
-      'geositeDat': './rules/GeoSite.dat',
-    };
+    geo['country'] = _geoCountry.text.trim();
+    geo['geoipDat'] = _geoIpDat.text.trim();
+    geo['geositeDat'] = _geoSiteDat.text.trim();
+    options['geoRules'] = geo;
     options = LaunchRouteMode.applyTo(options, _routeMode);
     return options;
   }
@@ -235,6 +235,8 @@ class _OptionsPageState extends State<OptionsPage> {
       _dnsFakeIpRange,
       _dnsStunCandidates,
       _geoCountry,
+      _geoIpDat,
+      _geoSiteDat,
       _httpProxyPort,
       _socksProxyPort,
     ]) {
@@ -330,16 +332,14 @@ class _OptionsPageState extends State<OptionsPage> {
                         Row(
                           children: [
                             Expanded(
-                                child: _text(_dns1, 'DNS 1',
-                                    onChanged: _markDirty)),
+                                child: _text(_dns1, 'DNS 1', onChanged: _markDirty)),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: _text(_dns2, 'DNS 2',
-                                    onChanged: _markDirty)),
+                                child: _text(_dns2, 'DNS 2', onChanged: _markDirty)),
                           ],
                         ),
-                        _multiline(_dnsRulesList,
-                            label: 'DNS 规则列表', onChanged: _markDirty),
+                        _multiline(_dnsRulesList, label: 'DNS 规则列表',
+                            onChanged: _markDirty),
                         Row(
                           children: [
                             Expanded(
@@ -387,10 +387,8 @@ class _OptionsPageState extends State<OptionsPage> {
                             _markDirty();
                           }),
                         ),
-                        _multiline(_dnsStunCandidates,
-                            label: 'STUN 候选',
-                            onChanged: _markDirty,
-                            height: 100),
+                        _multiline(_dnsStunCandidates, label: 'STUN 候选',
+                            onChanged: _markDirty, height: 100),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -419,18 +417,22 @@ class _OptionsPageState extends State<OptionsPage> {
                             });
                           },
                         ),
-                        const SizedBox(height: 12),
-                        _text(
-                          _geoCountry,
-                          '国家代码（如 cn、jp、us）',
-                          onChanged: _markDirty,
+                        const SizedBox(height: 8),
+                        _text(_geoCountry, 'Geo Country (如 cn)',
+                            onChanged: _markDirty),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _text(_geoIpDat, 'GeoIP.dat',
+                                  onChanged: _markDirty),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _text(_geoSiteDat, 'GeoSite.dat',
+                                  onChanged: _markDirty),
+                            ),
+                          ],
                         ),
-                        Text(
-                          'GEO 模式会让所选国家/地区的域名和 IP 直连，'
-                          '其他流量走代理。GeoIP、GeoSite 和规则文件由应用自动管理。',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                        const SizedBox(height: 12),
                         _multiline(_bypassIpList,
                             label: 'Bypass IP / CIDR', onChanged: _markDirty),
                       ],
@@ -444,12 +446,11 @@ class _OptionsPageState extends State<OptionsPage> {
                         Row(
                           children: [
                             Expanded(
-                                child: _text(_tunIp, 'TUN IP',
-                                    onChanged: _markDirty)),
+                                child: _text(_tunIp, 'TUN IP', onChanged: _markDirty)),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: _text(_tunMask, 'TUN Mask',
-                                    onChanged: _markDirty)),
+                                child:
+                                    _text(_tunMask, 'TUN Mask', onChanged: _markDirty)),
                           ],
                         ),
                         Row(
@@ -461,18 +462,16 @@ class _OptionsPageState extends State<OptionsPage> {
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: _text(_gateway, 'Gateway',
-                                    onChanged: _markDirty)),
+                                child:
+                                    _text(_gateway, 'Gateway', onChanged: _markDirty)),
                           ],
                         ),
                         _text(_mtu, 'MTU',
-                            keyboardType: TextInputType.number,
-                            onChanged: _markDirty),
+                            keyboardType: TextInputType.number, onChanged: _markDirty),
                         Row(
                           children: [
                             Expanded(
-                                child: _text(_route, 'Route',
-                                    onChanged: _markDirty)),
+                                child: _text(_route, 'Route', onChanged: _markDirty)),
                             const SizedBox(width: 8),
                             Expanded(
                               child: _text(_routePrefix, 'Route Prefix',
@@ -488,11 +487,11 @@ class _OptionsPageState extends State<OptionsPage> {
                       child: ListTile(
                         leading: const Icon(Icons.tune_rounded),
                         title: const Text('高级参数'),
-                        subtitle: const Text('VNet、Block QUIC、分应用代理、国内外分流等'),
+                        subtitle: const Text('VNet、Block QUIC、分应用代理、Geo 规则生成器等'),
                         trailing: const Icon(Icons.chevron_right_rounded),
                         onTap: () async {
                           if (_dirty) await _save(showSnack: false);
-                          if (!context.mounted) return;
+                          if (!mounted) return;
                           await Navigator.of(context).push(
                             MaterialPageRoute(
                               builder: (_) => const OptionsAdvancedPage(),
@@ -558,8 +557,9 @@ class _OptionsPageState extends State<OptionsPage> {
           Text(
             _dirty ? '未保存' : '已同步',
             style: theme.textTheme.bodySmall?.copyWith(
-              color:
-                  _dirty ? theme.colorScheme.error : theme.colorScheme.primary,
+              color: _dirty
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.primary,
               fontWeight: FontWeight.w700,
             ),
           ),

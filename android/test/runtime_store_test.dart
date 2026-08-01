@@ -12,8 +12,7 @@ RuntimeSnapshot snapshot(int generation, int monotonicMs, RuntimePhase phase) {
 
 void main() {
   test('initial store exposes bundled VMUX capabilities', () {
-    expect(
-        RuntimeStore().state.capabilities, RuntimeSnapshot.bundledCapabilities);
+    expect(RuntimeStore().state.capabilities, RuntimeSnapshot.bundledCapabilities);
   });
 
   test('older generation cannot overwrite current state', () {
@@ -47,7 +46,7 @@ void main() {
 
   test('invalid or unavailable snapshot is presented as unknown', () {
     final store = RuntimeStore(
-      initial: const RuntimeSnapshot(
+      initial: RuntimeSnapshot(
         generation: 8,
         monotonicMs: 200,
         phase: RuntimePhase.connected,
@@ -59,16 +58,13 @@ void main() {
     expect(store.state.monotonicMs, 200);
     expect(store.state.phase, RuntimePhase.unknown);
     expect(store.state.p2pState, P2PState.unavailable);
-    expect(store.state.effectivePath, 'unavailable');
+    expect(store.state.effectivePath, 'relay');
     expect(store.apply(snapshot(8, 201, RuntimePhase.reconnecting)), isTrue);
     expect(store.state.phase, RuntimePhase.reconnecting);
   });
 
-  test(
-      'ordered unknown rejects stale payload and advances generation watermark',
-      () {
-    final store =
-        RuntimeStore(initial: snapshot(8, 200, RuntimePhase.connected));
+  test('ordered unknown rejects stale payload and advances generation watermark', () {
+    final store = RuntimeStore(initial: snapshot(8, 200, RuntimePhase.connected));
     expect(store.applyUnknown(generation: 7, monotonicMs: 300), isFalse);
     expect(store.state.phase, RuntimePhase.connected);
 
@@ -76,13 +72,12 @@ void main() {
     expect(store.state.generation, 9);
     expect(store.state.phase, RuntimePhase.unknown);
     expect(store.state.p2pState, P2PState.unavailable);
-    expect(store.state.effectivePath, 'unavailable');
+    expect(store.state.effectivePath, 'relay');
     expect(store.apply(snapshot(8, 400, RuntimePhase.connected)), isFalse);
   });
 
   test('restarted session with a lower generation is accepted after reset', () {
-    final store =
-        RuntimeStore(initial: snapshot(9, 400, RuntimePhase.connected));
+    final store = RuntimeStore(initial: snapshot(9, 400, RuntimePhase.connected));
     expect(store.apply(snapshot(1, 10, RuntimePhase.starting)), isFalse);
 
     expect(store.resetForNewSession(), isTrue);
@@ -119,11 +114,11 @@ void main() {
 
   test('reset restores bundled capabilities', () {
     final store = RuntimeStore(
-      initial: const RuntimeSnapshot(
+      initial: RuntimeSnapshot(
         generation: 4,
         monotonicMs: 10,
         phase: RuntimePhase.connected,
-        capabilities: <String>['mux.compat'],
+        capabilities: const <String>['mux.compat'],
       ),
     );
     store.resetForNewSession();

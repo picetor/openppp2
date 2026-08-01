@@ -89,9 +89,8 @@ class ConfigProfile {
       favorite: m['favorite'] == true,
       subscriptionUrl: m['subscriptionUrl']?.toString(),
       subscriptionNodeId: m['subscriptionNodeId']?.toString(),
-      subscriptionUpdatedAtMs: (m['subscriptionUpdatedAtMs'] is int)
-          ? m['subscriptionUpdatedAtMs'] as int
-          : null,
+      subscriptionUpdatedAtMs:
+          (m['subscriptionUpdatedAtMs'] is int) ? m['subscriptionUpdatedAtMs'] as int : null,
       options: options,
       history: history,
     );

@@ -6,8 +6,7 @@ import 'package:openppp2_mobile/runtime/runtime_bridge.dart';
 import 'package:openppp2_mobile/runtime/runtime_snapshot.dart';
 
 Map<String, dynamic> readFixture(String name) {
-  final text =
-      File('../tests/contracts/runtime-snapshot/$name').readAsStringSync();
+  final text = File('../tests/contracts/runtime-snapshot/$name').readAsStringSync();
   return jsonDecode(text) as Map<String, dynamic>;
 }
 
@@ -20,13 +19,11 @@ void main() {
       'failed.json': RuntimePhase.failed,
     };
     for (final entry in phases.entries) {
-      expect(
-          RuntimeSnapshot.fromJson(readFixture(entry.key)).phase, entry.value);
+      expect(RuntimeSnapshot.fromJson(readFixture(entry.key)).phase, entry.value);
     }
   });
 
-  test('connected fixture decodes effective mode and ignores future fields',
-      () {
+  test('connected fixture decodes effective mode and ignores future fields', () {
     final snapshot = RuntimeSnapshot.fromJson(readFixture('connected.json'));
     expect(snapshot.generation, 7);
     expect(snapshot.phase, RuntimePhase.connected);
@@ -34,14 +31,12 @@ void main() {
     expect(snapshot.effectiveMuxMode, 'flow');
     expect(snapshot.muxReceiverOrdering, 'flow_v2');
     expect(snapshot.muxActiveLinks, 2);
-    expect(
-        snapshot.capabilities,
-        containsAll(<String>[
-          'mux.compat',
-          'mux.flow',
-          'mux.balance',
-          'mux.stripe',
-        ]));
+    expect(snapshot.capabilities, containsAll(<String>[
+      'mux.compat',
+      'mux.flow',
+      'mux.balance',
+      'mux.stripe',
+    ]));
     expect(snapshot.p2pState, P2PState.relay);
     expect(snapshot.effectivePath, 'relay');
     expect(snapshot.traffic.rxBytes, 10485760);
@@ -75,18 +70,7 @@ void main() {
     expect(P2PState.parse('future_state'), P2PState.unavailable);
   });
 
-  test('P2P diagnostics do not mislabel disabled states as relay', () {
-    const expectedPaths = <P2PState, String>{
-      P2PState.disabled: 'disabled',
-      P2PState.unavailable: 'unavailable',
-      P2PState.relay: 'relay',
-      P2PState.eligible: 'relay',
-      P2PState.probing: 'relay',
-      P2PState.direct: 'direct',
-      P2PState.suspect: 'relay',
-      P2PState.fallingBack: 'relay',
-      P2PState.failed: 'failed',
-    };
+  test('only authenticated direct state reports direct path', () {
     for (final state in P2PState.values) {
       final snapshot = RuntimeSnapshot.fromJson(<String, dynamic>{
         'schema_version': 1,
@@ -96,9 +80,8 @@ void main() {
         'p2p_state': state.wireName,
         'effective_path': 'direct',
       });
-      expect(snapshot.effectivePath, expectedPaths[state]);
-      expect(
-          snapshot.p2pDiagnosticLines, contains('P2P: ${state.displayName}'));
+      expect(snapshot.effectivePath, state == P2PState.direct ? 'direct' : 'relay');
+      expect(snapshot.p2pDiagnosticLines, contains('P2P: ${state.displayName}'));
       expect(
         snapshot.p2pDiagnosticLines,
         contains('Effective path: ${snapshot.effectivePathDisplayName}'),
@@ -160,8 +143,7 @@ void main() {
     );
   });
 
-  test('missing capabilities uses bundled schema-v1 compatibility fallback',
-      () {
+  test('missing capabilities uses bundled schema-v1 compatibility fallback', () {
     final snapshot = RuntimeSnapshot.fromJson(<String, dynamic>{
       'schema_version': 1,
       'generation': 1,

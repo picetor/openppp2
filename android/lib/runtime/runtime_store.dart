@@ -83,8 +83,7 @@ class RuntimeStore extends ChangeNotifier {
 
   bool applyUnknown({required int generation, required int monotonicMs}) {
     if (generation < _state.generation ||
-        (generation == _state.generation &&
-            monotonicMs <= _state.monotonicMs)) {
+        (generation == _state.generation && monotonicMs <= _state.monotonicMs)) {
       return false;
     }
     _state = RuntimeSnapshot(

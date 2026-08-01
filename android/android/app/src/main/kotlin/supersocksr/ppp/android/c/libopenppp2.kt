@@ -44,17 +44,6 @@ class libopenppp2 {
         }
 
         /**
-         * Compatibility callback used by the native core in this repository.
-         * Newer cores publish complete runtime snapshots; this core publishes
-         * cumulative traffic counters and the service combines them with
-         * get_link_state() into the same snapshot schema.
-         */
-        @JvmStatic
-        fun statistics(json: String) {
-            PppVpnService.instance?.onLegacyStatistics(json)
-        }
-
-        /**
          * Called from native code after VPN run() starts successfully.
          */
         @JvmStatic
@@ -82,19 +71,19 @@ class libopenppp2 {
         // ========== Native methods ==========
 
         @JvmStatic
-        fun installNativeTelemetryHttpPost() = Unit
+        external fun installNativeTelemetryHttpPost()
 
         @JvmStatic
-        fun setNativeTelemetryResourceAttribute(key: String, value: String) = Unit
+        external fun setNativeTelemetryResourceAttribute(key: String, value: String)
 
         @JvmStatic
-        fun clearNativeTelemetryResourceAttributes() = Unit
+        external fun clearNativeTelemetryResourceAttributes()
 
         @JvmStatic
-        fun set_protect_enabled(enabled: Boolean): Boolean = enabled
+        external fun set_protect_enabled(enabled: Boolean): Boolean
 
         @JvmStatic
-        fun protect_socket_fd(fd: Int): Boolean = protect(fd)
+        external fun protect_socket_fd(fd: Int): Boolean
 
         @JvmStatic
         external fun get_default_ciphersuites(): String?
@@ -132,13 +121,6 @@ class libopenppp2 {
         external fun set_dns_bcl(turbo: Boolean, ttl: Int, dns: String): Boolean
 
         @JvmStatic
-        external fun set_geo_rules(
-            rules: String,
-            geosite: String,
-            geoip: String
-        ): Boolean
-
-        @JvmStatic
         external fun get_bypass_ip_list(): String?
 
         @JvmStatic
@@ -154,7 +136,7 @@ class libopenppp2 {
         external fun get_link_state(): Int
 
         @JvmStatic
-        fun get_runtime_snapshot(): String? = null
+        external fun get_runtime_snapshot(): String?
 
         @JvmStatic
         external fun get_aggligator_state(): Int
@@ -163,10 +145,10 @@ class libopenppp2 {
         external fun get_duration_time(): Long
 
         @JvmStatic
-        fun get_last_error_code(): Int = 0
+        external fun get_last_error_code(): Int
 
         @JvmStatic
-        fun get_last_error_text(): String? = "native error details unavailable"
+        external fun get_last_error_text(): String?
 
         @JvmStatic
         external fun get_ethernet_information(default_: Boolean): String?

@@ -38,8 +38,7 @@ class DebugPanel extends StatelessWidget {
     r'(error|fail|exception|abort|crash|denied|timeout|refused|reset|'
     r'connect requested|disconnect requested|stopVpn|onStartCommand|'
     r'startForeground|builder\.establish|set_app_configuration|'
-    r'set_network_interface|set_root_path|set_geo_rules|geo asset|'
-    r'system bypass routes|set_bypass_ip_list|set_dns_rules_list|'
+    r'set_network_interface|set_bypass_ip_list|set_dns_rules_list|'
     r'libopenppp2\.run|onStarted|VPN started|onRevoke|'
     r'state=|notifyError)',
     caseSensitive: false,

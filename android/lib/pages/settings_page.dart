@@ -222,7 +222,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ListTile(
                   leading: const Icon(Icons.tune_rounded),
                   title: const Text('高级启动参数'),
-                  subtitle: const Text('分应用代理、国内外分流等 Android 扩展项'),
+                  subtitle: const Text('分应用代理、Geo 规则生成器等 Android 扩展项'),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () {
                     Navigator.of(context).push(

@@ -6,7 +6,7 @@
 
 **Type:** 维护边界与核验记录
 
-**Last verified:** 2026-07-28
+**Last verified:** 2026-07-22
 
 本文件不再保存一次性的本机构建结果、设备日志或已无法由当前代码复现的故障结论。它们不能替代真实设备验证，也不应被解释为该客户端已适合生产部署。
 
@@ -14,14 +14,8 @@
 
 - Android 客户端位于本 OpenPPP2 树的 `android/` 中，使用 Flutter UI、Kotlin `PppVpnService` 和 JNI `libopenppp2.so`。
 - VPN 服务在私有 `:vpn` 进程中运行；UI 经由 `MethodChannel` 读取服务写入的快照、心跳、链路状态和最后错误镜像。
-- 当前分支由 Kotlin 兼容层将旧核心的链路状态与流量统计合成为 UI 快照；
-  P2P、原生 OTLP 和详细原生错误仍属于降级能力。
 - 原生库构建依赖 Android NDK 与 ABI 匹配的 Boost/OpenSSL 库；应用打包的库 ABI 必须与实际 Gradle 构建相匹配。
-- Android Debug CI 构建 `arm64-v8a` 与 `x86_64` 原生库，运行 Flutter
-  测试并核对 APK 中的两个 ABI；CI 产物使用 Debug 证书。
-- CN 分流清单和 GeoIP/GeoSite 资源会由服务从 APK assets 复制到应用私有规则
-  目录，并通过 `set_geo_rules` 交给本项目 `GeoRuleEngine`，具体行为见
-  [规则资源说明](android/app/src/main/assets/rules/README.md)。
+- GeoIP/GeoSite 回退资源会由服务从 APK assets 复制到应用私有规则目录，具体行为见[规则资源说明](android/app/src/main/assets/rules/README.md)。
 
 ## 不应从本文件推断的事项
 

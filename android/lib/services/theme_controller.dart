@@ -13,8 +13,7 @@ class ThemeController {
   ThemeController._();
   static final ThemeController instance = ThemeController._();
 
-  final ValueNotifier<ThemeMode> mode =
-      ValueNotifier<ThemeMode>(ThemeMode.system);
+  final ValueNotifier<ThemeMode> mode = ValueNotifier<ThemeMode>(ThemeMode.system);
 
   bool _loaded = false;
 

@@ -5,7 +5,6 @@ class ServerEndpoint {
   final String scheme;
   final String host;
   final int? port;
-
   /// Request path for ws/wss (e.g. `/tun`). Empty/normalized to `/` for ppp.
   final String path;
 
@@ -48,7 +47,8 @@ class ServerEndpoint {
         final authority = parts[1];
         final endpoint = _parseAuthority(authority);
         final pathParts = parts.skip(2).where((p) => p.isNotEmpty).toList();
-        final path = pathParts.isEmpty ? '/' : '/${pathParts.join('/')}';
+        final path =
+            pathParts.isEmpty ? '/' : '/${pathParts.join('/')}';
         return ServerEndpoint(
           scheme: transport,
           host: endpoint.host,
@@ -126,7 +126,7 @@ class ServerEndpoint {
 
   /// Emits a dial URL for the endpoint's scheme (ppp/ws/wss).
   String toUrl({String? forceScheme}) {
-    final effectiveScheme = (forceScheme ?? scheme).toLowerCase();
+    final effectiveScheme = (forceScheme ?? this.scheme).toLowerCase();
     final normalizedHost = host.trim();
     final urlHost = _needsIpv6Brackets(normalizedHost)
         ? '[$normalizedHost]'
@@ -152,39 +152,4 @@ class ServerEndpoint {
 
   static bool _needsIpv6Brackets(String host) =>
       host.contains(':') && !(host.startsWith('[') && host.endsWith(']'));
-}
-
-/// Adds the Host/SNI overrides required when a WebSocket tunnel dials a CDN
-/// preferred IP instead of its origin domain.
-void applyWebSocketOverrides(
-  Map<String, dynamic> client, {
-  required String scheme,
-  required String host,
-  required String sni,
-}) {
-  if (scheme != 'ws' && scheme != 'wss') {
-    client.remove('websocket');
-    return;
-  }
-
-  final websocket = (client['websocket'] is Map)
-      ? Map<String, dynamic>.from(client['websocket'] as Map)
-      : <String, dynamic>{};
-  final normalizedHost = host.trim();
-  final normalizedSni = sni.trim();
-  if (normalizedHost.isEmpty) {
-    websocket.remove('host');
-  } else {
-    websocket['host'] = normalizedHost;
-  }
-  if (normalizedSni.isEmpty) {
-    websocket.remove('sni');
-  } else {
-    websocket['sni'] = normalizedSni;
-  }
-  if (websocket.isEmpty) {
-    client.remove('websocket');
-  } else {
-    client['websocket'] = websocket;
-  }
 }

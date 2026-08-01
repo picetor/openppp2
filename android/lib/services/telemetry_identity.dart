@@ -45,8 +45,7 @@ class TelemetryIdentity {
 
   static Future<Map<String, dynamic>> _loadPayload() async {
     try {
-      final result =
-          await _channel.invokeMethod<Object?>('getTelemetryIdentity');
+      final result = await _channel.invokeMethod<Object?>('getTelemetryIdentity');
       if (result is Map) {
         return Map<String, dynamic>.from(result);
       }

@@ -40,8 +40,7 @@ void main() {
       expect(block['console-log'], isTrue);
     });
 
-    test('default telemetry preset disables native telemetry in merged JSON',
-        () {
+    test('default telemetry preset disables native telemetry in merged JSON', () {
       final merged = ProfileStore.effectiveJson(profileJson, const {});
       final root = jsonDecode(merged) as Map<String, dynamic>;
       final block = root['telemetry'] as Map<String, dynamic>;
@@ -72,8 +71,7 @@ void main() {
       expect(block['enabled'], isFalse);
       expect(block['endpoint'], '');
     });
-    test('dns intercept-unmatched stays true when saved options omit the key',
-        () {
+    test('dns intercept-unmatched stays true when saved options omit the key', () {
       final merged = ProfileStore.effectiveJson(
         ProfileStore.defaultJson,
         const {

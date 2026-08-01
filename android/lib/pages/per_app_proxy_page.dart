@@ -183,13 +183,13 @@ class _PerAppProxyPageState extends State<PerAppProxyPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final filtered = _filtered;
-    final allFilteredSelected = filtered.isNotEmpty &&
-        filtered.every((a) => _selected.contains(a.package));
+    final allFilteredSelected =
+        filtered.isNotEmpty && filtered.every((a) => _selected.contains(a.package));
     return PopScope(
       canPop: !_dirty,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        if (await _confirmDiscard() && context.mounted) {
+        if (await _confirmDiscard() && mounted) {
           Navigator.of(context).pop();
         }
       },
@@ -268,7 +268,9 @@ class _PerAppProxyPageState extends State<PerAppProxyPage> {
                         child: filtered.isEmpty
                             ? Center(
                                 child: Text(
-                                  _query.isEmpty ? '没有可代理的应用' : '无匹配的应用',
+                                  _query.isEmpty
+                                      ? '没有可代理的应用'
+                                      : '无匹配的应用',
                                   style: theme.textTheme.bodyMedium,
                                 ),
                               )
@@ -382,8 +384,9 @@ class _Header extends StatelessWidget {
                 ),
               ],
               selected: {mode},
-              onSelectionChanged:
-                  enabled ? (s) => onModeChanged(s.first) : null,
+              onSelectionChanged: enabled
+                  ? (s) => onModeChanged(s.first)
+                  : null,
             ),
           ),
           const SizedBox(height: 8),
@@ -494,7 +497,9 @@ class _AppTileState extends State<_AppTile> {
       opacity: widget.enabled ? 1 : 0.55,
       child: CheckboxListTile(
         value: widget.checked,
-        onChanged: widget.enabled ? (v) => widget.onToggle(v ?? false) : null,
+        onChanged: widget.enabled
+            ? (v) => widget.onToggle(v ?? false)
+            : null,
         controlAffinity: ListTileControlAffinity.trailing,
         secondary: leading,
         title: Text(

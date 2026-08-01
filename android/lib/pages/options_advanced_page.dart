@@ -22,7 +22,14 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
 
   final _mark = TextEditingController();
   final _mux = TextEditingController();
-  final _geoCountry = TextEditingController(text: 'cn');
+  final _geoIpDownloadUrl = TextEditingController();
+  final _geoSiteDownloadUrl = TextEditingController();
+  final _geoIpFiles = TextEditingController();
+  final _geoSiteFiles = TextEditingController();
+  final _geoDnsProviderDomestic = TextEditingController();
+  final _geoDnsProviderForeign = TextEditingController();
+  final _geoOutputBypass = TextEditingController();
+  final _geoOutputDnsRules = TextEditingController();
 
   bool _vnet = false;
   bool _blockQuic = false;
@@ -112,7 +119,16 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
         ? Map<String, dynamic>.from(m['geoRules'] as Map)
         : <String, dynamic>{};
     _geoEnabled = geo['enabled'] == true;
-    _geoCountry.text = ProfileStore.normalizeGeoCountry(geo['country']);
+    _geoIpDownloadUrl.text = (geo['geoipDownloadUrl'] ?? '').toString();
+    _geoSiteDownloadUrl.text = (geo['geositeDownloadUrl'] ?? '').toString();
+    _geoIpFiles.text = (geo['geoipFiles'] ?? '').toString();
+    _geoSiteFiles.text = (geo['geositeFiles'] ?? '').toString();
+    _geoDnsProviderDomestic.text =
+        (geo['dnsProviderDomestic'] ?? '').toString();
+    _geoDnsProviderForeign.text =
+        (geo['dnsProviderForeign'] ?? '').toString();
+    _geoOutputBypass.text = (geo['outputBypass'] ?? '').toString();
+    _geoOutputDnsRules.text = (geo['outputDnsRules'] ?? '').toString();
   }
 
   Map<String, dynamic> _readForm(Map<String, dynamic> base) {
@@ -130,13 +146,19 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
       ..['perAppProxyApps'] = List<String>.from(_perAppProxyApps);
     options.remove('autoAppendApps');
 
-    options['geoRules'] = <String, dynamic>{
-      'enabled': _geoEnabled,
-      'country': ProfileStore.normalizeGeoCountry(_geoCountry.text),
-      'rulesPath': './rules/geo-rules.txt',
-      'geoipDat': './rules/GeoIP.dat',
-      'geositeDat': './rules/GeoSite.dat',
-    };
+    final geo = (options['geoRules'] is Map)
+        ? Map<String, dynamic>.from(options['geoRules'] as Map)
+        : <String, dynamic>{};
+    geo['enabled'] = _geoEnabled;
+    geo['geoipDownloadUrl'] = _geoIpDownloadUrl.text.trim();
+    geo['geositeDownloadUrl'] = _geoSiteDownloadUrl.text.trim();
+    geo['geoipFiles'] = _geoIpFiles.text;
+    geo['geositeFiles'] = _geoSiteFiles.text;
+    geo['dnsProviderDomestic'] = _geoDnsProviderDomestic.text.trim();
+    geo['dnsProviderForeign'] = _geoDnsProviderForeign.text.trim();
+    geo['outputBypass'] = _geoOutputBypass.text.trim();
+    geo['outputDnsRules'] = _geoOutputDnsRules.text.trim();
+    options['geoRules'] = geo;
     return options;
   }
 
@@ -213,7 +235,14 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
     for (final c in [
       _mark,
       _mux,
-      _geoCountry,
+      _geoIpDownloadUrl,
+      _geoSiteDownloadUrl,
+      _geoIpFiles,
+      _geoSiteFiles,
+      _geoDnsProviderDomestic,
+      _geoDnsProviderForeign,
+      _geoOutputBypass,
+      _geoOutputDnsRules,
     ]) {
       c.dispose();
     }
@@ -269,11 +298,11 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
                           trailing: const Icon(Icons.chevron_right_rounded),
                           onTap: _openPerAppProxyPage,
                         ),
-                        const SwitchListTile(
+                        SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           value: false,
-                          title: Text('系统 HTTP 代理'),
-                          subtitle: Text('为防止本地端口被抢占，Android 上不可用'),
+                          title: const Text('系统 HTTP 代理'),
+                          subtitle: const Text('为防止本地端口被抢占，Android 上不可用'),
                           onChanged: null,
                         ),
                       ],
@@ -340,28 +369,48 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
                     ),
                     const SizedBox(height: 12),
                     AppSectionCard(
-                      title: '国内外分流',
+                      title: 'Geo 规则生成器',
                       icon: Icons.travel_explore_rounded,
                       tint: Colors.deepOrange,
                       children: [
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           value: _geoEnabled,
-                          title: const Text('启用 GEO 分流'),
-                          subtitle: const Text(
-                            '所选国家/地区的域名和 IP 直连，其他流量走代理。'
-                            'GeoIP、GeoSite 和规则文件由应用自动管理。',
-                          ),
+                          title: const Text('启用 GeoIP / GeoSite 规则生成'),
                           onChanged: (v) => setState(() {
                             _geoEnabled = v;
                             _markDirty();
                           }),
                         ),
-                        _text(
-                          _geoCountry,
-                          '国家代码（如 cn、jp、us）',
-                          onChanged: _markDirty,
-                        ),
+                        if (_geoEnabled) ...[
+                          _text(_geoIpDownloadUrl, 'GeoIP 下载 URL',
+                              onChanged: _markDirty),
+                          _text(_geoSiteDownloadUrl, 'GeoSite 下载 URL',
+                              onChanged: _markDirty),
+                          _multiline(_geoIpFiles, label: 'GeoIP 文本源',
+                              onChanged: _markDirty, height: 90),
+                          _multiline(_geoSiteFiles, label: 'GeoSite 文本源',
+                              onChanged: _markDirty, height: 90),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _text(_geoDnsProviderDomestic,
+                                    'dns-provider-domestic',
+                                    onChanged: _markDirty),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: _text(_geoDnsProviderForeign,
+                                    'dns-provider-foreign',
+                                    onChanged: _markDirty),
+                              ),
+                            ],
+                          ),
+                          _text(_geoOutputBypass, 'output-bypass 路径',
+                              onChanged: _markDirty),
+                          _text(_geoOutputDnsRules, 'output-dns-rules 路径',
+                              onChanged: _markDirty),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -392,6 +441,39 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
           border: const OutlineInputBorder(),
           isDense: true,
         ),
+      ),
+    );
+  }
+
+  Widget _multiline(
+    TextEditingController c, {
+    required String label,
+    VoidCallback? onChanged,
+    double height = 120,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: height,
+            child: TextField(
+              controller: c,
+              maxLines: null,
+              expands: true,
+              textAlignVertical: TextAlignVertical.top,
+              onChanged: onChanged == null ? null : (_) => onChanged(),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.all(12),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

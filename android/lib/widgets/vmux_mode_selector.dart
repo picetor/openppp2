@@ -23,7 +23,7 @@ class VmuxModeSelector extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         DropdownButtonFormField<String>(
-          initialValue: modes.contains(selectedMode) ? selectedMode : null,
+          value: modes.contains(selectedMode) ? selectedMode : null,
           hint: const Text('Unavailable'),
           decoration: const InputDecoration(
             labelText: 'VMUX mode',

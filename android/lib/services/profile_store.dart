@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/config_profile.dart';
+import '../models/launch_route_mode.dart';
 import '../models/remote_subscription.dart';
 import '../models/telemetry_settings.dart';
 import '../utils/server_endpoint.dart';
@@ -132,8 +133,7 @@ class ProfileStore {
 }''';
 
   /// Foreign DNS rules for Ookla / Speedtest (force tunnel resolver path).
-  static const String defaultSpeedtestDnsRules =
-      '''speedtest.net      /cloudflare/tun
+  static const String defaultSpeedtestDnsRules = '''speedtest.net      /cloudflare/tun
 ookla.com          /cloudflare/tun
 ooklaserver.net    /cloudflare/tun
 cdnst.net          /cloudflare/tun''';
@@ -149,9 +149,7 @@ cdnst.net          /cloudflare/tun''';
     'dns2': '1.1.1.1',
     'mtu': 1400,
     'mark': 0,
-    // Four compatible VMUX links spread encryption and forwarding across
-    // Android cores. A zero-link tunnel is measurably CPU-bound near 100 Mbps.
-    'mux': 4,
+    'mux': 0,
     'muxMode': 'compat',
     'vnet': false,
     'blockQuic': false,
@@ -199,18 +197,21 @@ cdnst.net          /cloudflare/tun''';
     'geoRules': {
       'enabled': true,
       'country': 'cn',
-      'rulesPath': './rules/geo-rules.txt',
       'geoipDat': './rules/GeoIP.dat',
       'geositeDat': './rules/GeoSite.dat',
+      'geoipDownloadUrl':
+          'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat',
+      'geositeDownloadUrl':
+          'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat',
+      // Newline-separated lists of source file paths.
+      'geoipFiles': './rules/geoip-cn.txt',
+      'geositeFiles': './rules/geosite-cn.txt',
+      'dnsProviderDomestic': 'doh.pub',
+      'dnsProviderForeign': 'cloudflare',
+      'outputBypass': './generated/bypass-cn.txt',
+      'outputDnsRules': './generated/dns-rules-cn.txt',
     },
   };
-
-  /// GEO datasets use lower-case ISO 3166-1 alpha-2 selectors.
-  /// Invalid legacy values fall back to the original `cn` default.
-  static String normalizeGeoCountry(Object? value) {
-    final country = (value ?? '').toString().trim().toLowerCase();
-    return RegExp(r'^[a-z]{2}$').hasMatch(country) ? country : 'cn';
-  }
 
   /// Merge the per-profile `dns` and `geo-rules` form values (under
   /// `options.dnsConfig` / `options.geoRules`) into `profile.json` and return
@@ -299,15 +300,111 @@ cdnst.net          /cloudflare/tun''';
 
     // ---- geo-rules block ----
     final grRaw = options['geoRules'];
-    final gr =
-        grRaw is Map ? Map<String, dynamic>.from(grRaw) : <String, dynamic>{};
-    final geoEnabled = gr['enabled'] == true;
-    root['geo-rules'] = <String, dynamic>{
-      'enabled': geoEnabled,
-      'country': normalizeGeoCountry(gr['country']),
-      'geoip-dat': './rules/GeoIP.dat',
-      'geosite-dat': './rules/GeoSite.dat',
-    };
+    if (grRaw is Map) {
+      final gc = Map<String, dynamic>.from(grRaw);
+      final gr = (root['geo-rules'] is Map)
+          ? Map<String, dynamic>.from(root['geo-rules'] as Map)
+          : <String, dynamic>{};
+
+      gr['enabled'] = gc['enabled'] == true;
+      void putIfNonEmpty(String key, dynamic value) {
+        final s = (value ?? '').toString();
+        if (s.isNotEmpty) gr[key] = s;
+      }
+
+      putIfNonEmpty('country', gc['country']);
+      putIfNonEmpty('geoip-dat', gc['geoipDat']);
+      putIfNonEmpty('geosite-dat', gc['geositeDat']);
+      putIfNonEmpty('geoip-download-url', gc['geoipDownloadUrl']);
+      putIfNonEmpty('geosite-download-url', gc['geositeDownloadUrl']);
+      putIfNonEmpty('dns-provider-domestic', gc['dnsProviderDomestic']);
+      putIfNonEmpty('dns-provider-foreign', gc['dnsProviderForeign']);
+      putIfNonEmpty('output-bypass', gc['outputBypass']);
+      putIfNonEmpty('output-dns-rules', gc['outputDnsRules']);
+
+      List<String> splitLines(dynamic value) => (value ?? '')
+          .toString()
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+
+      final geoip = splitLines(gc['geoipFiles']);
+      final geosite = splitLines(gc['geositeFiles']);
+      if (geoip.isNotEmpty) gr['geoip'] = geoip;
+      if (geosite.isNotEmpty) gr['geosite'] = geosite;
+
+      root['geo-rules'] = gr;
+    }
+
+    // ---- canonical client routing block ----
+    // Keep IP/DNS policy in profile JSON so native clients can consume one
+    // authoritative bypass source list and DNS source list. The independent
+    // client.proxy-only flag controls runtime mode; legacy client.routes and
+    // client.peer-routes remain mirrored for older consumers.
+    {
+      List<String> splitLines(dynamic value) => (value ?? '')
+          .toString()
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+
+      final client = (root['client'] is Map)
+          ? Map<String, dynamic>.from(root['client'] as Map)
+          : <String, dynamic>{};
+      final routing = (client['routing'] is Map)
+          ? Map<String, dynamic>.from(client['routing'] as Map)
+          : <String, dynamic>{};
+      routing.remove('mode');
+      final ip = (routing['ip'] is Map)
+          ? Map<String, dynamic>.from(routing['ip'] as Map)
+          : <String, dynamic>{};
+      final dns = (routing['dns'] is Map)
+          ? Map<String, dynamic>.from(routing['dns'] as Map)
+          : <String, dynamic>{};
+
+      final routeMode = LaunchRouteMode.fromOptions(options);
+      final proxyOnly = options['proxyOnly'] == true;
+      // UI options are the user's active override and take precedence over the
+      // profile canonical value when they are non-empty.  An empty UI value
+      // means "not set by user"; in that case keep whatever the profile already
+      // has so that a profile with pre-populated canonical bypass/DNS is not
+      // silently discarded.  routeMode==global always forces an empty bypass
+      // regardless of UI or profile content.
+      final uiBypass = splitLines(options['bypassIpList']);
+      if (routeMode == LaunchRouteMode.global) {
+        ip['bypass'] = <String>[];
+      } else if (uiBypass.isNotEmpty) {
+        ip['bypass'] = uiBypass;
+      }
+      // ip['bypass'] left unchanged when uiBypass is empty and routeMode != global.
+      final uiDnsRules = splitLines(options['dnsRulesList']);
+      if (uiDnsRules.isNotEmpty) {
+        dns['rules'] = uiDnsRules;
+      }
+      // dns['rules'] left unchanged when uiDnsRules is empty.
+
+      // Do not discard route entries from profiles that predate the canonical
+      // block. Nested canonical values win; direct aliases are also retained.
+      if (!ip.containsKey('routes')) {
+        final routes = routing['routes'] ?? client['routes'];
+        if (routes != null) ip['routes'] = routes;
+      }
+      if (!ip.containsKey('peer-routes')) {
+        final peerRoutes = routing['peer-routes'] ?? client['peer-routes'];
+        if (peerRoutes != null) ip['peer-routes'] = peerRoutes;
+      }
+      // Canonical nested values are authoritative and remain mirrored for
+      // legacy native consumers that still read client.routes fields.
+      if (ip['routes'] != null) client['routes'] = ip['routes'];
+      if (ip['peer-routes'] != null) client['peer-routes'] = ip['peer-routes'];
+      routing['ip'] = ip;
+      routing['dns'] = dns;
+      client['routing'] = routing;
+      client['proxy-only'] = proxyOnly;
+      root['client'] = client;
+    }
 
     final mux = (root['mux'] is Map)
         ? Map<String, dynamic>.from(root['mux'] as Map)
@@ -327,9 +424,6 @@ cdnst.net          /cloudflare/tun''';
       final client = (root['client'] is Map)
           ? Map<String, dynamic>.from(root['client'] as Map)
           : <String, dynamic>{};
-      if (proxyOnly) {
-        client['proxy-only'] = true;
-      }
       final hp = (client['http-proxy'] is Map)
           ? Map<String, dynamic>.from(client['http-proxy'] as Map)
           : <String, dynamic>{'port': 8080};
@@ -369,8 +463,9 @@ cdnst.net          /cloudflare/tun''';
     var list = await _readRaw(prefs);
     if (list.isEmpty) {
       final legacy = prefs.getString(_legacyConfigKey);
-      final seedJson =
-          (legacy != null && legacy.trim().isNotEmpty) ? legacy : defaultJson;
+      final seedJson = (legacy != null && legacy.trim().isNotEmpty)
+          ? legacy
+          : defaultJson;
       final seed = ConfigProfile(
         id: _newId(),
         name: 'Default',
@@ -384,8 +479,7 @@ cdnst.net          /cloudflare/tun''';
     return list;
   }
 
-  Future<void> _writeProfiles(
-      SharedPreferences prefs, List<ConfigProfile> list) async {
+  Future<void> _writeProfiles(SharedPreferences prefs, List<ConfigProfile> list) async {
     final encoded = jsonEncode(list.map((p) => p.toMap()).toList());
     await prefs.setString(_profilesKey, encoded);
     _emit();
@@ -457,9 +551,8 @@ cdnst.net          /cloudflare/tun''';
         }
         list[existingIndex] = prev.copyWith(
           name: node.name,
-          subtitle: node.subtitle.isNotEmpty
-              ? node.subtitle
-              : (_hostFromJson(node.json) ?? ''),
+          subtitle:
+              node.subtitle.isNotEmpty ? node.subtitle : (_hostFromJson(node.json) ?? ''),
           flag: node.flag,
           json: node.json,
           options: node.options.isEmpty ? prev.options : node.options,
@@ -472,9 +565,8 @@ cdnst.net          /cloudflare/tun''';
         list.add(ConfigProfile(
           id: _newId(),
           name: node.name,
-          subtitle: node.subtitle.isNotEmpty
-              ? node.subtitle
-              : (_hostFromJson(node.json) ?? ''),
+          subtitle:
+              node.subtitle.isNotEmpty ? node.subtitle : (_hostFromJson(node.json) ?? ''),
           flag: node.flag,
           json: node.json,
           options: node.options,
@@ -578,7 +670,7 @@ cdnst.net          /cloudflare/tun''';
     await _writeProfiles(prefs, list);
   }
 
-  static const _speedtestCompatKey = 'vpn_geo_country_preset_applied_v4';
+  static const _speedtestCompatKey = 'vpn_speedtest_compat_applied_v1';
 
   /// Append Ookla/Speedtest DNS rules when missing so GEO split does not
   /// resolve test hosts through domestic ECS edges.
@@ -611,24 +703,9 @@ cdnst.net          /cloudflare/tun''';
   ) {
     final out = Map<String, dynamic>.from(options);
     out['staticMode'] = true;
-    final mux = int.tryParse((out['mux'] ?? '0').toString()) ?? 0;
-    if (mux <= 0) {
-      out['mux'] = 4;
-    }
-    out['muxMode'] = (out['muxMode'] ?? 'compat').toString();
     if (out['blockQuic'] == true) {
       out['blockQuic'] = false;
     }
-    final geoRaw = out['geoRules'];
-    final geo =
-        geoRaw is Map ? Map<String, dynamic>.from(geoRaw) : <String, dynamic>{};
-    out['geoRules'] = <String, dynamic>{
-      'enabled': geo['enabled'] == true,
-      'country': normalizeGeoCountry(geo['country']),
-      'rulesPath': './rules/geo-rules.txt',
-      'geoipDat': './rules/GeoIP.dat',
-      'geositeDat': './rules/GeoSite.dat',
-    };
     out['dnsRulesList'] = ensureSpeedtestDnsRules(
       (out['dnsRulesList'] ?? '').toString(),
     );
@@ -683,8 +760,7 @@ cdnst.net          /cloudflare/tun''';
           ? list.first
           : ConfigProfile(id: '_', name: '_', json: defaultJson),
     );
-    Map<String, dynamic> deepMerge(
-        Map<String, dynamic> a, Map<String, dynamic> b) {
+    Map<String, dynamic> deepMerge(Map<String, dynamic> a, Map<String, dynamic> b) {
       final out = Map<String, dynamic>.from(a);
       b.forEach((k, v) {
         final existing = out[k];
@@ -737,8 +813,7 @@ cdnst.net          /cloudflare/tun''';
     return out;
   }
 
-  Future<void> setProfileOptions(
-      String id, Map<String, dynamic> options) async {
+  Future<void> setProfileOptions(String id, Map<String, dynamic> options) async {
     final prefs = await SharedPreferences.getInstance();
     final list = await getProfiles();
     final idx = list.indexWhere((p) => p.id == id);

@@ -24,7 +24,6 @@ class VpnService with WidgetsBindingObserver {
   RuntimeSnapshot? _previousTrafficSample;
 
   bool _initialized = false;
-  bool _disconnectRequested = false;
   Timer? _runtimePollTimer;
   String? _lastReportedError;
 
@@ -99,12 +98,9 @@ class VpnService with WidgetsBindingObserver {
   bool connecting = false;
 
   Future<void> _pollRuntime() async {
-    final raw = await getRuntimeSnapshot();
-    final vpnAlive = await isVpnAlive();
     applyRuntimeSnapshotPoll(
-      raw,
+      await getRuntimeSnapshot(),
       connecting: connecting,
-      vpnAlive: vpnAlive,
     );
     final error = await getLastError();
     if (error.isEmpty) {
@@ -125,7 +121,6 @@ class VpnService with WidgetsBindingObserver {
   void applyRuntimeSnapshotPoll(
     String? raw, {
     bool connecting = false,
-    bool? vpnAlive,
   }) {
     if (raw == null || raw.trim().isEmpty) {
       if (connecting) {
@@ -133,11 +128,6 @@ class VpnService with WidgetsBindingObserver {
       }
       runtimeStore.endSession();
       _resetTraffic();
-      if (_disconnectRequested || vpnAlive == false) {
-        _disconnectRequested = false;
-        runtimeStore.resetForNewSession();
-        return;
-      }
       _markRuntimeUnavailable();
       return;
     }
@@ -161,7 +151,6 @@ class VpnService with WidgetsBindingObserver {
     Map<String, dynamic>? vpnOptions,
   }) async {
     try {
-      _disconnectRequested = false;
       _resetTraffic();
       final result = await _channel.invokeMethod<bool>('connect', {
         'configJson': jsonConfig,
@@ -179,26 +168,12 @@ class VpnService with WidgetsBindingObserver {
   }
 
   Future<bool> disconnect() async {
-    markDisconnectRequested();
     try {
       final result = await _channel.invokeMethod<bool>('disconnect');
-      final accepted = result ?? false;
-      if (!accepted) {
-        _disconnectRequested = false;
-      }
-      return accepted;
+      return result ?? false;
     } on PlatformException catch (e) {
-      _disconnectRequested = false;
       throw Exception('VPN disconnect failed: ${e.message}');
     }
-  }
-
-  /// Records an accepted user stop for tests and non-channel callers. The
-  /// first empty mirror after this transition is a clean idle state, while an
-  /// empty mirror without a stop request still means an unexpected runtime
-  /// loss and is presented as unknown.
-  void markDisconnectRequested() {
-    _disconnectRequested = true;
   }
 
   /// Runtime snapshot mirrored by the `:vpn` service, or null while that
@@ -206,17 +181,6 @@ class VpnService with WidgetsBindingObserver {
   Future<String?> getRuntimeSnapshot() async {
     try {
       return await _channel.invokeMethod<String>('getRuntimeSnapshot');
-    } on PlatformException {
-      return null;
-    }
-  }
-
-  /// Whether the separate `:vpn` process is still publishing a fresh
-  /// heartbeat. This distinguishes a dead session (clean idle) from a
-  /// transient mirror/channel failure (unknown).
-  Future<bool?> isVpnAlive() async {
-    try {
-      return await _channel.invokeMethod<bool>('isVpnAlive');
     } on PlatformException {
       return null;
     }

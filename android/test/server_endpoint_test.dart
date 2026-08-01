@@ -37,18 +37,16 @@ void main() {
 
     // Aim: toPppUrl() wraps bare IPv6 hosts in brackets for valid URLs.
     test('formats IPv6 host with brackets for URLs', () {
-      final url =
-          const ServerEndpoint(host: '2001:db8::1', port: 20000).toPppUrl();
+      final url = ServerEndpoint(host: '2001:db8::1', port: 20000).toPppUrl();
 
       expect(url, 'ppp://[2001:db8::1]:20000/');
     });
 
     // Aim: IPv4 and domain hosts are serialized without brackets.
     test('formats IPv4 and domain hosts without brackets', () {
-      expect(const ServerEndpoint(host: '192.0.2.10', port: 20000).toPppUrl(),
+      expect(ServerEndpoint(host: '192.0.2.10', port: 20000).toPppUrl(),
           'ppp://192.0.2.10:20000/');
-      expect(
-          const ServerEndpoint(host: 'vpn.example.com', port: 20000).toPppUrl(),
+      expect(ServerEndpoint(host: 'vpn.example.com', port: 20000).toPppUrl(),
           'ppp://vpn.example.com:20000/');
     });
 
@@ -65,8 +63,7 @@ void main() {
     });
 
     test('parses native ws URL with path and preserves it on toUrl', () {
-      final endpoint =
-          ServerEndpoint.parse('ws://haruka-hk.581006.xyz:20080/tun');
+      final endpoint = ServerEndpoint.parse('ws://haruka-hk.581006.xyz:20080/tun');
       expect(endpoint.scheme, 'ws');
       expect(endpoint.host, 'haruka-hk.581006.xyz');
       expect(endpoint.port, 20080);

@@ -1,12 +1,12 @@
 # Android 实现与排查指南
 
-> [Android 概览](README_CN.md) · [规则资源](android/app/src/main/assets/rules/README.md)
+> [Android 概览](README_CN.md) · [English](debug.md) · [规则资源](android/app/src/main/assets/rules/README.md)
 
 **Status:** 实验性实现参考
 
 **Type:** 内部平台集成与排查指南
 
-**Last verified:** 2026-07-27
+**Last verified:** 2026-07-22
 
 本页只描述 `android/` 下当前代码的实现。它比协议或配置参考更窄，不定义公开的 Android API。
 
@@ -20,23 +20,7 @@
 | `PppVpnService.kt` | 在 `:vpn` 中运行；管理前台 VPN 生命周期、创建 TUN、调用 JNI 并镜像原生状态。 |
 | `PppStateStore.kt` | 在应用私有存储中原子写入跨进程快照、链路状态、心跳和最后错误。 |
 | `c/libopenppp2.kt` | 声明原生方法并接收原生回调；JNI 名称/签名必须与 `libopenppp2.cpp` 一致。 |
-| `libopenppp2.cpp` | 共享运行时、TUN 描述符、socket 保护、旧版统计回调和本分支 GEO 规则入口的 Android 原生胶水层。 |
-
-## 本分支的兼容层
-
-本项目原生核心早于上游 runtime snapshot 与原生遥测接口，不能直接换用上游
-JNI 文件。当前 `c/libopenppp2.kt` 保留本核心已有的 native 声明，并提供以下
-适配：
-
-- 接收旧核心每秒触发的 `statistics(json)` 回调；
-- 结合 `get_link_state()` 合成 schema v1 runtime snapshot；
-- 继续使用旧核心 `JoinJNI` 路径回调 `VpnService.protect(fd)`；
-- 通过 `set_geo_rules` 把随 APK 提供的 CN 规则和 Geo 数据交给本项目
-  `GeoRuleEngine`；
-- 对仅新版核心具备的原生 OTLP、P2P 和详细错误接口返回明确的降级值。
-
-因此排查本分支时，运行状态文件中的 phase 与流量是兼容层生成的；P2P 状态
-固定为 `unavailable`，不应据此判断服务端是否支持 P2P。
+| `libopenppp2.cpp` | 共享运行时、TUN 描述符、socket 保护、遥测和运行时快照的 Android 原生胶水层。 |
 
 ## 连接生命周期
 
@@ -112,5 +96,6 @@ Android 包装层还在 `android/app/src/androidTest/` 下包含 instrumentation
 ## 本地相关文档
 
 - [Android 概览](README_CN.md)
+- [English technical guide](debug.md)
 - [随应用打包的规则资源](android/app/src/main/assets/rules/README.md)
 - [受状态约束的维护说明](WORK_STATUS.md)

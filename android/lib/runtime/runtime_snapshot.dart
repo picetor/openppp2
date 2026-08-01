@@ -160,27 +160,7 @@ class RuntimeSnapshot {
   final int muxActiveLinks;
   final String muxFallbackReason;
   final P2PState p2pState;
-  String get effectivePath {
-    switch (p2pState) {
-      case P2PState.direct:
-        return 'direct';
-      case P2PState.relay:
-      case P2PState.fallingBack:
-        return 'relay';
-      case P2PState.disabled:
-        return 'disabled';
-      case P2PState.unavailable:
-        return 'unavailable';
-      case P2PState.failed:
-        return 'failed';
-      case P2PState.eligible:
-      case P2PState.probing:
-      case P2PState.suspect:
-        // Until a direct path is authenticated, traffic still uses the relay.
-        return 'relay';
-    }
-  }
-
+  String get effectivePath => p2pState == P2PState.direct ? 'direct' : 'relay';
   final RuntimeTrafficSnapshot traffic;
 
   /// `monotonic_ms` at which the session entered `connected`, or 0 when it is
@@ -255,23 +235,12 @@ class RuntimeSnapshot {
         if (requestedMuxMode.isNotEmpty) 'Requested VMUX: $requestedMuxMode',
         if (effectiveMuxMode.isNotEmpty)
           'Effective VMUX: $effectiveMuxDisplayName',
-        if (muxFallbackReason.isNotEmpty) 'Fallback reason: $muxFallbackReason',
+        if (muxFallbackReason.isNotEmpty)
+          'Fallback reason: $muxFallbackReason',
       ];
 
-  String get effectivePathDisplayName {
-    switch (effectivePath) {
-      case 'direct':
-        return 'Direct';
-      case 'relay':
-        return 'Relay';
-      case 'disabled':
-        return 'Disabled';
-      case 'failed':
-        return 'Failed';
-      default:
-        return 'Unavailable';
-    }
-  }
+  String get effectivePathDisplayName =>
+      effectivePath == 'direct' ? 'Direct' : 'Relay';
 
   List<String> get p2pDiagnosticLines => <String>[
         'P2P: ${p2pState.displayName}',

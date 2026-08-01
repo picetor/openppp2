@@ -30,8 +30,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
   final _serverPortController = TextEditingController();
   final _serverPathController = TextEditingController();
   String _serverScheme = 'ppp'; // ppp | ws | wss
-  final _websocketHostController = TextEditingController();
-  final _websocketSniController = TextEditingController();
   final _guidController = TextEditingController();
   final _bandwidthController = TextEditingController();
 
@@ -61,10 +59,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
   bool _saving = false;
 
   static const _commonProtocols = [
-    'aes-128-cfb',
-    'aes-256-cfb',
-    'aes-128-gcm',
-    'aes-256-gcm',
+    'aes-128-cfb', 'aes-256-cfb', 'aes-128-gcm', 'aes-256-gcm',
     'chacha20-poly1305',
   ];
 
@@ -96,9 +91,8 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
       _jsonMap = {};
     }
 
-    Map<String, dynamic> mapAt(String key) => (_jsonMap[key] is Map)
-        ? Map<String, dynamic>.from(_jsonMap[key] as Map)
-        : {};
+    Map<String, dynamic> mapAt(String key) =>
+        (_jsonMap[key] is Map) ? Map<String, dynamic>.from(_jsonMap[key] as Map) : {};
 
     final client = mapAt('client');
     final key = mapAt('key');
@@ -111,11 +105,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
     _serverHostController.text = endpoint.host;
     _serverPortController.text = endpoint.port?.toString() ?? '';
     _serverPathController.text = endpoint.path;
-    final websocket = client['websocket'];
-    _websocketHostController.text =
-        (websocket is Map ? websocket['host'] : null)?.toString() ?? '';
-    _websocketSniController.text =
-        (websocket is Map ? websocket['sni'] : null)?.toString() ?? '';
     _guidController.text = client['guid']?.toString() ?? '';
     _bandwidthController.text = (client['bandwidth'] ?? 0).toString();
 
@@ -177,13 +166,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
     }
     final bw = int.tryParse(_bandwidthController.text.trim());
     if (bw != null) client['bandwidth'] = bw;
-
-    applyWebSocketOverrides(
-      client,
-      scheme: _serverScheme,
-      host: _websocketHostController.text,
-      sni: _websocketSniController.text,
-    );
 
     // Cipher
     if (_protocolController.text.trim().isNotEmpty) {
@@ -336,8 +318,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
       _serverHostController,
       _serverPortController,
       _serverPathController,
-      _websocketHostController,
-      _websocketSniController,
       _guidController,
       _bandwidthController,
       _protocolController,
@@ -414,7 +394,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
             icon: Icons.cloud_outlined,
             children: [
               DropdownButtonFormField<String>(
-                initialValue: _serverScheme,
+                value: _serverScheme,
                 decoration: const InputDecoration(
                   labelText: '协议 (ppp=TCP, ws/wss=WebSocket)',
                   border: OutlineInputBorder(),
@@ -423,8 +403,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                 items: const [
                   DropdownMenuItem(value: 'ppp', child: Text('ppp (TCP)')),
                   DropdownMenuItem(value: 'ws', child: Text('ws (WebSocket)')),
-                  DropdownMenuItem(
-                      value: 'wss', child: Text('wss (TLS WebSocket)')),
+                  DropdownMenuItem(value: 'wss', child: Text('wss (TLS WebSocket)')),
                 ],
                 onChanged: (v) {
                   if (v == null) return;
@@ -448,25 +427,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
               ),
               if (_serverScheme == 'ws' || _serverScheme == 'wss')
                 _text(_serverPathController, 'WebSocket Path (e.g. /tun)'),
-              if (_serverScheme == 'ws' || _serverScheme == 'wss') ...[
-                _text(
-                  _websocketHostController,
-                  '优选 IP 的原始域名 (WebSocket Host，可选)',
-                ),
-                _text(
-                  _websocketSniController,
-                  '优选 IP 的 TLS SNI (可选)',
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: -4, bottom: 12),
-                  child: Text(
-                    '连接 CDN 优选 IP 时填写原始域名。WSS 通常将 Host 与 SNI 设为同一域名。',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                  ),
-                ),
-              ],
               _text(_bandwidthController, 'Bandwidth (kbps, 0=不限)',
                   keyboardType: TextInputType.number),
               _text(_guidController, 'GUID (可选)'),
@@ -620,8 +580,8 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                     maxLines: null,
                     expands: true,
                     textAlignVertical: TextAlignVertical.top,
-                    style:
-                        const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12),
                     decoration: InputDecoration(
                       border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10)),
@@ -644,8 +604,9 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
   }
 
   Widget _dropdown(TextEditingController c, String label) {
-    final items =
-        {..._commonProtocols, c.text}.where((s) => s.isNotEmpty).toList();
+    final items = {..._commonProtocols, c.text}
+        .where((s) => s.isNotEmpty)
+        .toList();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: DropdownButtonFormField<String>(

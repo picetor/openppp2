@@ -65,9 +65,6 @@ class MainActivity : FlutterActivity() {
                         // null while that process is not alive.
                         result.success(PppStateStore.getRuntimeSnapshotIfAlive(this))
                     }
-                    "isVpnAlive" -> {
-                        result.success(PppStateStore.isVpnAlive(this))
-                    }
                     "getLastError" -> {
                         result.success(PppStateStore.getLastError(this))
                     }

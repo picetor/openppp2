@@ -5,24 +5,21 @@ void main() {
   group('SubscriptionUrlPolicy.isSecure', () {
     test('accepts https', () {
       expect(
-        SubscriptionUrlPolicy.isSecure(
-            Uri.parse('https://example.com/sub.json')),
+        SubscriptionUrlPolicy.isSecure(Uri.parse('https://example.com/sub.json')),
         isTrue,
       );
     });
 
     test('rejects remote http', () {
       expect(
-        SubscriptionUrlPolicy.isSecure(
-            Uri.parse('http://example.com/sub.json')),
+        SubscriptionUrlPolicy.isSecure(Uri.parse('http://example.com/sub.json')),
         isFalse,
       );
     });
 
     test('accepts loopback http', () {
       expect(
-        SubscriptionUrlPolicy.isSecure(
-            Uri.parse('http://localhost:8080/s.json')),
+        SubscriptionUrlPolicy.isSecure(Uri.parse('http://localhost:8080/s.json')),
         isTrue,
       );
       expect(

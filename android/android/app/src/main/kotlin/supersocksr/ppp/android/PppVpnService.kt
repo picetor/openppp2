@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
-import android.net.IpPrefix
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -24,8 +23,6 @@ import android.system.OsConstants
 import android.util.Log
 import org.json.JSONObject
 import supersocksr.ppp.android.c.libopenppp2
-import java.net.InetAddress
-import java.util.concurrent.atomic.AtomicBoolean
 
 class PppVpnService : VpnService() {
     companion object {
@@ -48,25 +45,10 @@ class PppVpnService : VpnService() {
 
         var currentState = 0
             private set
-
-        private fun virtualDnsAddress(vpnIp: String, prefix: Int): String? {
-            if (prefix !in 0..30) return null
-            val octets = vpnIp.split('.').mapNotNull { it.toIntOrNull() }
-            if (octets.size != 4 || octets.any { it !in 0..255 }) return null
-            var address = 0L
-            for (octet in octets) {
-                address = (address shl 8) or octet.toLong()
-            }
-            val mask = if (prefix == 0) 0L else (0xffffffffL shl (32 - prefix)) and 0xffffffffL
-            val gateway = ((address and mask) + 1L) and 0xffffffffL
-            return listOf(24, 16, 8, 0)
-                .joinToString(".") { shift -> ((gateway ushr shift) and 0xffL).toString() }
-        }
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var vpnThread: Thread? = null
-    private val stopInProgress = AtomicBoolean(false)
 
     // When ACTION_CONNECT arrives while the previous session is still tearing
     // down, we stash the new config here and the vpn thread's finally block
@@ -84,13 +66,6 @@ class PppVpnService : VpnService() {
     private val snapshotOrdering = Any()
     private var lastSnapshotGeneration = -1L
     private var lastSnapshotMonotonicMs = -1L
-    private val legacySnapshotLock = Any()
-    private var legacyRuntimeGeneration = 0L
-    private var legacyRuntimeMonotonicMs = 0L
-    private var legacyConnectedMonotonicMs = 0L
-    private var legacyLinkState = 6
-    private var legacyRxBytes = 0L
-    private var legacyTxBytes = 0L
     private var activeConfigJson: String? = null
     private var activeVpnOptionsJson: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -119,8 +94,6 @@ class PppVpnService : VpnService() {
             }
             if (runtimeSnapshot != null) {
                 onRuntimeSnapshot(runtimeSnapshot)
-            } else {
-                publishLegacyRuntimeSnapshot(ls)
             }
             linkStateHandler?.postDelayed(this, 1000L)
         }
@@ -166,73 +139,6 @@ class PppVpnService : VpnService() {
             lastSnapshotMonotonicMs = monotonicMs
             publishRuntimeSnapshot(json)
         }
-    }
-
-    /**
-     * Receives the traffic-only callback exported by this repository's native
-     * core and upgrades it to the runtime snapshot contract used by the
-     * imported Flutter UI.
-     */
-    fun onLegacyStatistics(json: String) {
-        val statistics = try {
-            JSONObject(json)
-        } catch (_: Throwable) {
-            null
-        }
-        publishLegacyRuntimeSnapshot(legacyLinkState, statistics)
-    }
-
-    private fun publishLegacyRuntimeSnapshot(
-        linkState: Int,
-        statistics: JSONObject? = null
-    ) {
-        val snapshot = synchronized(legacySnapshotLock) {
-            legacyLinkState = linkState
-            statistics?.let {
-                legacyRxBytes = it.optString("in", legacyRxBytes.toString())
-                    .toLongOrNull()
-                    ?.coerceAtLeast(legacyRxBytes)
-                    ?: legacyRxBytes
-                legacyTxBytes = it.optString("out", legacyTxBytes.toString())
-                    .toLongOrNull()
-                    ?.coerceAtLeast(legacyTxBytes)
-                    ?: legacyTxBytes
-            }
-
-            val now = SystemClock.elapsedRealtime()
-            legacyRuntimeMonotonicMs = maxOf(now, legacyRuntimeMonotonicMs + 1L)
-            if (legacyRuntimeGeneration <= 0L) {
-                legacyRuntimeGeneration = legacyRuntimeMonotonicMs.coerceAtLeast(1L)
-            }
-            if (linkState == 0 && legacyConnectedMonotonicMs == 0L) {
-                legacyConnectedMonotonicMs = legacyRuntimeMonotonicMs
-            }
-
-            val phase = when (linkState) {
-                0 -> "connected"
-                4 -> "reconnecting"
-                5 -> "connecting"
-                3 -> "handshaking"
-                1 -> "unknown"
-                else -> "starting"
-            }
-            JSONObject()
-                .put("schema_version", 1)
-                .put("generation", legacyRuntimeGeneration)
-                .put("monotonic_ms", legacyRuntimeMonotonicMs)
-                .put("phase", phase)
-                .put("role", "client")
-                .put("p2p_state", "unavailable")
-                .put(
-                    "traffic",
-                    JSONObject()
-                        .put("rx_bytes", legacyRxBytes)
-                        .put("tx_bytes", legacyTxBytes)
-                )
-                .put("connected_monotonic_ms", legacyConnectedMonotonicMs)
-                .toString()
-        }
-        onRuntimeSnapshot(snapshot)
     }
 
     private fun publishRuntimeSnapshot(value: String) {
@@ -350,7 +256,7 @@ class PppVpnService : VpnService() {
     }
 
     /**
-     * Drop the bundled routing manifest and GeoIP / GeoSite data into
+     * Drop a pre-bundled fallback copy of GeoIP.dat / GeoSite.dat into
      * `files/rules/` if the user does not already have a usable copy.
      *
      * Why: the native engine's `open_switcher` path is configured with
@@ -360,7 +266,7 @@ class PppVpnService : VpnService() {
      * for ~60s trying to (re)download from `geoip-download-url` and the
      * UI sits on "Initializing" until the watchdog fires.
      *
-     * The rule files are bundled under `assets/rules/` and are
+     * The two .dat files are bundled under `assets/rules/` and are
      * copied here at most once per APK version. We treat anything that
      * is NOT a regular file at the destination (missing, or a stray
      * directory left over from earlier broken builds) as "needs copy",
@@ -371,7 +277,6 @@ class PppVpnService : VpnService() {
             val rulesDir = java.io.File(filesDir, "rules")
             if (!rulesDir.exists()) rulesDir.mkdirs()
             val pairs = listOf(
-                "rules/geo-rules.txt" to "geo-rules.txt",
                 "rules/geoip.dat" to "GeoIP.dat",
                 "rules/geosite.dat" to "GeoSite.dat",
             )
@@ -382,25 +287,13 @@ class PppVpnService : VpnService() {
                 if (dest.exists() && !dest.isFile) {
                     dest.deleteRecursively()
                 }
-                // The routing manifest is application-owned policy and may
-                // change between APK builds even when GeoIP/GeoSite datasets
-                // do not. Refresh it on every service creation so an upgrade
-                // cannot keep an obsolete first-install rule order forever.
-                val refreshBundledPolicy = destName == "geo-rules.txt"
-                if (!refreshBundledPolicy && dest.isFile && dest.length() > 0L) continue
+                if (dest.isFile && dest.length() > 0L) continue
                 assets.open(assetPath).use { input ->
                     java.io.FileOutputStream(dest).use { output ->
                         input.copyTo(output)
                     }
                 }
                 PppLog.write(this, "extracted asset $assetPath -> ${dest.absolutePath} (${dest.length()} bytes)")
-            }
-            for (name in listOf("geo-rules.txt", "GeoIP.dat", "GeoSite.dat")) {
-                val file = java.io.File(rulesDir, name)
-                PppLog.write(
-                    this,
-                    "geo asset ready path=${file.absolutePath} exists=${file.isFile} size=${file.length()}"
-                )
             }
             // Also clean up the wrong-location stray dirs at filesDir root
             // that older builds created, so they stop confusing diagnostics.
@@ -413,48 +306,6 @@ class PppVpnService : VpnService() {
             }
         } catch (e: Throwable) {
             PppLog.write(this, "ensureGeoRulesAssets failed", e)
-        }
-    }
-
-    private fun normalizeGeoCountry(value: String?): String {
-        val country = value.orEmpty().trim().lowercase(java.util.Locale.ROOT)
-        return if (country.matches(Regex("^[a-z]{2}$"))) country else "cn"
-    }
-
-    private fun writeGeoRulesPreset(country: String): Boolean {
-        return try {
-            val rulesDir = java.io.File(filesDir, "rules")
-            if (!rulesDir.exists() && !rulesDir.mkdirs()) return false
-            val rulesFile = java.io.File(rulesDir, "geo-rules.txt")
-            val directDns = if (country == "cn") {
-                "local,223.5.5.5,119.29.29.29"
-            } else {
-                "local,1.1.1.1,8.8.8.8"
-            }
-            val content = """
-                # Generated by OpenPPP2 Android. Do not edit.
-                # The selected country is direct; all unmatched traffic uses the tunnel.
-                direct_dns=$directDns
-
-                ip-cidr,10.0.0.0/8,direct
-                ip-cidr,100.64.0.0/10,direct
-                ip-cidr,127.0.0.0/8,direct
-                ip-cidr,169.254.0.0/16,direct
-                ip-cidr,172.16.0.0/12,direct
-                ip-cidr,192.168.0.0/16,direct
-                domain-suffix,$country,direct
-                geosite,$country,direct
-                geoip,$country,direct
-            """.trimIndent() + "\n"
-            rulesFile.writeText(content, Charsets.UTF_8)
-            PppLog.write(
-                this,
-                "generated geo preset country=$country path=${rulesFile.absolutePath} size=${rulesFile.length()}"
-            )
-            rulesFile.isFile && rulesFile.length() > 0L
-        } catch (e: Throwable) {
-            PppLog.write(this, "writeGeoRulesPreset failed country=$country", e)
-            false
         }
     }
 
@@ -530,14 +381,6 @@ class PppVpnService : VpnService() {
         acquireWakeLock()
         startNetworkMonitor()
         connectStartedAtMs = android.os.SystemClock.elapsedRealtime()
-        synchronized(legacySnapshotLock) {
-            legacyRuntimeGeneration = connectStartedAtMs.coerceAtLeast(1L)
-            legacyRuntimeMonotonicMs = connectStartedAtMs
-            legacyConnectedMonotonicMs = 0L
-            legacyLinkState = 5
-            legacyRxBytes = 0L
-            legacyTxBytes = 0L
-        }
         PppLog.write(this, "perf connect_requested")
         notifyStateChanged(1) // connecting
 
@@ -579,20 +422,6 @@ class PppVpnService : VpnService() {
             }
             PppLog.write(this, "set_root_path path=$rootPath ok=$rootOk")
 
-            val configForLog = try {
-                JSONObject(configJson)
-            } catch (_: Throwable) {
-                null
-            }
-            val clientForLog = configForLog?.optJSONObject("client")
-            val websocketForLog = clientForLog?.optJSONObject("websocket")
-            PppLog.write(
-                this,
-                "remote endpoint server=${clientForLog?.optString("server", "").orEmpty()} " +
-                    "websocketHost=${websocketForLog?.optString("host", "").orEmpty()} " +
-                    "websocketSni=${websocketForLog?.optString("sni", "").orEmpty()}"
-            )
-
             val configResult = libopenppp2.set_app_configuration(configJson)
             PppLog.write(this, "set_app_configuration result=$configResult")
             if (configResult != 0) {
@@ -601,35 +430,6 @@ class PppVpnService : VpnService() {
                 stopForeground(true)
                 stopSelf()
                 return
-            }
-
-            val geoRules = options.optJSONObject("geoRules")
-            val geoEnabled = !proxyOnly && geoRules?.optBoolean("enabled", false) == true
-            if (geoEnabled) {
-                val geoCountry = normalizeGeoCountry(geoRules?.optString("country", "cn"))
-                if (!writeGeoRulesPreset(geoCountry)) {
-                    notifyError("generate GEO preset failed: $geoCountry")
-                    notifyStateChanged(0)
-                    stopForeground(true)
-                    stopSelf()
-                    return
-                }
-                val geoResult = libopenppp2.set_geo_rules(
-                    "./rules/geo-rules.txt",
-                    "./rules/GeoSite.dat",
-                    "./rules/GeoIP.dat"
-                )
-                PppLog.write(
-                    this,
-                    "set_geo_rules country=$geoCountry direct=true enabled=true result=$geoResult"
-                )
-                if (!geoResult) {
-                    notifyError("set_geo_rules failed")
-                    notifyStateChanged(0)
-                    stopForeground(true)
-                    stopSelf()
-                    return
-                }
             }
 
             // Sync VPN DNS servers into native vdns upstream list (gateway DNS path).
@@ -649,12 +449,12 @@ class PppVpnService : VpnService() {
                 }
             }
 
-            // Set bypass IP list and DNS rules if provided
-            if (!proxyOnly && bypassIpList.isNotBlank()) {
+            // Native bypass and DNS policy applies in both TUN and proxy-only modes.
+            if (bypassIpList.isNotBlank()) {
                 val bypassResult = libopenppp2.set_bypass_ip_list(bypassIpList)
                 PppLog.write(this, "set_bypass_ip_list result=$bypassResult")
             }
-            if (!proxyOnly && dnsRulesList.isNotBlank()) {
+            if (dnsRulesList.isNotBlank()) {
                 val dnsResult = libopenppp2.set_dns_rules_list(dnsRulesList)
                 PppLog.write(this, "set_dns_rules_list result=$dnsResult")
             }
@@ -672,76 +472,26 @@ class PppVpnService : VpnService() {
                 builder.addRoute(route, routePrefix)
             }
 
-            // Android 13+ can keep explicit direct CIDRs out of the TUN in the
-            // kernel. This avoids a user-space round trip for LAN/basic bypass
-            // traffic and leaves more CPU for encrypted foreign traffic.
-            if (!proxyOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                var excluded = 0
-                var skipped = 0
-                bypassIpList
-                    .split(Regex("[\\s,;]+"))
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .distinct()
-                    .forEach { value ->
-                        try {
-                            val cidr = if (value.contains('/')) {
-                                value
-                            } else if (value.contains(':')) {
-                                "$value/128"
-                            } else {
-                                "$value/32"
-                            }
-                            val separator = cidr.lastIndexOf('/')
-                            val address = cidr.substring(0, separator)
-                            val prefix = cidr.substring(separator + 1).toInt()
-                            builder.excludeRoute(
-                                IpPrefix(InetAddress.getByName(address), prefix)
-                            )
-                            excluded++
-                        } catch (_: Throwable) {
-                            skipped++
-                        }
-                    }
-                PppLog.write(
-                    this,
-                    "system bypass routes excluded=$excluded skipped=$skipped sdk=${Build.VERSION.SDK_INT}"
-                )
-            }
-
-            try {
-                builder.addAddress(IPV6_BLOCK_ADDRESS, 128)
-                builder.addRoute("::", 0)
-                builder.allowFamily(OsConstants.AF_INET6)
-                PppLog.write(this, "IPv6 leak protection active (capturing ::/0)")
-            } catch (e: Throwable) {
-                val reason = "IPv6 leak protection setup failed: ${e.message ?: e.javaClass.name}"
-                PppLog.write(this, reason, e)
-                notifyError(reason)
-                notifyStateChanged(0)
-                stopForeground(true)
-                stopSelf()
-                return
+            if (!proxyOnly) {
+                try {
+                    builder.addAddress(IPV6_BLOCK_ADDRESS, 128)
+                    builder.addRoute("::", 0)
+                    builder.allowFamily(OsConstants.AF_INET6)
+                    PppLog.write(this, "IPv6 leak protection active (capturing ::/0)")
+                } catch (e: Throwable) {
+                    val reason = "IPv6 leak protection setup failed: ${e.message ?: e.javaClass.name}"
+                    PppLog.write(this, reason, e)
+                    notifyError(reason)
+                    notifyStateChanged(0)
+                    stopForeground(true)
+                    stopSelf()
+                    return
+                }
+            } else {
+                PppLog.write(this, "IPv6 capture and leak protection disabled in proxy-only mode")
             }
 
             if (!proxyOnly) {
-                // Advertising public resolvers here lets Android validate them as
-                // opportunistic Private DNS and send encrypted DNS-over-TLS. The
-                // native data plane then sees only destination IPs, so GeoSite can
-                // never override GeoIP for domestic domains on overseas CDNs.
-                // Publish the TUN gateway as a virtual DNS endpoint instead. The
-                // core intercepts its plaintext port-53 traffic and chooses the
-                // configured domestic/tunnel upstream after applying GeoSite.
-                val virtualDns = virtualDnsAddress(vpnIp, vpnPrefix)
-                    ?: throw IllegalArgumentException(
-                        "Cannot derive virtual DNS from tunIp=$vpnIp/$vpnPrefix"
-                    )
-                builder.addDnsServer(virtualDns)
-                PppLog.write(
-                    this,
-                    "system DNS virtual=$virtualDns upstream=$dns1,$dns2"
-                )
-            } else {
                 if (dns1.isNotBlank()) {
                     builder.addDnsServer(dns1)
                 }
@@ -894,7 +644,6 @@ class PppVpnService : VpnService() {
                     notifyError("VPN thread exception: ${e.message ?: e.javaClass.name}")
                 } finally {
                     isRunning = false
-                    stopInProgress.set(false)
                     stopLinkStatePoller()
                     stopHeartbeatPoller()
                     stopNetworkMonitor()
@@ -917,11 +666,6 @@ class PppVpnService : VpnService() {
                     } else {
                         activeConfigJson = null
                         activeVpnOptionsJson = null
-                        // A clean stop must remove the last connected snapshot.
-                        // Otherwise the UI keeps reading it for the mirror's
-                        // 30-second grace period and then misclassifies the
-                        // expected disappearance as an unknown runtime loss.
-                        PppStateStore.clearRuntimeSnapshot(this)
                         notifyStateChanged(0) // disconnected
                         stopForeground(true)
                         stopSelf()
@@ -951,42 +695,13 @@ class PppVpnService : VpnService() {
         }
 
         notifyStateChanged(3) // disconnecting
-        if (!stopInProgress.compareAndSet(false, true)) {
-            PppLog.write(this, "stopVpn ignored: native stop already in progress")
-            return
+        try {
+            libopenppp2.stop()
+        } catch (e: Throwable) {
+            Log.e(TAG, "stop exception", e)
+            PppLog.write(this, "stop exception", e)
         }
-
-        // Native teardown may wait for pending asio handlers. Never block the
-        // Service main thread (or onDestroy) on that work; the VPN worker's
-        // finally block remains the single owner of foreground/service cleanup.
-        Thread {
-            try {
-                val result = libopenppp2.stop()
-                PppLog.write(this, "libopenppp2.stop returned=$result")
-            } catch (e: Throwable) {
-                Log.e(TAG, "stop exception", e)
-                PppLog.write(this, "stop exception", e)
-            }
-
-            val worker = vpnThread
-            if (worker != null && worker !== Thread.currentThread()) {
-                try {
-                    worker.join(5000L)
-                } catch (e: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    PppLog.write(this, "stop wait interrupted", e)
-                }
-                if (worker.isAlive) {
-                    PppLog.write(this, "stop timeout: vpnThread still alive after 5000ms")
-                } else {
-                    PppLog.write(this, "stop completed: vpnThread exited")
-                }
-            }
-        }.apply {
-            name = "openppp2-stop-thread"
-            isDaemon = true
-            start()
-        }
+        // The vpnThread will exit after run() returns, cleaning up in finally block
     }
 
     fun onStarted(key: Int) {
@@ -1001,7 +716,6 @@ class PppVpnService : VpnService() {
         PppLog.write(this, "onStarted key=$key")
         PppLog.write(this, "VPN started with key=$key")
         publishLinkState(0)
-        publishLegacyRuntimeSnapshot(0)
         notifyStateChanged(2) // connected
     }
 

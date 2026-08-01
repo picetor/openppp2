@@ -21,8 +21,7 @@ RuntimeSnapshot sample({
 
 void main() {
   group('traffic rate', () {
-    test('derives a rate from the snapshot clock, not the sampling interval',
-        () {
+    test('derives a rate from the snapshot clock, not the sampling interval', () {
       final previous = sample(monotonicMs: 1000, rxBytes: 1000, txBytes: 500);
       // Two seconds of snapshot time, whatever the UI poll interval was.
       final current = sample(monotonicMs: 3000, rxBytes: 5000, txBytes: 1500);
@@ -72,7 +71,8 @@ void main() {
     });
 
     test('phase snapshot between traffic samples does not spike the rate', () {
-      final trafficA = sample(monotonicMs: 1000, rxBytes: 1000, txBytes: 500);
+      final trafficA =
+          sample(monotonicMs: 1000, rxBytes: 1000, txBytes: 500);
       // Same counters, later clock: phase/readiness publish in the same tick.
       final phaseOnly = sample(
         monotonicMs: 1001,
@@ -80,7 +80,8 @@ void main() {
         txBytes: 500,
         phase: RuntimePhase.applyingPolicy,
       );
-      final trafficB = sample(monotonicMs: 3000, rxBytes: 5000, txBytes: 1500);
+      final trafficB =
+          sample(monotonicMs: 3000, rxBytes: 5000, txBytes: 1500);
 
       expect(
         RuntimeTrafficRate.advancesTrafficBaseline(trafficA, phaseOnly),
@@ -109,7 +110,8 @@ void main() {
 
   group('connected elapsed time', () {
     test('is measured against the snapshot clock', () {
-      final snapshot = sample(monotonicMs: 42000, connectedMonotonicMs: 30000);
+      final snapshot =
+          sample(monotonicMs: 42000, connectedMonotonicMs: 30000);
       expect(connectedElapsedMs(snapshot), 12000);
     });
 
@@ -123,7 +125,8 @@ void main() {
     });
 
     test('is zero when the clock is behind the connect stamp', () {
-      final snapshot = sample(monotonicMs: 1000, connectedMonotonicMs: 30000);
+      final snapshot =
+          sample(monotonicMs: 1000, connectedMonotonicMs: 30000);
       expect(connectedElapsedMs(snapshot), 0);
     });
   });

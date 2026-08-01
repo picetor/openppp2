@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import '../models/config_profile.dart';
 import '../services/profile_store.dart';
@@ -19,21 +17,14 @@ class _ProfilesPageState extends State<ProfilesPage> {
   List<ConfigProfile> _profiles = const [];
   String? _activeId;
   bool _loading = true;
-  StreamSubscription<void>? _storeSubscription;
 
   @override
   void initState() {
     super.initState();
     _load();
-    _storeSubscription = _store.changes.listen((_) {
+    _store.changes.listen((_) {
       if (mounted) _load();
     });
-  }
-
-  @override
-  void dispose() {
-    _storeSubscription?.cancel();
-    super.dispose();
   }
 
   Future<void> _load() async {
@@ -110,7 +101,6 @@ class _ProfilesPageState extends State<ProfilesPage> {
       if (!mounted) return;
       if (progressShown) Navigator.of(context, rootNavigator: true).pop();
       await _load();
-      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已导入/更新 $count 个节点')),
       );

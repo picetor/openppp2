@@ -64,10 +64,9 @@ class RemoteSubscriptionParser {
         throw const FormatException('节点 id 不能为空');
       }
       final rawName = (node['name'] ?? id).toString().trim();
-      final name =
-          prefix == null || prefix.isEmpty || rawName.startsWith(prefix)
-              ? rawName
-              : '$prefix $rawName';
+      final name = prefix == null || prefix.isEmpty || rawName.startsWith(prefix)
+          ? rawName
+          : '$prefix $rawName';
       final config = _buildConfig(node);
       nodes.add(RemoteSubscriptionNode(
         id: id,
@@ -145,9 +144,7 @@ class RemoteSubscriptionParser {
   }
 
   static Map<String, dynamic> _mapOrEmpty(dynamic value) {
-    return value is Map
-        ? Map<String, dynamic>.from(value)
-        : <String, dynamic>{};
+    return value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
   }
 
   static String? _stringOrNull(dynamic value) {

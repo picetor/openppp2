@@ -69,8 +69,7 @@ class TelemetrySettings {
       customEndpoint: (m['customEndpoint'] ?? '').toString(),
       includeCrashReports: m['includeCrashReports'] != false,
       includeNativeTelemetry: m['includeNativeTelemetry'] != false,
-      nativeLogLevel:
-          (m['nativeLogLevel'] is int) ? m['nativeLogLevel'] as int : 1,
+      nativeLogLevel: (m['nativeLogLevel'] is int) ? m['nativeLogLevel'] as int : 1,
       nativeMetricsEnabled: m['nativeMetricsEnabled'] == true,
       nativeSpansEnabled: m['nativeSpansEnabled'] == true,
     );
@@ -94,7 +93,8 @@ class TelemetrySettings {
         includeNativeTelemetry:
             includeNativeTelemetry ?? this.includeNativeTelemetry,
         nativeLogLevel: nativeLogLevel ?? this.nativeLogLevel,
-        nativeMetricsEnabled: nativeMetricsEnabled ?? this.nativeMetricsEnabled,
+        nativeMetricsEnabled:
+            nativeMetricsEnabled ?? this.nativeMetricsEnabled,
         nativeSpansEnabled: nativeSpansEnabled ?? this.nativeSpansEnabled,
       );
 
@@ -132,8 +132,7 @@ class TelemetrySettings {
   }
 
   /// Build the `telemetry` object merged into AppConfiguration JSON.
-  static Map<String, dynamic> appConfigurationBlock(
-      TelemetrySettings settings) {
+  static Map<String, dynamic> appConfigurationBlock(TelemetrySettings settings) {
     final endpoint = nativeEngineEndpoint(settings);
     return {
       'enabled': settings.uploadEnabled && settings.includeNativeTelemetry,

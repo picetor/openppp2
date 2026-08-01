@@ -11,8 +11,7 @@ RuntimeSnapshot snapshot({
     'mux.balance',
     'mux.stripe',
   ],
-}) =>
-    RuntimeSnapshot(
+}) => RuntimeSnapshot(
       generation: 1,
       monotonicMs: 1,
       phase: RuntimePhase.connected,

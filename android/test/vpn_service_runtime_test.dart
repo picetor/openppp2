@@ -42,11 +42,6 @@ void main() {
       mock((call) async => throw PlatformException(code: 'UNAVAILABLE'));
       expect(await service.getRuntimeSnapshot(), isNull);
     });
-
-    test('reports the mirrored vpn process liveness', () async {
-      mock((call) async => call.method == 'isVpnAlive' ? false : null);
-      expect(await service.isVpnAlive(), isFalse);
-    });
   });
 
   group('last error mirror', () {
@@ -111,41 +106,6 @@ void main() {
       );
       expect(store.state.phase, RuntimePhase.connected);
       service.connecting = false;
-    });
-
-    test('empty mirror after an accepted user stop returns to idle', () {
-      final store = service.runtimeStore;
-      store.endSession();
-      store.resetForNewSession();
-
-      service.applyRuntimeSnapshotPoll(
-        '{"schema_version":1,"generation":12,"monotonic_ms":500,'
-        '"phase":"connected"}',
-      );
-      expect(store.state.phase, RuntimePhase.connected);
-
-      service.markDisconnectRequested();
-      service.applyRuntimeSnapshotPoll(null);
-
-      expect(store.state.phase, RuntimePhase.idle);
-      expect(store.state.generation, 0);
-    });
-
-    test('empty mirror from a confirmed dead vpn process returns to idle', () {
-      final store = service.runtimeStore;
-      store.endSession();
-      store.resetForNewSession();
-
-      service.applyRuntimeSnapshotPoll(
-        '{"schema_version":1,"generation":13,"monotonic_ms":600,'
-        '"phase":"connected"}',
-      );
-      expect(store.state.phase, RuntimePhase.connected);
-
-      service.applyRuntimeSnapshotPoll(null, vpnAlive: false);
-
-      expect(store.state.phase, RuntimePhase.idle);
-      expect(store.state.generation, 0);
     });
   });
 }
