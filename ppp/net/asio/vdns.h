@@ -47,6 +47,7 @@ namespace ppp {
                     const ppp::function<void(const ppp::unordered_set<boost::asio::ip::address>&)>& cb) noexcept;
 
                 void                                                                            UpdateAsync() noexcept;
+                void                                                                            ClearCache() noexcept;
 
             } // namespace vdns
         } // namespace asio

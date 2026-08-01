@@ -301,6 +301,25 @@ enum {
     LIBOPENPPP2_ERROR_IT_IS_NOT_RUNING                                      = 401,
 };
 
+// Local equivalent of Miaocchi's ppp::PrefixMask128: build a 128-bit
+// network-order prefix mask from a prefix length (0..128). The byte layout
+// matches what Ipep::NetworkToHostOrder + IPEndPoint(InterNetworkV6) expect.
+static ppp::Int128 libopenppp2_prefix_mask_v6(int prefix) noexcept {
+    if (prefix <= 0) {
+        return 0;
+    }
+    if (prefix >= 128) {
+        return ppp::MAKE_OWORD(~0ULL, ~0ULL);
+    }
+    if (prefix >= 64) {
+        unsigned int low_bits = static_cast<unsigned int>(prefix - 64);
+        uint64_t low = low_bits == 0 ? 0ULL : (~0ULL << (64 - low_bits));
+        return ppp::MAKE_OWORD(low, ~0ULL);
+    }
+    uint64_t high = ~0ULL << (64 - static_cast<unsigned int>(prefix));
+    return ppp::MAKE_OWORD(0ULL, high);
+}
+
 static ppp::diagnostics::ErrorCode                                          libopenppp2_translate_error(int err) noexcept {
     using ErrorCode = ppp::diagnostics::ErrorCode;
 
@@ -829,11 +848,13 @@ bool                                                                        libo
         &client_, std::shared_ptr<VEthernetNetworkSwitcher>());
     if (NULLPTR != client) {
         any = true;
-        ppp::function<void(bool)> completion;
+        // Local VEthernetNetworkSwitcher::Dispose() is synchronous with
+        // asynchronous teardown and has no cleanup callback, so report
+        // completion immediately when we own the stop.
+        client->Dispose();
         if (stop_owner) {
-            completion = complete_stop;
+            complete_stop(true);
         }
-        client->Dispose(std::move(completion));
     }
     else if (stop_owner) {
         complete_stop(true);
@@ -2169,7 +2190,7 @@ __LIBOPENPPP2__(jstring) Java_supersocksr_ppp_android_c_libopenppp2_prefix_1to_1
         return JNIENV_NewStringUTF(env, mask_string.data());
     }
     else {
-        ppp::Int128 mask = ppp::PrefixMask128(prefix_);
+        ppp::Int128 mask = libopenppp2_prefix_mask_v6(prefix_);
         mask = Ipep::NetworkToHostOrder(mask);
 
         ppp::string mask_string = IPEndPoint(ppp::net::AddressFamily::InterNetworkV6, &mask, sizeof(mask), 0).ToAddressString();

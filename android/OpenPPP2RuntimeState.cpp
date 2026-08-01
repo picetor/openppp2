@@ -97,7 +97,7 @@ namespace ppp {
             }
 
             ppp::app::mux::MuxRuntimeState GetClientMuxRuntimeState(
-                const std::shared_ptr<client::VEthernetExchanger>& exchanger) {
+                const std::shared_ptr<ppp::app::client::VEthernetExchanger>& exchanger) {
                 ppp::app::mux::MuxRuntimeState state;
                 if (NULLPTR == exchanger) {
                     state.fallback_reason = "mux_inactive";
@@ -123,15 +123,15 @@ namespace ppp {
             }
 
             RuntimeReadiness GetClientRuntimeReadiness(
-                const std::shared_ptr<client::VEthernetNetworkSwitcher>& client) {
+                const std::shared_ptr<ppp::app::client::VEthernetNetworkSwitcher>& client) {
                 ClientRuntimeReadinessFacts facts;
                 if (NULLPTR != client) {
-                    const std::shared_ptr<client::VEthernetExchanger>& exchanger =
+                    const std::shared_ptr<ppp::app::client::VEthernetExchanger>& exchanger =
                         client->GetExchanger();
                     facts.session_established =
                         NULLPTR != exchanger &&
                         exchanger->GetNetworkState() ==
-                            client::VEthernetExchanger::NetworkState_Established;
+                            ppp::app::client::VEthernetExchanger::NetworkState_Established;
                     facts.adapter_open = NULLPTR != client->GetTapNetworkInterface();
 
                     // 本地 ppp 库不跟踪 route/dns/policy 的独立就绪位，

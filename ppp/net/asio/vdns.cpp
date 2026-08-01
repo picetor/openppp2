@@ -956,6 +956,19 @@ namespace ppp {
                 }
 
                 // -----------------------------------------------------------------------------
+                // Public API: ClearCache – drop every cached DNS record immediately.
+                // Used when the application configuration changes so stale entries
+                // cannot leak into the new configuration.
+                // -----------------------------------------------------------------------------
+                void ClearCache() noexcept {
+                    internal& c = internal::c();
+
+                    SynchronizedObjectScope lock(c.lockobj);
+                    c.nr_hmap.clear();
+                    c.nr_list.Clear();
+                }
+
+                // -----------------------------------------------------------------------------
                 // Public API: AddCache – manually insert a DNS response packet into the cache.
                 // -----------------------------------------------------------------------------
                 bool AddCache(const Byte* packet, int packet_size) noexcept {
