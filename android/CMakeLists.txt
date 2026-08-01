@@ -127,8 +127,10 @@ FILE(GLOB_RECURSE SOURCE_FILES
     ${PROJECT_ROOT_DIR}/linux/*.cpp
 
     ${PROJECT_ROOT_DIR}/android/libopenppp2.cpp
+    ${PROJECT_ROOT_DIR}/android/OpenPPP2RuntimeState.cpp
     ${PROJECT_ROOT_DIR}/android/OpenPPP2VpnProtectBridge.cpp
-    ${PROJECT_ROOT_DIR}/android/OpenPPP2TelemetryBridge.cpp)
+    ${PROJECT_ROOT_DIR}/android/OpenPPP2TelemetryBridge.cpp
+    ${PROJECT_ROOT_DIR}/ppp/diagnostics/Telemetry.cpp)
 
 # Add the compiled output binary files.
 ADD_LIBRARY(${NAME} SHARED ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES})

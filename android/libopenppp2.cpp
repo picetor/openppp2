@@ -33,9 +33,11 @@
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetSocksProxySwitcher.h>
 #include <common/aggligator/aggligator.h>
-#include <ppp/app/client/GeoRuleGenerator.h>
-#include <ppp/app/runtime/RuntimeLifecycle.h>
-#include <ppp/app/runtime/RuntimeSnapshotJson.h>
+
+// 精简运行时快照适配层：libopenppp2.cpp 使用的 RuntimeLifecycle /
+// RuntimeSnapshot / SerializeRuntimeSnapshot 均由 android 侧适配实现，
+// 不引入 Miaocchi 的 ppp/app/runtime 全套架构。
+#include <android/OpenPPP2RuntimeState.h>
 
 #include <android/OpenPPP2VpnProtectBridge.h>
 #include <android/OpenPPP2TelemetryBridge.h>
@@ -402,6 +404,14 @@ struct libopenppp2_network_interface final {
     boost::asio::ip::address                                                IPAddress;
     boost::asio::ip::address                                                GatewayServer;
     boost::asio::ip::address                                                SubmaskAddress;
+
+    // The IPv6 address actually configured on the TUN interface by
+    // VpnService.Builder (e.g. the leak-block ULA).  Native code cannot
+    // change the kernel address of an Android TUN without root, so this
+    // must match what the Java side passed to Builder.addAddress().
+    // VEthernetExchanger::TranslateIPv6Packet translates between this
+    // address and the server-assigned lease (AssignedIPv6Address).
+    boost::asio::ip::address                                                IPv6Address;
 };
 
 class libopenppp2_application final : public std::enable_shared_from_this<libopenppp2_application> {
@@ -544,7 +554,7 @@ bool                                                                        libo
         else {
             runtime_lifecycle_.UpdateMuxState(
                 runtime.generation,
-                exchanger->GetMuxRuntimeState(),
+                ppp::app::runtime::GetClientMuxRuntimeState(exchanger),
                 now);
         }
         if (NULLPTR != exchanger && exchanger->GetNetworkState() == VEthernetExchanger::NetworkState_Reconnecting) {
@@ -556,7 +566,7 @@ bool                                                                        libo
         else if (NULLPTR != exchanger && exchanger->GetNetworkState() == VEthernetExchanger::NetworkState_Established) {
             runtime_lifecycle_.UpdateReadiness(
                 runtime.generation,
-                client->GetRuntimeReadiness(),
+                ppp::app::runtime::GetClientRuntimeReadiness(client),
                 now);
             runtime_lifecycle_.Transition(
                 runtime.generation,
@@ -1239,7 +1249,7 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_is_1default_1fl
 
 // package: supersocksr.ppp.android.c
 // public final class libopenpppp2
-// public native int set_network_interface(int tun, int mux, bool vnet, bool block_quic, bool static_mode, string ip, string mask, string gw)
+// public native int set_network_interface(int tun, int mux, bool vnet, bool block_quic, bool static_mode, string ip, string mask, string ipv6)
 __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1interface(JNIEnv* env, jobject* this_,
     jint                                                                                    tun,
     jint                                                                                    mux,
@@ -1247,7 +1257,8 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1i
     jboolean                                                                                block_quic,
     jboolean                                                                                static_mode,
     jstring                                                                                 ip,
-    jstring                                                                                 mask) noexcept {
+    jstring                                                                                 mask,
+    jstring                                                                                 ipv6) noexcept {
     __LIBOPENPPP2_MAIN__;
 
     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::Success);
@@ -1277,6 +1288,25 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1i
     boost::asio::ip::address mask_address = ppp::StringToAddress(mask_string->data(), ec);
     if (ec || !mask_address.is_v4()) {
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::NetworkMaskInvalid, LIBOPENPPP2_ERROR_ARG_MASK_IS_NOT_AF_INET_FORMAT);
+    }
+
+    // Optional IPv6 TUN address (e.g. the leak-block ULA configured on the
+    // VpnService.Builder).  An empty or invalid value is tolerated so the
+    // interface can still be opened for IPv4-only operation.
+    boost::asio::ip::address ipv6_address;
+    if (NULLPTR != ipv6) {
+        std::shared_ptr<ppp::string> ipv6_string = JNIENV_GetStringUTFChars(env, ipv6);
+        if (NULLPTR != ipv6_string && !ipv6_string->empty()) {
+            boost::system::error_code ipv6_ec;
+            boost::asio::ip::address parsed = ppp::StringToAddress(ipv6_string->data(), ipv6_ec);
+            if (!ipv6_ec && parsed.is_v6()) {
+                ipv6_address = parsed;
+            }
+            else {
+                __android_log_print(ANDROID_LOG_WARN, "libopenppp2",
+                    "set_network_interface: ignoring invalid ipv6 address \"%s\"", ipv6_string->data());
+            }
+        }
     }
 
     uint32_t addresses[2] = {
@@ -1323,6 +1353,7 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1network_1i
     network_interface->IPAddress = ip_address;
     network_interface->GatewayServer = gw_address;
     network_interface->SubmaskAddress = mask_address;
+    network_interface->IPv6Address = ipv6_address;
 
     int err = libopenppp2_application::Invoke(
         [&app, &network_interface]() noexcept {
@@ -1508,6 +1539,9 @@ __LIBOPENPPP2__(jstring) Java_supersocksr_ppp_android_c_libopenppp2_get_1network
                 json["gw"] = stl::transform<ppp::string>(network_interface->GatewayServer.to_string());
                 json["ip"] = stl::transform<ppp::string>(network_interface->IPAddress.to_string());
                 json["mask"] = stl::transform<ppp::string>(network_interface->SubmaskAddress.to_string());
+                json["ipv6"] = network_interface->IPv6Address.is_v6()
+                    ? stl::transform<ppp::string>(network_interface->IPv6Address.to_string())
+                    : "";
 
                 json_string = ppp::make_shared_object<ppp::string>(JsonAuxiliary::ToStyledString(json));
             }
@@ -1575,7 +1609,15 @@ static std::shared_ptr<ITap>                                                    
     bool hosted_network = true;
 
     void* tun = (void*)(std::intptr_t)tun_fd;
-    return ppp::tap::TapLinux::From(context, dev, tun, ip, gw, mask, promisc, hosted_network);
+    std::shared_ptr<ITap> tap = ppp::tap::TapLinux::From(context, dev, tun, ip, gw, mask, promisc, hosted_network);
+    if (NULLPTR != tap && network_interface->IPv6Address.is_v6()) {
+        // The Android TUN's kernel-side IPv6 address was fixed by
+        // VpnService.Builder (e.g. the leak-block ULA).  Mirror it onto the
+        // tap object so VEthernetExchanger::TranslateIPv6Packet can translate
+        // between this address and the server-assigned IPv6 lease.
+        tap->IPv6Address = network_interface->IPv6Address;
+    }
+    return tap;
 }
 
 static ppp::string                                                               libopenppp2_routing_source_without_file_uri(
@@ -1700,67 +1742,13 @@ static int                                                                      
 
     // Phase G: GeoIP/GeoSite rule generation pipeline.
     //
-    // ApplicationInitialize.cpp gates this behind `#if !defined(_ANDROID)`,
-    // so on Android we have to invoke it explicitly here. The generator reads
-    // configuration->geo_rules.{geoip_dat, geosite_dat, geoip[], geosite[],
-    // dns_provider_*, output_*} (already populated by AppConfiguration::Load
-    // from the JSON `geo-rules` block) and writes two text files:
-    //   - output_bypass:    newline-separated CIDR list
-    //   - output_dns_rules: newline-separated DNS redirect rules
-    // We then feed those files back into the client.
+    // Miaocchi 的桌面端在 ApplicationInitialize.cpp 中通过
+    // GeoRuleGenerator 生成 bypass/dns 规则文件。本地 openppp2 主线没有
+    // 该生成器（geo 规则生成已独立为 picetor/openppp2-geo-rules 项目），
+    // 因此 Android 上不执行生成；geo-rules 配置仅在桌面端消费。
     if (configuration->geo_rules.enabled) {
-        const auto geo_begin = std::chrono::steady_clock::now();
-        __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
-            "open_switcher: geo-rules enabled country=%s geoip_dat=%s geosite_dat=%s",
-            configuration->geo_rules.country.data(),
-            configuration->geo_rules.geoip_dat.data(),
-            configuration->geo_rules.geosite_dat.data());
-
-        // Build a bypass-file seed list from canonical sources, mirroring the
-        // desktop behaviour in ApplicationClientBootstrap.cpp.  When canonical
-        // routing is absent the generator runs without a seed (NULLPTR), which
-        // was the previous Android behaviour.
-        ppp::vector<ppp::string> bypass_seed_paths;
-        if (canonical_routing_configured) {
-            for (const ppp::string& source : configuration->client.routing.bypass) {
-                ppp::string resolved_path;
-                ppp::string inline_text;
-                if (libopenppp2_read_routing_source(source, resolved_path, inline_text) &&
-                    !resolved_path.empty()) {
-                    bypass_seed_paths.emplace_back(resolved_path);
-                }
-            }
-        }
-        const ppp::vector<ppp::string>* seed_ptr =
-            bypass_seed_paths.empty() ? NULLPTR : &bypass_seed_paths;
-
-        ppp::app::client::GeoRuleGenerateResult geo_result =
-            ppp::app::client::GeoRuleGenerator::Generate(*configuration, seed_ptr);
-
-        const auto geo_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - geo_begin).count();
-        __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
-            "open_switcher: geo-rules %s bypass=%s(%d) dns_rules=%s(%d) elapsed_ms=%lld",
-            geo_result.cache_hit ? "cache_hit" : "generated",
-            geo_result.output_bypass_path.data(), geo_result.bypass_line_count,
-            geo_result.output_dns_rules_path.data(), geo_result.dns_rule_line_count,
-            static_cast<long long>(geo_elapsed_ms));
-
-        // Merge generated bypass CIDRs after legacy/default sources. Canonical
-        // sources are appended after Geo below so they remain explicit.
-        if (!geo_result.output_bypass_path.empty()) {
-            ppp::string geo_bypass_text =
-                ppp::io::File::ReadAllText(geo_result.output_bypass_path.data());
-            libopenppp2_append_routing_text(bypass_text, geo_bypass_text);
-        }
-
-        // Load generated DNS redirect rules from file.
-        if (!geo_result.output_dns_rules_path.empty()) {
-            bool ok = client->LoadAllDnsRules(geo_result.output_dns_rules_path, true);
-            __android_log_print(ANDROID_LOG_INFO, "libopenppp2",
-                "open_switcher: geo-rules dns rules loaded path=%s ok=%d",
-                geo_result.output_dns_rules_path.data(), ok ? 1 : 0);
-        }
+        __android_log_print(ANDROID_LOG_WARN, "libopenppp2",
+            "open_switcher: geo-rules enabled but generator is unavailable on Android; ignored");
     }
 
     if (canonical_routing_configured) {

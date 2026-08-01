@@ -47,6 +47,38 @@ namespace ppp {
             };
 
             /**
+             * @brief Peer-prefix route entry for client static routing.
+             *
+             * Announces or forwards a prefix to a peer virtual address.  Used
+             * by the canonical client routing policy.
+             */
+            struct PeerPrefixRouteConfiguration final {
+                ppp::string                                                 network; ///< Prefix network, e.g. "10.0.0.0".
+                int                                                         prefix = 0; ///< Prefix length, e.g. 24.
+                ppp::string                                                 via;     ///< Gateway peer virtual IPv4, e.g. "10.1.0.2"; empty for announce-only.
+                ppp::string                                                 guid;    ///< Server allowlist owner client GUID; empty for client static routes.
+            };
+
+            /**
+             * @brief Canonical client routing policy model.
+             *
+             * The model is present under @c client.routing when the canonical
+             * object was supplied.  It carries only IP and DNS policy sources:
+             * each @c ip and @c dns item may identify a file or contain inline
+             * text.  The independent @c client.proxy-only flag controls runtime
+             * mode.  During the compatibility period, canonical routes are
+             * mirrored to the legacy @c client.routes, while legacy-only input
+             * is projected into this model for serialization.
+             */
+            struct ClientRoutingConfiguration final {
+                bool                                                        configured;  ///< True when client.routing was supplied as a JSON object.
+                ppp::vector<ppp::string>                                    bypass;      ///< IP bypass source files or inline text.
+                ppp::vector<RouteConfiguration>                             routes;      ///< Canonical IP route sources.
+                ppp::vector<PeerPrefixRouteConfiguration>                   peer_routes; ///< Canonical peer-prefix routes.
+                ppp::vector<ppp::string>                                    dns_rules;   ///< DNS rule source files or inline text.
+            };
+
+            /**
              * @brief IPv6 address assignment mode for server-side data plane.
              *
              * Controls which IPv6 provisioning strategy the server uses when
@@ -241,6 +273,7 @@ namespace ppp {
 #endif
                 ppp::vector<MappingConfiguration>                           mappings;       ///< List of static port mapping rules activated on connect.
                 ppp::vector<RouteConfiguration>                             routes;         ///< List of route sources imported after tunnel establishment.
+                ClientRoutingConfiguration                                  routing;        ///< Canonical routing policy; legacy route fields remain mirrored during migration.
                 struct {
                     int                                                     port;           ///< HTTP proxy listen port; 0 disables the local HTTP proxy.
                     ppp::string                                             bind;           ///< HTTP proxy bind address; empty = loopback only.
@@ -251,7 +284,35 @@ namespace ppp {
                     ppp::string                                             username;       ///< SOCKS5 authentication username; empty = no authentication.
                     ppp::string                                             password;       ///< SOCKS5 authentication password; empty = no authentication.
                 }                                                           socks_proxy;
+                bool                                                        proxy_only;     ///< Local HTTP/SOCKS runtime; suppresses host TUN routes/DNS takeover while native policy remains active (also implied by --mode=proxy).
             }                                                               client;         ///< Client-mode specific parameters.
+            struct {
+                bool                                                        enabled;        ///< Enable telemetry output when true; default false for zero-cost on low-end hardware.
+                int                                                         level;          ///< Minimum verbosity level to output: 0=INFO, 1=VERB, 2=DEBUG, 3=TRACE.
+                bool                                                        count;          ///< Enable counter metrics when true.
+                bool                                                        span;           ///< Enable trace spans when true.
+                ppp::string                                                 endpoint;       ///< Optional OTLP/gRPC endpoint; empty uses built-in stderr backend.
+                ppp::string                                                 log_file;       ///< Optional local log file path; empty disables file output.
+                bool                                                        console_log;    ///< Show log events on local console/file sink.
+                bool                                                        console_metric; ///< Show counter/gauge/histogram events on local console/file sink.
+                bool                                                        console_span;   ///< Show span events on local console/file sink.
+            }                                                               telemetry;      ///< Optional telemetry/observability configuration.
+            struct {
+                bool                                                        enabled;               ///< Enable geo-rules generation; default false (no-op).
+                ppp::string                                                 country;               ///< Target country/region code; default "cn".
+                ppp::string                                                 geoip_dat;             ///< Local GeoIP dat cache path for downloads; default "GeoIP.dat".
+                ppp::string                                                 geosite_dat;           ///< Local GeoSite dat cache path for downloads; default "GeoSite.dat".
+                ppp::string                                                 geoip_download_url;    ///< Optional URL used to download/update geoip_dat before generation.
+                ppp::string                                                 geosite_download_url;  ///< Optional URL used to download/update geosite_dat before generation.
+                ppp::vector<ppp::string>                                    geoip;                 ///< GeoIP/CIDR source file paths (text CIDR format).
+                ppp::vector<ppp::string>                                    geosite;               ///< GeoSite/domain source file paths (text domain format).
+                ppp::string                                                 dns_provider_domestic; ///< DNS provider for domestic rules; falls back to dns.servers.domestic or "doh.pub".
+                ppp::string                                                 dns_provider_foreign;  ///< DNS provider for foreign rules (reserved); falls back to dns.servers.foreign or "cloudflare".
+                ppp::string                                                 output_bypass;         ///< Generated bypass output file path; default "./generated/bypass-cn.txt".
+                ppp::string                                                 output_dns_rules;      ///< Generated DNS rules output file path; default "./generated/dns-rules-cn.txt".
+                ppp::vector<ppp::string>                                    append_bypass;         ///< Extra CIDR lines or file paths appended after GeoIP results.
+                ppp::vector<ppp::string>                                    append_dns_rules;      ///< Extra DNS rule lines, file paths, or rules:// URLs appended after GeoSite results.
+            }                                                               geo_rules;      ///< GeoIP/GeoSite rule generation configuration (Phase G).
         public:
             /**
              * @brief Initializes configuration fields to default values.
@@ -358,6 +419,14 @@ namespace ppp {
              * @return True when normalization completes.
              */
             bool                                                            Normalize() noexcept { return Loaded(); }
+            /**
+             * @brief Applies the client proxy-only runtime defaults.
+             *
+             * Forces the local HTTP/SOCKS listeners onto loopback and enables
+             * the proxy-only runtime.  Used when the CLI requests proxy mode or
+             * the loaded configuration has client.proxy-only set.
+             */
+            void                                                            ApplyProxyModeDefaults() noexcept;
 
         private:
             /**

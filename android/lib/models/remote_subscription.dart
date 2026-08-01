@@ -133,12 +133,17 @@ class RemoteSubscriptionParser {
     client['mappings'] = const [];
     root['client'] = client;
 
+    // 优选 IP (CDN 加速)：节点 `websocket` 段（host/sni）必须合并到
+    // `client.websocket`，native 客户端握手时用它做 Host/SNI 头，而
+    // client.server 是 wss://优选IP:端口/路径。不写入顶层 `websocket`
+    // （那是服务端配置，客户端不读取）。
     final websocket = _mapOrEmpty(node['websocket']);
     if (websocket.isNotEmpty) {
-      root['websocket'] = {
-        ...Map<String, dynamic>.from(root['websocket'] as Map),
-        ...websocket,
-      };
+      final clientWs = (client['websocket'] is Map)
+          ? Map<String, dynamic>.from(client['websocket'] as Map)
+          : <String, dynamic>{};
+      client['websocket'] = {...clientWs, ...websocket};
+      root['client'] = client;
     }
     return root;
   }
@@ -153,10 +158,17 @@ class RemoteSubscriptionParser {
   }
 
   static void _validateServerUri(String value) {
-    if (!value.startsWith('ppp://')) {
-      throw const FormatException('server 必须以 ppp:// 开头');
+    // 支持 native UriAuxiliary 认识的协议。优选 IP 场景使用
+    // wss://优选IP:端口/路径，配合 client.websocket.host/sni。
+    const schemes = [
+      'ppp://', 'tcp://', 'ws://', 'wss://',
+      'http://', 'https://', 'socks://',
+    ];
+    final matched = schemes.where((s) => value.startsWith(s)).toList();
+    if (matched.isEmpty) {
+      throw const FormatException('server 必须以 ppp/ws/wss 等协议开头');
     }
-    final body = value.substring('ppp://'.length);
+    final body = value.substring(matched.first.length);
     if (body.isEmpty) {
       throw const FormatException('server 地址为空');
     }

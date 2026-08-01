@@ -592,7 +592,10 @@ class PppVpnService : VpnService() {
             vpnInterface = null
             PppLog.write(this, "detached tun fd=$tunFd")
 
-            // Set network interface for native layer
+            // Set network interface for native layer.  ipv6 must be the
+            // address actually configured on the TUN by Builder.addAddress()
+            // (the leak-block ULA), so native TranslateIPv6Packet can
+            // translate between it and the server-assigned IPv6 lease.
             val niResult = libopenppp2.set_network_interface(
                 tunFd,
                 mux,
@@ -600,7 +603,8 @@ class PppVpnService : VpnService() {
                 blockQuic,
                 staticMode,
                 vpnIp,
-                vpnMask
+                vpnMask,
+                IPV6_BLOCK_ADDRESS
             )
             PppLog.write(this, "set_network_interface result=$niResult")
             if (niResult != 0) {

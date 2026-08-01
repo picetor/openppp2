@@ -105,7 +105,8 @@ class libopenppp2 {
             block_quic: Boolean,
             static_mode: Boolean,
             ip: String,
-            mask: String
+            mask: String,
+            ipv6: String
         ): Int
 
         @JvmStatic

@@ -35,6 +35,32 @@ void main() {
     expect((root['key'] as Map)['protocol-key'], 'p-key');
   });
 
+  test('imports wss preferred-IP nodes with websocket host/sni into client.websocket', () {
+    final sub = RemoteSubscriptionParser.parse(jsonEncode({
+      'type': 'openppp2-subscription',
+      'version': 1,
+      'nodes': [
+        {
+          'id': 'cn-cdn-01',
+          'name': 'CDN 优选',
+          'server': 'wss://1.2.3.4:443/tun',
+          'key': {'protocol': 'aes-128-cfb', 'protocol-key': 'p-key'},
+          'websocket': {'host': 'tun.example.com', 'sni': 'tun.example.com'},
+        }
+      ]
+    }));
+
+    expect(sub.nodes, hasLength(1));
+    final root = jsonDecode(sub.nodes.first.json) as Map<String, dynamic>;
+    final client = root['client'] as Map<String, dynamic>;
+    expect(client['server'], 'wss://1.2.3.4:443/tun');
+    final ws = client['websocket'] as Map<String, dynamic>;
+    expect(ws['host'], 'tun.example.com');
+    expect(ws['sni'], 'tun.example.com');
+    // 不应写入顶层 websocket（那是服务端配置）
+    expect(root['websocket'], isNot(contains('host')));
+  });
+
   test('skips disabled nodes', () {
     final sub = RemoteSubscriptionParser.parse(jsonEncode({
       'type': 'openppp2-subscription',

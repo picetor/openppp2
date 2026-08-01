@@ -2032,15 +2032,28 @@ namespace ppp {
                         extensions.AssignedIPv6Address.to_string().c_str(),
                         address_prefix_length,
                         (int)gua_mode);
-                    ppp::ipv6::auxiliary::ApplyClientAddress(
+                    const bool applied = ppp::ipv6::auxiliary::ApplyClientAddress(
                         ctx,
                         extensions.AssignedIPv6Address,
                         address_prefix_length,
                         gua_mode,
                         state);
 
-                    // Update the tap object so the console display can show IPv6 info.
-                    tap->IPv6Address = extensions.AssignedIPv6Address;
+                    if (applied) {
+                        // Update the tap object so the console display can show IPv6 info.
+                        tap->IPv6Address = extensions.AssignedIPv6Address;
+                    }
+                    else {
+                        // The kernel-side address could not be applied (e.g. an
+                        // Android TUN whose addresses are fixed by
+                        // VpnService.Builder and cannot be changed from native
+                        // code without root).  Keep tap->IPv6Address pointing at
+                        // the TUN's real configured address so
+                        // VEthernetExchanger::TranslateIPv6Packet can translate
+                        // between that address and the server-assigned lease.
+                        LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: address not applied (rc=0), keeping tap->IPv6Address=%s",
+                            tap->IPv6Address.is_v6() ? tap->IPv6Address.to_string().c_str() : "(none)");
+                    }
 
                     // Pin server IPv6 route to the underlying physical NIC (avoid routing loop).
                     // OpenTransmission normally installs this before the first

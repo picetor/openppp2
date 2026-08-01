@@ -374,6 +374,37 @@ namespace ppp {
             config.client.websocket.host = "";
             config.client.websocket.sni = "";
             config.client.log = "";
+            config.client.proxy_only = false;
+            config.client.routing.configured = false;
+            config.client.routing.bypass.clear();
+            config.client.routing.routes.clear();
+            config.client.routing.peer_routes.clear();
+            config.client.routing.dns_rules.clear();
+
+            config.telemetry.enabled = false;
+            config.telemetry.level = 0;
+            config.telemetry.count = false;
+            config.telemetry.span = false;
+            config.telemetry.endpoint = "";
+            config.telemetry.log_file = "";
+            config.telemetry.console_log = true;
+            config.telemetry.console_metric = true;
+            config.telemetry.console_span = true;
+
+            config.geo_rules.enabled = false;
+            config.geo_rules.country = "cn";
+            config.geo_rules.geoip_dat = "GeoIP.dat";
+            config.geo_rules.geosite_dat = "GeoSite.dat";
+            config.geo_rules.geoip_download_url = "";
+            config.geo_rules.geosite_download_url = "";
+            config.geo_rules.geoip.clear();
+            config.geo_rules.geosite.clear();
+            config.geo_rules.dns_provider_domestic = "";
+            config.geo_rules.dns_provider_foreign = "";
+            config.geo_rules.output_bypass = "./generated/bypass-cn.txt";
+            config.geo_rules.output_dns_rules = "./generated/dns-rules-cn.txt";
+            config.geo_rules.append_bypass.clear();
+            config.geo_rules.append_dns_rules.clear();
 
             config._mux_mode_diagnostic.clear();
             memset(config._lcgmods, 0, sizeof(config._lcgmods));
@@ -1443,8 +1474,82 @@ namespace ppp {
             config.client.websocket.host = JsonAuxiliary::AsValue<ppp::string>(json["client"]["websocket"]["host"]);
             config.client.websocket.sni = JsonAuxiliary::AsValue<ppp::string>(json["client"]["websocket"]["sni"]);
             config.client.log = JsonAuxiliary::AsValue<ppp::string>(json["client"]["log"]);
+            AssignBoolIfPresent(config.client.proxy_only, json["client"]["proxy-only"]);
+
+            // Parse client.routing: canonical routing policy.  When present as
+            // an object, configured is set and both IP/DNS sources are loaded.
+            {
+                const Json::Value& routing_json = json["client"]["routing"];
+                if (routing_json.isObject()) {
+                    config.client.routing.configured = true;
+                    config.client.routing.bypass.clear();
+                    config.client.routing.routes.clear();
+                    config.client.routing.peer_routes.clear();
+                    config.client.routing.dns_rules.clear();
+
+                    const Json::Value& bypass_json = routing_json["bypass"];
+                    if (bypass_json.isArray()) {
+                        for (const Json::Value& item : bypass_json) {
+                            ppp::string value = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(item)));
+                            if (!value.empty()) {
+                                config.client.routing.bypass.push_back(value);
+                            }
+                        }
+                    }
+                    const Json::Value& dns_rules_json = routing_json["dns-rules"];
+                    if (dns_rules_json.isArray()) {
+                        for (const Json::Value& item : dns_rules_json) {
+                            ppp::string value = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(item)));
+                            if (!value.empty()) {
+                                config.client.routing.dns_rules.push_back(value);
+                            }
+                        }
+                    }
+                    const Json::Value& routes_json = routing_json["routes"];
+                    if (routes_json.isArray()) {
+                        for (const Json::Value& item : routes_json) {
+                            RouteConfiguration route;
+                            if (ReadJsonToRoute(route, item)) {
+                                config.client.routing.routes.push_back(route);
+                            }
+                        }
+                    }
+                    const Json::Value& peer_routes_json = routing_json["peer-routes"];
+                    if (peer_routes_json.isArray()) {
+                        for (const Json::Value& item : peer_routes_json) {
+                            PeerPrefixRouteConfiguration peer;
+                            peer.network = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(item["network"])));
+                            peer.prefix = JsonAuxiliary::AsValue<int>(item["prefix"]);
+                            peer.via = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(item["via"])));
+                            peer.guid = LTrim(RTrim(JsonAuxiliary::AsValue<ppp::string>(item["guid"])));
+                            config.client.routing.peer_routes.push_back(peer);
+                        }
+                    }
+                }
+            }
+
+            // Telemetry configuration.
+            AssignBoolIfPresent(config.telemetry.enabled, json["telemetry"]["enabled"]);
+            config.telemetry.level = JsonAuxiliary::AsValue<int>(json["telemetry"]["level"]);
+            AssignBoolIfPresent(config.telemetry.count, json["telemetry"]["count"]);
+            AssignBoolIfPresent(config.telemetry.span, json["telemetry"]["span"]);
+            config.telemetry.endpoint = JsonAuxiliary::AsValue<ppp::string>(json["telemetry"]["endpoint"]);
+            config.telemetry.log_file = JsonAuxiliary::AsValue<ppp::string>(json["telemetry"]["log-file"]);
+            AssignBoolIfPresent(config.telemetry.console_log, json["telemetry"]["console-log"]);
+            AssignBoolIfPresent(config.telemetry.console_metric, json["telemetry"]["console-metric"]);
+            AssignBoolIfPresent(config.telemetry.console_span, json["telemetry"]["console-span"]);
 
             // Geo-rules configuration (Phase G) — 已独立为 picetor/openppp2-geo-rules 项目
+            AssignBoolIfPresent(config.geo_rules.enabled, json["geo-rules"]["enabled"]);
+            config.geo_rules.country = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["country"]);
+            config.geo_rules.geoip_dat = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["geoip-dat"]);
+            config.geo_rules.geosite_dat = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["geosite-dat"]);
+            config.geo_rules.geoip_download_url = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["geoip-download-url"]);
+            config.geo_rules.geosite_download_url = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["geosite-download-url"]);
+            config.geo_rules.dns_provider_domestic = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["dns-provider-domestic"]);
+            config.geo_rules.dns_provider_foreign = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["dns-provider-foreign"]);
+            config.geo_rules.output_bypass = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["output-bypass"]);
+            config.geo_rules.output_dns_rules = JsonAuxiliary::AsValue<ppp::string>(json["geo-rules"]["output-dns-rules"]);
 
             bool loaded = Loaded();
             if (!loaded && ppp::diagnostics::ErrorCode::Success == ppp::diagnostics::GetLastErrorCode()) {
@@ -1683,8 +1788,111 @@ namespace ppp {
             client["websocket"]["host"] = config.client.websocket.host;
             client["websocket"]["sni"] = config.client.websocket.sni;
             client["log"] = config.client.log;
+            client["proxy-only"] = config.client.proxy_only;
+            if (config.client.routing.configured) {
+                Json::Value routing(Json::objectValue);
+                if (!config.client.routing.bypass.empty()) {
+                    Json::Value bypass(Json::arrayValue);
+                    for (const ppp::string& source : config.client.routing.bypass) {
+                        bypass.append(source);
+                    }
+                    routing["bypass"] = bypass;
+                }
+                if (!config.client.routing.dns_rules.empty()) {
+                    Json::Value dns_rules(Json::arrayValue);
+                    for (const ppp::string& source : config.client.routing.dns_rules) {
+                        dns_rules.append(source);
+                    }
+                    routing["dns-rules"] = dns_rules;
+                }
+                if (!config.client.routing.routes.empty()) {
+                    Json::Value routes(Json::arrayValue);
+                    for (const RouteConfiguration& route : config.client.routing.routes) {
+                        Json::Value item(Json::objectValue);
+                        item["ngw"] = Ipep::ToAddressString<ppp::string>(Ipep::ToAddress(route.ngw));
+#if defined(_LINUX)
+                        item["nic"] = route.nic;
+#endif
+                        item["path"] = route.path;
+                        routes.append(item);
+                    }
+                    routing["routes"] = routes;
+                }
+                if (!config.client.routing.peer_routes.empty()) {
+                    Json::Value peer_routes(Json::arrayValue);
+                    for (const PeerPrefixRouteConfiguration& peer : config.client.routing.peer_routes) {
+                        Json::Value item(Json::objectValue);
+                        item["network"] = peer.network;
+                        item["prefix"] = peer.prefix;
+                        item["via"] = peer.via;
+                        item["guid"] = peer.guid;
+                        peer_routes.append(item);
+                    }
+                    routing["peer-routes"] = peer_routes;
+                }
+                client["routing"] = routing;
+            }
 
             root["client"] = client;
+
+            // Telemetry configuration output.
+            {
+                Json::Value telemetry(Json::objectValue);
+                telemetry["enabled"] = config.telemetry.enabled;
+                telemetry["level"] = config.telemetry.level;
+                telemetry["count"] = config.telemetry.count;
+                telemetry["span"] = config.telemetry.span;
+                telemetry["endpoint"] = config.telemetry.endpoint;
+                telemetry["log-file"] = config.telemetry.log_file;
+                telemetry["console-log"] = config.telemetry.console_log;
+                telemetry["console-metric"] = config.telemetry.console_metric;
+                telemetry["console-span"] = config.telemetry.console_span;
+                root["telemetry"] = telemetry;
+            }
+
+            // Geo-rules configuration output.
+            {
+                Json::Value geo_rules(Json::objectValue);
+                geo_rules["enabled"] = config.geo_rules.enabled;
+                geo_rules["country"] = config.geo_rules.country;
+                geo_rules["geoip-dat"] = config.geo_rules.geoip_dat;
+                geo_rules["geosite-dat"] = config.geo_rules.geosite_dat;
+                geo_rules["geoip-download-url"] = config.geo_rules.geoip_download_url;
+                geo_rules["geosite-download-url"] = config.geo_rules.geosite_download_url;
+                if (!config.geo_rules.geoip.empty()) {
+                    Json::Value geoip(Json::arrayValue);
+                    for (const ppp::string& source : config.geo_rules.geoip) {
+                        geoip.append(source);
+                    }
+                    geo_rules["geoip"] = geoip;
+                }
+                if (!config.geo_rules.geosite.empty()) {
+                    Json::Value geosite(Json::arrayValue);
+                    for (const ppp::string& source : config.geo_rules.geosite) {
+                        geosite.append(source);
+                    }
+                    geo_rules["geosite"] = geosite;
+                }
+                geo_rules["dns-provider-domestic"] = config.geo_rules.dns_provider_domestic;
+                geo_rules["dns-provider-foreign"] = config.geo_rules.dns_provider_foreign;
+                geo_rules["output-bypass"] = config.geo_rules.output_bypass;
+                geo_rules["output-dns-rules"] = config.geo_rules.output_dns_rules;
+                if (!config.geo_rules.append_bypass.empty()) {
+                    Json::Value append_bypass(Json::arrayValue);
+                    for (const ppp::string& source : config.geo_rules.append_bypass) {
+                        append_bypass.append(source);
+                    }
+                    geo_rules["append-bypass"] = append_bypass;
+                }
+                if (!config.geo_rules.append_dns_rules.empty()) {
+                    Json::Value append_dns_rules(Json::arrayValue);
+                    for (const ppp::string& source : config.geo_rules.append_dns_rules) {
+                        append_dns_rules.append(source);
+                    }
+                    geo_rules["append-dns-rules"] = append_dns_rules;
+                }
+                root["geo-rules"] = geo_rules;
+            }
 
             return root;
         }
@@ -1788,6 +1996,28 @@ namespace ppp {
         void AppConfiguration::SetMuxModeRuntimeOverride(int mode_value) noexcept {
             int normalized = (mode_value >= 0 && mode_value <= 3) ? mode_value : -1;
             _mux_mode_runtime_override.store(normalized, std::memory_order_release);
+        }
+
+        /**
+         * @brief Applies the client proxy-only runtime defaults.
+         *
+         * Forces the local HTTP/SOCKS listeners onto loopback and enables the
+         * proxy-only runtime.  Default ports are assigned when the configured
+         * ports are outside the valid range.
+         */
+        void AppConfiguration::ApplyProxyModeDefaults() noexcept {
+            AppConfiguration& config = *this;
+
+            config.client.proxy_only = true;
+            config.client.http_proxy.bind = "127.0.0.1";
+            config.client.socks_proxy.bind = "127.0.0.1";
+
+            if (config.client.http_proxy.port <= IPEndPoint::MinPort) {
+                config.client.http_proxy.port = PPP_DEFAULT_HTTP_PROXY_PORT;
+            }
+            if (config.client.socks_proxy.port <= IPEndPoint::MinPort) {
+                config.client.socks_proxy.port = PPP_DEFAULT_SOCKS_PROXY_PORT;
+            }
         }
 
         namespace extensions {
