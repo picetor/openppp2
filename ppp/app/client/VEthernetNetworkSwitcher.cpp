@@ -3458,7 +3458,20 @@ namespace ppp {
 
             bool VEthernetNetworkSwitcher::Open(const std::shared_ptr<ITap>& tap) noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: starting");
-#if !defined(_ANDROID) && !defined(_IPHONE)
+#if defined(_ANDROID) || defined(_IPHONE)
+                // Mobile platforms never snapshot the physical NIC
+                // (underlying_ni_ is only populated on desktop), so
+                // direct_dns=local can contribute no servers here. The
+                // explicitly configured direct DNS servers from geo-rules.yaml
+                // (e.g. 223.5.5.5, 119.29.29.29) are still loaded so that
+                // domain rules (domain-suffix/geosite) can steer domestic DNS
+                // lookups to a direct resolver instead of the tunnel DNS, and
+                // the DNS response observation path can pin those domains'
+                // resolved IPs to direct. Without this the direct DNS list
+                // stays empty on Android/iOS and SelectDirectDnsServer()
+                // always fails, so domain-based geo rules never take effect.
+                RefreshDirectDnsServers();
+#else
                 // Get and retrieve the current underlying Ethernet interface information!
                 // This is needed in both TUN and proxy-only modes: proxy-only still
                 // requires the physical NIC info for IPv6 server route pinning.

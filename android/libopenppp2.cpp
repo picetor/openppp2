@@ -1826,7 +1826,7 @@ static int                                                                      
     // Phase G: load the GEO policy into the local ppp core.
     //
     // The Flutter profile carries the geo policy (`geoRules` block); the
-    // service materializes `./rules/geo-rules.txt` and calls set_geo_rules()
+    // service materializes `./rules/geo-rules.yaml` and calls set_geo_rules()
     // before run(). The GeoRuleEngine here is the same engine the desktop
     // client uses, so "country direct / everything else tunnel" (single
     // outbound) works on Android too. GeoRuleEngine also resolves the

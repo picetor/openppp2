@@ -30,11 +30,13 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
   final _geoDnsProviderForeign = TextEditingController();
   final _geoOutputBypass = TextEditingController();
   final _geoOutputDnsRules = TextEditingController();
+  String _geoCustomRules = '';
 
   bool _vnet = false;
   bool _blockQuic = false;
   bool _staticMode = true;
   bool _geoEnabled = true;
+  String _geoCountry = 'cn';
   bool _proxyOnly = false;
   bool _perAppProxyEnabled = false;
   String _perAppProxyMode = 'allow';
@@ -119,6 +121,8 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
         ? Map<String, dynamic>.from(m['geoRules'] as Map)
         : <String, dynamic>{};
     _geoEnabled = geo['enabled'] == true;
+    _geoCountry = (geo['country'] ?? 'cn').toString().trim().toLowerCase();
+    if (!RegExp(r'^[a-z]{2}$').hasMatch(_geoCountry)) _geoCountry = 'cn';
     _geoIpDownloadUrl.text = (geo['geoipDownloadUrl'] ?? '').toString();
     _geoSiteDownloadUrl.text = (geo['geositeDownloadUrl'] ?? '').toString();
     _geoIpFiles.text = (geo['geoipFiles'] ?? '').toString();
@@ -129,6 +133,7 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
         (geo['dnsProviderForeign'] ?? '').toString();
     _geoOutputBypass.text = (geo['outputBypass'] ?? '').toString();
     _geoOutputDnsRules.text = (geo['outputDnsRules'] ?? '').toString();
+    _geoCustomRules = (geo['customRules'] ?? '').toString();
   }
 
   Map<String, dynamic> _readForm(Map<String, dynamic> base) {
@@ -158,6 +163,7 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
     geo['dnsProviderForeign'] = _geoDnsProviderForeign.text.trim();
     geo['outputBypass'] = _geoOutputBypass.text.trim();
     geo['outputDnsRules'] = _geoOutputDnsRules.text.trim();
+    geo['customRules'] = _geoCustomRules.trim();
     options['geoRules'] = geo;
     return options;
   }
@@ -192,6 +198,79 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
       MaterialPageRoute(builder: (_) => const PerAppProxyPage()),
     );
     await _load();
+  }
+
+  String _defaultGeoRulesYaml(String country) {
+    final dns = country == 'cn'
+        ? 'local\n  - 223.5.5.5\n  - 119.29.29.29'
+        : 'local\n  - 1.1.1.1\n  - 8.8.8.8';
+    return '''
+# OpenPPP2 GEO 分流策略（Android）
+# 规则按书写顺序“首条命中”。直接命中的目标走物理网络（直连），
+# 其余全部走当前激活的隧道出口。
+version: 1
+final: tunnel
+
+direct_dns:
+  - $dns
+
+rules:
+  - ip-cidr,10.0.0.0/8,direct
+  - ip-cidr,100.64.0.0/10,direct
+  - ip-cidr,127.0.0.0/8,direct
+  - ip-cidr,169.254.0.0/16,direct
+  - ip-cidr,172.16.0.0/12,direct
+  - ip-cidr,192.168.0.0/16,direct
+  - domain-suffix,$country,direct
+  - geosite,$country,direct
+  - geoip,$country,direct
+''';
+  }
+
+  Future<void> _editGeoRulesFile() async {
+    final country = _geoCountry;
+    final controller = TextEditingController(
+      text: _geoCustomRules.trim().isNotEmpty
+          ? _geoCustomRules
+          : _defaultGeoRulesYaml(country),
+    );
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑 geo 分流文件'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: TextField(
+            controller: controller,
+            maxLines: null,
+            expands: true,
+            textAlignVertical: TextAlignVertical.top,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText:
+                  '# geo-rules.yaml\n# 直接编辑分流规则，保存后下次连接生效。\n# 规则格式：类型,值,动作（如 ip-cidr,10.0.0.0/8,direct）',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    setState(() {
+      _geoCustomRules = controller.text;
+      _markDirty();
+    });
+    controller.dispose();
   }
 
   Future<void> _copyToAll() async {
@@ -410,6 +489,41 @@ class _OptionsAdvancedPageState extends State<OptionsAdvancedPage> {
                               onChanged: _markDirty),
                           _text(_geoOutputDnsRules, 'output-dns-rules 路径',
                               onChanged: _markDirty),
+                          const Divider(height: 20),
+                          OutlinedButton.icon(
+                            onPressed: _editGeoRulesFile,
+                            icon: const Icon(Icons.edit_note_rounded),
+                            label: const Text('编辑 geo 分流文件 (geo-rules.yaml)'),
+                          ),
+                          if (_geoCustomRules.trim().isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.check_circle_rounded,
+                                      size: 16,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .primary),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      '已启用自定义 geo 分流文件（${_geoCustomRules.trim().split('\n').length} 行）',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall,
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => setState(() {
+                                      _geoCustomRules = '';
+                                      _markDirty();
+                                    }),
+                                    child: const Text('恢复默认'),
+                                  ),
+                                ],
+                              ),
+                            ),
                         ],
                       ],
                     ),
