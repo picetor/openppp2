@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/config_profile.dart';
+import '../runtime/runtime_controls.dart';
 import '../services/profile_store.dart';
 import '../services/subscription_service.dart';
+import '../vpn_service.dart';
 import '../widgets/profile_ui.dart';
 import 'profile_edit_page.dart';
 
@@ -162,6 +164,27 @@ class _ProfilesPageState extends State<ProfilesPage> {
   Future<void> _setActive(ConfigProfile p) async {
     await _store.setActive(p.id);
     await _load();
+    if (!mounted) return;
+    // VPN 正在运行时切换节点必须立即重连，否则旧会话（与订阅其它节点共用
+    // 同一 GUID）会一直挂在旧服务器上，造成管理端同一 GUID 双连接。
+    final phase = VpnService().runtimeStore.state.phase;
+    if (!controlsFor(phase).configEditable) {
+      final error = await VpnService().reconnectWithProfile(p);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error == null
+                ? '已切换到「${p.name}」，正在重连...'
+                : '切换到「${p.name}」失败：$error',
+          ),
+        ),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已切换到「${p.name}」')),
+    );
   }
 
   Future<void> _togglePin(ConfigProfile p) async {

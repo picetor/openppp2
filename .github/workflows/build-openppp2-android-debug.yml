@@ -48,27 +48,29 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Cache Android SDK components
         id: android-sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Only the exact components this build needs; the runner already
           # ships other SDK versions we must not bloat the cache with.
+          # v2: rebuilt after a corrupted tar entry failed to restore on the
+          # node24 runner (actions/cache v4 was pinned to node20).
           path: |
             ${{ env.ANDROID_SDK_ROOT }}/platforms/android-36
             ${{ env.ANDROID_SDK_ROOT }}/build-tools/36.0.0
             ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_R20B }}
             ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_FLUTTER }}
-          key: android-sdk-36-r20b-28-v1
+          key: android-sdk-36-r20b-28-v2
 
       - name: Install Android SDK and NDK packages
         if: steps.android-sdk-cache.outputs.cache-hit != 'true'
@@ -91,7 +93,7 @@ jobs:
 
       - name: Cache Android native dependencies
         id: android-native-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.ANDROID_THIRD_PARTY }}
           key: android-native-r20b-boost-1.74-openssl-1.1.1i-v1
@@ -119,7 +121,7 @@ jobs:
           ccache --version | head -n 1
 
       - name: Cache ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # ccache keys on the compiled content itself, so a stale cache is
           # still correct; bump the key when the toolchain changes.
@@ -144,7 +146,7 @@ jobs:
         # runner would generate a new keystore on every run, changing the APK
         # signature each build and breaking `adb install -r` over an existing
         # install. Cache the keystore so every build shares one signature.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.android/debug.keystore
           key: android-debug-keystore-v1
@@ -173,7 +175,7 @@ jobs:
         run: flutter pub get
 
       - name: Cache pub cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.PUB_CACHE }}
           key: pub-cache-${{ hashFiles('android/pubspec.lock') }}

@@ -409,9 +409,62 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _refreshStore();
     if (!mounted) return;
     if (!controlsFor(_runtimeStore.state.phase).configEditable) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已切换到「${profile.name}」，重连后生效')),
+      // VPN 正在运行：立即用新配置重连。native 的 startVpn 排队机制会先
+      // 停掉旧会话、再由 vpn 线程 finally 重放新配置，因此同一 GUID 不会
+      // 同时挂在两个服务器节点上（订阅节点共用同一 GUID 时曾出现的 bug）。
+      await _restartWithProfile(profile);
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已切换到「${profile.name}」，重连后生效')),
+    );
+  }
+
+  /// 运行中切换 profile 时的完整重连流程（guard / watchdog / 错误处理与
+  /// 手动连接一致）。native 端负责"先断开旧会话，再启动新会话"。
+  Future<void> _restartWithProfile(ConfigProfile profile) async {
+    if (_pendingStartGeneration != null) return;
+    setState(() {
+      _pendingStartGeneration = _runtimeStore.state.generation;
+    });
+    _vpnService.connecting = true;
+    try {
+      await _vpnService.clearLog();
+      final options = await _store.getProfileOptions(profile.id);
+      final telemetry = await TelemetrySettingsStore().settings();
+      final mergedJson = ProfileStore.effectiveJson(
+        profile.json,
+        options,
+        telemetry: telemetry,
       );
+      final accepted = await _vpnService.connect(
+        mergedJson,
+        vpnOptions: options,
+      );
+      if (!accepted) {
+        throw StateError('VPN start command was rejected');
+      }
+      // Drop the previous session watermark so the first mirrored snapshot of
+      // the restarted `:vpn` session is accepted even when its generation
+      // counter restarts.
+      _runtimeStore.endSession();
+      _startConnectWatchdog();
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已切换到「${profile.name}」，正在重连...')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _vpnService.connecting = false;
+      final error = e.toString();
+      setState(() {
+        _pendingStartGeneration = null;
+        _lastError = error;
+      });
+      await _showErrorDialog(error);
     }
   }
 
@@ -591,8 +644,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               activeId: _active?.id,
               shrinkWrap: true,
               maxHeight: MediaQuery.sizeOf(context).height * 0.38,
-              onTap: configEditable ? _applyProfile : null,
-              onApply: configEditable ? _applyProfile : null,
+              // 运行中也允许切换：_applyProfile 会触发 native 排队重连，
+              // 先断开旧节点再连新节点，避免同一 GUID 双连接。
+              onTap: _applyProfile,
+              onApply: _applyProfile,
               onEdit: configEditable ? _editProfile : null,
               onTogglePin: configEditable ? _togglePin : null,
             ),

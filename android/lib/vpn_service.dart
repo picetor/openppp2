@@ -2,10 +2,13 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'models/config_profile.dart';
 import 'runtime/runtime_bridge.dart';
 import 'runtime/runtime_snapshot.dart';
 import 'runtime/runtime_store.dart';
 import 'runtime/runtime_traffic_rate.dart';
+import 'services/profile_store.dart';
+import 'services/telemetry_settings_store.dart';
 
 class VpnService with WidgetsBindingObserver {
   static const _channel = MethodChannel('supersocksr.ppp/vpn');
@@ -173,6 +176,40 @@ class VpnService with WidgetsBindingObserver {
       return result ?? false;
     } on PlatformException catch (e) {
       throw Exception('VPN disconnect failed: ${e.message}');
+    }
+  }
+
+  /// Switches the live VPN to [profile] while a session is already active.
+  ///
+  /// The native `:vpn` service queues the new configuration and tears the old
+  /// session down first (its vpn-thread finally block replays the pending
+  /// config), so the same device GUID is never left connected to two server
+  /// nodes at the same time — the exact bug that appeared when switching
+  /// subscription nodes while the old connection stayed up.
+  ///
+  /// Returns `null` on success, or a human-readable error message. Only call
+  /// this while the VPN is running; use [connect] for a fresh start.
+  Future<String?> reconnectWithProfile(ConfigProfile profile) async {
+    final store = ProfileStore();
+    final options = await store.getProfileOptions(profile.id);
+    final telemetry = await TelemetrySettingsStore().settings();
+    final mergedJson = ProfileStore.effectiveJson(
+      profile.json,
+      options,
+      telemetry: telemetry,
+    );
+    // A restarted `:vpn` generation counts from zero again; drop the ordering
+    // baseline so the first snapshot of the new session is accepted, and treat
+    // empty mirror polls during the teardown/replay gap as "not yet" instead of
+    // flipping the UI to unknown.
+    runtimeStore.endSession();
+    connecting = true;
+    try {
+      await clearLog();
+      final accepted = await connect(mergedJson, vpnOptions: options);
+      return accepted ? null : 'VPN start command was rejected';
+    } catch (e) {
+      return e.toString();
     }
   }
 

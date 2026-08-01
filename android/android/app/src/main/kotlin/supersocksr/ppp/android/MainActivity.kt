@@ -319,16 +319,16 @@ class MainActivity : FlutterActivity() {
                     val uri = data.data
                     if (uri != null) {
                         val saved = importPickedFile(uri, dest)
-                        result.success(saved)
+                        result?.success(saved)
                     } else {
-                        result.error("IMPORT_FAILED", "No file selected", null)
+                        result?.error("IMPORT_FAILED", "No file selected", null)
                     }
                 } catch (e: Throwable) {
                     PppLog.write(this, "import file failed", e)
-                    result.error("IMPORT_FAILED", e.message ?: e.javaClass.name, null)
+                    result?.error("IMPORT_FAILED", e.message ?: e.javaClass.name, null)
                 }
             } else {
-                result.success(null) // User cancelled
+                result?.success(null) // User cancelled
             }
         }
     }
