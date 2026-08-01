@@ -567,15 +567,26 @@ namespace ppp {
             // ------------------------------------------------------------------
             // 从本地 ppp 库对象构造运行时状态（Android 适配入口）。
             // 实现在 OpenPPP2RuntimeState.cpp，避免头文件依赖 ppp 库内部类型。
+            // 前置声明必须位于 ppp::app::client 命名空间（顶层），否则
+            // 全限定名 ppp::app::client::VEthernetExchanger 会被内层
+            // namespace ppp 块劫持为 runtime::ppp::app::client。
             // ------------------------------------------------------------------
-            namespace ppp {
-                namespace app {
-                    namespace client {
-                        class VEthernetExchanger;
-                        class VEthernetNetworkSwitcher;
-                    }
-                }
-            }
+        }
+    }
+}
+
+namespace ppp {
+    namespace app {
+        namespace client {
+            class VEthernetExchanger;
+            class VEthernetNetworkSwitcher;
+        }
+    }
+}
+
+namespace ppp {
+    namespace app {
+        namespace runtime {
 
             ppp::app::mux::MuxRuntimeState GetClientMuxRuntimeState(
                 const std::shared_ptr<ppp::app::client::VEthernetExchanger>& exchanger);
