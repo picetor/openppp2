@@ -7,7 +7,6 @@ import '../services/profile_store.dart';
 ///
 /// openppp2 的配置参数极多，这里不维护逐项表单：
 /// 仅保留改名（名称/副标题/Emoji），配置本身通过 Raw JSON 直接编辑。
-/// 提供「优选 IP 模板」按钮，一键写入 wss://优选IP + client.websocket.host/sni。
 class ProfileEditPage extends StatefulWidget {
   final ConfigProfile? profile;
   const ProfileEditPage({super.key, this.profile});
@@ -35,7 +34,9 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
     final initialJson = p?.json ?? ProfileStore.defaultJson;
     _jsonController.text = _prettify(initialJson);
     _nameController.text = p?.name ?? 'New Profile';
-    _subtitleController.text = p?.subtitle ?? '';
+    // 副标题（城市）默认保持为空，不回填配置文件里解析出的 host/城市名，
+    // 由用户按需手动填写。
+    _subtitleController.text = '';
     _flagController.text = p?.flag ?? '';
   }
 
@@ -218,14 +219,10 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
             title: 'Raw JSON 配置 (主编辑区)',
             icon: Icons.code_rounded,
             children: [
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: _applyPreferredIpTemplate,
-                    icon: const Icon(Icons.rocket_launch_rounded),
-                    label: const Text('优选 IP 模板'),
-                  ),
-                  const SizedBox(width: 8),
                   OutlinedButton.icon(
                     onPressed: () {
                       _jsonController.text = _prettify(_jsonController.text);
@@ -233,7 +230,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                     icon: const Icon(Icons.auto_fix_high_rounded),
                     label: const Text('格式化'),
                   ),
-                  const SizedBox(width: 8),
                   OutlinedButton.icon(
                     onPressed: () {
                       _jsonController.text =
@@ -271,135 +267,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
           ),
         ],
       ),
-    );
-  }
-
-  /// 优选 IP 模板：把 client.server 改为 wss://优选IP:port/路径，
-  /// 并把 client.websocket.host/sni 设为真实域名（CDN Host/SNI）。
-  Future<void> _applyPreferredIpTemplate() async {
-    Map<String, dynamic> decode() {
-      try {
-        final d = jsonDecode(_jsonController.text);
-        return (d is Map) ? Map<String, dynamic>.from(d) : <String, dynamic>{};
-      } catch (_) {
-        return <String, dynamic>{};
-      }
-    }
-
-    final map = decode();
-    final client = (map['client'] is Map)
-        ? Map<String, dynamic>.from(map['client'] as Map)
-        : <String, dynamic>{};
-    final currentServer = (client['server'] ?? '').toString();
-
-    final ipController = TextEditingController();
-    final portController = TextEditingController(text: '443');
-    final domainController = TextEditingController();
-    final pathController = TextEditingController(text: '/tun');
-    try {
-      final uri = Uri.tryParse(currentServer);
-      if (uri != null && uri.host.isNotEmpty) {
-        ipController.text = uri.host;
-        if (uri.hasPort) portController.text = uri.port.toString();
-        if (uri.path.isNotEmpty && uri.path != '/') {
-          pathController.text = uri.path;
-        }
-        final ws = client['websocket'];
-        if (ws is Map && (ws['host']?.toString().isNotEmpty ?? false)) {
-          domainController.text = ws['host'].toString();
-        } else {
-          domainController.text = uri.host;
-        }
-      }
-    } catch (_) {}
-
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('优选 IP 模板'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: ipController,
-                decoration: const InputDecoration(
-                  labelText: '优选 IP / 域名',
-                  hintText: '1.2.3.4 或 edge.example.com',
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: portController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: '端口',
-                  hintText: '443',
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: pathController,
-                decoration: const InputDecoration(
-                  labelText: 'WebSocket 路径',
-                  hintText: '/tun',
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: domainController,
-                decoration: const InputDecoration(
-                  labelText: '真实域名 (Host/SNI)',
-                  hintText: 'your-domain.com',
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('应用'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-
-    final host = ipController.text.trim();
-    final port = int.tryParse(portController.text.trim()) ?? 443;
-    var path = pathController.text.trim();
-    final domain = domainController.text.trim();
-    if (host.isEmpty || domain.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请填写优选 IP 与真实域名')),
-      );
-      return;
-    }
-    if (!path.startsWith('/')) path = '/$path';
-    if (path.isEmpty || path == '/') path = '/tun';
-    final hostForUrl = host.contains(':') && !host.startsWith('[')
-        ? '[$host]'
-        : host;
-    client['server'] = 'wss://$hostForUrl:$port$path';
-    final ws = {
-      ...((client['websocket'] is Map)
-          ? Map<String, dynamic>.from(client['websocket'] as Map)
-          : <String, dynamic>{}),
-      'host': domain,
-      'sni': domain,
-    };
-    client['websocket'] = ws;
-    map['client'] = client;
-    _jsonController.text = const JsonEncoder.withIndent('  ').convert(map);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已套用优选 IP 模板，请核对 JSON 后保存')),
     );
   }
 
