@@ -85,6 +85,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final pending = _pendingStartGeneration;
       if (pending != null &&
           (_runtimeStore.state.generation > pending ||
+              phase == RuntimePhase.idle ||
+              phase == RuntimePhase.stopping ||
               phase == RuntimePhase.unknown ||
               phase == RuntimePhase.failed ||
               phase == RuntimePhase.connected)) {
@@ -382,8 +384,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!accepted) {
         throw StateError('VPN stop command was rejected');
       }
-      if (forceStop && mounted) {
-        setState(() => _pendingStopGeneration = null);
+      if (forceStop) {
+        // The runtime phase is unknown, usually because the :vpn process is
+        // dead or wedged, so no native snapshot will ever transition the UI
+        // to idle. Drop the mirrored baseline here instead; otherwise the UI
+        // sits on "force stop" forever and the next connect stays blocked.
+        _runtimeStore.resetForNewSession();
+        _vpnService.connecting = false;
       }
     } catch (e) {
       if (!mounted) return;

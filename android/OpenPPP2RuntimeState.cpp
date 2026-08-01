@@ -132,10 +132,19 @@ namespace ppp {
                         NULLPTR != exchanger &&
                         exchanger->GetNetworkState() ==
                             ppp::app::client::VEthernetExchanger::NetworkState_Established;
-                    facts.adapter_open = NULLPTR != client->GetTapNetworkInterface();
+                    // Android 上 VEthernetNetworkSwitcher 的 TUN 接口信息
+                    // （tun_ni_）由 open_switcher 通过 fd 建立，Open() 中
+                    // tun_ni_ 的赋值被 `#if !defined(_ANDROID)` 排除，因此
+                    // GetTapNetworkInterface() 在 Android 平台恒为 null，不能
+                    // 作为 adapter 就绪位——否则 readiness 永远不完整，native
+                    // 快照 phase 被 GateConnectedPhase 恒降级为 applying_policy，
+                    // Flutter UI 一直显示"连接中..."即使 VPN 已实际建立。
+                    // 会话建立（NetworkState_Established）即表示 TUN 适配器
+                    // 已接入并开始转发，adapter 位与会话位绑定。
+                    facts.adapter_open = facts.session_established;
 
                     // 本地 ppp 库不跟踪 route/dns/policy 的独立就绪位，
-                    // 按"不要求"处理，使会话建立 + 适配器打开即视为完全就绪。
+                    // 按"不要求"处理，使会话建立即视为完全就绪。
                     facts.route_required = false;
                     facts.dns_required = false;
                     facts.policy_negotiated = true;

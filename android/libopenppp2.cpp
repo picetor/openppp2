@@ -448,6 +448,11 @@ public:
     std::shared_ptr<Timer>                                                  timeout_ = 0;
     Stopwatch                                                               stopwatch_;
     std::shared_ptr<VEthernetNetworkSwitcher>                               client_;
+    // run() owns a work guard on its private io_context, so that context can
+    // never drain on its own. Release() must stop it explicitly, otherwise
+    // the vpn worker thread never leaves run() and the Android service never
+    // actually stops (ghost VPN, "stop" stuck forever).
+    std::shared_ptr<boost::asio::io_context>                                run_context_;
     std::shared_ptr<AppConfiguration>                                       configuration_;
     std::shared_ptr<libopenppp2_network_interface>                          network_interface_;
     std::shared_ptr<ppp::string>                                            bypass_ip_list_;
@@ -848,6 +853,14 @@ bool                                                                        libo
         &client_, std::shared_ptr<VEthernetNetworkSwitcher>());
     if (NULLPTR != client) {
         any = true;
+        // Android transfers ownership of ParcelFileDescriptor.detachFd() to
+        // native code. Close the TAP descriptor before the broader
+        // asynchronous object graph is released, otherwise Android can
+        // retain a ghost VPN after the Service itself has already stopped.
+        std::shared_ptr<ITap> tap = client->GetTap();
+        if (NULLPTR != tap) {
+            tap->Dispose();
+        }
         // Local VEthernetNetworkSwitcher::Dispose() is synchronous with
         // asynchronous teardown and has no cleanup callback, so report
         // completion immediately when we own the stop.
@@ -858,6 +871,17 @@ bool                                                                        libo
     }
     else if (stop_owner) {
         complete_stop(true);
+    }
+
+    // run() owns a work guard, so its private io_context cannot drain on its
+    // own. Stop it after the teardown above has been dispatched: the
+    // Finalize handlers run inline on this same context thread, and stopping
+    // afterwards lets the vpn worker thread leave run(), run the Java
+    // finally block (stopForeground/stopSelf) and truly end the session.
+    std::shared_ptr<boost::asio::io_context> run_context = std::move(run_context_);
+    if (NULLPTR != run_context) {
+        any = true;
+        run_context->stop();
     }
     return any;
 }
@@ -1996,6 +2020,11 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_run(JNIEnv* env
                     if (!protector->JoinJNI(context, env)) {
                         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::RuntimeEnvironmentInvalid, LIBOPENPPP2_ERROR_UNKNOWN);
                     }
+
+                    // Remember the io_context driving this run() session so
+                    // Release() can stop it and let the vpn worker thread
+                    // leave run() (its work guard never drains on its own).
+                    app->run_context_ = context;
 
                     return LIBOPENPPP2_ERROR_SUCCESS;
                 };
