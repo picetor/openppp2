@@ -2911,22 +2911,30 @@ namespace ppp {
                             upstream->socket = make_shared_object<boost::asio::ip::udp::socket>(*context);
                             boost::system::error_code ec;
                             upstream->socket->open(server.is_v4() ? boost::asio::ip::udp::v4() : boost::asio::ip::udp::v6(), ec);
-                            if (!ec) upstream->socket->connect({ server, PPP_DNS_SYS_PORT }, ec);
-                            if (ec) return false;
 #if defined(_ANDROID)
                             // VpnService routes 0.0.0.0/0 through the TUN. A
                             // direct DNS socket that is not protect()ed sends
                             // its query back into the tunnel where the native
                             // layer re-dispatches it as yet another DNS query,
                             // so the domestic resolver (e.g. 223.5.5.5) never
-                            // sees it and the query eventually times out. Bind
-                            // the socket to the physical network so the direct
-                            // resolver can actually reply.
-                            auto protector_network = GetProtectorNetwork();
-                            if (NULLPTR != protector_network) {
-                                protector_network->Protect(upstream->socket->native_handle());
+                            // sees it and the query eventually times out.
+                            //
+                            // VpnService.protect() must run BEFORE connect():
+                            // connect() performs the route lookup and pins the
+                            // socket to the tun0 route, so a protect() issued
+                            // after connect() only toggles a mark that is never
+                            // re-applied - the query keeps looping into the
+                            // tunnel. Protect right after open() so the route
+                            // decision in connect() picks the physical network.
+                            if (!ec) {
+                                auto protector_network = GetProtectorNetwork();
+                                if (NULLPTR != protector_network) {
+                                    protector_network->Protect(upstream->socket->native_handle());
+                                }
                             }
 #endif
+                            if (!ec) upstream->socket->connect({ server, PPP_DNS_SYS_PORT }, ec);
+                            if (ec) return false;
                         }
                         local_dns_upstreams_[upstream_key] = upstream;
                     }
