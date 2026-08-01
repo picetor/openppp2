@@ -506,7 +506,7 @@ class _StatusDot extends StatelessWidget {
             color: color.withValues(alpha: 0.42),
             blurRadius: 10,
           ),
-        ),
+        ],
       ),
     );
   }
