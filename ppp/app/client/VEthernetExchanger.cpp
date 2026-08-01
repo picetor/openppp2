@@ -407,9 +407,17 @@ namespace ppp {
                 }
 
 #if defined(_LINUX)
-                // If IPV4 is not a loop IP address, it needs to be linked to a physical network adapter. 
-                // IPV6 does not need to be linked, because VPN is IPV4, 
-                // And IPV6 does not affect the physical layer network communication of the VPN.
+                // The VPN transport socket must bypass the VPN itself or it
+                // loops back into the tunnel. On Android, VpnService claims
+                // 0.0.0.0/0 AND ::/0 (IPv6 leak protection), and the ip rule
+                // set hijacks any unmarked socket (fwmark 0x0/0x20000) back
+                // into tun0. A server that is IPv6-only (e.g. a ppp://
+                // endpoint on 2400::/12) previously skipped protect() here
+                // because "VPN is IPv4", so the handshake packet entered the
+                // tunnel, got re-dispatched as ordinary VPN traffic, and the
+                // server was never reached - phase stayed "connected" (the
+                // TUN exists) while every tunneled flow timed out. Protect
+                // IPv4 and IPv6 alike.
                 if (!remoteIP.is_loopback()) {
                     auto protector_network = switcher_->GetProtectorNetwork(); 
                     if (NULLPTR != protector_network) {
