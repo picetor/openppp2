@@ -373,8 +373,8 @@ Socks Proxy           : 127.0.0.1:1080/socks
       "enabled": true,
       "distribute": true,
       "allowed-routes": [
-        { "network": "192.168.11.0", "prefix": 24 },
-        { "network": "192.168.68.0", "prefix": 24 }
+        { "network": "192.168.11.0", "prefix": 24, "guid": "{PVE-GUID}" },
+        { "network": "192.168.68.0", "prefix": 24, "guid": "{WIN-GUID}" }
       ]
     }
   }
@@ -385,60 +385,60 @@ Socks Proxy           : 127.0.0.1:1080/socks
 |------|------|
 | `peer-routing.enabled` | 启用 peer 前缀路由 |
 | `peer-routing.distribute` | 设为 `true` 时服务端自动广播全局路由快照，客户端无需静态 `peer-routes` |
+| `allowed-routes[].guid` | 将网段与特定客户端 GUID 绑定（可选；省略则匹配任意 GUID） |
 | `allowed-routes` | **fail-closed 白名单**。必须声明允许宣告的每个 LAN 网段，否则宣告会被拒绝（telemetry: `server.peer_route.announce_rejected`） |
 
 > `server.subnet=true` + `server.ipv4-pool` 是 peer 路由的**前置条件**，缺一不可（代码 `IsPeerRoutingEnabled()` 要求 `subnet && peer_routing.enabled` 同时成立）。
 
-### 网关客户端配置（宣告方）
+### 客户端配置
 
-宣告自己的 LAN 网段给其他客户端，并开启网关转发以接收回程流量：
+两端对称宣告 + 互通。`peer-route-announce` 宣告自己的 LAN，`peer-routes` 安装对端的 LAN 路由，`peer-gateway-forward=true` 开启网关转发。
+
+**pve 网关**（`192.168.12.2`，LAN `192.168.11.0/24`）：
 
 ```json
 {
   "client": {
-    "guid": "{PVE-GATEWAY-GUID}",
+    "guid": "{PVE-GUID}",
+    "server": "hk.example.com:20000",
     "peer-route-announce": [
       { "network": "192.168.11.0", "prefix": 24 }
     ],
-    "peer-gateway-forward": true
+    "peer-gateway-forward": true,
+    "peer-routes": [
+      { "network": "192.168.68.0", "prefix": 24, "via": "192.168.12.68" }
+    ]
   }
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `peer-route-announce[]` | 宣告的 LAN 网段列表；`network` 只写纯 IP，`prefix` 独立字段（**不支持** `"192.168.11.0/24"` 写法） |
-| `peer-gateway-forward` | 允许接收目标 IP 不等于本机虚拟 IP 的包，即网关转发（默认 `false`，仅接收发给自己的包） |
-
-> `peer-gateway-forward=false`（默认）时，服务端仍会通过此客户端转发流量到其宣告的 LAN，但该客户端自身的 `OnNat` 接收门会拒绝非本机 IP 的包（telemetry: `client.peer_gateway_forward.rejected`）。
-
-### 访问方客户端配置（接收方）
-
-**动态路由（推荐）**：服务端 `distribute=true` 时自动生效，无需任何配置。
-
-**静态路由（可选）**：`via` 必须指向对端网关的虚拟 IP（**不是自己的 `--tun-ip`**）：
+**Windows PC**（`192.168.12.68`，LAN `192.168.68.0/24`）：
 
 ```json
 {
   "client": {
-    "routing": {
-      "ip": {
-        "peer-routes": [
-          { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
-        ]
-      }
-    }
+    "guid": "{WIN-GUID}",
+    "server": "hk.example.com:20000",
+    "peer-route-announce": [
+      { "network": "192.168.68.0", "prefix": 24 }
+    ],
+    "peer-gateway-forward": true,
+    "peer-routes": [
+      { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
+    ]
   }
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `peer-routes[].network` | 纯 IP，不带 CIDR 斜杠 |
-| `peer-routes[].prefix` | 前缀长度，1-32 |
-| `peer-routes[].via` | **必填**。对端网关的虚拟 IP，不等于本机 `--tun-ip` |
+| `peer-route-announce[]` | 宣告的 LAN 网段；`network` 纯 IP + `prefix` 独立字段（**不支持** `"192.168.11.0/24"` 写法） |
+| `peer-gateway-forward` | 允许接收目标 IP 不等于本机虚拟 IP 的包（默认 `false`，仅收发给自己的包） |
+| `peer-routes` | 静态安装对端 LAN 路由；`network`/`prefix` 同上，`via` **必填**且指向对端虚拟 IP |
 
-### 典型拓扑示例
+> 服务端 `distribute=true` 时客户端**可省略 `peer-routes`**（动态快照自动安装）。`peer-routes` 也可放在 `client.routing.ip.peer-routes` 中（与 `--bypass` 路由同层级）。`peer-gateway-forward=false` 时服务端仍会转发，但客户端 `OnNat` 门会拒绝非本机 IP 的包（telemetry: `client.peer_gateway_forward.rejected`）。
+
+### 典型拓扑
 
 ```
 香港服务器 (192.168.12.1)
@@ -446,9 +446,9 @@ Socks Proxy           : 127.0.0.1:1080/socks
   └─ Windows PC  (192.168.12.68) → LAN: 192.168.68.0/24
 ```
 
-pve 宣告 `11.0/24`，Windows 宣告 `68.0/24`，双方自动安装对端路由后即可 `ping 192.168.68.5` ↔ `ping 192.168.11.5`。
+pve 宣告 `11.0/24`，Windows 宣告 `68.0/24`，双方安装对端路由后即可 `ping 192.168.68.5` ↔ `ping 192.168.11.5`。
 
-Windows 侧需额外**开启 IPv4 转发并放行防火墙**：
+Windows 需额外**开启 IPv4 转发并放行防火墙**：
 
 ```powershell
 netsh interface ipv4 set global forwarding=enabled

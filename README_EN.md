@@ -378,8 +378,8 @@ Client A (192.168.11.0/24) ──announce──→ Server(RIB distribute) ──
       "enabled": true,
       "distribute": true,
       "allowed-routes": [
-        { "network": "192.168.11.0", "prefix": 24 },
-        { "network": "192.168.68.0", "prefix": 24 }
+        { "network": "192.168.11.0", "prefix": 24, "guid": "{PVE-GUID}" },
+        { "network": "192.168.68.0", "prefix": 24, "guid": "{WIN-GUID}" }
       ]
     }
   }
@@ -390,58 +390,58 @@ Client A (192.168.11.0/24) ──announce──→ Server(RIB distribute) ──
 |-------|-------------|
 | `peer-routing.enabled` | Enable peer prefix routing |
 | `peer-routing.distribute` | When `true`, the server broadcasts a global route snapshot so clients don't need static `peer-routes` |
+| `allowed-routes[].guid` | Bind a subnet to a specific client GUID (optional; omit to match any GUID) |
 | `allowed-routes` | **Fail-closed allowlist**. Every LAN subnet that may be announced must be listed here, or the announce is rejected (telemetry: `server.peer_route.announce_rejected`) |
 
 > `server.subnet=true` + `server.ipv4-pool` are **prerequisites** for peer routing (`IsPeerRoutingEnabled()` requires both `subnet && peer_routing.enabled`).
 
-### Gateway Client (Announcer)
+### Client Configuration
 
-Announces its LAN subnets and enables gateway forwarding for return traffic:
+Both sides symmetrically announce and interconnect. `peer-route-announce` advertises the local LAN, `peer-routes` installs the remote LAN route, and `peer-gateway-forward=true` enables gateway forwarding.
+
+**pve gateway** (`192.168.12.2`, LAN `192.168.11.0/24`):
 
 ```json
 {
   "client": {
-    "guid": "{PVE-GATEWAY-GUID}",
+    "guid": "{PVE-GUID}",
+    "server": "hk.example.com:20000",
     "peer-route-announce": [
       { "network": "192.168.11.0", "prefix": 24 }
     ],
-    "peer-gateway-forward": true
+    "peer-gateway-forward": true,
+    "peer-routes": [
+      { "network": "192.168.68.0", "prefix": 24, "via": "192.168.12.68" }
+    ]
   }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `peer-route-announce[]` | LAN subnets to announce; `network` is the bare IP and `prefix` is a separate field (the `"192.168.11.0/24"` CIDR format is **not supported**) |
-| `peer-gateway-forward` | Accept packets whose destination IP differs from the local virtual IP (default `false` — only accepts packets addressed to itself) |
-
-> When `peer-gateway-forward=false` (default), the server still forwards traffic through this client to its announced LAN, but the client's own `OnNat` ingress gate rejects non-local-IP packets (telemetry: `client.peer_gateway_forward.rejected`).
-
-### Accessing Client (Receiver)
-
-**Dynamic routing (recommended)**: Works automatically when server `distribute=true`; no configuration needed.
-
-**Static routing (optional)**: `via` must point to the remote gateway's virtual IP (**not your own `--tun-ip`**):
+**Windows PC** (`192.168.12.68`, LAN `192.168.68.0/24`):
 
 ```json
 {
   "client": {
-    "routing": {
-      "ip": {
-        "peer-routes": [
-          { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
-        ]
-      }
-    }
+    "guid": "{WIN-GUID}",
+    "server": "hk.example.com:20000",
+    "peer-route-announce": [
+      { "network": "192.168.68.0", "prefix": 24 }
+    ],
+    "peer-gateway-forward": true,
+    "peer-routes": [
+      { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
+    ]
   }
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `peer-routes[].network` | Bare IP, no CIDR slash |
-| `peer-routes[].prefix` | Prefix length, 1–32 |
-| `peer-routes[].via` | **Required**. Remote gateway's virtual IP (not your own `--tun-ip`) |
+| `peer-route-announce[]` | LAN subnets to announce; `network` bare IP + separate `prefix` (CIDR `"192.168.11.0/24"` is **not supported**) |
+| `peer-gateway-forward` | Accept packets whose destination IP differs from the local virtual IP (default `false`) |
+| `peer-routes` | Static install of remote LAN routes; `network`/`prefix` same as above, `via` **required** and points to remote virtual IP |
+
+> When server `distribute=true`, clients **may omit `peer-routes`** (dynamic snapshot auto-installs). `peer-routes` can also be nested under `client.routing.ip.peer-routes` (same level as `--bypass` routes). With `peer-gateway-forward=false`, the server still forwards, but the client's `OnNat` gate rejects non-local-IP packets (telemetry: `client.peer_gateway_forward.rejected`).
 
 ### Typical Topology
 
@@ -451,7 +451,7 @@ Hong Kong server (192.168.12.1)
   └─ Windows PC     (192.168.12.68) → LAN: 192.168.68.0/24
 ```
 
-pve announces `11.0/24`, Windows announces `68.0/24`. After both sides auto-install the peer routes, `ping 192.168.68.5` ↔ `ping 192.168.11.5` works.
+pve announces `11.0/24`, Windows announces `68.0/24`. After both sides install peer routes, `ping 192.168.68.5` ↔ `ping 192.168.11.5` works.
 
 Windows requires additional **IPv4 forwarding and firewall rules**:
 
