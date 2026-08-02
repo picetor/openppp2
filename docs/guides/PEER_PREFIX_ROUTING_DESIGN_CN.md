@@ -181,6 +181,31 @@ bool VEthernetExchanger::OnNat(...) {
 
 **网关必须配 `client.peer-gateway-forward = true`**，否则非本机 TAP IP 的包会被拒绝。
 
+#### 3.3.1 回程路由死结与 `peer-local-bridge`（本分支补充）
+
+`peer-gateway-forward` 的前提是**网关宿主机能把包真正送达目标设备**。当 LAN 内设备的
+默认网关不是宿主机时，转发会断在回程：
+
+```
+PVE ──隧道──→ 网关 A (注入 TAP) ──三层转发──→ 68.10   ✅ 去程可达
+                                             68.10 回包 → 默认网关 68.1 → 无 12.0/24 路由 → 丢弃 ❌
+```
+
+**`client.peer-local-bridge = true`**（本分支新增）绕开该死结：入站包目标命中
+`peer-route-announce` 宣告网段时，不再注入 TAP 做三层转发，而是由 openppp2 在
+`OnNat` 处拦截并**从宿主机自身 LAN 地址主动 connect 目标设备**：
+
+```
+PVE ──隧道──→ openppp2 OnNat 拦截 ──本机 socket connect──→ 68.10
+                                    ↑ 源 = 192.168.68.249（宿主机 LAN 地址）
+                                    └─ 回包直接回到宿主机，全程不经过 68.1
+```
+
+本地连接源地址是宿主机 LAN 地址，回包天然回到宿主机，彻底绕开缺少回程路由的中间网关。
+实现为 `VEthernetPeerLocalBridgeConnection`（自建轻量 TCP 状态机：SYN/SYN-ACK/数据/FIN/RST
+桥接，隧道侧看到标准三次握手），5 元组连接表 + 超时回收；UDP 支持随版本演进。
+拦截发生在 `peer_gateway_forward` 门**之前**，命中桥接的包不再走三层转发。
+
 ### 3.4 服务端数据结构
 
 ```cpp

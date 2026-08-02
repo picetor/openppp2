@@ -291,6 +291,7 @@ namespace ppp {
                 ppp::vector<PeerPrefixRouteConfiguration>                   peer_routes;    ///< Static peer-gateway routes installed on connect.
                 ppp::vector<PeerPrefixRouteConfiguration>                   peer_route_announce; ///< Prefixes this client advertises as a gateway.
                 bool                                                        peer_gateway_forward = false; ///< Forward received remote-prefix packets to the local LAN.
+                bool                                                        peer_local_bridge = false; ///< Bridge inbound tunnel TCP/UDP to the locally announced peer LAN (source = local host).
                 struct {
                     int                                                     port;           ///< HTTP proxy listen port; 0 disables the local HTTP proxy.
                     ppp::string                                             bind;           ///< HTTP proxy bind address; empty = loopback only.

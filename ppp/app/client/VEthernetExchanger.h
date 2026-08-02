@@ -4,6 +4,7 @@
 #include <ppp/app/protocol/VirtualEthernetMappingPort.h>
 #include <ppp/app/protocol/VirtualEthernetPacket.h>
 #include <ppp/app/mux/vmux_net.h>
+#include <ppp/app/client/VEthernetPeerLocalBridge.h>
 #include <ppp/cryptography/Ciphertext.h>
 #include <ppp/Int128.h>
 #include <ppp/net/Ipep.h>
@@ -25,6 +26,7 @@ namespace ppp {
             class VEthernetExchanger : public ppp::app::protocol::VirtualEthernetLinklayer {
                 friend class                                                            VEthernetDatagramPort;
                 friend class                                                            VEthernetNetworkSwitcher;
+                friend class                                                            VEthernetPeerLocalBridgeConnection;
 
             public:
                 typedef std::shared_ptr<VEthernetNetworkSwitcher>                       VEthernetNetworkSwitcherPtr;
@@ -53,6 +55,9 @@ namespace ppp {
                 typedef ppp::unordered_map<void*, DeadlineTimerPtr>                     DeadlineTimerTable;
                 typedef ppp::transmissions::proxys::IForwarding                         IForwarding;
                 typedef std::shared_ptr<IForwarding>                                    IForwardingPtr;
+                typedef std::shared_ptr<VEthernetPeerLocalBridgeConnection>             VEthernetPeerLocalBridgeConnectionPtr;
+                typedef ppp::unordered_map<VEthernetPeerLocalBridgeKey,
+                    VEthernetPeerLocalBridgeConnectionPtr>                              VEthernetPeerLocalBridgeTable;
 
             public:
                 VEthernetExchanger(
@@ -167,6 +172,9 @@ namespace ppp {
                 }
                 bool                                                                    TranslateIPv6Packet(Byte* packet, int packet_length, bool outbound) noexcept;
                 void                                                                    Finalize() noexcept;
+                bool                                                                    OnPeerLocalBridge(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept;
+                VEthernetPeerLocalBridgeConnectionPtr                                   GetOrCreatePeerLocalBridge(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept;
+                void                                                                    CleanupPeerLocalBridges() noexcept;
                 void                                                                    ExchangeToEstablishState() noexcept;
                 void                                                                    ExchangeToConnectingState() noexcept;
                 void                                                                    ExchangeToReconnectingState() noexcept;
@@ -277,6 +285,7 @@ namespace ppp {
                 VEthernetDatagramPortTable                                              datagrams_;
                 DatagramPacketHandlerTable                                              datagram_handlers_;
                 ITransmissionPtr                                                        transmission_;
+                VEthernetPeerLocalBridgeTable                                           peer_local_bridges_;
                 std::atomic<NetworkState>                                               network_state_      = NetworkState_Connecting;
                 VirtualEthernetMappingPortTable                                         mappings_;
                 DeadlineTimerTable                                                      deadline_timers_;

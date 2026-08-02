@@ -325,6 +325,7 @@
     <ClCompile Include="ppp\net\rinetd\RinetdConnection.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetDatagramPort.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetExchanger.cpp" />
+    <ClCompile Include="ppp\app\client\VEthernetPeerLocalBridge.cpp" />
     <ClCompile Include="ppp\app\client\PeerPrefixRouteManager.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkSwitcher.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkTcpipConnection.cpp" />
@@ -634,6 +635,7 @@
     <ClInclude Include="ppp\net\rinetd\RinetdConnection.h" />
     <ClInclude Include="ppp\app\client\VEthernetDatagramPort.h" />
     <ClInclude Include="ppp\app\client\VEthernetExchanger.h" />
+    <ClInclude Include="ppp\app\client\VEthernetPeerLocalBridge.h" />
     <ClInclude Include="ppp\app\client\VEthernetNetworkSwitcher.h" />
     <ClInclude Include="ppp\app\client\VEthernetNetworkTcpipStack.h" />
     <ClInclude Include="ppp\app\client\VEthernetNetworkTcpipConnection.h" />

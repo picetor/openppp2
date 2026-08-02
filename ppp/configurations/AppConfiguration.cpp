@@ -388,6 +388,7 @@ namespace ppp {
             config.client.peer_routes.clear();
             config.client.peer_route_announce.clear();
             config.client.peer_gateway_forward = false;
+            config.client.peer_local_bridge = false;
 
             config.telemetry.enabled = false;
             config.telemetry.level = 0;
@@ -1516,6 +1517,7 @@ namespace ppp {
             LoadAllPeerPrefixRoutes(config.client.peer_routes, json["client"]["peer-routes"]);
             LoadAllPeerPrefixRoutes(config.client.peer_route_announce, json["client"]["peer-route-announce"]);
             AssignBoolIfPresent(config.client.peer_gateway_forward, json["client"]["peer-gateway-forward"]);
+            AssignBoolIfPresent(config.client.peer_local_bridge, json["client"]["peer-local-bridge"]);
 
             config.client.reconnections.timeout = JsonAuxiliary::AsValue<int>(json["client"]["reconnections"]["timeout"]);
             config.client.guid = JsonAuxiliary::AsValue<ppp::string>(json["client"]["guid"]);
@@ -1939,6 +1941,7 @@ namespace ppp {
                 }
             }
             client["peer-gateway-forward"] = config.client.peer_gateway_forward;
+            client["peer-local-bridge"] = config.client.peer_local_bridge;
 
             root["client"] = client;
 

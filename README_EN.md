@@ -428,6 +428,7 @@ Both sides symmetrically announce and interconnect. `peer-route-announce` advert
       { "network": "192.168.68.0", "prefix": 24 }
     ],
     "peer-gateway-forward": true,
+    "peer-local-bridge": true,
     "peer-routes": [
       { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
     ]
@@ -439,9 +440,31 @@ Both sides symmetrically announce and interconnect. `peer-route-announce` advert
 |-------|-------------|
 | `peer-route-announce[]` | LAN subnets to announce; `network` bare IP + separate `prefix` (CIDR `"192.168.11.0/24"` is **not supported**) |
 | `peer-gateway-forward` | Accept packets whose destination IP differs from the local virtual IP (default `false`) |
+| `peer-local-bridge` | When an inbound packet targets an announced subnet, actively connect to the target device from the local host and bridge (default `false`); bypasses intermediate gateways that lack a return route |
 | `peer-routes` | Static install of remote LAN routes; `network`/`prefix` same as above, `via` **required** and points to remote virtual IP |
 
 > When server `distribute=true`, clients **may omit `peer-routes`** (dynamic snapshot auto-installs). `peer-routes` can also be nested under `client.routing.ip.peer-routes` (same level as `--bypass` routes). With `peer-gateway-forward=false`, the server still forwards, but the client's `OnNat` gate rejects non-local-IP packets (telemetry: `client.peer_gateway_forward.rejected`).
+
+### Local LAN Bridge (`peer-local-bridge`)
+
+**When to use**: `peer-gateway-forward` breaks on the return path when a LAN device's default gateway is not the VPN host. Example: `68.10`'s default gateway is the `68.1` router, and `68.1` has no route back to the tunnel-side `12.0/24`. Packets from PVE to `68.10` are forwarded out, but replies are dropped at `68.10` (one-way ping).
+
+**How it works**: when enabled, openppp2 no longer injects inbound packets that match an announced subnet into the TAP/OS stack for L3 forwarding. Instead it intercepts them at `OnNat` and **actively connects to the target device from the local host**:
+
+```
+PVE ──tunnel──→ openppp2 (OnNat intercept) ──local socket connect──→ 68.10
+                                      ↑ source = 192.168.68.249 (host LAN address)
+                                      └─ replies go straight back to the host, never via 68.1
+```
+
+Because the local connection's source address is the host's own LAN address (e.g. `192.168.68.249`), replies naturally return to the host, completely bypassing the intermediate gateway that lacks a return route. Current implementation covers TCP (a lightweight built-in state machine: SYN/SYN-ACK/data/FIN/RST bridging; the PVE side sees a standard three-way handshake); UDP support evolves in later versions.
+
+| Key point | Description |
+|-----------|-------------|
+| Requirement | Inbound packet destination must match a subnet announced via `peer-route-announce` |
+| Relation to gateway forward | The intercept happens **before** the `peer_gateway_forward` gate; bridged packets never go through L3 forwarding |
+| Source address | Local LAN interface address (not the tunnel virtual IP) so replies are reachable |
+| State management | 5-tuple (client IP/port, server IP/port) connection table + 60s timeout reclamation |
 
 ### Typical Topology
 

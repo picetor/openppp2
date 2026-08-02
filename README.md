@@ -423,6 +423,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
       { "network": "192.168.68.0", "prefix": 24 }
     ],
     "peer-gateway-forward": true,
+    "peer-local-bridge": true,
     "peer-routes": [
       { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
     ]
@@ -434,9 +435,31 @@ Socks Proxy           : 127.0.0.1:1080/socks
 |------|------|
 | `peer-route-announce[]` | 宣告的 LAN 网段；`network` 纯 IP + `prefix` 独立字段（**不支持** `"192.168.11.0/24"` 写法） |
 | `peer-gateway-forward` | 允许接收目标 IP 不等于本机虚拟 IP 的包（默认 `false`，仅收发给自己的包） |
+| `peer-local-bridge` | 入站包目标命中宣告网段时，由本机主动连接目标设备并桥接（默认 `false`），绕开无回程路由的中间网关 |
 | `peer-routes` | 静态安装对端 LAN 路由；`network`/`prefix` 同上，`via` **必填**且指向对端虚拟 IP |
 
 > 服务端 `distribute=true` 时客户端**可省略 `peer-routes`**（动态快照自动安装）。`peer-routes` 也可放在 `client.routing.ip.peer-routes` 中（与 `--bypass` 路由同层级）。`peer-gateway-forward=false` 时服务端仍会转发，但客户端 `OnNat` 门会拒绝非本机 IP 的包（telemetry: `client.peer_gateway_forward.rejected`）。
+
+### 本地网段桥接（`peer-local-bridge`）
+
+**适用场景**：当 LAN 内设备的默认网关不是本机时，`peer-gateway-forward` 的转发链路会断在回程。例如 `68.10` 的默认网关是 `68.1` 路由器，而 `68.1` 没有去往隧道侧 `12.0/24` 的路由，于是 PVE → `68.10` 的包虽被转发出去，回包却在 `68.10` 处被丢弃（单向 ping 不通）。
+
+**工作原理**：开启后，openppp2 不再把命中宣告网段的入站包注入 TAP/OS 协议栈做三层转发，而是在 `OnNat` 处拦截并**从本机地址主动 connect 目标设备**：
+
+```
+PVE ──隧道──→ openppp2 (OnNat 拦截) ──本机 socket connect──→ 68.10
+                                    ↑ 源地址 = 192.168.68.249（本机 LAN 地址）
+                                    └─ 回包直接回到本机，全程不经过 68.1
+```
+
+由于本地连接的源地址是宿主机自身的 LAN 地址（如 `192.168.68.249`），回包天然回到宿主机，彻底绕开缺少回程路由的中间网关。当前实现覆盖 TCP（自建轻量状态机：SYN/SYN-ACK/数据/FIN/RST 桥接，PVE 侧看到标准三次握手），UDP 支持随版本演进。
+
+| 要点 | 说明 |
+|------|------|
+| 依赖 | 入站包目标必须命中 `peer-route-announce` 宣告的网段 |
+| 与网关转发的关系 | 拦截发生在 `peer_gateway_forward` 门**之前**，命中桥接的包不再走三层转发 |
+| 源地址 | 本机 LAN 接口地址（非隧道虚拟 IP），保证回包可达 |
+| 状态管理 | 5 元组（客户端 IP/端口、服务端 IP/端口）连接表 + 60s 超时回收 |
 
 ### 典型拓扑
 
