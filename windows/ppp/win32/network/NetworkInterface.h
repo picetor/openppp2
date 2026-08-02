@@ -136,6 +136,7 @@ namespace ppp
             bool                                                SetIPv6PrefixPolicyPreferULA() noexcept;
             bool                                                RestoreIPv6PrefixPolicyULA() noexcept;
             bool                                                SetIPv6InterfaceMetric(int interface_index, int metric) noexcept;
+            bool                                                SetIPv6RouterDiscovery(int interface_index, bool enabled) noexcept;
         }
     }
 }

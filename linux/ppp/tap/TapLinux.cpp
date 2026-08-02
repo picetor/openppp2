@@ -1537,6 +1537,9 @@ namespace ppp {
             if (bytes_transferred < 0) {
                 LOG_DEBUG("TapLinux::Output: write failed, tun=%d, size=%d, errno=%d", tun, packet_size, errno);
             }
+            else {
+                LOG_DEBUG("TapLinux::Output: write ok, tun=%d, size=%d, written=%zd, ssmt=%d, tlfd=%d", tun, packet_size, bytes_transferred, Ssmt() ? 1 : 0, ssmt_tls_.tun_fd_);
+            }
             return bytes_transferred > -1;
         }
 

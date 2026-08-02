@@ -179,7 +179,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4244;4819;4309;4334;4267;4566;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <AdditionalOptions>/execution-charset:utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/execution-charset:utf-8 /bigobj /FS %(AdditionalOptions)</AdditionalOptions>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <StringPooling>true</StringPooling>
       <IntelJCCErratum>true</IntelJCCErratum>

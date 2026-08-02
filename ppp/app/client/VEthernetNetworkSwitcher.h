@@ -186,6 +186,7 @@ namespace ppp {
                 bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
                 void                                                                ClearPeerPrefixRoutes() noexcept;
                 bool                                                                ApplyPeerPrefixRoutes(const ppp::app::protocol::VirtualEthernetInformationExtensions& extensions) noexcept;
+                const ppp::net::native::RouteEntry*                                 FindAppliedPeerPrefixRoute(uint32_t destination) noexcept;
                 const ppp::vector<ppp::net::native::RouteEntry>&                     GetAppliedPeerPrefixRoutes() const noexcept { return applied_peer_prefix_routes_; }
 
             public: 
@@ -394,7 +395,6 @@ namespace ppp {
                 bool                                                                IPAddressIsGatewayServer(UInt32 ip, UInt32 gw, UInt32 mask) noexcept { return ip == gw ? true : htonl((ntohl(gw) & ntohl(mask)) + 1) == ip; }
                 bool                                                                EchoOtherServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
                 bool                                                                EchoGatewayServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
-                const ppp::net::native::RouteEntry*                                 FindAppliedPeerPrefixRoute(uint32_t destination) noexcept;
                 bool                                                                IsLocalAnnouncedPeerPrefix(uint32_t source) noexcept;
 
             private:    
@@ -550,6 +550,7 @@ namespace ppp {
                 ppp::vector<IPv6ServerRoute>                                        ipv6_server_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
+                ppp::unordered_set<int>                                             ni_router_discovery_disabled_v6_;
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
                 std::atomic<bool>                                                   dns_guard_active_ = false;
                 std::atomic<int>                                                    dns_guard_workers_ = 0;

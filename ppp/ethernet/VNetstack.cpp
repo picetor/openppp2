@@ -637,6 +637,9 @@ namespace ppp {
             c->sync_ack_tap_driver_ = tap;
             c->sync_ack_byte_array_ = packet;
             c->sync_ack_bytes_size_ = ippkg_len;
+            LOG_DEBUG("DATAPLANE VNetstack::Output: delayed sync-ack stored, len=%d, client=%p, src=%u:%u, dest=%u:%u",
+                ippkg_len, (void*)c, (unsigned)ip->src, (unsigned)ntohs(tcp->src),
+                (unsigned)ip->dest, (unsigned)ntohs(tcp->dest));
             return true;
         }
 
@@ -1120,6 +1123,8 @@ namespace ppp {
             }
 #endif
 
+            LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: writing delayed SYN back, this=%p, tap=%p, len=%d, state=%u",
+                this, tap.get(), packet_length, sync_ack_state_.load());
             return tap->Output(packet, packet_length);
         }
     }

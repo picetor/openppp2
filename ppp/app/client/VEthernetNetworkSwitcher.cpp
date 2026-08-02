@@ -4146,11 +4146,34 @@ namespace ppp {
                     }
 
                     ni_dns_servers_v6_.clear();
+                    ni_router_discovery_disabled_v6_.clear();
                     ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v6;
+                    ppp::vector<int> non_tap_v6_indexes;
+                    // Bring up the loopback DNS proxy first so every NIC can
+                    // point at 127.0.0.1/[::1] and its queries are funneled into
+                    // the tunnel instead of racing the ISP resolver.
+                    StartLocalDnsProxy();
                     if (ppp::win32::network::GetAllNicsDnsAddressesV6(all_dns_v6)) {
-                        auto original = all_dns_v6.find(tap_if_index);
-                        if (original != all_dns_v6.end()) {
-                            ni_dns_servers_v6_[tap_if_index] = original->second;
+                        // Snapshot the original IPv6 DNS of every NIC so shutdown can
+                        // restore them.  The Windows DNS Client queries every NIC's
+                        // resolvers in parallel and accepts the first answer.  A
+                        // physical NIC (e.g. the Hyper-V vSwitch carrying the host
+                        // LAN) whose IPv6 DNS still points at the ISP resolver
+                        // answers instantly with GFW-polluted records and steals the
+                        // answer from the tunnel DNS.  Instead of clearing (which RA
+                        // RDNSS may re-inject) we pin every non-TAP NIC to the local
+                        // proxy ::1, a static value RA never overwrites.
+                        ni_dns_servers_v6_ = all_dns_v6;
+                        for (const auto& [if_index, servers] : all_dns_v6) {
+                            if (if_index != tap_if_index && !servers.empty()) {
+                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                // Disable RA so RDNSS cannot re-inject the ISP IPv6
+                                // resolver on Hyper-V vSwitch/underlying NICs.
+                                if (ppp::win32::network::SetIPv6RouterDiscovery(if_index, false)) {
+                                    ni_router_discovery_disabled_v6_.emplace(if_index);
+                                }
+                                non_tap_v6_indexes.emplace_back(if_index);
+                            }
                         }
                     }
                     ppp::win32::network::ClearDnsAddressesV6(tap_if_index);
@@ -4161,14 +4184,14 @@ namespace ppp {
                     if (NULLPTR != dns_guard_timer_) {
                         dns_guard_active_.store(true);
                         dns_guard_timer_->TickEvent =
-                            [self, tap_if_index, dns_if_index, system_dns_strings](ppp::threading::Timer*, ppp::threading::Timer::TickEventArgs&) noexcept {
+                            [self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v6_indexes](ppp::threading::Timer*, ppp::threading::Timer::TickEventArgs&) noexcept {
                                 if (!self->dns_guard_active_.load()) {
                                     return;
                                 }
 
                                 self->dns_guard_workers_.fetch_add(1);
                                 try {
-                                    std::thread([self, tap_if_index, dns_if_index, system_dns_strings]() noexcept {
+                                    std::thread([self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v6_indexes]() noexcept {
                                         if (!self->dns_guard_active_.load()) {
                                             self->dns_guard_workers_.fetch_sub(1);
                                             return;
@@ -4176,6 +4199,13 @@ namespace ppp {
 
                                         HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
                                         if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
+                                            // DHCPv6/RA may re-inject ISP IPv6 DNS after
+                                            // takeover; keep every non-TAP NIC pinned to
+                                            // the local proxy so the tunnel resolver
+                                            // always wins the parallel race.
+                                            for (int if_index : non_tap_v6_indexes) {
+                                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                            }
                                             ppp::win32::network::ClearDnsAddressesV6(tap_if_index);
                                             if (self->dns_guard_active_.load()) {
                                                 ppp::win32::network::ClearDnsAddresses(dns_if_index);
@@ -5555,7 +5585,16 @@ namespace ppp {
 #if defined(_WIN32)
                 MIB_IPFORWARDROW route;
                 if (ppp::win32::network::Router::GetBestRoute(ip, route)) {
-                    if (route.dwForwardDest == ip && route.dwForwardNextHop != gw) {
+                    if (route.dwForwardDest == ip) {
+                        uint32_t mask = IPEndPoint::PrefixToNetmask(prefix);
+                        if (route.dwForwardMask == mask && route.dwForwardNextHop == gw) {
+                            // The peer-prefix route already exists in the system table
+                            // (e.g. a leftover from a previous process). Re-adding it
+                            // would fail with ERROR_OBJECT_ALREADY_EXISTS, which made
+                            // ApplyPeerPrefixRoutes silently skip the route while the
+                            // OS route table still carried it. Treat it as installed.
+                            return true;
+                        }
                         ppp::win32::network::Router::Delete(route);
                     }
                 }
@@ -5896,6 +5935,18 @@ namespace ppp {
                     return false;
                 }
 
+                // Peer-prefix destinations (e.g. 192.168.11.0/24 announced by a peer
+                // gateway) must always be treated as direct: mux/direct
+                // sub-transmission terminates on the VPN server, which cannot reach
+                // peer LANs. Direct connects are routed through the TAP data plane,
+                // where peer-prefix TCP/UDP/ICMP is NAT'd via the announcing peer
+                // gateway. This check must precede Geo rules so a proxy policy can
+                // never override peer reachability.
+                uint32_t peer_prefix_ip = htonl(ip.to_v4().to_uint());
+                if (NULLPTR != FindAppliedPeerPrefixRoute(peer_prefix_ip)) {
+                    return true;
+                }
+
                 if (geo_rules_) {
                     auto decision = geo_rules_->MatchAddress(ip, ppp::threading::Executors::GetTickCount());
                     if (decision.Matched()) {
@@ -6028,6 +6079,12 @@ namespace ppp {
                 ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
                 ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
                 ppp::tap::TapWindows::DnsFlushResolverCache();
+                // Re-enable IPv6 router discovery on the NICs that had it disabled
+                // during takeover so RA/RDNSS can resume after the tunnel shuts down.
+                for (int if_index : ni_router_discovery_disabled_v6_) {
+                    ppp::win32::network::SetIPv6RouterDiscovery(if_index, true);
+                }
+                ni_router_discovery_disabled_v6_.clear();
                 // DNS is restored before the loopback service is stopped so there
                 // is no interval where physical NICs point at an unbound port.
                 StopLocalDnsProxy();

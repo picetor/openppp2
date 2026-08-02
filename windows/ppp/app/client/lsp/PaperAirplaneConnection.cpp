@@ -212,6 +212,27 @@ namespace ppp
                     // cannot silently send a secondary-outbound flow through main.
                     if (std::shared_ptr<VEthernetNetworkSwitcher> switcher = exchanger->GetSwitcher(); NULLPTR != switcher)
                     {
+                        // Peer-prefix destinations (e.g. 192.168.11.0/24 announced by
+                        // a peer gateway) must never use mux/direct sub-transmission:
+                        // both terminate on the server, which cannot reach peer LANs.
+                        // Connect locally instead so the OS routes the flow through the
+                        // TAP data plane, where peer-prefix TCP is NAT'd to the
+                        // announcing peer gateway (exactly like ICMP).
+                        if (host.is_v4() && NULLPTR != switcher->FindAppliedPeerPrefixRoute(htonl(host.to_v4().to_uint())))
+                        {
+                            AppConfigurationPtr direct_configuration = exchanger->GetConfiguration();
+                            if (NULLPTR == direct_configuration)
+                            {
+                                return false;
+                            }
+
+                            int rinetd_status = VEthernetNetworkTcpipConnection::Rinetd(self, exchanger, context, strand_,
+                                direct_configuration, socket, remoteEP, connection_rinetd_, y);
+                            LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, selected_outbound=peer-prefix-local, status=%d",
+                                this, remote_host.data(), rinetd_status);
+                            return rinetd_status == 0;
+                        }
+
                         std::shared_ptr<VEthernetExchanger> selected = switcher->GetExchanger(host);
                         if (NULLPTR == selected)
                         {
@@ -262,14 +283,26 @@ namespace ppp
 
                     int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger, "paper-airplane", this,
                         remoteEP, socket, connection_mux_, y);
-                    if (mux_status < 1) 
+                    if (mux_status == 0)
                     {
-                        return mux_status == 0;
+                        LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, mux selected, status=%d",
+                            this, remote_host.data(), mux_status);
+                        return true;
                     }
+                    if (mux_status < 0)
+                    {
+                        LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, mux connect_yield failed, fallback to direct, status=%d",
+                            this, remote_host.data(), mux_status);
+                    }
+
+                    LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, using direct sub-transmission, mux_status=%d",
+                        this, remote_host.data(), mux_status);
 
                     std::shared_ptr<ppp::transmissions::ITransmission> transmission = exchanger->ConnectTransmission(context, strand_, y);
                     if (NULLPTR == transmission)
                     {
+                        LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, ConnectTransmission failed",
+                            this, remote_host.data());
                         return false;
                     }
 
@@ -284,11 +317,15 @@ namespace ppp
                     bool ok = connection->Connect(y, transmission, stl::transform<ppp::string>(host.to_string()), port);
                     if (!ok)
                     {
+                        LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, remote CONNECT failed",
+                            this, remote_host.data());
                         IDisposable::DisposeReferences(connection, transmission);
                         return false;
                     }
 
                     this->connection_ = std::move(connection);
+                    LOG_DEBUG("PaperAirplaneConnection::OnConnect: source=paper-airplane, trace=%p, destination=%s, connected",
+                        this, remote_host.data());
                     return true;
                 }
             }

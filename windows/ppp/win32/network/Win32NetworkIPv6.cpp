@@ -569,6 +569,30 @@ namespace ppp
 
                 return ExecuteNetshCommand(command);
             }
+
+            bool SetIPv6RouterDiscovery(int interface_index, bool enabled) noexcept
+            {
+                if (interface_index < 0)
+                {
+                    return false;
+                }
+
+                // Disable/enable IPv6 router discovery (RA) processing on an
+                // interface.  When RA is disabled the interface no longer applies
+                // RDNSS (Recursive DNS Server) options from router advertisements,
+                // which prevents an ISP IPv6 DNS from being re-injected after
+                // ClearDnsAddressesV6() removes it.  Hyper-V external vSwitch
+                // adapters (e.g. vEthernet (Debian)) inherit the physical NIC's
+                // RA and continuously re-add the ISP resolver, racing the tunnel
+                // DNS in the Windows DNS client's parallel query.
+                // Using netsh: netsh interface ipv6 set interface <ifindex> routerdiscovery=disabled|enabled
+                char command[256];
+                ::snprintf(command, sizeof(command),
+                    "interface ipv6 set interface %d routerdiscovery=%s",
+                    interface_index, enabled ? "enabled" : "disabled");
+
+                return ExecuteNetshCommand(command);
+            }
         }
     }
 }
