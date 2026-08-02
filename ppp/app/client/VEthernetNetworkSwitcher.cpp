@@ -5442,6 +5442,32 @@ namespace ppp {
                     for (uint32_t ip : dns_serverss_[0]) {
                         AddRoute(ip, tap->GatewayServer, 32);
                     }
+
+                    // Remove any stale /32 host route that pins an address inside the
+                    // TAP virtual subnet (e.g. the virtual gateway) through the physical
+                    // gateway. Previous builds installed such routes when a physical NIC
+                    // had the virtual gateway configured as a DNS server; they shadow the
+                    // TAP on-link route and must be cleaned up even if the DNS is no longer
+                    // added to the direct list.
+                    uint32_t tap_virtual_network = ntohl(tap->IPAddress) & ntohl(tap->SubmaskAddress);
+                    uint32_t tap_virtual_mask = ntohl(tap->SubmaskAddress);
+#if defined(_WIN32)
+                    if (tap_virtual_mask != IPEndPoint::AnyAddress) {
+                        if (auto mib = ppp::win32::network::Router::GetIpForwardTable(); NULLPTR != mib) {
+                            for (DWORD i = 0; i < mib->dwNumEntries; i++) {
+                                MIB_IPFORWARDROW row = mib->table[i];
+                                if (row.dwForwardMask != 0xffffffffu) {
+                                    continue;
+                                }
+                                uint32_t dest = row.dwForwardDest;
+                                if ((dest & tap_virtual_mask) == tap_virtual_network &&
+                                    row.dwForwardNextHop != tap->GatewayServer) {
+                                    ppp::win32::network::Router::Delete(row);
+                                }
+                            }
+                        }
+                    }
+#endif
                 }
 
                 // Add the dns route table to the loopback settings of the physical nic.
