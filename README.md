@@ -29,6 +29,7 @@
   - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
 - [WSS 优选 IP 加速](#-wss-优选-ip-加速)
 - [SOCKS5 代理](#-socks5-代理)
+- [Peer 前缀路由](#-peer-前缀路由)
 - [改进与修复](#-改进与修复)
 - [CLI 参数对比](#-cli-参数对比)
 - [命令行接口（原版）](#-命令行接口原版)
@@ -347,6 +348,113 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | **CONNECT 无回复** | 建立隧道后未发送 SOCKS5 成功回复，客户端一直等待 | ✅ 正确发送 `REP=0` 回复 |
 | **域名端口损坏** | Null 终止符覆盖了端口高字节 | ✅ 先读端口再 Null 终止 |
 | **认证逻辑错误** | `&&` 而非 `\|\|` — 只需用户名或密码之一匹配即通过 | ✅ `\|\|` — 任一不匹配即拒绝 |
+
+---
+
+## 🌐 Peer 前缀路由
+
+通过 VPN 组网内的中央服务器自动交换各客户端所在 LAN 网段信息，使组网内任意两台设备都能直接互通各自的私有 IP，**无需手动维护路由表或额外隧道**。
+
+```
+客户端 A (192.168.11.0/24) ──宣告──→ 服务端(RIB 分发) ──快照──→ 客户端 B (192.168.68.0/24)
+       ↑                                                                          │
+       └──────────────────────────────────────────────────────────────────────────┘
+                        B 已自动安装去往 11.0/24 的路由，下一跳 = A 的虚拟 IP
+```
+
+### 服务端配置
+
+```json
+{
+  "server": {
+    "subnet": true,
+    "ipv4-pool": { "network": "192.168.12.0", "mask": "255.255.255.0" },
+    "peer-routing": {
+      "enabled": true,
+      "distribute": true,
+      "allowed-routes": [
+        { "network": "192.168.11.0", "prefix": 24 },
+        { "network": "192.168.68.0", "prefix": 24 }
+      ]
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `peer-routing.enabled` | 启用 peer 前缀路由 |
+| `peer-routing.distribute` | 设为 `true` 时服务端自动广播全局路由快照，客户端无需静态 `peer-routes` |
+| `allowed-routes` | **fail-closed 白名单**。必须声明允许宣告的每个 LAN 网段，否则宣告会被拒绝（telemetry: `server.peer_route.announce_rejected`） |
+
+> `server.subnet=true` + `server.ipv4-pool` 是 peer 路由的**前置条件**，缺一不可（代码 `IsPeerRoutingEnabled()` 要求 `subnet && peer_routing.enabled` 同时成立）。
+
+### 网关客户端配置（宣告方）
+
+宣告自己的 LAN 网段给其他客户端，并开启网关转发以接收回程流量：
+
+```json
+{
+  "client": {
+    "guid": "{PVE-GATEWAY-GUID}",
+    "peer-route-announce": [
+      { "network": "192.168.11.0", "prefix": 24 }
+    ],
+    "peer-gateway-forward": true
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `peer-route-announce[]` | 宣告的 LAN 网段列表；`network` 只写纯 IP，`prefix` 独立字段（**不支持** `"192.168.11.0/24"` 写法） |
+| `peer-gateway-forward` | 允许接收目标 IP 不等于本机虚拟 IP 的包，即网关转发（默认 `false`，仅接收发给自己的包） |
+
+> `peer-gateway-forward=false`（默认）时，服务端仍会通过此客户端转发流量到其宣告的 LAN，但该客户端自身的 `OnNat` 接收门会拒绝非本机 IP 的包（telemetry: `client.peer_gateway_forward.rejected`）。
+
+### 访问方客户端配置（接收方）
+
+**动态路由（推荐）**：服务端 `distribute=true` 时自动生效，无需任何配置。
+
+**静态路由（可选）**：`via` 必须指向对端网关的虚拟 IP（**不是自己的 `--tun-ip`**）：
+
+```json
+{
+  "client": {
+    "routing": {
+      "ip": {
+        "peer-routes": [
+          { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
+        ]
+      }
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `peer-routes[].network` | 纯 IP，不带 CIDR 斜杠 |
+| `peer-routes[].prefix` | 前缀长度，1-32 |
+| `peer-routes[].via` | **必填**。对端网关的虚拟 IP，不等于本机 `--tun-ip` |
+
+### 典型拓扑示例
+
+```
+香港服务器 (192.168.12.1)
+  ├─ pve 网关    (192.168.12.2) → LAN: 192.168.11.0/24
+  └─ Windows PC  (192.168.12.68) → LAN: 192.168.68.0/24
+```
+
+pve 宣告 `11.0/24`，Windows 宣告 `68.0/24`，双方自动安装对端路由后即可 `ping 192.168.68.5` ↔ `ping 192.168.11.5`。
+
+Windows 侧需额外**开启 IPv4 转发并放行防火墙**：
+
+```powershell
+netsh interface ipv4 set global forwarding=enabled
+New-NetFirewallRule -DisplayName "PPP LAN route forward" -Direction Inbound -Action Allow -InterfaceAlias "ppp" -Protocol Any
+```
+
 ## 🔧 改进与修复
 
 | 改进项 | 原版 | 本分支 |

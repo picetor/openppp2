@@ -29,6 +29,7 @@
   - [IPv6 DNS Configuration and Delivery](#-ipv6-dns-configuration-and-delivery)
 - [WSS Optimized IP Acceleration](#-wss-optimized-ip-acceleration)
 - [SOCKS5 Proxy](#-socks5-proxy)
+- [Peer Prefix Routing](#-peer-prefix-routing)
 - [Improvements & Bug Fixes](#-improvements--bug-fixes)
 - [CLI Parameters Comparison](#-cli-parameters-comparison)
 - [CLI Reference (Original)](#-cli-reference-original)
@@ -354,6 +355,110 @@ Socks Proxy           : 127.0.0.1:1080/socks
 | **Auth logic error** | Uses `&&` instead of `\|\|` — only one of username/password needed to pass | ✅ `\|\|` — reject if either credential mismatches |
 
 ---
+
+## 🌐 Peer Prefix Routing
+
+Let VPN members automatically exchange their LAN subnets through the central server, enabling any two devices in the mesh to reach each other's private IPs **without manual route tables or extra tunnels**.
+
+```
+Client A (192.168.11.0/24) ──announce──→ Server(RIB distribute) ──snapshot──→ Client B (192.168.68.0/24)
+       ↑                                                                               │
+       └───────────────────────────────────────────────────────────────────────────────┘
+                     B auto-installs route to 11.0/24 via A's virtual IP
+```
+
+### Server Configuration
+
+```json
+{
+  "server": {
+    "subnet": true,
+    "ipv4-pool": { "network": "192.168.12.0", "mask": "255.255.255.0" },
+    "peer-routing": {
+      "enabled": true,
+      "distribute": true,
+      "allowed-routes": [
+        { "network": "192.168.11.0", "prefix": 24 },
+        { "network": "192.168.68.0", "prefix": 24 }
+      ]
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `peer-routing.enabled` | Enable peer prefix routing |
+| `peer-routing.distribute` | When `true`, the server broadcasts a global route snapshot so clients don't need static `peer-routes` |
+| `allowed-routes` | **Fail-closed allowlist**. Every LAN subnet that may be announced must be listed here, or the announce is rejected (telemetry: `server.peer_route.announce_rejected`) |
+
+> `server.subnet=true` + `server.ipv4-pool` are **prerequisites** for peer routing (`IsPeerRoutingEnabled()` requires both `subnet && peer_routing.enabled`).
+
+### Gateway Client (Announcer)
+
+Announces its LAN subnets and enables gateway forwarding for return traffic:
+
+```json
+{
+  "client": {
+    "guid": "{PVE-GATEWAY-GUID}",
+    "peer-route-announce": [
+      { "network": "192.168.11.0", "prefix": 24 }
+    ],
+    "peer-gateway-forward": true
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `peer-route-announce[]` | LAN subnets to announce; `network` is the bare IP and `prefix` is a separate field (the `"192.168.11.0/24"` CIDR format is **not supported**) |
+| `peer-gateway-forward` | Accept packets whose destination IP differs from the local virtual IP (default `false` — only accepts packets addressed to itself) |
+
+> When `peer-gateway-forward=false` (default), the server still forwards traffic through this client to its announced LAN, but the client's own `OnNat` ingress gate rejects non-local-IP packets (telemetry: `client.peer_gateway_forward.rejected`).
+
+### Accessing Client (Receiver)
+
+**Dynamic routing (recommended)**: Works automatically when server `distribute=true`; no configuration needed.
+
+**Static routing (optional)**: `via` must point to the remote gateway's virtual IP (**not your own `--tun-ip`**):
+
+```json
+{
+  "client": {
+    "routing": {
+      "ip": {
+        "peer-routes": [
+          { "network": "192.168.11.0", "prefix": 24, "via": "192.168.12.2" }
+        ]
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `peer-routes[].network` | Bare IP, no CIDR slash |
+| `peer-routes[].prefix` | Prefix length, 1–32 |
+| `peer-routes[].via` | **Required**. Remote gateway's virtual IP (not your own `--tun-ip`) |
+
+### Typical Topology
+
+```
+Hong Kong server (192.168.12.1)
+  ├─ pve gateway    (192.168.12.2) → LAN: 192.168.11.0/24
+  └─ Windows PC     (192.168.12.68) → LAN: 192.168.68.0/24
+```
+
+pve announces `11.0/24`, Windows announces `68.0/24`. After both sides auto-install the peer routes, `ping 192.168.68.5` ↔ `ping 192.168.11.5` works.
+
+Windows requires additional **IPv4 forwarding and firewall rules**:
+
+```powershell
+netsh interface ipv4 set global forwarding=enabled
+New-NetFirewallRule -DisplayName "PPP LAN route forward" -Direction Inbound -Action Allow -InterfaceAlias "ppp" -Protocol Any
+```
 
 ## 🔧 Improvements & Bug Fixes
 
