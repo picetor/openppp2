@@ -395,6 +395,7 @@ namespace ppp {
                 bool                                                                EchoOtherServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
                 bool                                                                EchoGatewayServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
                 const ppp::net::native::RouteEntry*                                 FindAppliedPeerPrefixRoute(uint32_t destination) noexcept;
+                bool                                                                IsLocalAnnouncedPeerPrefix(uint32_t source) noexcept;
 
             private:    
                 VirtualEthernetLoggerPtr                                            logger_;

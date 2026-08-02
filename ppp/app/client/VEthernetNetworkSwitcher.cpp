@@ -366,8 +366,19 @@ namespace ppp {
                 }
 
                 uint32_t destination = packet->dest;
-                if (destination == tap->IPAddress || packet->src != tap->IPAddress) {
+                if (destination == tap->IPAddress) {
                     return false;
+                }
+                if (packet->src != tap->IPAddress) {
+                    // Peer gateway forward: a reply sourced by a local LAN host
+                    // behind this gateway client (an announced peer prefix, e.g.
+                    // 192.168.11.2 behind PVE's TAP 192.168.12.2) is not the TAP
+                    // address itself.  Relay it only when the source falls inside
+                    // one of this client's announced prefixes; without this the
+                    // return traffic is silently dropped on the outbound path.
+                    if (!IsLocalAnnouncedPeerPrefix(packet->src)) {
+                        return false;
+                    }
                 }
 
                 uint32_t gw = tap->GatewayServer;
@@ -2291,6 +2302,33 @@ namespace ppp {
                 }
 
                 return best;
+            }
+
+            bool VEthernetNetworkSwitcher::IsLocalAnnouncedPeerPrefix(uint32_t source) noexcept {
+                std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+
+                for (const auto& item : configuration->client.peer_route_announce) {
+                    if (item.prefix <= 0 || item.prefix > ppp::net::native::MAX_PREFIX_VALUE_V4 || item.network.empty()) {
+                        continue;
+                    }
+
+                    boost::system::error_code ec;
+                    boost::asio::ip::address address = StringToAddress(item.network.c_str(), ec);
+                    if (ec || !address.is_v4()) {
+                        continue;
+                    }
+
+                    uint32_t network = htonl(address.to_v4().to_uint());
+                    uint32_t mask = ppp::net::IPEndPoint::PrefixToNetmask(item.prefix);
+                    if ((source & mask) == (network & mask)) {
+                        return true;
+                    }
+                }
+
+                return false;
             }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
