@@ -1263,6 +1263,9 @@ namespace ppp {
                             }
                             if (primary_outbound_) {
                                 switcher_->OnInformation(ei);
+                                // Apply static peer routes even when server does not support ExtendedJson
+                                ppp::app::protocol::VirtualEthernetInformationExtensions empty_extensions;
+                                switcher_->ApplyPeerPrefixRoutes(empty_extensions);
                             }
                             elif(!ei->Valid()) {
                                 if (ITransmissionPtr transmission = transmission_; NULLPTR != transmission) {
@@ -1314,8 +1317,10 @@ namespace ppp {
                                 (int)information.ExtendedJson.empty(),
                                 (int)information.ExtendedJson.size(),
                                 (int)information.Extensions.AssignedIPv6Mode);
-                            if (primary_outbound_ && !information.ExtendedJson.empty()) {
-                                switcher_->ApplyIPv6Assignment(information.Extensions);
+                            if (primary_outbound_) {
+                                if (!information.ExtendedJson.empty()) {
+                                    switcher_->ApplyIPv6Assignment(information.Extensions);
+                                }
                                 switcher_->ApplyPeerPrefixRoutes(information.Extensions);
                             }
                         }
