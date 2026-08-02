@@ -5334,8 +5334,18 @@ namespace ppp {
                 }
 
                 // Obtain the IP address list of the DNS server configured on the current physical bearer NIC and VPN virtual network adapter.
+                // DNS servers that belong to the TAP virtual subnet (such as the virtual gateway)
+                // must never be pinned through the physical gateway; doing so would install a
+                // /32 host route that hijacks virtual gateway traffic away from the TAP adapter.
+                uint32_t tap_virtual_network = IPEndPoint::AnyAddress;
+                uint32_t tap_virtual_mask = IPEndPoint::AnyAddress;
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap_virtual_mask = ntohl(tap->SubmaskAddress);
+                    tap_virtual_network = ntohl(tap->IPAddress) & tap_virtual_mask;
+                }
+
                 auto add_dns_server_to_dns_servers =
-                    [](const std::shared_ptr<NetworkInterface>& ni, ppp::unordered_set<uint32_t>& dns_servers) noexcept {
+                    [&](const std::shared_ptr<NetworkInterface>& ni, ppp::unordered_set<uint32_t>& dns_servers) noexcept {
                         if (NULLPTR == ni) {
                             return false;
                         }
@@ -5378,6 +5388,14 @@ namespace ppp {
                             uint32_t dip = ip.to_v4().to_uint();
                             uint32_t tip = (dip & ips[1]);
                             if (tip == rip) {
+                                continue;
+                            }
+
+                            // Skip DNS servers inside the TAP virtual subnet. They are reachable
+                            // on-link through the virtual gateway, and pinning them via the
+                            // physical gateway would shadow the virtual gateway /32 route.
+                            if (tap_virtual_mask != IPEndPoint::AnyAddress &&
+                                (dip & tap_virtual_mask) == tap_virtual_network) {
                                 continue;
                             }
 
