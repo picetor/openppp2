@@ -1049,6 +1049,17 @@ namespace ppp {
                 }
 
                 VES::NatInformationPtr source = switcher_->FindNatInformation(ip->src);
+                if (NULLPTR == source && switcher_->IsPeerRoutingEnabled()) {
+                    // Return traffic from a peer-prefix network (e.g. a reply
+                    // sourced by a LAN host behind a gateway peer). The source
+                    // address is not a virtual IP in nats_, so resolve the
+                    // announcing gateway through the peer RIB and use its NAT
+                    // mapping as the source so the reply can be forwarded.
+                    uint32_t via = switcher_->FindGatewayVirtualIPForDestination(ip->src);
+                    if (via != 0) {
+                        source = switcher_->FindNatInformation(via);
+                    }
+                }
                 if (NULLPTR == source) {
                     return false;
                 }

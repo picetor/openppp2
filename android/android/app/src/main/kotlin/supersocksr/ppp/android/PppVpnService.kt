@@ -822,6 +822,22 @@ class PppVpnService : VpnService() {
                 PppLog.write(this, "set_mux_acceleration value=$muxAcceleration result=$accelResult")
             }
 
+            // ---- Force all traffic through the tunnel (root) ----
+            // Android 8+ lets apps explicitly bind sockets to a physical
+            // network (e.g. Chrome binds WiFi netId 195 -> fwmark 0xc3).
+            // netd installs `ip rule 11500 fwmark 0xc3 lookup wlan0` with
+            // HIGHER priority than the VPN rule (12000, lookup tun0), so
+            // those sockets bypass the tunnel and, if the physical path to
+            // the destination is blackholed, their TCP hangs with
+            // SYN_SENT [UNREPLIED]. Verified on Nokia 9 / Android 9:
+            // deleting the 11500 rule makes Chrome TCP go through tun0
+            // immediately (OUT=tun0 SRC=10.0.0.2). When we have root
+            // (Magisk), replace the bypass rules with same-priority rules
+            // that point fwmark 0xc3 at tun0 instead.
+            if (!proxyOnly) {
+                installTun0OverrideRules()
+            }
+
             // Start VPN in background thread (run() is blocking)
             PppLog.write(this, "before libopenppp2.run(0)")
             isRunning = true
@@ -853,6 +869,10 @@ class PppVpnService : VpnService() {
                     notifyError("VPN thread exception: ${e.message ?: e.javaClass.name}")
                 } finally {
                     isRunning = false
+                    // Clean up the root-installed routing override so a later
+                    // VPN session (or the OS after a network switch) can
+                    // reinstall it from a clean state.
+                    removeTun0OverrideRules()
                     stopLinkStatePoller()
                     stopHeartbeatPoller()
                     stopNetworkMonitor()
@@ -890,6 +910,105 @@ class PppVpnService : VpnService() {
             stopForeground(true)
             stopSelf()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Root-based routing override.
+    //
+    // Android netd normally installs (priority 11500, i.e. ABOVE the VPN
+    // rule at 12000):
+    //   ip rule add from all fwmark 0xc3/0xffff   iif lo lookup wlan0
+    //   ip rule add from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0
+    //
+    // fwmark 0xc3 = WiFi netId 195 (0xc3). Apps that explicitly bind their
+    // sockets to the WiFi network (Chrome does this for some connections)
+    // therefore match these rules BEFORE the tun0 rule and bypass the VPN.
+    // When the physical path to the server is unreachable, TCP hangs at
+    // SYN_SENT [UNREPLIED] -- exactly the Nokia 9 symptom.
+    //
+    // With root (Magisk) we DELETE those bypass rules.  Once gone, the
+    // fwmark 0xc3 packets fall through to rule 12000
+    // (fwmark 0x0/0x20000 iif lo lookup tun0) because bit 17 (0x20000) is
+    // clear, and are forced through the tunnel.  We deliberately do NOT add
+    // a same-priority tun0 rule: the tunnel transport socket is protected
+    // via VpnService.protect(), whose fwmark carries bit 17 (0x200c3);
+    // 0x200c3 & 0xffff == 0xc3 would match a `fwmark 0xc3/0xffff lookup
+    // tun0` rule and loop the tunnel into itself.  Verified on Nokia 9 /
+    // Android 9: deleting the 11500 rules makes Chrome TCP go through tun0
+    // immediately (OUT=tun0 SRC=10.0.0.2) while the tunnel keeps working.
+    private fun installTun0OverrideRules() {
+        if (!isRootAvailable()) {
+            PppLog.write(this, "tun0 override: root not available, skipping (Chrome may bypass VPN)")
+            return
+        }
+        val commands = listOf(
+            "ip rule del from all fwmark 0xc3/0xffff iif lo lookup wlan0 pref 11500",
+            "ip rule del from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0 pref 11500"
+        )
+        val results = runRootCommands(commands)
+        var deleted = 0
+        for ((cmd, ok) in commands.zip(results)) {
+            if (ok) {
+                deleted++
+                PppLog.write(this, "tun0 override: deleted $cmd")
+            }
+        }
+        PppLog.write(this, "tun0 override deleted $deleted/${commands.size} bypass rules")
+        // Sanity: show what 0xc3 rules remain after the deletion.
+        val remaining = runRootCommand("ip rule show | grep 0xc3")
+        PppLog.write(this, "tun0 override: remaining 0xc3 rules: ${remaining?.trim().orEmpty()}")
+    }
+
+    private fun removeTun0OverrideRules() {
+        if (!isRootAvailable()) return
+        // Re-add the standard WiFi bypass rules so the system policy is
+        // restored when the VPN goes away (netd re-adds them anyway, but
+        // this makes the window between VPN teardown and netd refresh
+        // explicit and avoids leaking a bypass-less policy if netd is slow).
+        val commands = listOf(
+            "ip rule add from all fwmark 0xc3/0xffff iif lo lookup wlan0 pref 11500",
+            "ip rule add from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0 pref 11500"
+        )
+        val results = runRootCommands(commands)
+        for ((cmd, ok) in commands.zip(results)) {
+            if (ok) {
+                PppLog.write(this, "tun0 override: restored $cmd")
+            }
+        }
+    }
+
+    private fun isRootAvailable(): Boolean {
+        return try {
+            val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().readText().trim()
+            val ok = process.waitFor() == 0 && output.contains("uid=0")
+            if (!ok) {
+                PppLog.write(this, "root check: su returned '$output'")
+            }
+            ok
+        } catch (e: Throwable) {
+            PppLog.write(this, "root check failed: ${e.message ?: e.javaClass.name}")
+            false
+        }
+    }
+
+    private fun runRootCommand(cmd: String): String? {
+        return try {
+            val process = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().readText().trim()
+            val ok = process.waitFor() == 0
+            if (!ok) {
+                PppLog.write(this, "root cmd failed: $cmd -> '$output'")
+            }
+            if (ok) output else null
+        } catch (e: Throwable) {
+            PppLog.write(this, "root cmd exception: $cmd -> ${e.message ?: e.javaClass.name}")
+            null
+        }
+    }
+
+    private fun runRootCommands(commands: List<String>): List<Boolean> {
+        return commands.map { cmd -> runRootCommand(cmd) != null }
     }
 
     private fun stopVpn() {
