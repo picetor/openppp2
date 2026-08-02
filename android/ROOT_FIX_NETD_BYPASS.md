@@ -80,6 +80,12 @@ netd 只在网络切换/连接事件时才重新下发规则——而这类事�
 openppp2 网络监控重连 → 重新执行 `installTun0OverrideRules()` → 覆盖
 再次生效。因此修复在稳态下有效。
 
+> 真机观察：VPN 网络建立完成（`VPN started with key=0`）的瞬间，netd 可能
+> 短暂重新下发 11500 规则（启动后 ~5s 的检查曾见到它出现）；但稳态下
+> （连接后 45s+、10 分钟+ 复查）规则保持已删除状态，未再复发。若在
+> 生产中发现 netd 在连接瞬间的重发造成窗口期，可加一个轻量 watchdog
+> （每 30s 检查 `ip rule show` 中 11500 是否回来，回来即删）。
+
 ### 13000 的规则不构成绕过
 
 `13000: from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0` 优先级低于
@@ -92,7 +98,26 @@ openppp2 网络监控重连 → 重新执行 `installTun0OverrideRules()` → �
 - [x] 删除规则后 curl 端到端通（Akamai 响应）
 - [x] 60s 内 netd 不恢复规则
 - [x] 规则可恢复（add 报 File exists 说明 netd 已恢复，无妨）
-- [ ] 打包 APK 后真机验证 Chrome 直接可上网（静态模式/默认模式）
+- [x] 打包 APK 后真机验证 Chrome 直接可上网（静态模式/默认模式）
+
+## 真机验证结果（2026-08-02，Nokia 9 / Android 9）
+
+APK 2.1.6（versionCode=5，含 `ca4d8f0f` root 修复）安装后连接 HKBN 隧道：
+
+| 检查项 | 结果 |
+|---|---|
+| vpn.log 删除日志 | `tun0 override deleted 2/2 bypass rules` ✓ |
+| 删除后 remaining | 仅 `19000: fwmark 0xc3/0x1ffff lookup wlan0`（不绕过）✓ |
+| 稳态 ip rule（45s 间隔 × 2） | 11500 保持已删除，未复发 ✓ |
+| 路由决策 | `ip route get 61.244.242.112 mark 0xc3` → `dev tun0 src 10.0.0.2` ✓ |
+| dmesg（Chrome 访问） | `TCP80IN OUT=tun0 SRC=10.0.0.2 DST=61.244.242.112 SYN/ACK/PSH/FIN MARK=0xc3` ✓ |
+| Chrome 实际上网 | example.com / example.org / NeverSSL 全部加载成功 ✓ |
+| DNS | `DNSPKTIN OUT=tun0 DST=8.8.8.8` 走隧道 ✓ |
+
+**结论：修复生效，Chrome 显式绑定 WiFi 的 socket（fwmark 0xc3）不再绕过
+VPN，TCP 完整握手 + 数据收发，无 SYN_SENT 卡死。**
+
+> 对比修复前：`OUT=wlan0 MARK=0xc3` + `SYN_SENT [UNREPLIED]` 卡死。
 
 ## 相关记忆
 
