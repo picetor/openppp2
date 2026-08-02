@@ -161,7 +161,7 @@ cdnst.net          /cloudflare/tun''';
     'muxMode': 'compat',
     'vnet': false,
     'blockQuic': false,
-    'staticMode': true,
+    'staticMode': false,
     'bypassIpList': '',
     'dnsRulesList': defaultSpeedtestDnsRules,
     // ---- Per-app proxy ----
@@ -723,7 +723,6 @@ cdnst.net          /cloudflare/tun''';
     Map<String, dynamic> options,
   ) {
     final out = Map<String, dynamic>.from(options);
-    out['staticMode'] = true;
     if (out['blockQuic'] == true) {
       out['blockQuic'] = false;
     }

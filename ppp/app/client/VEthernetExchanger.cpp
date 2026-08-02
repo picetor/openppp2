@@ -1137,6 +1137,8 @@ namespace ppp {
                 // through untouched, so the vnet branch below is unchanged.
                 bool is_ipv6 = NULLPTR != packet && packet_length >= ppp::ipv6::IPv6_HEADER_MIN_SIZE &&
                     (packet[0] >> 4) == ppp::ipv6::IPv6_VERSION;
+                LOG_DEBUG("DATAPLANE VEthernetExchanger::OnNat: entry, vnet=%d, is_ipv6=%d, len=%d, first=0x%02x",
+                    (int)vnet, (int)is_ipv6, packet_length, NULLPTR != packet ? (int)packet[0] : -1);
                 if (vnet || is_ipv6) {
                     // Peer gateway forward gate: unless client.peer-gateway-forward
                     // is enabled, inbound packets must be addressed to this host's

@@ -420,6 +420,9 @@ namespace ppp
 #if !defined(_WIN32)
                     elif(mta_)
                     {
+                        LOG_DEBUG("DATAPLANE VEthernet::TAP_PACKET_INPUT: ipv4, proto=%d, len=%d, src=%u, dest=%u",
+                            (int)ip_hdr::IPH_PROTO(iphdr), packet_length,
+                            (unsigned)iphdr->src, (unsigned)iphdr->dest);
                         // If tcp/ip synchronization is enabled in the case of multithreading.
                         if (ssmt_ > 0 && VETHERNET_INTERNAL::PacketSsmtInput(this, iphdr, packet_length))
                         {

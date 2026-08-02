@@ -306,6 +306,13 @@ namespace ppp {
             std::shared_ptr<TapTcpLink> link;
             std::shared_ptr<TapTcpClient> c;
 
+            LOG_DEBUG("DATAPLANE VNetstack::Input: entry, flags=0x%02x, src=%u:%u, dest=%u:%u, tcp_len=%d, gw=%u, tap_ip=%u, listen_port=%u",
+                (int)flags,
+                (unsigned)ip->src, (unsigned)ntohs(tcp->src),
+                (unsigned)ip->dest, (unsigned)ntohs(tcp->dest),
+                tcp_len, (unsigned)tap->GatewayServer, (unsigned)tap->IPAddress,
+                (unsigned)ntohs(this->listenEP_.Port));
+
             if (ip->dest == tap->GatewayServer) { // V->Local 
                 if ((link = this->FindTcpLink(tcp->dest))) {
                     link->Update();
@@ -316,6 +323,12 @@ namespace ppp {
                     tcp->src = link->dstPort;
                     ip->dest = link->srcAddr;
                     tcp->dest = link->srcPort;
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: V->Local link hit, nat_port=%u, rewritten dst=%u:%u",
+                        (unsigned)link->natPort, (unsigned)ip->dest, (unsigned)ntohs(tcp->dest));
+                }
+                else {
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: V->Local no link for port=%u -> RST",
+                        (unsigned)ntohs(tcp->dest));
                 }
             }
             elif(flags != TcpFlags::TCP_SYN) { // Local->V
@@ -327,17 +340,30 @@ namespace ppp {
                     tcp->src = link->natPort;
                     ip->dest = tap->IPAddress;
                     tcp->dest = ntohs(this->listenEP_.Port);
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: Local->V non-SYN link hit, nat_port=%u", (unsigned)link->natPort);
+                }
+                else {
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: Local->V non-SYN no link, src=%u:%u, dest=%u:%u -> RST",
+                        (unsigned)ip->src, (unsigned)ntohs(tcp->src),
+                        (unsigned)ip->dest, (unsigned)ntohs(tcp->dest));
                 }
             }
             elif((link = this->AllocTcpLink(ip->src, tcp->src, ip->dest, tcp->dest))) { // SYN
+                LOG_DEBUG("DATAPLANE VNetstack::Input: SYN accepted, link=%p, src=%u:%u, dest=%u:%u, nat_port=%u, state=%d",
+                    (void*)link.get(), (unsigned)ip->src, (unsigned)ntohs(tcp->src),
+                    (unsigned)ip->dest, (unsigned)ntohs(tcp->dest),
+                    (unsigned)link->natPort, (int)link->state);
                 for (;;) {
                     if (link->closed || link->state != TcpState::TCP_STATE_SYN_RECEIVED) {
+                        LOG_DEBUG("DATAPLANE VNetstack::Input: SYN loop break, link closed=%d state=%d -> RST",
+                            (int)link->closed, (int)link->state);
                         break;
                     }
                     else {
                         c = link->socket;
                         if (NULLPTR != c) {
                             rst = c->IsDisposed();
+                            LOG_DEBUG("DATAPLANE VNetstack::Input: SYN loop existing client, disposed=%d", (int)rst);
                             break;
                         }
                     }
@@ -347,8 +373,10 @@ namespace ppp {
 
                     c = this->BeginAcceptClient(localEP, remoteEP);
                     if (NULLPTR == c) {
+                        LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAcceptClient returned NULL -> RST");
                         break;
                     }
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAcceptClient ok, client=%p", (void*)c.get());
 
                     c->sync_ack_state_ = VNETSTACK_SYNC_ACK_STATE_SYN_SENT;
 #ifdef SYSNAT
@@ -360,8 +388,10 @@ namespace ppp {
 #endif
 
                     if (!c->BeginAccept()) {
+                        LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept failed -> RST");
                         break;
                     }
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept ok, sync_ack_state_=%d", (int)c->sync_ack_state_);
 
                     rst = false;
                     c->link_ = link;
@@ -373,6 +403,9 @@ namespace ppp {
                     tcp->dest = ntohs(this->listenEP_.Port);
                     break;
                 }
+            }
+            else {
+                LOG_DEBUG("DATAPLANE VNetstack::Input: AllocTcpLink returned NULL -> RST");
             }
 
             if (rst) {
@@ -584,7 +617,12 @@ namespace ppp {
 
             int ippkg_len = ((char*)tcp + tcp_len) - (char*)ip;
             if (NULLPTR == c) {
-                return tap->Output(ip, ippkg_len);
+                bool ok = tap->Output(ip, ippkg_len);
+                LOG_DEBUG("DATAPLANE VNetstack::Output: direct tap->Output, len=%d, result=%d, src=%u:%u, dest=%u:%u",
+                    ippkg_len, (int)ok,
+                    (unsigned)ip->src, (unsigned)ntohs(tcp->src),
+                    (unsigned)ip->dest, (unsigned)ntohs(tcp->dest));
+                return ok;
             }
 
             std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();

@@ -48,6 +48,18 @@
                 android:value="vpn" />
         </service>
 
+        <!-- Shell/ADB debug control bridge. Exported so `am broadcast` from
+             adb can drive connect/disconnect/status without exposing the VPN
+             service itself. Debug builds only; the command surface is minimal
+             and validated in DebugControlReceiver. -->
+        <receiver
+            android:name=".DebugControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="supersocksr.ppp.android.DEBUG_CONTROL" />
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

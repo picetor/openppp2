@@ -349,6 +349,8 @@ namespace ppp {
 
             bool VEthernetNetworkSwitcher::OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept {
                 if (!vnet) {
+                    LOG_DEBUG("DATAPLANE VEthernetNetworkSwitcher::OnPacketInput: !vnet gate, proto=%d, len=%d, src=%u, dest=%u -> fallthrough",
+                        proto, packet_length, (unsigned)packet->src, (unsigned)packet->dest);
                     return false;
                 }
 
@@ -1065,6 +1067,21 @@ namespace ppp {
 
                     frame->Ttl = ttl;
                     packet->Ttl = ttl;
+
+                    // Peer-prefix site-to-site routing: when the destination
+                    // matches an applied peer prefix route, send the ICMP packet
+                    // via NAT protocol so the server can forward it through the
+                    // peer gateway instead of using a raw socket.
+                    if (NULLPTR != FindAppliedPeerPrefixRoute(frame->Destination)) {
+                        auto exchanger = GetExchanger(Ipep::ToAddress(frame->Destination));
+                        if (NULLPTR != exchanger) {
+                            std::shared_ptr<BufferSegment> messages = IPFrame::ToArray(allocator, packet.get());
+                            if (NULLPTR != messages) {
+                                return exchanger->Nat(messages->Buffer.get(), messages->Length);
+                            }
+                        }
+                        return false;
+                    }
 
                     return EchoOtherServer(GetExchanger(Ipep::ToAddress(frame->Destination)), packet, allocator);
                 }
