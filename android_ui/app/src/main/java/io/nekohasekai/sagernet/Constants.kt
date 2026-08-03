@@ -91,6 +91,19 @@ object Key {
 
     const val ROUTE_MODE = "routeMode"
 
+    // openppp2 tunnel specific settings
+    const val BYPASS_MODE_TYPE = "bypassModeType"
+    const val DNS1 = "tunnelDns1"
+    const val DNS2 = "tunnelDns2"
+    const val DNS_DIRECT1 = "directDns1"
+    const val DNS_DIRECT2 = "directDns2"
+    const val TUN_MUX = "tunMux"
+    const val TUN_MUX_ACCELERATION = "tunMuxAcceleration"
+    const val TUN_VNET = "tunVnet"
+    const val TUN_STATIC = "tunStatic"
+    const val BLOCK_QUIC = "blockQuic"
+    const val EXTRA_ARGS = "extraArgs"
+
     const val RULES_PROVIDER = "rulesProvider"
     const val RULES_GEOSITE_URL = "rulesGeositeUrl"
     const val RULES_GEOIP_URL = "rulesGeoipUrl"

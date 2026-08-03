@@ -260,70 +260,29 @@
 
     <PreferenceCategory app:title="@string/cag_dns">
         <io.nekohasekai.sagernet.widget.NonBlackEditTextPreference
-            app:defaultValue="tcp://1.1.1.1"
+            app:defaultValue="223.5.5.5"
             app:icon="@drawable/ic_action_dns"
-            app:key="remoteDns"
-            app:title="@string/remote_dns"
+            app:key="directDns1"
+            app:title="@string/direct_dns_1"
             app:useSimpleSummaryProvider="true" />
-        <io.nekohasekai.sagernet.widget.SimpleMenuPreference
-            app:defaultValue="UseIP"
-            app:entries="@array/dns_query_strategy"
-            app:entryValues="@array/dns_query_strategy_value"
-            app:icon="@drawable/ic_baseline_manage_search_24"
-            app:key="remoteDnsQueryStrategy"
-            app:title="@string/remote_dns_query_strategy"
-            app:useSimpleSummaryProvider="true" />
-        <EditTextPreference
-            app:dialogMessage="@string/edns_client_ip_sum"
-            app:icon="@drawable/ic_baseline_push_pin_24"
-            app:key="ednsClientIp"
-            app:title="@string/edns_client_ip"
-            app:useSimpleSummaryProvider="true" />
-        <SwitchPreference
-            app:defaultValue="@string/use_system_dns_as_direct_dns_default_value"
-            app:icon="@drawable/ic_baseline_home_24"
-            app:key="useLocalDnsAsDirectDns"
-            app:title="@string/use_local_dns_as_direct_dns" />
         <io.nekohasekai.sagernet.widget.NonBlackEditTextPreference
+            app:defaultValue="119.29.29.29"
             app:icon="@drawable/ic_action_dns"
-            app:key="directDns"
-            app:title="@string/direct_dns"
+            app:key="directDns2"
+            app:title="@string/direct_dns_2"
             app:useSimpleSummaryProvider="true" />
-        <io.nekohasekai.sagernet.widget.SimpleMenuPreference
-            app:defaultValue="UseIP"
-            app:entries="@array/dns_query_strategy"
-            app:entryValues="@array/dns_query_strategy_value"
-            app:icon="@drawable/ic_baseline_manage_search_24"
-            app:key="directDnsQueryStrategy"
-            app:title="@string/direct_dns_query_strategy"
-            app:useSimpleSummaryProvider="true" />
-        <SwitchPreference
-            app:defaultValue="true"
-            app:icon="@drawable/ic_baseline_home_24"
-            app:key="useLocalDnsAsBootstrapDns"
-            app:title="@string/use_local_dns_as_bootstrap_dns" />
         <io.nekohasekai.sagernet.widget.NonBlackEditTextPreference
-            app:dialogMessage="@string/bootstrap_dns_sum"
+            app:defaultValue="8.8.8.8"
             app:icon="@drawable/ic_action_dns"
-            app:key="bootstrapDns"
-            app:title="@string/bootstrap_dns"
+            app:key="tunnelDns1"
+            app:title="@string/tunnel_dns_1"
             app:useSimpleSummaryProvider="true" />
-        <EditTextPreference
-            app:icon="@drawable/ic_baseline_transform_24"
-            app:key="dnsHosts0"
-            app:title="@string/dns_hosts"
-            app:summary="@string/hosts_sum" />
-        <SwitchPreference
-            app:defaultValue="true"
-            app:icon="@drawable/ic_baseline_camera_24"
-            app:key="enableDnsRouting"
-            app:summary="@string/dns_routing_message"
-            app:title="@string/enable_dns_routing" />
-        <SwitchPreference
-            app:icon="@drawable/ic_action_lock"
-            app:key="enableFakeDns"
-            app:summary="@string/fakedns_message"
-            app:title="@string/enable_fakedns" />
+        <io.nekohasekai.sagernet.widget.NonBlackEditTextPreference
+            app:defaultValue="8.8.4.4"
+            app:icon="@drawable/ic_action_dns"
+            app:key="tunnelDns2"
+            app:title="@string/tunnel_dns_2"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/inbound_settings">
@@ -456,6 +415,45 @@
             app:dialogMessage="For testing purpose only.\nBreaking changes are expected.\nNo guarantee of existence."
             app:key="experimentalFlags"
             app:title="Experimental flags" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/openppp2_tunnel_settings">
+        <io.nekohasekai.sagernet.widget.SimpleMenuPreference
+            app:defaultValue="0"
+            app:entries="@array/tun_mux_entry"
+            app:entryValues="@array/int_array_4"
+            app:icon="@drawable/ic_baseline_flip_camera_android_24"
+            app:key="tunMux"
+            app:title="@string/tun_mux"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:defaultValue="-1"
+            app:dialogMessage="@string/tun_mux_acceleration_sum"
+            app:icon="@drawable/ic_baseline_speed_24"
+            app:key="tunMuxAcceleration"
+            app:title="@string/tun_mux_acceleration"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreference
+            app:icon="@drawable/ic_baseline_airplanemode_active_24"
+            app:key="tunVnet"
+            app:summary="@string/tun_vnet_sum"
+            app:title="@string/tun_vnet" />
+        <SwitchPreference
+            app:icon="@drawable/ic_baseline_vpn_key_24"
+            app:key="tunStatic"
+            app:summary="@string/tun_static_sum"
+            app:title="@string/tun_static" />
+        <SwitchPreference
+            app:icon="@drawable/ic_action_lock"
+            app:key="blockQuic"
+            app:summary="@string/block_quic_sum"
+            app:title="@string/block_quic" />
+        <EditTextPreference
+            app:dialogMessage="@string/extra_args_sum"
+            app:icon="@drawable/baseline_construction_24"
+            app:key="extraArgs"
+            app:title="@string/extra_args"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
 </PreferenceScreen>

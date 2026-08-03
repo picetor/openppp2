@@ -26,7 +26,9 @@
 #include <ppp/net/native/ip.h>
 #include <ppp/net/native/tcp.h>
 #include <ppp/net/native/udp.h>
+#include <ppp/net/native/icmp.h>
 #include <ppp/net/native/checksum.h>
+#include <boost/asio/ip/icmp.hpp>
 
 #if defined(_WIN32)
 #include <windows/ppp/net/QoSS.h>
@@ -72,6 +74,10 @@ namespace ppp {
                 friend class                                            VEthernetExchanger;
 
             public:
+                enum BridgeProtocol {
+                    BridgeProtocol_TCP = 0,
+                    BridgeProtocol_ICMP = 1
+                };
                 typedef ppp::configurations::AppConfiguration           AppConfiguration;
                 typedef std::shared_ptr<AppConfiguration>               AppConfigurationPtr;
                 typedef ppp::threading::Executors                       Executors;
@@ -103,7 +109,8 @@ namespace ppp {
                     uint32_t                                            client_ip,
                     uint16_t                                            client_port,
                     uint32_t                                            server_ip,
-                    uint16_t                                            server_port) noexcept;
+                    uint16_t                                            server_port,
+                    BridgeProtocol                                      protocol) noexcept;
                 virtual ~VEthernetPeerLocalBridgeConnection() noexcept;
 
             public:
@@ -139,8 +146,13 @@ namespace ppp {
                 void                                                    Finalize() noexcept;
                 bool                                                    Open(YieldContext& y) noexcept;
                 bool                                                    StartLocalConnect() noexcept;
+                bool                                                    StartLocalIcmpBridge() noexcept;
                 void                                                    OnLocalConnected(const boost::system::error_code& ec) noexcept;
+                void                                                    OnLocalIcmpReceived(const boost::system::error_code& ec, std::size_t bytes_transferred) noexcept;
                 bool                                                    SendSynAck() noexcept;
+                bool                                                    SendIcmpToLocalSocket(const void* packet, int packet_length) noexcept;
+                bool                                                    ReceiveIcmpFromLocal() noexcept;
+                bool                                                    ForwardIcmpReplyToTunnel(const std::shared_ptr<Byte>& buffer, int bytes_transferred) noexcept;
                 bool                                                    SendPacket(uint32_t seq, uint32_t ack, int flags, const void* payload, int payload_length) noexcept;
                 bool                                                    SendFin() noexcept;
                 void                                                    ReceiveSocketToTransmission() noexcept;
@@ -167,7 +179,10 @@ namespace ppp {
                 ITransmissionPtr                                        transmission_;
                 AppConfigurationPtr                                     configuration_;
                 std::shared_ptr<boost::asio::ip::tcp::socket>           socket_;
+                std::shared_ptr<boost::asio::ip::icmp::socket>         icmp_socket_;
                 std::shared_ptr<Byte>                                   buffer_;
+                std::shared_ptr<Byte>                                   icmp_buffer_;
+                BridgeProtocol                                          protocol_ = BridgeProtocol_TCP;
                 uint32_t                                                client_ip_;
                 uint16_t                                                client_port_;
                 uint32_t                                                server_ip_;

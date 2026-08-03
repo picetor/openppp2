@@ -95,7 +95,7 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         val httpPassword = findPreference<EditTextPreference>(Key.HTTP_PASSWORD)!!
         val appendHttpProxy = findPreference<SwitchPreference>(Key.APPEND_HTTP_PROXY)!!
         val httpProxyException = findPreference<EditTextPreference>(Key.HTTP_PROXY_EXCEPTION)!!
-
+        httpProxyException.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
         // app settings
         findPreference<ColorPickerPreference>(Key.APP_THEME)!!.setOnPreferenceChangeListener { _, newTheme ->
             val theme = Theme.getTheme(newTheme as Int)
@@ -353,39 +353,19 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         enableFragmentForDirect.isVisible = enableFragment.isChecked
         fragmentMethod.isVisible = enableFragment.isChecked
 
-        // DNS settings
-        findPreference<EditTextPreference>(Key.REMOTE_DNS)!!.onPreferenceChangeListener = reloadListener
-        findPreference<ListPreference>(Key.REMOTE_DNS_QUERY_STRATEGY)!!.onPreferenceChangeListener = reloadListener
-        findPreference<EditTextPreference>(Key.EDNS_CLIENT_IP)!!.onPreferenceChangeListener = reloadListener
+        // DNS settings (openppp2: direct DNS + tunnel DNS, 2 each)
+        findPreference<EditTextPreference>(Key.DNS_DIRECT1)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.DNS_DIRECT2)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.DNS1)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.DNS2)!!.onPreferenceChangeListener = reloadListener
 
-        val useLocalDnsAsDirectDns = findPreference<SwitchPreference>(Key.USE_LOCAL_DNS_AS_DIRECT_DNS)!!
-        val directDns = findPreference<EditTextPreference>(Key.DIRECT_DNS)!!
-        directDns.onPreferenceChangeListener = reloadListener
-        useLocalDnsAsDirectDns.setOnPreferenceChangeListener { _, newValue ->
-            directDns.isEnabled = newValue == false
-            needReload()
-            true
+        // openppp2 tunnel parameters
+        findPreference<ListPreference>(Key.TUN_MUX)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.TUN_MUX_ACCELERATION)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.EXTRA_ARGS)!!.apply {
+            setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+            onPreferenceChangeListener = reloadListener
         }
-        directDns.isEnabled = !useLocalDnsAsDirectDns.isChecked
-        findPreference<ListPreference>(Key.DIRECT_DNS_QUERY_STRATEGY)!!.onPreferenceChangeListener = reloadListener
-
-        val useLocalDnsAsBootstrapDns = findPreference<SwitchPreference>(Key.USE_LOCAL_DNS_AS_BOOTSTRAP_DNS)!!
-        val bootstrapDns = findPreference<EditTextPreference>(Key.BOOTSTRAP_DNS)!!
-        bootstrapDns.onPreferenceChangeListener = reloadListener
-        useLocalDnsAsBootstrapDns.setOnPreferenceChangeListener { _, newValue ->
-            bootstrapDns.isEnabled = newValue == false
-            needReload()
-            true
-        }
-        bootstrapDns.isEnabled = !useLocalDnsAsBootstrapDns.isChecked
-
-        val dnsHosts = findPreference<EditTextPreference>(Key.DNS_HOSTS)!!
-        dnsHosts.setOnBindEditTextListener(EditTextPreferenceModifiers.Hosts)
-        dnsHosts.dialogMessage = getString(R.string.one_per_line_format, "example.com 127.0.0.1\nwww.example.com 127.0.0.1 127.0.0.2")
-        dnsHosts.onPreferenceChangeListener = reloadListener
-
-        findPreference<SwitchPreference>(Key.ENABLE_DNS_ROUTING)!!.onPreferenceChangeListener = reloadListener
-        findPreference<SwitchPreference>(Key.ENABLE_FAKEDNS)!!.onPreferenceChangeListener = reloadListener
 
         // inbound settings
         findPreference<SwitchPreference>(Key.ALLOW_ACCESS)!!.onPreferenceChangeListener = reloadListener
@@ -574,6 +554,7 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         // misc settings
         findPreference<SwitchPreference>(Key.SHOW_GROUP_NAME)!!.onPreferenceChangeListener = reloadListener
         findPreference<SwitchPreference>(Key.ACQUIRE_WAKE_LOCK)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.STUN_SERVERS)!!.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
         findPreference<ListPreference>(Key.FAB_STYLE)!!.setOnPreferenceChangeListener { _, _ ->
             requireActivity().apply {
                 this.finish()

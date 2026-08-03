@@ -1791,7 +1791,13 @@ static int                                                                      
     std::shared_ptr<AppConfiguration>                                               configuration) noexcept {
     const auto open_switcher_begin = std::chrono::steady_clock::now();
 
-    bool lwip = false;
+    // TCP via the user-space lwIP stack instead of the kernel loopback NAT.
+    // On Android (no root) the VpnService ip rules carry uidrange entries that
+    // exclude the VPN process uid, so the kernel SYN-ACK reply to the loopback
+    // listen socket (10.0.0.1:38377) is routed into the empty/other tables and
+    // dropped.  lwIP generates the SYN-ACK in-process and writes it straight
+    // back to tun0, bypassing kernel routing entirely.
+    bool lwip = true;
     int max_concurrent = ppp::GetProcesserCount();
     const bool proxy_only_runtime = configuration->client.proxy_only;
     const bool canonical_routing_configured = configuration->client.routing.configured;

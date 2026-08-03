@@ -615,6 +615,13 @@
         <item>System</item>
     </string-array>
 
+    <string-array name="tun_mux_entry">
+        <item>关闭</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+    </string-array>
+
     <string-array name="network_type_entry">
         <item>@string/network_data</item>
         <item>@string/network_wifi</item>

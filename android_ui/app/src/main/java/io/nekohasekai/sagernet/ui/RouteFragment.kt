@@ -60,6 +60,40 @@ class RouteFragment : ToolbarFragment(R.layout.layout_route), Toolbar.OnMenuItem
         toolbar.inflateMenu(R.menu.add_route_menu)
         toolbar.setOnMenuItemClickListener(this)
 
+        // OpenPPP2 bypass mode selector (geo / ip / no).
+        val bypassModeGroup = view.findViewById<com.google.android.material.button.MaterialButtonToggleGroup>(R.id.bypass_mode_group)
+        val bypassModeSummary = view.findViewById<android.widget.TextView>(R.id.bypass_mode_summary)
+        fun updateBypassModeSummary(mode: String) {
+            bypassModeSummary.setText(
+                when (mode) {
+                    "ip" -> R.string.bypass_mode_ip_sum
+                    "no" -> R.string.bypass_mode_no_sum
+                    else -> R.string.bypass_mode_geo_sum
+                }
+            )
+        }
+        updateBypassModeSummary(DataStore.bypassMode)
+        bypassModeGroup.check(
+            when (DataStore.bypassMode) {
+                "ip" -> R.id.bypass_mode_ip
+                "no" -> R.id.bypass_mode_no
+                else -> R.id.bypass_mode_geo
+            }
+        )
+        bypassModeGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val mode = when (checkedId) {
+                R.id.bypass_mode_ip -> "ip"
+                R.id.bypass_mode_no -> "no"
+                else -> "geo"
+            }
+            if (DataStore.bypassMode != mode) {
+                DataStore.bypassMode = mode
+                updateBypassModeSummary(mode)
+                needReload()
+            }
+        }
+
         ruleListView = view.findViewById(R.id.route_list)
         ruleListView.layoutManager = FixedLinearLayoutManager(ruleListView)
         ViewCompat.setOnApplyWindowInsetsListener(ruleListView) { v, insets ->
@@ -338,6 +372,7 @@ class RouteFragment : ToolbarFragment(R.layout.layout_route), Toolbar.OnMenuItem
                     .show()
             }
             R.id.action_manage_assets -> {
+                startActivity(Intent(requireContext(), AssetsActivity::class.java))
             }
         }
         return true

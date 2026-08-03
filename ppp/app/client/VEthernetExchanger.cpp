@@ -247,7 +247,15 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                if (ppp::net::native::ip_hdr::IPH_PROTO(ip) != ppp::net::native::ip_hdr::IP_PROTO_TCP) {
+                int ip_proto = ppp::net::native::ip_hdr::IPH_PROTO(ip);
+                VEthernetPeerLocalBridgeConnection::BridgeProtocol protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP;
+                if (ip_proto == ppp::net::native::ip_hdr::IP_PROTO_TCP) {
+                    protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP;
+                }
+                else if (ip_proto == ppp::net::native::ip_hdr::IP_PROTO_ICMP) {
+                    protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_ICMP;
+                }
+                else {
                     return NULLPTR;
                 }
 
@@ -256,22 +264,28 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                Byte* tcp_start = (Byte*)packet + (ppp::net::native::ip_hdr::IPH_HL(ip) << 2);
-                int tcp_available = ip_length - (int)(tcp_start - (Byte*)packet);
-                if (tcp_available < (int)sizeof(ppp::net::native::tcp_hdr)) {
-                    return NULLPTR;
-                }
-
-                ppp::net::native::tcp_hdr* tcp = ppp::net::native::tcp_hdr::Parse(ip, tcp_start, tcp_available);
-                if (NULLPTR == tcp) {
-                    return NULLPTR;
-                }
-
                 VEthernetPeerLocalBridgeKey key;
                 key.client_ip   = ip->src;
-                key.client_port = tcp->src;
+                key.client_port = 0;
                 key.server_ip   = ip->dest;
-                key.server_port = tcp->dest;
+                key.server_port = 0;
+
+                ppp::net::native::tcp_hdr* tcp = NULLPTR;
+                if (protocol == VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP) {
+                    Byte* tcp_start = (Byte*)packet + (ppp::net::native::ip_hdr::IPH_HL(ip) << 2);
+                    int tcp_available = ip_length - (int)(tcp_start - (Byte*)packet);
+                    if (tcp_available < (int)sizeof(ppp::net::native::tcp_hdr)) {
+                        return NULLPTR;
+                    }
+
+                    tcp = ppp::net::native::tcp_hdr::Parse(ip, tcp_start, tcp_available);
+                    if (NULLPTR == tcp) {
+                        return NULLPTR;
+                    }
+
+                    key.client_port = tcp->src;
+                    key.server_port = tcp->dest;
+                }
 
                 VEthernetPeerLocalBridgeConnectionPtr bridge;
                 for (;;) {
@@ -285,16 +299,18 @@ namespace ppp {
                         peer_local_bridges_.erase(it);
                     }
 
-                    // Only a fresh TCP SYN may create a new bridge; stray
-                    // packets without an established bridge are dropped.
-                    Byte tcp_flags = ppp::net::native::tcp_hdr::TCPH_FLAGS(tcp);
-                    if (!(tcp_flags & ppp::net::native::tcp_hdr::TCP_SYN)) {
-                        break;
+                    if (protocol == VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP) {
+                        // Only a fresh TCP SYN may create a new bridge; stray
+                        // packets without an established bridge are dropped.
+                        Byte tcp_flags = ppp::net::native::tcp_hdr::TCPH_FLAGS(tcp);
+                        if (!(tcp_flags & ppp::net::native::tcp_hdr::TCP_SYN)) {
+                            break;
+                        }
                     }
 
                     auto self = std::static_pointer_cast<VEthernetExchanger>(shared_from_this());
                     bridge = make_shared_object<VEthernetPeerLocalBridgeConnection>(
-                        self, transmission, key.client_ip, key.client_port, key.server_ip, key.server_port);
+                        self, transmission, key.client_ip, key.client_port, key.server_ip, key.server_port, protocol);
                     if (NULLPTR == bridge) {
                         break;
                     }
@@ -1258,16 +1274,11 @@ namespace ppp {
 
             bool VEthernetExchanger::OnNat(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
                 bool vnet = switcher_->IsVNet();
-                // Android keeps vnet=false but still forwards IPv6: the
-                // inbound (server -> TUN) translation below only rewrites
-                // IPv6 headers, and IPv4 never reaches OnNat unless vnet is
-                // enabled. TranslateIPv6Packet() passes non-IPv6 packets
-                // through untouched, so the vnet branch below is unchanged.
                 bool is_ipv6 = NULLPTR != packet && packet_length >= ppp::ipv6::IPv6_HEADER_MIN_SIZE &&
                     (packet[0] >> 4) == ppp::ipv6::IPv6_VERSION;
                 LOG_DEBUG("DATAPLANE VEthernetExchanger::OnNat: entry, vnet=%d, is_ipv6=%d, len=%d, first=0x%02x",
                     (int)vnet, (int)is_ipv6, packet_length, NULLPTR != packet ? (int)packet[0] : -1);
-                if (vnet || is_ipv6) {
+                if (vnet || is_ipv6 || (NULLPTR != packet && packet_length >= (int)sizeof(ppp::net::native::ip_hdr) && (packet[0] >> 4) == ppp::net::native::ip_hdr::IP_VER)) {
                     AppConfigurationPtr configuration = GetConfiguration();
 
                     // Peer local bridge gate: when client.peer-local-bridge is
@@ -1297,7 +1308,7 @@ namespace ppp {
                             ppp::net::native::ip_hdr* ip = ppp::net::native::ip_hdr::Parse(packet, ip_length);
                             destination_matches = NULLPTR != ip && ip->dest == tap->IPAddress;
                         }
-                        elif (version == ppp::ipv6::IPv6_VERSION) {
+                        else if (version == ppp::ipv6::IPv6_VERSION) {
                             boost::asio::ip::address_v6 source;
                             boost::asio::ip::address_v6 destination;
                             boost::asio::ip::address assigned = assigned_ipv6_address_;

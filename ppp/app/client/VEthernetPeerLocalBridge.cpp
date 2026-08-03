@@ -16,7 +16,8 @@ namespace ppp {
                 uint32_t client_ip,
                 uint16_t client_port,
                 uint32_t server_ip,
-                uint16_t server_port) noexcept
+                uint16_t server_port,
+                BridgeProtocol protocol) noexcept
                 : context_(NULLPTR)
                 , switcher_(NULLPTR)
                 , exchanger_(exchanger)
@@ -24,7 +25,8 @@ namespace ppp {
                 , client_ip_(client_ip)
                 , client_port_(client_port)
                 , server_ip_(server_ip)
-                , server_port_(server_port) {
+                , server_port_(server_port)
+                , protocol_(protocol) {
                 disposed_    = false;
                 connected_   = false;
                 syn_ack_sent_ = false;
@@ -53,7 +55,13 @@ namespace ppp {
 
                 ppp::net::Socket::Closesocket(socket_);
                 socket_.reset();
+                if (NULLPTR != icmp_socket_) {
+                    boost::system::error_code ec;
+                    icmp_socket_->close(ec);
+                }
+                icmp_socket_.reset();
                 buffer_.reset();
+                icmp_buffer_.reset();
                 transmission_.reset();
             }
 
@@ -72,6 +80,32 @@ namespace ppp {
             bool VEthernetPeerLocalBridgeConnection::Open(YieldContext& y) noexcept {
                 if (disposed_ || NULLPTR == context_ || NULLPTR == transmission_) {
                     return false;
+                }
+
+                if (protocol_ == BridgeProtocol_ICMP) {
+                    auto socket = make_shared_object<boost::asio::ip::icmp::socket>(*context_);
+                    if (NULLPTR == socket) {
+                        return false;
+                    }
+
+                    boost::system::error_code ec;
+                    socket->open(boost::asio::ip::icmp::v4(), ec);
+                    if (ec) {
+                        return false;
+                    }
+
+                    icmp_socket_ = socket;
+                    icmp_buffer_ = configuration_->GetBufferAllocator()->MakeArray<Byte>(PPP_BUFFER_SIZE);
+                    if (NULLPTR == icmp_buffer_) {
+                        if (icmp_socket_) {
+                            boost::system::error_code close_ec;
+                            icmp_socket_->close(close_ec);
+                        }
+                        icmp_socket_.reset();
+                        return false;
+                    }
+
+                    return StartLocalIcmpBridge();
                 }
 
                 std::shared_ptr<boost::asio::ip::tcp::socket> socket =
@@ -113,6 +147,10 @@ namespace ppp {
                         OnLocalConnected(ec);
                     });
                 return true;
+            }
+
+            bool VEthernetPeerLocalBridgeConnection::StartLocalIcmpBridge() noexcept {
+                return ReceiveIcmpFromLocal();
             }
 
             void VEthernetPeerLocalBridgeConnection::OnLocalConnected(const boost::system::error_code& ec) noexcept {
@@ -159,6 +197,31 @@ namespace ppp {
             bool VEthernetPeerLocalBridgeConnection::OnTunnelPacket(const void* packet, int packet_length) noexcept {
                 if (disposed_ || NULLPTR == packet || packet_length < (int)sizeof(ip_hdr)) {
                     return false;
+                }
+
+                if (protocol_ == BridgeProtocol_ICMP) {
+                    int icmp_length = packet_length;
+                    ip_hdr* ip = ip_hdr::Parse((void*)packet, icmp_length);
+                    if (NULLPTR == ip || icmp_length < (int)sizeof(ip_hdr)) {
+                        return false;
+                    }
+
+                    if (ip_hdr::IPH_PROTO(ip) != ip_hdr::IP_PROTO_ICMP) {
+                        return false;
+                    }
+
+                    Byte* icmp_start = (Byte*)packet + (ip_hdr::IPH_HL(ip) << 2);
+                    int icmp_available = icmp_length - (int)(icmp_start - (Byte*)packet);
+                    if (icmp_available < (int)sizeof(ppp::net::native::icmp_hdr)) {
+                        return false;
+                    }
+
+                    ppp::net::native::icmp_hdr* icmp = ppp::net::native::icmp_hdr::Parse(ip, icmp_start, icmp_available);
+                    if (NULLPTR == icmp || icmp->icmp_type != ppp::net::native::IcmpType::ICMP_ECHO) {
+                        return false;
+                    }
+
+                    return SendIcmpToLocalSocket(packet, packet_length);
                 }
 
                 int ip_length = packet_length;
@@ -292,6 +355,111 @@ namespace ppp {
                 }
                 ReceiveSocketToTransmission();
                 return true;
+            }
+
+            bool VEthernetPeerLocalBridgeConnection::SendIcmpToLocalSocket(const void* packet, int packet_length) noexcept {
+                std::shared_ptr<boost::asio::ip::icmp::socket> socket = icmp_socket_;
+                if (NULLPTR == socket || packet_length < 1 || NULLPTR == packet) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                std::shared_ptr<Byte> copy = configuration_->GetBufferAllocator()->MakeArray<Byte>(packet_length);
+                if (NULLPTR == copy) {
+                    return false;
+                }
+
+                memcpy(copy.get(), packet, packet_length);
+                boost::asio::ip::icmp::endpoint destinationEP(
+                    boost::asio::ip::address_v4(ntohl(server_ip_)), 0);
+                socket->async_send_to(boost::asio::buffer(copy.get(), packet_length), destinationEP,
+                    [self, this, copy, packet_length](const boost::system::error_code& ec, std::size_t bytes_transferred) noexcept {
+                        if (ec || bytes_transferred != (std::size_t)packet_length) {
+                            Dispose();
+                            return;
+                        }
+
+                        UpdateTimeout();
+                    });
+                return true;
+            }
+
+            bool VEthernetPeerLocalBridgeConnection::ReceiveIcmpFromLocal() noexcept {
+                std::shared_ptr<boost::asio::ip::icmp::socket> socket = icmp_socket_;
+                std::shared_ptr<Byte> buffer = icmp_buffer_;
+                if (NULLPTR == socket || NULLPTR == buffer || disposed_) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                boost::asio::ip::icmp::endpoint sourceEP;
+                socket->async_receive_from(boost::asio::buffer(buffer.get(), PPP_BUFFER_SIZE), sourceEP,
+                    [self, this, buffer](const boost::system::error_code& ec, std::size_t bytes_transferred) noexcept {
+                        OnLocalIcmpReceived(ec, bytes_transferred);
+                    });
+                return true;
+            }
+
+            void VEthernetPeerLocalBridgeConnection::OnLocalIcmpReceived(const boost::system::error_code& ec, std::size_t bytes_transferred) noexcept {
+                if (disposed_) {
+                    return;
+                }
+
+                if (ec || bytes_transferred < (std::size_t)sizeof(ip_hdr)) {
+                    if (ec) {
+                        Dispose();
+                    }
+                    return;
+                }
+
+                std::shared_ptr<Byte> buffer = icmp_buffer_;
+                if (NULLPTR == buffer) {
+                    return;
+                }
+
+                if (!ForwardIcmpReplyToTunnel(buffer, (int)bytes_transferred)) {
+                    Dispose();
+                    return;
+                }
+
+                UpdateTimeout();
+                ReceiveIcmpFromLocal();
+            }
+
+            bool VEthernetPeerLocalBridgeConnection::ForwardIcmpReplyToTunnel(const std::shared_ptr<Byte>& buffer, int bytes_transferred) noexcept {
+                if (NULLPTR == buffer || bytes_transferred < (int)sizeof(ip_hdr) || NULLPTR == transmission_ || disposed_) {
+                    return false;
+                }
+
+                int ip_length = bytes_transferred;
+                ip_hdr* ip = ip_hdr::Parse(buffer.get(), ip_length);
+                if (NULLPTR == ip || ip_length < (int)sizeof(ip_hdr)) {
+                    return false;
+                }
+
+                if (ip_hdr::IPH_PROTO(ip) != ip_hdr::IP_PROTO_ICMP) {
+                    return false;
+                }
+
+                ip->dest = client_ip_;
+                ip->chksum = ppp::net::native::inet_chksum(ip, (int)sizeof(ip_hdr));
+
+                std::shared_ptr<Byte> out = configuration_->GetBufferAllocator()->MakeArray<Byte>(bytes_transferred + 1);
+                if (NULLPTR == out) {
+                    return false;
+                }
+
+                out.get()[0] = (Byte)ppp::app::protocol::VirtualEthernetLinklayer::PacketAction_NAT;
+                memcpy(out.get() + 1, buffer.get(), bytes_transferred);
+
+                ITransmissionPtr transmission = transmission_;
+                auto self = shared_from_this();
+                return transmission->Write(out.get(), bytes_transferred + 1,
+                    [self, this, out](bool ok) noexcept {
+                        if (!ok) {
+                            Dispose();
+                        }
+                    });
             }
 
             bool VEthernetPeerLocalBridgeConnection::SendPacket(uint32_t seq, uint32_t ack, int flags, const void* payload, int payload_length) noexcept {

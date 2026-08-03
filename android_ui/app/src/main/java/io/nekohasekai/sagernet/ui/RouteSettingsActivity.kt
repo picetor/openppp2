@@ -47,6 +47,7 @@ import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.ProfileManager
 import io.nekohasekai.sagernet.database.RuleEntity
 import io.nekohasekai.sagernet.database.SagerDatabase
+import io.nekohasekai.sagernet.database.preference.EditTextPreferenceModifiers
 import io.nekohasekai.sagernet.database.preference.OnPreferenceDataStoreChangeListener
 import io.nekohasekai.sagernet.ktx.Logs
 import io.nekohasekai.sagernet.ktx.listByLineOrComma
@@ -194,6 +195,19 @@ class RouteSettingsActivity(
         customPackageNames = findPreference(Key.ROUTE_CUSTOM_PACKAGE_NAME_OR_UID)!!
         networkType = findPreference(Key.ROUTE_NETWORK_TYPE)!!
         ssid = findPreference(Key.ROUTE_SSID)!!
+
+        // Multi-line entry fields: keep one-entry-per-line formatting in the
+        // dialog instead of collapsing everything to a single row.
+        findPreference<EditTextPreference>(Key.ROUTE_DOMAIN)!!
+            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+        findPreference<EditTextPreference>(Key.ROUTE_IP)!!
+            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+        findPreference<EditTextPreference>(Key.ROUTE_SOURCE)!!
+            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+        findPreference<EditTextPreference>(Key.ROUTE_PROTOCOL)!!
+            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+        customPackageNames.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
+        ssid.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
 
         apps.isEnabled = customPackageNames.text.isNullOrEmpty()
         customPackageNames.setOnPreferenceChangeListener { _, newValue ->

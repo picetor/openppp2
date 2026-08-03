@@ -101,11 +101,14 @@ class AssetEditActivity(
         if (File(app.externalAssets, filename).canonicalPath.substringAfterLast('/') != DataStore.assetName) {
             error(getString(R.string.route_asset_invalid_filename, filename))
         }
-        if (!filename.endsWith(".dat")) {
+        if (!filename.endsWith(".dat") && !filename.endsWith(".txt") &&
+            !filename.endsWith(".yaml") && !filename.endsWith(".yml") && !filename.endsWith(".json")) {
             error(getString(R.string.route_not_asset, filename))
         }
-        if (filename == "geosite.dat" || filename == "geoip.dat") {
-            error(getString(R.string.route_asset_reserved_filename,  filename))
+        val fixedRuleFile = filename == "geosite.dat" || filename == "geoip.dat" ||
+            filename == "ip.txt" || filename == "ipv6.txt" || filename == "dns-rules.txt"
+        if (fixedRuleFile && DataStore.editingAssetName != filename) {
+            error(getString(R.string.route_asset_reserved_filename, filename))
         }
         if (filename != DataStore.editingAssetName && SagerDatabase.assetDao.get(filename) != null) {
             error(getString(R.string.route_asset_duplicate_filename,  filename))
@@ -147,12 +150,15 @@ class AssetEditActivity(
                 } else {
                     val entity = SagerDatabase.assetDao.get(editingAssetName)
                     if (entity == null) {
-                        onMainDispatcher {
-                            finish()
+                        val fixedUrl = when (editingAssetName) {
+                            "geoip.dat" -> DataStore.rulesGeoipUrl
+                            "geosite.dat" -> DataStore.rulesGeositeUrl
+                            else -> ""
                         }
-                        return@runOnDefaultDispatcher
+                        AssetEntity(name = editingAssetName, url = fixedUrl).init()
+                    } else {
+                        entity.init()
                     }
-                    entity.init()
                 }
 
                 onMainDispatcher {

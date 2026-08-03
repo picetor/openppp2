@@ -72,4 +72,20 @@ object EditTextPreferenceModifiers {
             editText.setSelection(editText.text.length)
         }
     }
+
+    /** Multi-line text editor: keeps newline-separated entries (one per line)
+     *  visible in the dialog instead of collapsing them to a single row. */
+    object Multiline : EditTextPreference.OnBindEditTextListener {
+
+        override fun onBindEditText(editText: EditText) {
+            editText.setSingleLine(false)
+            editText.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            editText.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            editText.minLines = 6
+            editText.maxLines = 12
+            editText.setHorizontallyScrolling(false)
+            editText.setSelection(editText.text.length)
+        }
+    }
 }

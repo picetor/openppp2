@@ -111,21 +111,26 @@ class OpenPPP2Instance(
         options.put("tunPrefix", 24)
         options.put("route", "0.0.0.0")
         options.put("routePrefix", 0)
-        options.put("dns1", "8.8.8.8")
-        options.put("dns2", "8.8.4.4")
-        options.put("dnsDirect1", "")
-        options.put("dnsDirect2", "")
+        options.put("dns1", DataStore.tunnelDns1)
+        options.put("dns2", DataStore.tunnelDns2)
+        options.put("dnsDirect1", DataStore.directDns1)
+        options.put("dnsDirect2", DataStore.directDns2)
         options.put("mtu", DataStore.mtu)
         options.put("mark", 0)
-        options.put("mux", 0)
-        options.put("vnet", false)
-        options.put("blockQuic", false)
-        options.put("staticMode", false)
+        options.put("mux", DataStore.tunMux)
+        options.put("muxAcceleration", DataStore.tunMuxAcceleration)
+        options.put("vnet", DataStore.tunVnet)
+        options.put("blockQuic", DataStore.blockQuic)
+        options.put("staticMode", DataStore.tunStatic)
         options.put("proxyOnly", false)
         options.put("bypassIpList", "")
         options.put("dnsRulesList", "")
-        options.put("routeMode", "")
-        options.put("extraArgs", "")
+        options.put("routeMode", when (DataStore.bypassMode) {
+            "ip" -> "basic"
+            "geo" -> "geo"
+            else -> ""
+        })
+        options.put("extraArgs", DataStore.extraArgs)
 
         // Per-app proxy policy.
         options.put("perAppProxyEnabled", DataStore.proxyApps)
@@ -136,10 +141,10 @@ class OpenPPP2Instance(
         }
         options.put("perAppProxyApps", apps)
 
-        // GEO routing preset: single tunnel final, user-configured country
-        // (if any) direct. The preset YAML is materialized by VpnService.
+        // GEO routing preset: enabled only in geo bypass mode. The preset
+        // YAML (rules/geo-rules.yaml) is materialized by VpnService.
         val geoRules = JSONObject()
-        geoRules.put("enabled", false)
+        geoRules.put("enabled", DataStore.bypassMode == "geo")
         geoRules.put("country", "cn")
         options.put("geoRules", geoRules)
 

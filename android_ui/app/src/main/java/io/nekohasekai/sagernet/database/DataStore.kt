@@ -173,8 +173,21 @@ object DataStore : OnPreferenceDataStoreChangeListener {
 
     var routeMode by configurationStore.stringToInt(Key.ROUTE_MODE)
     var rulesProvider by configurationStore.stringToInt(Key.RULES_PROVIDER)
-    var rulesGeositeUrl by configurationStore.string(Key.RULES_GEOSITE_URL) { "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" }
-    var rulesGeoipUrl by configurationStore.string(Key.RULES_GEOIP_URL) { "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" }
+
+    // openppp2 tunnel specific settings
+    var bypassMode by configurationStore.string(Key.BYPASS_MODE_TYPE) { "geo" }
+    var tunnelDns1 by configurationStore.string(Key.DNS1) { "8.8.8.8" }
+    var tunnelDns2 by configurationStore.string(Key.DNS2) { "8.8.4.4" }
+    var directDns1 by configurationStore.string(Key.DNS_DIRECT1) { "223.5.5.5" }
+    var directDns2 by configurationStore.string(Key.DNS_DIRECT2) { "119.29.29.29" }
+    var tunMux by configurationStore.stringToInt(Key.TUN_MUX) { 0 }
+    var tunMuxAcceleration by configurationStore.stringToInt(Key.TUN_MUX_ACCELERATION) { -1 }
+    var tunVnet by configurationStore.boolean(Key.TUN_VNET) { false }
+    var tunStatic by configurationStore.boolean(Key.TUN_STATIC) { false }
+    var blockQuic by configurationStore.boolean(Key.BLOCK_QUIC) { false }
+    var extraArgs by configurationStore.string(Key.EXTRA_ARGS) { "" }
+    var rulesGeositeUrl by configurationStore.string(Key.RULES_GEOSITE_URL) { "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" }
+    var rulesGeoipUrl by configurationStore.string(Key.RULES_GEOIP_URL) { "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" }
     var logLevel by configurationStore.stringToInt(Key.LOG_LEVEL) { 2 }
     var logLevelDebugWarningDisable by configurationStore.boolean(Key.LOG_LEVEL_DEBUG_WARNING_DISABLE)
     var enableDebug by configurationStore.boolean(Key.ENABLE_DEBUG) { BuildConfig.DEBUG }
@@ -233,6 +246,18 @@ object DataStore : OnPreferenceDataStoreChangeListener {
         }
         if (configurationStore.getString(Key.DIRECT_DNS).isNullOrBlank()) {
             directDns = directDns
+        }
+        if (configurationStore.getString(Key.DNS1).isNullOrBlank()) {
+            tunnelDns1 = tunnelDns1
+        }
+        if (configurationStore.getString(Key.DNS2).isNullOrBlank()) {
+            tunnelDns2 = tunnelDns2
+        }
+        if (configurationStore.getString(Key.DNS_DIRECT1).isNullOrBlank()) {
+            directDns1 = directDns1
+        }
+        if (configurationStore.getString(Key.DNS_DIRECT2).isNullOrBlank()) {
+            directDns2 = directDns2
         }
         if (configurationStore.getString(Key.MTU).isNullOrBlank()) {
             mtu = mtu

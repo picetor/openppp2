@@ -38,6 +38,7 @@ import io.nekohasekai.sagernet.R
 import io.nekohasekai.sagernet.SagerNet
 import io.nekohasekai.sagernet.bg.proto.OpenPPP2Instance
 import io.nekohasekai.sagernet.database.DataStore
+import io.nekohasekai.sagernet.database.ProfileManager
 import io.nekohasekai.sagernet.ktx.Logs
 import io.nekohasekai.sagernet.ui.VpnRequestActivity
 import io.nekohasekai.sagernet.utils.DefaultNetworkListener
@@ -73,6 +74,9 @@ class VpnService : BaseVpnService(),
     private var linkStateHandler: Handler? = null
     override var wakeLock: PowerManager.WakeLock? = null
     private var active = false
+    private var activeGatewayLoopback: String? = null
+    private var gatewayFixVerified = false
+    private var gatewayFixLastFullCheck = 0L
 
     @Volatile
     var underlyingNetwork: Network? = null
@@ -106,6 +110,8 @@ class VpnService : BaseVpnService(),
             Logs.w(e)
         }
         removeTun0OverrideRules()
+        activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
+        activeGatewayLoopback = null
         stopLinkStatePoller()
         vpnThread?.interrupt()
         vpnThread = null
@@ -238,17 +244,27 @@ class VpnService : BaseVpnService(),
             1 -> if (data.state == BaseService.State.Stopped || data.state == BaseService.State.Idle) {
                 data.changeState(BaseService.State.Connecting)
             }
-            2 -> if (data.state == BaseService.State.Connecting) {
-                data.changeState(BaseService.State.Connected)
+            2 -> {
+                if (data.state == BaseService.State.Connecting) {
+                    data.changeState(BaseService.State.Connected)
+                }
+                // netd assigns a NEW route-table id every time the VPN network
+                // is (re)created, so the gateway-loopback rule installed at
+                // startVpn() may target a stale table.  Re-check now that the
+                // link is up and repair the rule to match the CURRENT table.
+                ensureGatewayLoopbackFix()
             }
             3 -> data.changeState(BaseService.State.Stopping)
-            6 -> if (data.state != BaseService.State.Stopped) {
-                data.changeState(BaseService.State.Stopped)
+            6 -> {
+                if (data.state != BaseService.State.Stopped) {
+                    data.changeState(BaseService.State.Stopped)
+                }
+                gatewayFixVerified = false
             }
         }
     }
 
-    private fun startVpn() {
+    private suspend fun startVpn() {
         instance = this
         val proxy = data.proxy as? OpenPPP2Instance ?: error("core not started")
         val configJson = proxy.config.configJson
@@ -266,7 +282,7 @@ class VpnService : BaseVpnService(),
         val dnsDirect2 = options.optString("dnsDirect2", "")
         val mtu = options.optInt("mtu", 1400)
         val mark = options.optInt("mark", 0)
-        var mux = options.optInt("mux", 0)
+        val mux = options.optInt("mux", 0)
         val vnet = options.optBoolean("vnet", false)
         val blockQuic = options.optBoolean("blockQuic", false)
         val staticMode = options.optBoolean("staticMode", false)
@@ -298,25 +314,33 @@ class VpnService : BaseVpnService(),
                 effectiveDnsRules = dnsFile.readText(Charsets.UTF_8)
             }
         }
-        var muxAcceleration = -1
+        val muxAcceleration = options.optInt("muxAcceleration", -1)
+        // extraArgs may still override mux / mux-acceleration.
+        var effectiveMuxAcceleration = muxAcceleration
+        var effectiveMux = mux
         for (arg in extraArgs.split(Regex("\\s+"))) {
             val trimmed = arg.trim()
             if (trimmed.startsWith("--tun-mux-acceleration=")) {
                 trimmed.removePrefix("--tun-mux-acceleration=").trim().toIntOrNull()
-                    ?.let { muxAcceleration = it }
+                    ?.let { effectiveMuxAcceleration = it }
             } else if (trimmed.startsWith("--tun-mux=")) {
                 trimmed.removePrefix("--tun-mux=").trim().toIntOrNull()
-                    ?.let { if (it > 0) mux = it }
+                    ?.let { if (it > 0) effectiveMux = it }
             }
         }
         val directDns = listOf(dnsDirect1, dnsDirect2).map { it.trim() }.filter { it.isNotEmpty() }
-        Log.i(TAG, "vpn options tunIp=$vpnIp/$vpnPrefix mtu=$mtu mux=$mux proxyOnly=$proxyOnly routeMode=$routeMode")
+        Log.i(TAG, "vpn options tunIp=$vpnIp/$vpnPrefix mtu=$mtu mux=$effectiveMux proxyOnly=$proxyOnly routeMode=$routeMode")
 
         // Anchor relative paths in the AppConfiguration JSON to filesDir.
         try {
             libopenppp2.set_root_path(filesDir.absolutePath)
         } catch (_: UnsatisfiedLinkError) {
         }
+
+        // Ensure bundled rule assets (GeoSite.dat / GeoIP.dat / ip.txt /
+        // ipv6.txt / dns-rules.txt) exist under files/rules before the
+        // native core tries to load them.
+        ensureRuleAssets()
 
         val configResult = libopenppp2.set_app_configuration(configJson)
         Log.i(TAG, "set_app_configuration result=$configResult")
@@ -464,7 +488,7 @@ class VpnService : BaseVpnService(),
         vpnInterface = null
 
         val niResult = libopenppp2.set_network_interface(
-            tunFd, mux, vnet, blockQuic, staticMode, vpnIp, vpnMask, IPV6_BLOCK_ADDRESS
+            tunFd, effectiveMux, vnet, blockQuic, staticMode, vpnIp, vpnMask, IPV6_BLOCK_ADDRESS
         )
         if (niResult != 0) {
             throw IllegalStateException(
@@ -472,9 +496,9 @@ class VpnService : BaseVpnService(),
             )
         }
 
-        if (muxAcceleration > 0) {
+        if (effectiveMuxAcceleration > 0) {
             try {
-                libopenppp2.set_mux_acceleration(muxAcceleration)
+                libopenppp2.set_mux_acceleration(effectiveMuxAcceleration)
             } catch (_: UnsatisfiedLinkError) {
             }
         }
@@ -487,6 +511,12 @@ class VpnService : BaseVpnService(),
         // rules. Verified on Nokia 9 / Android 9.
         if (!proxyOnly) {
             installTun0OverrideRules()
+            // vnet 回环修复：Android 系统 VpnService 自动规则（pref 12000）
+            // 用 uidrange 排除 VPN 进程 uid，导致 vnet 模式的内核回环
+            // SYN-ACK（目标=网关，如 10.0.0.1）被路由进空表丢弃。
+            // 加一条高优先级规则：发往网关的包（只有回环流量）走 tun0 表。
+            activeGatewayLoopback = gatewayFor(vpnIp, vpnMask)
+            activeGatewayLoopback?.let { installGatewayLoopbackFix(it) }
         }
 
         // Start VPN in background thread (run() is blocking). 8 MiB stack for
@@ -506,6 +536,8 @@ class VpnService : BaseVpnService(),
             } finally {
                 isRunning = false
                 removeTun0OverrideRules()
+                activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
+                activeGatewayLoopback = null
                 stopLinkStatePoller()
                 releaseWakeLock()
                 try {
@@ -562,6 +594,173 @@ class VpnService : BaseVpnService(),
         }
     }
 
+    // ------------------------------------------------------------------
+    // vnet loopback fix (root).
+    //
+    // Android's per-VPN ip rules (pref 12000) carry
+    //   uidrange 0-<vpnUid-1>/<vpnUid+1>-99999
+    // which EXCLUDES the VPN process uid.  The vnet (kernel-loopback)
+    // TCP path rewrites every LAN->WAN SYN to a loopback SYN targeting
+    // the gateway (10.0.0.1:listenPort); the kernel's SYN-ACK reply is
+    // owned by the VPN uid, so the 12000 rule does not match and the
+    // packet falls through empty tables (99/98/97) into `unreachable`.
+    // This high-priority rule forces packets destined to the gateway
+    // (only the loopback handshake traffic) into the tun0 table.
+    // ------------------------------------------------------------------
+    private fun gatewayFor(ip: String, mask: String): String? {
+        return try {
+            val ipParts = ip.trim().split(".").map { it.toInt() and 0xff }
+            val maskParts = mask.trim().split(".").map { it.toInt() and 0xff }
+            if (ipParts.size != 4 || maskParts.size != 4) return null
+            val net = IntArray(4) { i -> ipParts[i] and maskParts[i] }
+            // gateway = network address + 1
+            var carry = 1
+            for (i in 3 downTo 0) {
+                val v = net[i] + carry
+                net[i] = v and 0xff
+                carry = v shr 8
+            }
+            net.joinToString(".")
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
+    private fun installGatewayLoopbackFix(gateway: String) {
+        if (!isRootAvailable()) {
+            Log.i(TAG, "gateway loopback fix: root not available, skipping")
+            return
+        }
+        val table = resolveVpnRouteTable()
+        if (table == null) {
+            Log.i(TAG, "gateway loopback fix: could not resolve vpn route table, skipping")
+            return
+        }
+        // If the table is not routing through tun0 yet, leave it for
+        // ensureGatewayLoopbackFix() (connected state) to retry with delay.
+        if (!vpnTableHasDefault(table)) {
+            Log.i(TAG, "gateway loopback fix: table $table has no tun0 default yet, will re-check at connected")
+            return
+        }
+        val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
+        Log.i(TAG, "gateway loopback fix: add rule to $gateway table $table -> ${if (r != null) "ok" else "failed/dup"}")
+        val show = runRootCommand("ip rule show pref 11000")
+        Log.i(TAG, "gateway loopback fix: verify: ${show?.trim().orEmpty()}")
+    }
+
+    private fun removeGatewayLoopbackFix(gateway: String) {
+        if (!isRootAvailable()) return
+        // Try exact match first; fall back to pref-only match in case the table
+        // number changed (e.g. after a package rename the netd table id differs).
+        val table = resolveVpnRouteTable()
+        if (table != null) {
+            runRootCommand("ip rule del from all to $gateway lookup $table pref 11000")
+        }
+        runRootCommand("ip rule del from all to $gateway pref 11000")
+        Log.i(TAG, "gateway loopback fix: removed rule to $gateway")
+    }
+
+    // Resolve the netd routing table used by our tun0 interface.  The table
+    // id is NOT stable: it is derived from the per-VPN netId and changes when
+    // the package/network is re-created, and netd may present it EITHER as a
+    // numeric id (`table 1098`) or as the named table (`table tun0`), with the
+    // numeric id coming from /data/misc/net/rt_tables.  Parse it from
+    // `ip route show table all` instead of hard-coding any id.  We may return
+    // either "tun0" or a numeric id; the kernel resolves both in
+    // `ip rule add ... lookup <value>`.
+    private fun resolveVpnRouteTable(): String? {
+        val out = runRootCommand("ip route show table all") ?: return null
+        // Numeric table id: `default dev tun0 ... table 1096`.
+        Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+(\\d+)").find(out)?.let {
+            return it.groupValues[1]
+        }
+        // Named table: `default dev tun0 ... table tun0` (rt_tables maps it).
+        if (Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+tun0").containsMatchIn(out)) {
+            return "tun0"
+        }
+        return null
+    }
+
+    // Does the resolved table currently carry a tun0 default route?  Guards
+    // against installing the fix onto a stale/empty table (which makes the
+    // SYN-ACK loopback silently drop -> curl 000).  Note: this Android
+    // iproute2 cannot query a named table with `ip route show table tun0`
+    // ("table id value is invalid"), so we work from the `table all` dump.
+    private fun vpnTableHasDefault(table: String): Boolean {
+        val out = runRootCommand("ip route show table all") ?: return false
+        val def = Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+(\\S+)").find(out)
+            ?: return false
+        val shown = def.groupValues[1] // "tun0" or a numeric id
+        if (table == shown) return true
+        // numeric id that rt_tables maps to tun0 -> the dump prints "tun0"
+        if (table.matches(Regex("\\d+")) && shown == "tun0") return true
+        return false
+    }
+
+    // Re-install the gateway-loopback rule against the CURRENT netd table.
+    // Called from publishLinkState() once the link is up, because netd may
+    // have re-created the VPN network (assigning a new table id) after the
+    // initial install inside startVpn().  Runs on the link-state poller
+    // thread, so short sleeps for netd settling are safe.
+    private fun ensureGatewayLoopbackFix() {
+        val gateway = activeGatewayLoopback ?: return
+        if (!isRootAvailable()) return
+
+        // netd may still be finalizing the per-VPN table right after the link
+        // comes up (we saw the table id / named-table display flip between
+        // 1095/1096/tun0 while a second VPN app was competing).  Retry the
+        // resolution until it yields a table that actually routes tun0.
+        var table = resolveVpnRouteTable()
+        var attempt = 0
+        while ((table == null || !vpnTableHasDefault(table)) && attempt < 5) {
+            Thread.sleep(1200)
+            table = resolveVpnRouteTable()
+            attempt++
+        }
+        if (table == null) {
+            Log.i(TAG, "gateway loopback fix: re-check table unavailable after retries")
+            return
+        }
+        if (!vpnTableHasDefault(table)) {
+            Log.i(TAG, "gateway loopback fix: table $table has no tun0 default yet, retry later")
+            return
+        }
+
+        val current = runRootCommand("ip rule show pref 11000")
+        val already = current?.contains("to $gateway lookup $table") == true
+        if (already) {
+            gatewayFixVerified = true
+            periodicRuleIntegrityCheck(gateway, table)
+            return
+        }
+        // remove any stale rule (old table id) then add with the current one
+        runRootCommand("ip rule del from all to $gateway pref 11000")
+        val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
+        gatewayFixVerified = r != null
+        Log.i(TAG, "gateway loopback fix: re-check -> table $table ${if (r != null) "ok" else "failed"}")
+    }
+
+    // Called on every connected poll (1s) but only does full work every ~15s:
+    // netd can silently re-create the VPN network (new table id) while we are
+    // up, which would leave our rule pointing at an empty table and break the
+    // SYN-ACK loopback again.  Detect that and re-install immediately.
+    private fun periodicRuleIntegrityCheck(gateway: String, table: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - gatewayFixLastFullCheck < 15000) return
+        gatewayFixLastFullCheck = now
+
+        val show = runRootCommand("ip rule show pref 11000") ?: ""
+        val ruleOk = show.contains("to $gateway lookup $table")
+        val routeOk = vpnTableHasDefault(table)
+        if (!ruleOk || !routeOk) {
+            Log.i(TAG, "gateway loopback fix: stale rule detected (rule=$ruleOk route=$routeOk), re-installing")
+            runRootCommand("ip rule del from all to $gateway pref 11000")
+            val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
+            gatewayFixVerified = r != null
+            gatewayFixLastFullCheck = 0
+        }
+    }
+
     private fun isRootAvailable(): Boolean {
         return try {
             val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
@@ -592,7 +791,70 @@ class VpnService : BaseVpnService(),
         return if (country.matches(Regex("^[a-z]{2}$"))) country else "cn"
     }
 
-    private fun writeGeoRulesPreset(country: String, directDns: List<String>): Boolean {
+    /**
+     * Copy the rule assets into files/rules so the native core can open them
+     * by relative path:
+     *   ./rules/GeoSite.dat   (geosite.dat -> GeoSite.dat is handled below)
+     *   ./rules/GeoIP.dat
+     *   ./rules/ip.txt, ./rules/ipv6.txt, ./rules/dns-rules.txt
+     * The native core references "GeoSite.dat"/"GeoIP.dat" (capital letters);
+     * the bundled files are named geosite.dat / geoip.dat, so the copies are
+     * renamed to match what set_geo_rules() expects.
+     *
+     * Source priority: a user-updated copy in the writable assets directory
+     * (imported or downloaded from the route-assets screen) wins over the
+     * bundled APK copy.
+     */
+    private fun ensureRuleAssets() {
+        try {
+            val rulesDir = java.io.File(filesDir, "rules")
+            if (!rulesDir.exists() && !rulesDir.mkdirs()) {
+                Log.w(TAG, "ensureRuleAssets: cannot create $rulesDir")
+                return
+            }
+            // assetName -> destination file name
+            val mapping = linkedMapOf(
+                "geosite.dat" to "GeoSite.dat",
+                "geoip.dat" to "GeoIP.dat",
+                "ip.txt" to "ip.txt",
+                "ipv6.txt" to "ipv6.txt",
+                "dns-rules.txt" to "dns-rules.txt",
+            )
+            for ((assetName, destName) in mapping) {
+                val dest = java.io.File(rulesDir, destName)
+                // 1) user-updated copy (route assets screen import/download)
+                val userFile = java.io.File(SagerNet.application.externalAssets, assetName)
+                if (userFile.isFile && userFile.length() > 0L &&
+                    (!dest.isFile || dest.length() != userFile.length() ||
+                        userFile.lastModified() > dest.lastModified())
+                ) {
+                    try {
+                        userFile.inputStream().use { input ->
+                            dest.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        Log.i(TAG, "ensureRuleAssets: copied user $assetName -> rules/$destName")
+                        continue
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "ensureRuleAssets: failed to copy user $assetName: ${e.message}")
+                    }
+                }
+                // 2) bundled APK copy (only when missing)
+                if (dest.isFile && dest.length() > 0L) continue
+                try {
+                    assets.open("rules/$assetName").use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    Log.i(TAG, "ensureRuleAssets: copied $assetName -> rules/$destName")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "ensureRuleAssets: failed to copy $assetName: ${e.message}")
+                }
+            }
+        } catch (e: Throwable) {
+            Logs.w(e)
+        }
+    }
+
+    private suspend fun writeGeoRulesPreset(country: String, directDns: List<String>): Boolean {
         return try {
             val rulesDir = java.io.File(filesDir, "rules")
             if (!rulesDir.exists() && !rulesDir.mkdirs()) return false
@@ -603,7 +865,7 @@ class VpnService : BaseVpnService(),
                 listOf("local", "1.1.1.1", "8.8.8.8")
             }
             val content = buildString {
-                appendLine("# Generated by OpenPPP2 Android. Do not edit.")
+                appendLine("# Generated by OpenPPP2 Android from route rules.")
                 appendLine("version: 1")
                 appendLine("final: tunnel")
                 appendLine()
@@ -611,21 +873,58 @@ class VpnService : BaseVpnService(),
                 for (dns in dnsList) appendLine("  - $dns")
                 appendLine()
                 appendLine("rules:")
-                appendLine("  - ip-cidr,10.0.0.0/8,direct")
-                appendLine("  - ip-cidr,100.64.0.0/10,direct")
-                appendLine("  - ip-cidr,127.0.0.0/8,direct")
-                appendLine("  - ip-cidr,169.254.0.0/16,direct")
-                appendLine("  - ip-cidr,172.16.0.0/12,direct")
-                appendLine("  - ip-cidr,192.168.0.0/16,direct")
-                appendLine("  - domain-suffix,$country,direct")
-                appendLine("  - geosite,$country,direct")
-                appendLine("  - geoip,$country,direct")
+                // User-editable route rules (RuleEntity). outbound == -1 -> direct.
+                val rules = ProfileManager.getRules().filter { it.enabled }
+                if (rules.isEmpty()) {
+                    // Fallback defaults: private ranges + the configured country.
+                    appendLine("  - ip-cidr,10.0.0.0/8,direct")
+                    appendLine("  - ip-cidr,100.64.0.0/10,direct")
+                    appendLine("  - ip-cidr,127.0.0.0/8,direct")
+                    appendLine("  - ip-cidr,169.254.0.0/16,direct")
+                    appendLine("  - ip-cidr,172.16.0.0/12,direct")
+                    appendLine("  - ip-cidr,192.168.0.0/16,direct")
+                    appendLine("  - domain-suffix,$country,direct")
+                    appendLine("  - geosite,$country,direct")
+                    appendLine("  - geoip,$country,direct")
+                } else {
+                    for (rule in rules) {
+                        val action = if (rule.outbound == -1L) "direct" else "tunnel"
+                        for (raw in rule.domains.split('\n')) {
+                            val d = raw.trim()
+                            if (d.isEmpty()) continue
+                            appendLine("  - ${toGeoRule(d)},$action")
+                        }
+                        for (raw in rule.ip.split('\n')) {
+                            val i = raw.trim()
+                            if (i.isEmpty()) continue
+                            appendLine("  - ${toGeoRule(i)},$action")
+                        }
+                    }
+                }
             }
             rulesFile.writeText(content, Charsets.UTF_8)
             rulesFile.isFile && rulesFile.length() > 0L
         } catch (e: Throwable) {
             Logs.w(e)
             false
+        }
+    }
+
+    /** Convert a SagerNet rule matcher (domain:xxx / geosite:cn / geoip:cn /
+     * ip-cidr:...) into openppp2 geo-rules syntax. */
+    private fun toGeoRule(matcher: String): String {
+        val m = matcher.trim()
+        return when {
+            m.startsWith("domain-suffix:") -> "domain-suffix," + m.removePrefix("domain-suffix:")
+            m.startsWith("domain:") -> "domain," + m.removePrefix("domain:")
+            m.startsWith("geosite:") -> "geosite," + m.removePrefix("geosite:")
+            m.startsWith("geoip:") -> "geoip," + m.removePrefix("geoip:")
+            m.startsWith("ip-cidr:") -> "ip-cidr," + m.removePrefix("ip-cidr:")
+            m.startsWith("ip:") -> "ip-cidr," + m.removePrefix("ip:")
+            m.startsWith("domain-suffix,") || m.startsWith("domain,") ||
+                m.startsWith("geosite,") || m.startsWith("geoip,") ||
+                m.startsWith("ip-cidr,") -> m
+            else -> "domain-suffix,$m"
         }
     }
 

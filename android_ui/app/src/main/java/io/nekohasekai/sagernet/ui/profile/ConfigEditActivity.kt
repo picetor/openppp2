@@ -32,6 +32,7 @@ import com.blacksquircle.ui.editorkit.listener.OnChangeListener
 import com.blacksquircle.ui.editorkit.model.ColorScheme
 import com.blacksquircle.ui.language.base.model.SyntaxScheme
 import com.blacksquircle.ui.language.json.JsonLanguage
+import com.google.gson.GsonBuilder
 import io.nekohasekai.sagernet.R
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.databinding.LayoutEditConfigBinding
@@ -134,8 +135,14 @@ class ConfigEditActivity : ThemedActivity() {
                 config = it
             }
 
+            val prettyConfig = runCatching {
+                parseJson(config, lenient = true).let { json ->
+                    GsonBuilder().setPrettyPrinting().create().toJson(json)
+                }
+            }.getOrNull() ?: config
+
             onMainDispatcher {
-                binding.editor.setTextContent(config)
+                binding.editor.setTextContent(prettyConfig)
             }
         }
 

@@ -1645,6 +1645,13 @@ namespace ppp {
                     return exchanger_;
                 }
                 if (!geo_rules_) {
+#if defined(_ANDROID) || defined(_IPHONE)
+                    if (IsBypassIpAddress(destination) || IsBypassIpAddress6(destination)) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=carrier, reason=ip_bypass_without_geo",
+                            ppp::net::Ipep::ToAddressString<ppp::string>(destination).data());
+                        return exchanger_;
+                    }
+#endif
                     std::shared_ptr<VEthernetExchanger> active = get_active();
                     LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, selected_outbound=%s, reason=geo_rules_unavailable",
                         ppp::net::Ipep::ToAddressString<ppp::string>(destination).data(),
@@ -3599,6 +3606,69 @@ namespace ppp {
                     // IP address of the virtual network card is used here to make it inconsistent with the condition of determining
                     // The next hop gateway of the route in the IsBypassIpAddress function.
                     rib->AddAllRoutes(bypass_ip_list, IPEndPoint::LoopbackAddress);
+
+                    // AddAllRoutes() rejects IPv6 lines (AddRoute() only accepts
+                    // v4), so parse the IPv6 bypass entries manually into rib6_.
+                    // Without this IsBypassIpAddress6() can never match on Android.
+                    IPv6RouteTablePtr rib6 = make_shared_object<IPv6RouteTable>();
+                    if (NULLPTR != rib6) {
+                        // A loopback next hop distinguishes bypass routes from the
+                        // TAP v6 gateway in IsBypassIpAddress6().
+                        boost::asio::ip::address_v6 ngw6 = boost::asio::ip::address_v6::loopback();
+                        ppp::vector<ppp::string> lines;
+                        if (Tokenize<ppp::string>(bypass_ip_list, lines, "\r\n") < 1) {
+                            Tokenize<ppp::string>(bypass_ip_list, lines, "\n");
+                        }
+
+                        for (const ppp::string& line : lines) {
+                            ppp::string cidr = ppp::LTrim(ppp::RTrim(line));
+                            if (cidr.empty()) {
+                                continue;
+                            }
+                            if (cidr[0] == '#' || cidr[0] == ';') {
+                                continue;
+                            }
+
+                            std::string host;
+                            int prefix = -1;
+                            std::size_t i = cidr.find('/');
+                            if (i == ppp::string::npos) {
+                                host = cidr;
+                            }
+                            else {
+                                if (i == 0) {
+                                    continue;
+                                }
+                                host = cidr.substr(0, i);
+                                prefix = atoi(cidr.data() + (i + 1));
+                            }
+
+                            boost::system::error_code ec;
+                            boost::asio::ip::address ip = ppp::StringToAddress(host, ec);
+                            if (ec) {
+                                continue;
+                            }
+                            if (!ip.is_v6()) {
+                                continue;
+                            }
+                            if (prefix < 0) {
+                                prefix = 128;
+                            }
+                            elif (prefix > 128) {
+                                continue;
+                            }
+
+                            IPv6RouteEntry entry;
+                            entry.Network = ip.to_v6();
+                            entry.Prefix = prefix;
+                            entry.NextHop = ngw6;
+                            rib6->emplace_back(entry);
+                        }
+
+                        if (!rib6->empty()) {
+                            rib6_ = rib6;
+                        }
+                    }
                 }
 
                 // Add dns route set rules.
@@ -5961,10 +6031,15 @@ namespace ppp {
 
                 uint32_t nip = htonl(ip.to_v4().to_uint());
 #if defined(_ANDROID)
-                // RIB
-                if (auto fib = fib_; NULLPTR != fib) {
-                    uint32_t ngw = fib->GetNextHop(nip);
-                    return ngw != tap->GatewayServer;
+                // Android builds the bypass routes in the RIB directly. The FIB
+                // is not populated on this path, so querying it makes every
+                // destination fall through to the main tunnel.
+                if (auto rib = rib_; NULLPTR != rib) {
+                    uint32_t ngw = ppp::net::native::ForwardInformationTable::GetNextHop(
+                        nip, rib->GetAllRoutes());
+                    if (ngw != ppp::net::IPEndPoint::NoneAddress) {
+                        return ngw != tap->GatewayServer;
+                    }
                 }
 
                 return false;
@@ -6018,10 +6093,48 @@ namespace ppp {
                 }
 
 #if defined(_ANDROID)
-                // Use FIB6 to determine the next hop; if it differs from the TAP v6 gateway, bypass.
-                if (auto fib6 = fib6_; NULLPTR != fib6) {
-                    boost::asio::ip::address ngw6 = fib6->GetNextHop(ip);
-                    return ngw6.is_v6() && !ngw6.is_unspecified() && ngw6 != tap->IPv6GatewayServer;
+                // Android builds the bypass routes in the RIB6 directly. The
+                // FIB6 is not populated on this path, so do a longest-prefix
+                // match over the raw IPv6RouteEntry table.
+                if (auto rib6 = rib6_; NULLPTR != rib6 && !rib6->empty()) {
+                    boost::asio::ip::address_v6 dst = ip.to_v6();
+                    int best_prefix = -1;
+                    boost::asio::ip::address_v6 best_nh;
+                    for (const IPv6RouteEntry& entry : *rib6) {
+                        if (entry.Prefix <= best_prefix) {
+                            continue;
+                        }
+
+                        // Longest-prefix match: compare the masked bytes of the
+                        // destination against the entry network.
+                        const auto& nb = entry.Network.to_bytes();
+                        const auto& db = dst.to_bytes();
+                        const int full = entry.Prefix / 8;
+                        const int rem = entry.Prefix % 8;
+                        bool matched = true;
+                        for (int k = 0; k < full; k++) {
+                            if (nb[k] != db[k]) {
+                                matched = false;
+                                break;
+                            }
+                        }
+                        if (matched && rem > 0) {
+                            const uint8_t mask = (uint8_t)(0xFF << (8 - rem));
+                            if ((nb[full] & mask) != (db[full] & mask)) {
+                                matched = false;
+                            }
+                        }
+
+                        if (matched) {
+                            best_prefix = entry.Prefix;
+                            best_nh = entry.NextHop;
+                        }
+                    }
+
+                    if (best_prefix >= 0) {
+                        return !best_nh.is_unspecified() &&
+                            best_nh != tap->IPv6GatewayServer;
+                    }
                 }
 
                 return false;
