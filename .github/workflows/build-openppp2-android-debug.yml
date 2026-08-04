@@ -1,4 +1,4 @@
-name: Build OpenPPP2 Android Debug APK
+name: Build OpenPPP2 Android Native Libraries
 
 on:
   push:
@@ -32,16 +32,13 @@ concurrency:
 
 jobs:
   build-android-debug:
-    name: Android Debug APK
+    name: Android Native .so
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     env:
-      FLUTTER_VERSION: "3.44.8"
       ANDROID_NDK_R20B: "20.1.5948944"
-      ANDROID_NDK_FLUTTER: "28.2.13676358"
       ANDROID_THIRD_PARTY: ${{ github.workspace }}/.ci/android-third-party
-      PUB_CACHE: ${{ github.workspace }}/.ci/pub-cache
 
     steps:
       - name: Checkout repository
@@ -69,8 +66,7 @@ jobs:
             ${{ env.ANDROID_SDK_ROOT }}/platforms/android-36
             ${{ env.ANDROID_SDK_ROOT }}/build-tools/36.0.0
             ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_R20B }}
-            ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_FLUTTER }}
-          key: android-sdk-36-r20b-28-v2
+          key: android-sdk-36-r20b-v2
 
       - name: Install Android SDK and NDK packages
         if: steps.android-sdk-cache.outputs.cache-hit != 'true'
@@ -81,15 +77,7 @@ jobs:
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "ndk;${ANDROID_NDK_R20B}" \
-            "ndk;${ANDROID_NDK_FLUTTER}"
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
+            "ndk;${ANDROID_NDK_R20B}"
 
       - name: Cache Android native dependencies
         id: android-native-cache
@@ -141,73 +129,12 @@ jobs:
           test -s ../bin/android/arm64-v8a/libopenppp2.so
           test -s ../bin/android/x86_64/libopenppp2.so
 
-      - name: Cache Android debug keystore
-        # flutter debug builds sign with ~/.android/debug.keystore; a fresh
-        # runner would generate a new keystore on every run, changing the APK
-        # signature each build and breaking `adb install -r` over an existing
-        # install. Cache the keystore so every build shares one signature.
-        uses: actions/cache@v6
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
-
-      - name: Restore signing keystore from secrets
-        shell: bash
-        working-directory: android
-        run: |
-          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
-            echo "No signing keystore secret; using cached debug keystore"
-            exit 0
-          fi
-          mkdir -p android/android/keystore
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/android/keystore/yav-release.keystore
-          cat > android/android/keystore/yav-release-key.properties <<EOF
-          storeFile=keystore/yav-release.keystore
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          EOF
-          echo "signing keystore restored from secret"
-
-      - name: Install Flutter dependencies
-        shell: bash
-        working-directory: android
-        run: flutter pub get
-
-      - name: Cache pub cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.PUB_CACHE }}
-          key: pub-cache-${{ hashFiles('android/pubspec.lock') }}
-          restore-keys: |
-            pub-cache-
-
-      - name: Run Flutter tests
-        shell: bash
-        working-directory: android
-        run: flutter test
-
-      - name: Build Debug APK
-        shell: bash
-        working-directory: android
-        run: flutter build apk --debug
-
-      - name: Verify APK contents
-        shell: bash
-        working-directory: android
-        run: |
-          APK=build/app/outputs/flutter-apk/app-debug.apk
-          test -s "${APK}"
-          unzip -l "${APK}" | grep -F "lib/arm64-v8a/libopenppp2.so"
-          unzip -l "${APK}" | grep -F "lib/x86_64/libopenppp2.so"
-          sha256sum "${APK}" | tee build/app/outputs/flutter-apk/app-debug.apk.sha256
-
-      - name: Upload Debug APK
+      - name: Upload native Android libraries
         uses: actions/upload-artifact@v4
         with:
-          name: openppp2-android-debug-${{ github.sha }}
+          name: openppp2-android-libs-${{ github.sha }}
           path: |
-            android/build/app/outputs/flutter-apk/app-debug.apk
-            android/build/app/outputs/flutter-apk/app-debug.apk.sha256
+            bin/android/arm64-v8a/libopenppp2.so
+            bin/android/x86_64/libopenppp2.so
           if-no-files-found: error
           retention-days: 14

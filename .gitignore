@@ -125,5 +125,5 @@ MISSING*
 # Allow libglibc_compat.a to be tracked
 !libglibc_compat.a
 
-# Local machine build environment (machine-specific, never commit)
-.agents/LOCAL_BUILD_ENV.md
+# Local machine build environment and agent scratch files (never commit)
+.agents/
