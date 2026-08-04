@@ -66,7 +66,11 @@ import io.nekohasekai.sagernet.ktx.*
 import io.nekohasekai.sagernet.utils.PackageCache
 import io.noties.markwon.Markwon
 import java.io.BufferedReader
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.ConnectException
@@ -255,31 +259,38 @@ class MainActivity : ThemedActivity(),
         // Android's VpnService exempts the creating app's uid from VPN
         // routing (to avoid loops), so a plain socket from this UI process
         // goes out the physical NIC directly and cannot reach the tunnel.
-        // The openppp2 core opens a local HTTP CONNECT proxy on loopback
-        // (injected as client.http-proxy.port in VpnService.startVpn);
-        // connecting to 127.0.0.1 is not VPN-routed, and the proxy forwards
-        // the request into the tunnel from the VpnService process. This is
-        // the only reliable way to measure real latency through the tunnel
-        // from the UI process. Run in-process so exceptions propagate to
-        // the UI callers (Binder cannot propagate exceptions across
-        // processes).
+        // The openppp2 core opens a local proxy on loopback (injected as
+        // client.http-proxy.port / client.socks-proxy.port in
+        // VpnService.startVpn); connecting to 127.0.0.1 is not VPN-routed,
+        // and the proxy forwards the request into the tunnel from the
+        // VpnService process. This is the only reliable way to measure real
+        // latency through the tunnel from the UI process. Run in-process so
+        // exceptions propagate to the UI callers (Binder cannot propagate
+        // exceptions across processes).
+        //
+        // The HTTP inbound is optional (requireHttp, default off) while the
+        // SOCKS5 inbound is on by default (requireSocks), so pick whichever
+        // inbound is actually listening instead of assuming HTTP CONNECT.
+        if (!DataStore.requireHttp && !DataStore.requireSocks) {
+            error("no inbound proxy enabled")
+        }
+        val useHttpProxy = DataStore.requireHttp
         val url = URL(DataStore.connectionTestURL)
         val useTls = url.protocol.equals("https", ignoreCase = true)
         val host = url.host
         val port = if (url.port > 0) url.port else if (useTls) 443 else 80
         val path = (url.path.ifEmpty { "/" }) + (url.query?.let { "?$it" } ?: "")
-        val proxyPort = DataStore.httpPort
+        val proxyPort = if (useHttpProxy) DataStore.httpPort else DataStore.socksPort
         val start = System.currentTimeMillis()
-        var raw = Socket()
+        var raw: Socket? = null
         try {
-            // The local HTTP CONNECT proxy is opened by the VpnService core
-            // when the tunnel comes up.  Right after the UI reports
-            // Connected the listener may not be bound yet (a race of a few
-            // hundred ms), so retry a handful of times on refusal instead of
-            // failing the very first tap.  A failed connect() poisons the
-            // Android socket instance (the next connect() on it throws
-            // SocketException: Socket closed), so allocate a fresh socket for
-            // every attempt.
+            // The local proxy is opened by the VpnService core when the
+            // tunnel comes up.  Right after the UI reports Connected the
+            // listener may not be bound yet (a race of a few hundred ms), so
+            // retry a handful of times on refusal instead of failing the
+            // very first tap.  A failed connect() poisons the Android socket
+            // instance (the next connect() on it throws SocketException:
+            // Socket closed), so allocate a fresh socket for every attempt.
             var lastRefusal: ConnectException? = null
             for (attempt in 0 until 5) {
                 val candidate = Socket()
@@ -302,28 +313,18 @@ class MainActivity : ThemedActivity(),
                 }
             }
             if (lastRefusal != null) throw lastRefusal
-            raw.soTimeout = 20000
-            val proxyOut = BufferedWriter(OutputStreamWriter(raw.getOutputStream(), Charsets.US_ASCII))
-            val proxyIn = BufferedReader(InputStreamReader(raw.getInputStream(), Charsets.US_ASCII))
-            proxyOut.write("CONNECT $host:$port HTTP/1.1\r\n")
-            proxyOut.write("Host: $host:$port\r\n")
-            proxyOut.write("User-Agent: openppp2-android\r\n")
-            proxyOut.write("\r\n")
-            proxyOut.flush()
-            val proxyStatus = proxyIn.readLine() ?: error("proxy empty response")
-            val proxyCode = proxyStatus.split(" ").getOrNull(1)?.toIntOrNull()
-                ?: error("malformed proxy response: $proxyStatus")
-            if (proxyCode !in 200..299) error("proxy HTTP $proxyCode")
-            while (true) {
-                val line = proxyIn.readLine() ?: error("proxy header EOF")
-                if (line.isEmpty()) break
+            raw!!.soTimeout = 20000
+            if (useHttpProxy) {
+                httpProxyConnect(raw!!, host, port)
+            } else {
+                socks5Connect(raw!!, host, port)
             }
             val socket: Socket = if (useTls) {
                 val ssl = (SSLContext.getDefault().socketFactory as SSLSocketFactory)
                     .createSocket(raw, host, port, true) as SSLSocket
                 ssl.startHandshake()
                 ssl
-            } else raw
+            } else raw!!
             try {
                 val out = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.US_ASCII))
                 out.write("GET $path HTTP/1.1\r\n")
@@ -341,8 +342,82 @@ class MainActivity : ThemedActivity(),
                 if (socket !== raw) socket.close()
             }
         } finally {
-            raw.close()
+            raw?.close()
         }
+    }
+
+    /** HTTP CONNECT handshake against the core's local HTTP proxy. */
+    private fun httpProxyConnect(raw: Socket, host: String, port: Int) {
+        val proxyOut = BufferedWriter(OutputStreamWriter(raw.getOutputStream(), Charsets.US_ASCII))
+        val proxyIn = BufferedReader(InputStreamReader(raw.getInputStream(), Charsets.US_ASCII))
+        proxyOut.write("CONNECT $host:$port HTTP/1.1\r\n")
+        proxyOut.write("Host: $host:$port\r\n")
+        proxyOut.write("User-Agent: openppp2-android\r\n")
+        proxyOut.write("\r\n")
+        proxyOut.flush()
+        val proxyStatus = proxyIn.readLine() ?: error("proxy empty response")
+        val proxyCode = proxyStatus.split(" ").getOrNull(1)?.toIntOrNull()
+            ?: error("malformed proxy response: $proxyStatus")
+        if (proxyCode !in 200..299) error("proxy HTTP $proxyCode")
+        while (true) {
+            val line = proxyIn.readLine() ?: error("proxy header EOF")
+            if (line.isEmpty()) break
+        }
+    }
+
+    /** SOCKS5 CONNECT handshake against the core's local SOCKS5 proxy. */
+    private fun socks5Connect(raw: Socket, host: String, port: Int) {
+        val out = DataOutputStream(BufferedOutputStream(raw.getOutputStream()))
+        val input = BufferedInputStream(raw.getInputStream())
+        val username = DataStore.socksUsername
+        val password = DataStore.socksPassword
+        val auth = !username.isNullOrEmpty() || !password.isNullOrEmpty()
+        // Method negotiation: NO AUTH, plus USER/PASS when credentials exist.
+        out.write(if (auth) byteArrayOf(5, 2, 0, 2) else byteArrayOf(5, 1, 0))
+        out.flush()
+        if (input.read() != 5) error("SOCKS5: bad version")
+        when (input.read()) {
+            0 -> { /* no auth */ }
+            2 -> {
+                val u = username.orEmpty().toByteArray(Charsets.ISO_8859_1)
+                val p = password.orEmpty().toByteArray(Charsets.ISO_8859_1)
+                val buf = ByteArrayOutputStream()
+                buf.write(1)
+                buf.write(u.size)
+                buf.write(u)
+                buf.write(p.size)
+                buf.write(p)
+                out.write(buf.toByteArray())
+                out.flush()
+                if (input.read() != 1 || input.read() != 0) error("SOCKS5: auth failed")
+            }
+            else -> error("SOCKS5: no acceptable auth method")
+        }
+        // CONNECT request: SOCKS5 01 00 03 <domain> <port BE>.
+        val hostBytes = host.toByteArray(Charsets.ISO_8859_1)
+        val req = ByteArrayOutputStream()
+        req.write(5)
+        req.write(1)
+        req.write(0)
+        req.write(3)
+        req.write(hostBytes.size)
+        req.write(hostBytes)
+        req.write(port ushr 8)
+        req.write(port and 0xFF)
+        out.write(req.toByteArray())
+        out.flush()
+        if (input.read() != 5) error("SOCKS5: bad reply version")
+        val rep = input.read()
+        input.read() // reserved
+        when (input.read()) { // address type
+            1 -> repeat(4) { input.read() }
+            3 -> repeat(input.read()) { input.read() }
+            4 -> repeat(16) { input.read() }
+            else -> error("SOCKS5: bad address type")
+        }
+        input.read()
+        input.read() // bound port
+        if (rep != 0) error("SOCKS5: connect failed (code $rep)")
     }
 
     suspend fun importSubscription(uri: String) {
