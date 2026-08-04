@@ -34,41 +34,13 @@ object Key {
     const val MODE_VPN = "vpn"
     const val MODE_PROXY = "proxy"
 
-    const val REMOTE_DNS = "remoteDns"
-    const val DIRECT_DNS = "directDns"
-    const val BOOTSTRAP_DNS = "bootstrapDns"
-    const val USE_LOCAL_DNS_AS_DIRECT_DNS = "useLocalDnsAsDirectDns"
-    const val USE_LOCAL_DNS_AS_BOOTSTRAP_DNS = "useLocalDnsAsBootstrapDns"
-    const val ENABLE_DNS_ROUTING = "enableDnsRouting"
-    const val ENABLE_FAKEDNS = "enableFakeDns"
-    const val HIJACK_DNS = "hijackDns0"
-    const val DNS_HOSTS = "dnsHosts0"
-    const val REMOTE_DNS_QUERY_STRATEGY = "remoteDnsQueryStrategy"
-    const val DIRECT_DNS_QUERY_STRATEGY = "directDnsQueryStrategy"
-    const val EDNS_CLIENT_IP = "ednsClientIp"
-
-    const val ENABLE_VPN_INTERFACE_IPV6_ADDRESS = "enableVPNInterfaceIPv6Address"
-
     const val PROXY_APPS = "proxyApps"
     const val BYPASS_MODE = "bypassMode"
     const val INDIVIDUAL = "individual"
-    const val METERED_NETWORK = "meteredNetwork"
-
-    const val DOMAIN_STRATEGY = "domainStrategy"
-    const val TRAFFIC_SNIFFING = "trafficSniffing"
-    const val DESTINATION_OVERRIDE = "destinationOverride"
-    const val OUTBOUND_DOMAIN_STRATEGY = "outboundDomainStrategy"
-    const val OUTBOUND_DOMAIN_STRATEGY_FOR_DIRECT = "outboundDomainStrategyForDirect"
-    const val OUTBOUND_DOMAIN_STRATEGY_FOR_SERVER = "outboundDomainStrategyForServer"
 
     const val BYPASS_LAN = "bypassLan"
 
     const val SOCKS_PORT = "socksPort"
-    const val ALLOW_ACCESS = "allowAccess"
-    const val SPEED_INTERVAL = "speedInterval"
-    const val SHOW_DIRECT_SPEED = "showDirectSpeed"
-    const val LOCAL_DNS_PORT = "portLocalDns"
-    const val REQUIRE_DNS_INBOUND = "requireDnsInbound"
 
     const val REQUIRE_SOCKS = "requireSocks"
     const val SOCKS_USERNAME = "socksUsername"
@@ -76,20 +48,13 @@ object Key {
     const val SOCKS_UDP = "socksUDP"
     const val SOCKS_UDP_WARNING_DISABLE = "socksUDPWarningDisable"
     const val REQUIRE_HTTP = "requireHttp"
-    const val HTTP_USERNAME = "httpUsername"
-    const val HTTP_PASSWORD = "httpPassword"
     const val APPEND_HTTP_PROXY = "appendHttpProxy"
     const val HTTP_PROXY_EXCEPTION = "httpProxyException"
     const val HTTP_PORT = "httpPort"
 
-    const val REQUIRE_TRANSPROXY = "requireTransproxy"
-    const val TRANSPROXY_PORT = "transproxyPort"
-
     const val CONNECTION_TEST_URL = "connectionTestURL"
     const val PROBE_URL = "probeUrl"
     const val PROBE_INTERVAL = "probeInterval"
-
-    const val ROUTE_MODE = "routeMode"
 
     // openppp2 tunnel specific settings
     const val BYPASS_MODE_TYPE = "bypassModeType"
@@ -118,12 +83,7 @@ object Key {
 
     const val PROVIDER_ROOT_CA = "providerRootCA"
 
-    const val INTERRUPT_REUSED_CONNECTIONS = "interruptReusedConnections0"
-
-    const val TUN_IMPLEMENTATION = "tunImplementation"
-    const val ENABLE_PCAP = "enablePcap"
     const val MTU = "mtu"
-    const val DISCARD_ICMP = "discardICMP"
     const val ALLOW_APPS_BYPASS_VPN = "allowAppsBypassVpn"
     const val ACQUIRE_WAKE_LOCK = "acquireWakeLock"
     const val STUN_SERVERS = "stunServers"
@@ -131,16 +91,7 @@ object Key {
     const val USE_IEC_UNIT = "useIECUnit"
     const val QUERY_ALL_PACKAGES_ALTERNATIVE_METHOD = "queryAllPackagesAlternativeMethod"
 
-    const val ENABLE_FRAGMENT = "enableFragment"
-    const val ENABLE_FRAGMENT_FOR_DIRECT = "enableFragmentForDirect"
-    const val FRAGMENT_METHOD = "fragmentMethod"
-    const val REALITY_DISABLE_X25519MLKEM768 = "realityDisableX25519Mlkem768"
-    const val HYSTERIA2_OMIT_MAX_DATAGRAM_FRAME_SIZE = "hysteria2OmitMaxDatagramFrameSize"
-    const val GRPC_SERVICE_NAME_COMPAT = "grpcServiceNameCompat"
     const val PROFILE_SECURITY_ADVISORY = "profileSecurityAdvisory"
-
-    const val APP_TRAFFIC_STATISTICS = "appTrafficStatistics"
-    const val PROFILE_TRAFFIC_STATISTICS = "profileTrafficStatistics"
 
     const val PROFILE_DIRTY = "profileDirty"
     const val PROFILE_ID = "profileId"

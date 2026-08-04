@@ -752,8 +752,42 @@ class ConfigurationFragment @JvmOverloads constructor(
 
     @Suppress("EXPERIMENTAL_API_USAGE")
     fun urlTest() {
-        // The openppp2 core does not implement per-server URL tests.
-        snackbar(getString(R.string.connection_test_unsupported)).show()
+        // The openppp2 core has no per-server URL tests; test tunnel liveness
+        // through the established connection and report the round-trip time.
+        val testing = snackbar(R.string.connection_test_testing)
+        runOnDefaultDispatcher {
+            try {
+                val elapsed = (requireActivity() as MainActivity).urlTest()
+                onMainDispatcher {
+                    testing.dismiss()
+                    snackbar(getString(
+                        if (DataStore.connectionTestURL.startsWith("https://", ignoreCase = true)) {
+                            R.string.connection_test_available
+                        } else {
+                            R.string.connection_test_available_http
+                        }, elapsed
+                    )).show()
+                }
+            } catch (e: Exception) {
+                Logs.w(e)
+                onMainDispatcher {
+                    testing.dismiss()
+                    var msg = e.localizedMessage ?: e.readableMessage
+                    when {
+                        msg.contains("timeout") || msg.contains("deadline") -> {
+                            msg = getString(R.string.connection_test_timeout)
+                        }
+                        msg.contains("refused") || msg.contains("closed pipe") -> {
+                            msg = getString(R.string.connection_test_refused)
+                        }
+                        msg.contains("unreachable") || msg.contains("unable to resolve") -> {
+                            msg = getString(R.string.connection_test_unreachable)
+                        }
+                    }
+                    snackbar(getString(R.string.connection_test_error, msg)).show()
+                }
+            }
+        }
     }
 
     inner class GroupPagerAdapter : FragmentStateAdapter(this),

@@ -42,6 +42,8 @@ import io.nekohasekai.sagernet.plugin.PluginManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.UnknownHostException
 import com.github.shadowsocks.plugin.PluginManager as ShadowsocksPluginPluginManager
 
@@ -129,7 +131,6 @@ class BaseService {
 
         private suspend fun loop() {
             var lastQueryTime = 0L
-            val showDirectSpeed = DataStore.showDirectSpeed
             while (true) {
                 val delayMs = bandwidthListeners.values.minOrNull()
                 delay(delayMs ?: return)
@@ -228,9 +229,23 @@ class BaseService {
         }
 
         override fun urlTest(): Int {
-            // The openppp2 core has no URL-test facility; report failure so the
-            // UI test button yields a non-misleading result.
-            return -1
+            // The openppp2 core has no per-server URL-test facility; approximate
+            // a tunnel liveness test by issuing an HTTP(S) request through the
+            // established tunnel and measuring the round-trip time.
+            val start = System.currentTimeMillis()
+            val connection = (URL(DataStore.connectionTestURL).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10000
+                readTimeout = 10000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "openppp2-android")
+            }
+            try {
+                val code = connection.responseCode
+                if (code !in 200..399) error("HTTP $code")
+                return (System.currentTimeMillis() - start).toInt()
+            } finally {
+                connection.disconnect()
+            }
         }
 
         override fun startListeningForStats(cb: ISagerNetServiceCallback, timeout: Long) {

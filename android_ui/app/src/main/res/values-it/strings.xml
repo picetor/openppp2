@@ -39,7 +39,6 @@
     <string name="unsaved_changes_prompt">Modifiche non salvate. Vuoi salvare\?</string>
     <string name="restart">Ricarica il servizio proxy per applicare le modifiche</string>
     <string name="license">Licenza</string>
-    <string name="probe_interval">Intervallo Osservazione Balancer</string>
     <string name="unavailable">Non disponibile</string>
     <string name="always_show_address_sum">Visualizzare sempre l\'indirizzo del server sulla scheda di configurazione</string>
     <string name="connection_test">Test di connessione</string>
@@ -68,7 +67,6 @@
         <item quantity="many"/>
         <item quantity="other">%d Proxy</item>
     </plurals>
-    <string name="remote_dns">DNS Remoto</string>
     <string name="dns_routing_message">Risolvi i domini nei percorsi di bypass con il DNS Diretto</string>
     <string name="security_settings">Impostazioni di Sicurezza</string>
     <string name="allow_insecure">Permetti Non-Sicuro</string>
@@ -96,7 +94,6 @@
     <string name="enable_mux">Abilità Multiplexer</string>
     <string name="ws_browser_forwarding_sum">Trasferisci i corrispondenti WebSockets tramite il browser.</string>
     <string name="add_profile_methods_manual_settings">Impostazioni manuali</string>
-    <string name="balancer_strategy">Strategia</string>
     <string name="header_type">Tipo di Intestazione</string>
     <string name="show_direct_speed_sum">Mostra anche la velocità del traffico senza proxy nella notifica</string>
     <string name="not_connected">Non connesso</string>
@@ -105,13 +102,11 @@
     <string name="quic_security">Protocollo QUIC</string>
     <string name="alpn">Negoziazione del Protocollo Application-Layer</string>
     <string name="port_proxy">Porta del Proxy SOCKS5</string>
-    <string name="balancer_type">Tipo</string>
     <string name="menu_traffic">Traffico</string>
     <string name="group_no_difference">%s: Invariato</string>
     <string name="bypass_apps">Bypassa</string>
     <string name="apply">Applica</string>
     <string name="profile_config">Configurazione del profilo</string>
-    <string name="balancer_settings">Impostazioni Balancer</string>
     <string name="enable_dns_routing">Abilita l\'instradamento DNS</string>
     <string name="clear_selections">Cancella selezione</string>
     <string name="plugin_disabled">Disabilitato</string>
@@ -123,9 +118,7 @@
     <string name="route_proxy">Proxy</string>
     <string name="route_name">Nome Percorso</string>
     <string name="http_host">Host dell\'HTTP</string>
-    <string name="domain_strategy">Modalità Risoluzione Dominio</string>
     <string name="http_path">Percorso dell\'HTTP</string>
-    <string name="grpc_service_name">Nome Servizio gRPC</string>
     <string name="ws_host">Host del WebSocket</string>
     <string name="profile_empty">Per favore seleziona un profilo</string>
     <string name="clear_traffic_statistics">Cancella le statistiche sul traffico</string>
@@ -170,7 +163,6 @@
     <string name="hysteria_upload_mbps">Velocità Massima di Upload (in Mbps)</string>
     <string name="require_transproxy">Abilita Transproxy in Entrata</string>
     <string name="security">Crittografia del layer di trasporto</string>
-    <string name="probe_url">URL di Testo Personalizzato</string>
     <string name="route_bypass_domain">Regola del Dominio per %s</string>
     <string name="proxied_apps">Modalità VPN delle app</string>
     <string name="search_apps">Cerca…</string>
@@ -208,7 +200,6 @@
     <string name="route_asset_updated">Aggiornato</string>
     <string name="route_not_asset">Non è un file di risorse: serviva un .dat, ma ricevuto %s</string>
     <string name="route_opt_bypass_lan">Bypassa la LAN</string>
-    <string name="traffic_sniffing">Abilità Sniffing Traffico</string>
     <string name="mux_concurrency">Connessioni Simultanee Mux</string>
     <string name="proxied_apps_summary">Configura la modalità VPN per le app selezionate</string>
     <string name="off">Inattivo</string>
@@ -226,7 +217,6 @@
     <string name="edit">Modifica</string>
     <string name="select_profile">Seleziona Profilo</string>
     <string name="custom_config">Configurazione Personalizzata</string>
-    <string name="balancer">Balancer</string>
     <string name="proxy_chain">Proxy Chain</string>
     <string name="chain_settings">Impostazioni della Chain</string>
     <string name="action_export_msg">Esportazione riuscita!</string>
@@ -286,12 +276,9 @@
     <string name="connection_test_available">Operazione Riuscita: l\'handshake HTTPS ha richiesto %dms</string>
     <string name="connection_test_error">Non Riuscito: %s</string>
     <string name="cag_dns">Impostazioni DNS</string>
-    <string name="direct_dns">DNS Diretto</string>
-    <string name="dns_hosts">Riscrittura del Dominio</string>
     <string name="port_local_dns">Porta DNS Locale</string>
     <string name="uuid">ID Utente</string>
     <string name="network">Rete</string>
-    <string name="transproxy_mode">Modalità Transproxy</string>
     <string name="connection_test_url">URL per Test Connessione</string>
     <string name="server_port">Porta Remota</string>
     <string name="password">Password</string>

@@ -18,6 +18,17 @@ class libopenppp2 {
         /**
          * Called from native code to protect a socket from VPN routing.
          * This binds the socket to the underlying network so traffic doesn't loop.
+         *
+         * ColorOS (realme/OPPO/OnePlus) installs `ip rule 13000 fwmark
+         * 0xc022a/0xcffff lookup <vpn-table>` which hijacks the 0xc022a fwmark
+         * that VpnService.protect() assigns, sending the "protected" socket
+         * straight back into the tunnel. Direct DNS queries then exit from the
+         * overseas tunnel egress and 223.5.5.5 returns overseas CDN nodes,
+         * breaking DNS-based splitting. When the hijack rule is present AND our
+         * uid still routes via the physical NIC (ColorOS excludes the VPN app
+         * uid from its 13000 uidrange rules, falling through to `ip rule 31000
+         * fwmark 0x0/0xffff iif lo lookup <wlan0>`), skip protect() so the
+         * socket stays unmarked and exits over the physical network.
          */
         @JvmStatic
         fun protect(sockfd: Int): Boolean {
@@ -26,9 +37,62 @@ class libopenppp2 {
                 android.util.Log.w("openppp2", "protect failed: service missing fd=$sockfd")
                 return false
             }
+            if (protectHijacked) {
+                android.util.Log.i("openppp2", "protect skipped (ColorOS fwmark hijack) fd=$sockfd")
+                return true
+            }
             val ok = service.protect(sockfd)
             android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok")
             return ok
+        }
+
+        /**
+         * True when ColorOS ip-rule 13000 hijacks VpnService.protect()'s fwmark
+         * (0xc022a) back into the VPN table, and our uid can still reach the
+         * physical network unmarked.
+         *
+         * Detection: ordinary apps have no NET_ADMIN, so `ip rule` fails with
+         * "Cannot bind netlink socket: Permission denied". We therefore key on
+         * Build.MANUFACTURER/BRAND (realme/OPPO/OnePlus run ColorOS, which
+         * installs the hijack rule) and additionally try `ip rule` as a
+         * cross-check when permitted. On ColorOS the VPN app uid is excluded
+         * from the 13000 uidrange rules, so an unmarked socket falls through to
+         * `ip rule 31000 fwmark 0x0/0xffff iif lo lookup <wlan0>` and exits over
+         * the physical NIC - exactly what skipping protect() achieves.
+         */
+        private val protectHijacked: Boolean by lazy {
+            val manufacturer = (android.os.Build.MANUFACTURER ?: "").lowercase()
+            val brand = (android.os.Build.BRAND ?: "").lowercase()
+            val colorOS = manufacturer.contains("realme") || manufacturer.contains("oppo") ||
+                manufacturer.contains("oneplus") || manufacturer.contains("oplus") ||
+                brand.contains("realme") || brand.contains("oppo") ||
+                brand.contains("oneplus") || brand.contains("oplus")
+            if (!colorOS) {
+                android.util.Log.i(
+                    "openppp2",
+                    "protect hijack: not ColorOS ($manufacturer/$brand), protect() normal"
+                )
+                false
+            } else {
+                // Cross-check the actual hijack rule if `ip` is available.
+                var ipConfirms = false
+                try {
+                    val rule = Runtime.getRuntime()
+                        .exec(arrayOf("ip", "rule"))
+                        .inputStream.bufferedReader().readText()
+                    ipConfirms = rule.contains("fwmark 0xc022a/0xcffff")
+                    android.util.Log.i(
+                        "openppp2",
+                        "protect hijack: ColorOS ($manufacturer/$brand) ip-rule confirm=$ipConfirms"
+                    )
+                } catch (e: Throwable) {
+                    android.util.Log.i(
+                        "openppp2",
+                        "protect hijack: ColorOS ($manufacturer/$brand) ip not readable, skip protect()"
+                    )
+                }
+                true
+            }
         }
 
         @JvmStatic
@@ -127,6 +191,9 @@ class libopenppp2 {
 
         @JvmStatic
         external fun set_dns_bcl(turbo: Boolean, ttl: Int, dns: String): Boolean
+
+        @JvmStatic
+        external fun set_log_level(level: Int): Int
 
         @JvmStatic
         external fun get_bypass_ip_list(): String?

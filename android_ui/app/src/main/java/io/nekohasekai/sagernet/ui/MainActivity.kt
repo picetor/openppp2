@@ -65,6 +65,19 @@ import io.nekohasekai.sagernet.group.GroupInterfaceAdapter
 import io.nekohasekai.sagernet.ktx.*
 import io.nekohasekai.sagernet.utils.PackageCache
 import io.noties.markwon.Markwon
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.ConnectException
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URL
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 class MainActivity : ThemedActivity(),
     SagerConnection.Callback,
@@ -239,7 +252,88 @@ class MainActivity : ThemedActivity(),
         if (state != BaseService.State.Connected || connection.service == null) {
             error("not started")
         }
-        return connection.service!!.urlTest()
+        // Android's VpnService exempts the creating app's uid from VPN
+        // routing (to avoid loops), so a plain socket from this UI process
+        // goes out the physical NIC directly and cannot reach the tunnel.
+        // The openppp2 core opens a local HTTP CONNECT proxy on loopback
+        // (injected as client.http-proxy.port in VpnService.startVpn);
+        // connecting to 127.0.0.1 is not VPN-routed, and the proxy forwards
+        // the request into the tunnel from the VpnService process. This is
+        // the only reliable way to measure real latency through the tunnel
+        // from the UI process. Run in-process so exceptions propagate to
+        // the UI callers (Binder cannot propagate exceptions across
+        // processes).
+        val url = URL(DataStore.connectionTestURL)
+        val useTls = url.protocol.equals("https", ignoreCase = true)
+        val host = url.host
+        val port = if (url.port > 0) url.port else if (useTls) 443 else 80
+        val path = (url.path.ifEmpty { "/" }) + (url.query?.let { "?$it" } ?: "")
+        val proxyPort = DataStore.httpPort
+        val start = System.currentTimeMillis()
+        val raw = Socket()
+        try {
+            // The local HTTP CONNECT proxy is opened by the VpnService core
+            // when the tunnel comes up.  Right after the UI reports
+            // Connected the listener may not be bound yet (a race of a few
+            // hundred ms), so retry a handful of times on refusal instead of
+            // failing the very first tap.
+            var lastRefusal: ConnectException? = null
+            for (attempt in 0 until 5) {
+                try {
+                    raw.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), proxyPort), 20000)
+                    lastRefusal = null
+                    break
+                } catch (e: ConnectException) {
+                    lastRefusal = e
+                    try {
+                        Thread.sleep(500L)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+            if (lastRefusal != null) throw lastRefusal
+            raw.soTimeout = 20000
+            val proxyOut = BufferedWriter(OutputStreamWriter(raw.getOutputStream(), Charsets.US_ASCII))
+            val proxyIn = BufferedReader(InputStreamReader(raw.getInputStream(), Charsets.US_ASCII))
+            proxyOut.write("CONNECT $host:$port HTTP/1.1\r\n")
+            proxyOut.write("Host: $host:$port\r\n")
+            proxyOut.write("User-Agent: openppp2-android\r\n")
+            proxyOut.write("\r\n")
+            proxyOut.flush()
+            val proxyStatus = proxyIn.readLine() ?: error("proxy empty response")
+            val proxyCode = proxyStatus.split(" ").getOrNull(1)?.toIntOrNull()
+                ?: error("malformed proxy response: $proxyStatus")
+            if (proxyCode !in 200..299) error("proxy HTTP $proxyCode")
+            while (true) {
+                val line = proxyIn.readLine() ?: error("proxy header EOF")
+                if (line.isEmpty()) break
+            }
+            val socket: Socket = if (useTls) {
+                val ssl = (SSLContext.getDefault().socketFactory as SSLSocketFactory)
+                    .createSocket(raw, host, port, true) as SSLSocket
+                ssl.startHandshake()
+                ssl
+            } else raw
+            try {
+                val out = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.US_ASCII))
+                out.write("GET $path HTTP/1.1\r\n")
+                out.write("Host: $host\r\n")
+                out.write("User-Agent: openppp2-android\r\n")
+                out.write("Connection: close\r\n\r\n")
+                out.flush()
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.US_ASCII))
+                val statusLine = reader.readLine() ?: error("empty response")
+                val code = statusLine.split(" ").getOrNull(1)?.toIntOrNull()
+                    ?: error("malformed response: $statusLine")
+                if (code !in 200..399) error("HTTP $code")
+                return (System.currentTimeMillis() - start).toInt()
+            } finally {
+                if (socket !== raw) socket.close()
+            }
+        } finally {
+            raw.close()
+        }
     }
 
     suspend fun importSubscription(uri: String) {
@@ -351,11 +445,6 @@ class MainActivity : ThemedActivity(),
             R.id.nav_group -> displayFragment(GroupFragment())
             R.id.nav_route -> displayFragment(RouteFragment())
             R.id.nav_settings -> displayFragment(SettingsFragment())
-            R.id.nav_traffic -> {
-                displayFragment(TrafficFragment())
-                connection.trafficTimeout = connection.trafficTimeout
-            }
-            R.id.nav_tools -> displayFragment(ToolsFragment())
             R.id.nav_logcat -> displayFragment(LogcatFragment())
             R.id.nav_about -> displayFragment(AboutFragment())
             else -> return false
@@ -417,9 +506,8 @@ class MainActivity : ThemedActivity(),
     }
 
     override fun statsUpdated(stats: List<AppStats>) {
-        (supportFragmentManager.findFragmentById(R.id.fragment_holder) as? TrafficFragment)?.emitStats(
-            stats
-        )
+        // The traffic statistics screen has been removed from the drawer;
+        // stats are still published to the notification by the service.
     }
 
     override fun routeAlert(type: Int, routeName: String) {

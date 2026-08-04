@@ -23,8 +23,6 @@ package io.nekohasekai.sagernet.database
 
 import android.content.Intent
 import android.os.Binder
-import android.os.Build
-import android.os.LocaleList
 import androidx.preference.PreferenceDataStore
 import io.nekohasekai.sagernet.*
 import io.nekohasekai.sagernet.SagerNet.Companion.application
@@ -36,7 +34,6 @@ import io.nekohasekai.sagernet.database.preference.RoomPreferenceDataStore
 import io.nekohasekai.sagernet.ktx.*
 import java.io.BufferedReader
 import java.io.StringReader
-import java.util.Locale
 import java.util.Properties
 
 object DataStore : OnPreferenceDataStoreChangeListener {
@@ -46,40 +43,6 @@ object DataStore : OnPreferenceDataStoreChangeListener {
 
     fun init() {
         configurationStore.registerChangeListener(this)
-
-        // migrate from 0.14.10
-        val ipv6Mode0 = configurationStore.getString("ipv6Mode0")?.toIntOrNull()
-        // 0: Disable, 1: Enable, 2: Prefer, 3: Only
-        if (configurationStore.getBoolean("enableVPNInterfaceIPv6Address") == null) {
-            when (ipv6Mode0) {
-                0 -> configurationStore.putBoolean("enableVPNInterfaceIPv6Address", false)
-                1, 2, 3 -> configurationStore.putBoolean("enableVPNInterfaceIPv6Address", true)
-            }
-        }
-        if (configurationStore.getBoolean("resolveDestination") == true
-            && configurationStore.getString("outboundDomainStrategy") == null) {
-            when (ipv6Mode0) {
-                0 -> configurationStore.putString("outboundDomainStrategy", "UseIPv4")
-                1 -> configurationStore.putString("outboundDomainStrategy", "PreferIPv4")
-                2 -> configurationStore.putString("outboundDomainStrategy", "PreferIPv6")
-                3 -> configurationStore.putString("outboundDomainStrategy", "UseIPv6")
-            }
-        }
-        if (configurationStore.getBoolean("resolveDestinationForDirect") == true
-            && configurationStore.getString("outboundDomainStrategyForDirect") == null) {
-            when (ipv6Mode0) {
-                0 -> configurationStore.putString("outboundDomainStrategyForDirect", "UseIPv4")
-                1 -> configurationStore.putString("outboundDomainStrategyForDirect", "PreferIPv4")
-                2 -> configurationStore.putString("outboundDomainStrategyForDirect", "PreferIPv6")
-                3 -> configurationStore.putString("outboundDomainStrategyForDirect", "UseIPv6")
-            }
-        }
-        // migrate from 0.14.14
-        val outboundDomainStrategy = configurationStore.getString("outboundDomainStrategy")
-        if (outboundDomainStrategy != null && outboundDomainStrategy != "AsIs"
-            && configurationStore.getString("outboundDomainStrategyForServer") == null) {
-            configurationStore.putString("outboundDomainStrategyForServer", outboundDomainStrategy)
-        }
     }
 
     var selectedProxy by configurationStore.long(Key.PROFILE_ID)
@@ -134,44 +97,8 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var nightTheme by configurationStore.stringToInt(Key.NIGHT_THEME)
     var serviceMode by configurationStore.string(Key.SERVICE_MODE) { Key.MODE_VPN }
 
-    var domainStrategy by configurationStore.string(Key.DOMAIN_STRATEGY) { "AsIs" }
-    var trafficSniffing by configurationStore.boolean(Key.TRAFFIC_SNIFFING) { true }
-    var destinationOverride by configurationStore.boolean(Key.DESTINATION_OVERRIDE)
-    var outboundDomainStrategy by configurationStore.string(Key.OUTBOUND_DOMAIN_STRATEGY) { "AsIs" }
-    var outboundDomainStrategyForDirect by configurationStore.string(Key.OUTBOUND_DOMAIN_STRATEGY_FOR_DIRECT) { "AsIs" }
-
-    var outboundDomainStrategyForServer by configurationStore.string(Key.OUTBOUND_DOMAIN_STRATEGY_FOR_SERVER) { "AsIs" }
     var bypassLan by configurationStore.boolean(Key.BYPASS_LAN) { true }
 
-    var allowAccess by configurationStore.boolean(Key.ALLOW_ACCESS)
-    var speedInterval by configurationStore.stringToInt(Key.SPEED_INTERVAL)
-
-    var remoteDns by configurationStore.stringNotBlack(Key.REMOTE_DNS) { "tcp://1.1.1.1" }
-    var directDns by configurationStore.stringNotBlack(Key.DIRECT_DNS) {
-        val locale = when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> SagerNet.locale.systemLocales[0]!!
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N -> LocaleList.getDefault().get(0)
-            else -> Locale.getDefault()
-        }
-        when (locale.country) {
-            "CN" -> "tcp://223.5.5.5"
-            "IR" -> "tcp://178.22.122.100"
-            "RU" -> "tcp://77.88.8.8"
-            else -> "tcp://1.1.1.1"
-        }
-    }
-    var bootstrapDns by configurationStore.stringNotBlack(Key.BOOTSTRAP_DNS)
-    var useLocalDnsAsDirectDns by configurationStore.boolean(Key.USE_LOCAL_DNS_AS_DIRECT_DNS) { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }
-    var useLocalDnsAsBootstrapDns by configurationStore.boolean(Key.USE_LOCAL_DNS_AS_BOOTSTRAP_DNS) { true }
-    var enableFakeDns by configurationStore.boolean(Key.ENABLE_FAKEDNS)
-    var hijackDns by configurationStore.boolean(Key.HIJACK_DNS)
-    var hosts by configurationStore.string(Key.DNS_HOSTS)
-    var enableDnsRouting by configurationStore.boolean(Key.ENABLE_DNS_ROUTING) { true }
-    var remoteDnsQueryStrategy by configurationStore.string(Key.REMOTE_DNS_QUERY_STRATEGY) { "UseIP" }
-    var directDnsQueryStrategy by configurationStore.string(Key.DIRECT_DNS_QUERY_STRATEGY) { "UseIP" }
-    var ednsClientIp by configurationStore.string(Key.EDNS_CLIENT_IP)
-
-    var routeMode by configurationStore.stringToInt(Key.ROUTE_MODE)
     var rulesProvider by configurationStore.stringToInt(Key.RULES_PROVIDER)
 
     // openppp2 tunnel specific settings
@@ -192,7 +119,6 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var logLevelDebugWarningDisable by configurationStore.boolean(Key.LOG_LEVEL_DEBUG_WARNING_DISABLE)
     var enableDebug by configurationStore.boolean(Key.ENABLE_DEBUG) { BuildConfig.DEBUG }
     var pprofServer by configurationStore.string(Key.PPROF_SERVER)
-    var enablePcap by configurationStore.boolean(Key.ENABLE_PCAP)
     var allowAppsBypassVpn by configurationStore.boolean(Key.ALLOW_APPS_BYPASS_VPN)
     var acquireWakeLock by configurationStore.boolean(Key.ACQUIRE_WAKE_LOCK)
     var stunServers by configurationStore.string(Key.STUN_SERVERS)
@@ -200,12 +126,6 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var useIECUnit by configurationStore.boolean(Key.USE_IEC_UNIT)
     var queryAllPackagesAlternativeMethod by configurationStore.boolean(Key.QUERY_ALL_PACKAGES_ALTERNATIVE_METHOD)
 
-    var enableFragment by configurationStore.boolean(Key.ENABLE_FRAGMENT)
-    var enableFragmentForDirect by configurationStore.boolean(Key.ENABLE_FRAGMENT_FOR_DIRECT)
-    var fragmentMethod by configurationStore.stringToInt(Key.FRAGMENT_METHOD)
-    var realityDisableX25519Mlkem768 by configurationStore.boolean(Key.REALITY_DISABLE_X25519MLKEM768)
-    var hysteria2OmitMaxDatagramFrameSize by configurationStore.boolean(Key.HYSTERIA2_OMIT_MAX_DATAGRAM_FRAME_SIZE)
-    var grpcServiceNameCompat by configurationStore.boolean(Key.GRPC_SERVICE_NAME_COMPAT)
     var profileSecurityAdvisory by configurationStore.boolean(Key.PROFILE_SECURITY_ADVISORY) { true }
 
     // hopefully hashCode = mHandle doesn't change, currently this is true from KitKat to Nougat
@@ -213,39 +133,16 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var socksPort: Int
         get() = getLocalPort(Key.SOCKS_PORT, 2080)
         set(value) = saveLocalPort(Key.SOCKS_PORT, value)
-    var localDNSPort: Int
-        get() = getLocalPort(Key.LOCAL_DNS_PORT, 6450)
-        set(value) {
-            saveLocalPort(Key.LOCAL_DNS_PORT, value)
-        }
     var httpPort: Int
         get() = getLocalPort(Key.HTTP_PORT, 9080)
         set(value) = saveLocalPort(Key.HTTP_PORT, value)
-    var transproxyPort: Int
-        get() = getLocalPort(Key.TRANSPROXY_PORT, 9200)
-        set(value) = saveLocalPort(Key.TRANSPROXY_PORT, value)
 
     fun initGlobal() {
         if (configurationStore.getString(Key.SOCKS_PORT) == null) {
             socksPort = socksPort
         }
-        if (configurationStore.getString(Key.LOCAL_DNS_PORT) == null) {
-            localDNSPort = localDNSPort
-        }
         if (configurationStore.getString(Key.HTTP_PORT) == null) {
             httpPort = httpPort
-        }
-        if (configurationStore.getString(Key.TRANSPROXY_PORT) == null) {
-            transproxyPort = transproxyPort
-        }
-        if (configurationStore.getString(Key.DNS_HOSTS) == null) {
-            hosts = hosts
-        }
-        if (configurationStore.getString(Key.REMOTE_DNS).isNullOrBlank()) {
-            remoteDns = remoteDns
-        }
-        if (configurationStore.getString(Key.DIRECT_DNS).isNullOrBlank()) {
-            directDns = directDns
         }
         if (configurationStore.getString(Key.DNS1).isNullOrBlank()) {
             tunnelDns1 = tunnelDns1
@@ -273,13 +170,9 @@ object DataStore : OnPreferenceDataStoreChangeListener {
         configurationStore.putString(key, "$value")
     }
 
-    var enableVPNInterfaceIPv6Address by configurationStore.boolean(Key.ENABLE_VPN_INTERFACE_IPV6_ADDRESS)
-
-    var meteredNetwork by configurationStore.boolean(Key.METERED_NETWORK)
     var proxyApps by configurationStore.boolean(Key.PROXY_APPS)
     var bypass by configurationStore.boolean(Key.BYPASS_MODE) { true }
     var individual by configurationStore.string(Key.INDIVIDUAL)
-    var showDirectSpeed by configurationStore.boolean(Key.SHOW_DIRECT_SPEED)
 
     val persistAcrossReboot by configurationStore.boolean(Key.PERSIST_ACROSS_REBOOT)
 
@@ -289,29 +182,16 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var socksUDP by configurationStore.boolean(Key.SOCKS_UDP) { true }
     var socksUDPWarningDisable by configurationStore.boolean(Key.SOCKS_UDP_WARNING_DISABLE)
     var requireHttp by configurationStore.boolean(Key.REQUIRE_HTTP) { false }
-    var httpUsername by configurationStore.string(Key.HTTP_USERNAME)
-    var httpPassword by configurationStore.string(Key.HTTP_PASSWORD)
     var appendHttpProxy by configurationStore.boolean(Key.APPEND_HTTP_PROXY) { true }
     var httpProxyException by configurationStore.string(Key.HTTP_PROXY_EXCEPTION)
-    var requireTransproxy by configurationStore.boolean(Key.REQUIRE_TRANSPROXY)
-    // var transproxyMode by configurationStore.stringToInt(Key.TRANSPROXY_MODE)
-    var requireDnsInbound by configurationStore.boolean(Key.REQUIRE_DNS_INBOUND)
     var connectionTestURL by configurationStore.string(Key.CONNECTION_TEST_URL) { CONNECTION_TEST_URL }
     var alwaysShowAddress by configurationStore.boolean(Key.ALWAYS_SHOW_ADDRESS)
     var showGroupName by configurationStore.boolean(Key.SHOW_GROUP_NAME)
 
-    var tunImplementation by configurationStore.stringToInt(Key.TUN_IMPLEMENTATION) { TunImplementation.GVISOR }
-
     var mtu by configurationStore.stringToInt(Key.MTU) { VpnService.DEFAULT_MTU }
-
-    var discardICMP by configurationStore.boolean(Key.DISCARD_ICMP)
-
-    var appTrafficStatistics by configurationStore.boolean(Key.APP_TRAFFIC_STATISTICS)
-    var profileTrafficStatistics by configurationStore.boolean(Key.PROFILE_TRAFFIC_STATISTICS) { true }
 
     // protocol
     var providerRootCA by configurationStore.stringToInt(Key.PROVIDER_ROOT_CA) { 1 }
-    var interruptReusedConnections by configurationStore.boolean(Key.INTERRUPT_REUSED_CONNECTIONS) { true }
 
     // cache
 

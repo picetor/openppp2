@@ -12,7 +12,6 @@
     <string name="theme">Theme</string>
     <string name="group_default">Ungrouped</string>
     <string name="quick_toggle">Toggle</string>
-    <string name="menu_traffic">Traffic</string>
     <!-- group -->
     <string name="group_name">Group name</string>
     <string name="group_update">Update</string>
@@ -57,10 +56,7 @@
     <string name="ws_max_early_data">Max early data</string>
     <string name="ws_browser_forwarding">Browser forwarding</string>
     <string name="ws_browser_forwarding_sum">Forward WebSocket through browser</string>
-    <string name="speed_interval">Speed notification update interval</string>
     <string name="cag_misc">Misc settings</string>
-    <string name="show_direct_speed">Show direct speed</string>
-    <string name="show_direct_speed_sum">Show direct traffic speed in notification as well</string>
     <string name="security_settings">Security settings</string>
     <string name="allow_insecure">Skip certificate verification</string>
     <string name="allow_insecure_sum">Enabling this option without deploying other security measures leads to the success of man-in-the-middle attacks. Do NOT enable unless you know what you are doing.</string>
@@ -73,8 +69,6 @@
     <string name="connection_test_available_http">Success: HTTP handshake took %d ms</string>
     <string name="connection_test_error">Failed: %s</string>
     <string name="cag_dns">DNS settings</string>
-    <string name="remote_dns">Remote DNS</string>
-    <string name="direct_dns">Direct DNS</string>
     <string name="direct_dns_1">直连 DNS 1</string>
     <string name="direct_dns_2">直连 DNS 2</string>
     <string name="tunnel_dns_1">隧道 DNS 1</string>
@@ -93,16 +87,10 @@
     <string name="extra_args_sum">附加到启动命令的额外参数，例如 --tun-mux-acceleration=3 --link-restart=3</string>
     <string name="enable_dns_routing">Enable DNS routing</string>
     <string name="dns_routing_message">Resolve domains in bypass routes with direct DNS</string>
-    <string name="enable_fakedns">Enable fake DNS</string>
     <string name="fakedns_message">May cause other applications to need to be restarted to reconnect to the network after the proxy is disconnected</string>
-    <string name="hijack_dns">Hijack DNS</string>
-    <string name="hijack_dns_message">Hijack DNS queries that are not sent to TUN DNS address with DNS sniffer</string>
-    <string name="dns_hosts">Domain rewriting</string>
     <string name="port_local_dns">Local DNS port</string>
     <string name="require_transproxy">Enable transparent proxy inbound</string>
-    <string name="transproxy_mode">Transparent proxy mode</string>
     <string name="connection_test_url">Connection test URL</string>
-    <string name="probe_url">Custom test URL</string>
     <!-- proxy category -->
     <string name="profile_name">Profile name</string>
     <string name="server_address">Server</string>
@@ -127,7 +115,6 @@
     <string name="quic_security">QUIC Security</string>
     <string name="quic_key">QUIC key</string>
     <string name="kcp_seed">mKCP seed</string>
-    <string name="grpc_service_name">gRPC service name</string>
     <string name="url">URL</string>
     <string name="sni">SNI</string>
     <string name="alpn">ALPN</string>
@@ -174,8 +161,6 @@
     <string name="route_asset_updated">Updated</string>
     <string name="route_not_asset">Not an asset file: expected .dat or ip rule files, but %s</string>
     <string name="route_opt_bypass_lan">Bypass private addresses</string>
-    <string name="domain_strategy">Domain strategy</string>
-    <string name="traffic_sniffing">Enable sniffing</string>
     <string name="enable_mux">Enable Mux</string>
     <string name="mux_concurrency">Mux concurrent Connections</string>
     <string name="proxied_apps">Per-app VPN</string>
@@ -225,12 +210,6 @@
     <string name="action_anytls" translatable="false">AnyTLS</string>
     <string name="proxy_chain">Proxy chain</string>
     <string name="custom_config">Custom config</string>
-    <string name="balancer">Balancer</string>
-    <string name="balancer_settings">Balancer settings</string>
-    <string name="balancer_type">Type</string>
-    <string name="balancer_strategy">Strategy</string>
-    <string name="balancer_use_landing_proxy">Use group landing proxy</string>
-    <string name="balancer_use_front_proxy">Use group front proxy</string>
     <string name="chain_settings">Chain settings</string>
     <string name="config_settings">Config settings</string>
     <string name="circular_reference">Circular reference</string>
@@ -302,7 +281,6 @@
     <string name="auto">Auto</string>
     <string name="list">List</string>
     <string name="random">Random</string>
-    <string name="probe_interval">Balancer observation interval (s)</string>
     <string name="available">%d ms</string>
     <string name="unavailable">Unavailable</string>
     <string name="always_show_address">Always show address</string>
@@ -370,8 +348,6 @@
     <string name="traffic_downlink">%s | %s/s ↓</string>
     <string name="traffic_uplink_total" translatable="false">%s ↑</string>
     <string name="traffic_downlink_total" translatable="false">%s ↓</string>
-    <string name="traffic_active">Active</string>
-    <string name="traffic_stats">Statistics</string>
     <plurals name="tcp_connections">
         <item quantity="one">%d TCP connection</item>
         <item quantity="other">%d TCP connections</item>
@@ -380,7 +356,6 @@
         <item quantity="one">%d UDP connection</item>
         <item quantity="other">%d UDP connections</item>
     </plurals>
-    <string name="traffic_holder">Turn on VPN to record traffic statistics</string>
     <string name="copy_label">Copy app name</string>
     <string name="copy_package_name">Copy package name</string>
     <string name="open_settings">Open in Settings</string>
@@ -390,28 +365,14 @@
     <string name="app_no_launcher">The app has no interface.</string>
     <string name="route_for">Rule for %s</string>
     <string name="route_need_vpn">Routing rule `%s` requires VPN, ignored.</string>
-    <string name="app_traffic_statistics">App traffic statistics</string>
-    <string name="profile_traffic_statistics">Profile traffic statistics</string>
-    <string name="traffic_statistics_summary">May increase power consumption</string>
-    <string name="profile_traffic_statistics_summary">When disabled, used traffic will not be counted</string>
-    <string name="no_statistics">No statistics yet</string>
-    <string name="app_statistics_disabled">App traffic statistics disabled</string>
-    <string name="ssh_auth_type_none">None</string>
-    <string name="ssh_public_key">Public key</string>
     <string name="ssh_private_key">Private key</string>
     <string name="ssh_private_key_passphrase">Private key passphrase</string>
-    <string name="menu_tools">Tools</string>
     <string name="menu_log">Logs</string>
     <string name="clear_logcat">Clear Logcat</string>
     <string name="wireguard_local_address">Local address</string>
     <string name="wireguard_public_key">Peer public key</string>
     <string name="wireguard_psk">Peer pre-shared key</string>
-    <string name="tun_implementation">TCP/IP stack</string>
-    <string name="destination_override">Override destination</string>
-    <string name="destination_override_summary">Override the destination address with the sniffed domain name, not for routing only</string>
-    <string name="resolve_destination">Resolve destination</string>
     <string name="pcap" translatable="false">PCAP</string>
-    <string name="enable_pcap">Enable PCAP</string>
     <string name="pcap_summary">Save traffic to .pcap file</string>
     <string name="pcap_notice">Pcap files will be saved to %s</string>
     <string name="naive_insecure_concurrency">Insecure concurrency</string>
@@ -434,7 +395,6 @@
     <string name="network_wifi">Wi-Fi</string>
     <string name="network_bt">Bluetooth</string>
     <string name="network_eth">Ethernet</string>
-    <string name="tools_network">Network</string>
     <string name="backup">Backup</string>
     <string name="backup_groups_and_configurations">Groups and configurations</string>
     <string name="backup_rules">Routing rules</string>
@@ -468,7 +428,6 @@
     <string name="reality_short_id">REALITY Short ID</string>
     <string name="reality_fingerprint">REALITY uTLS fingerprint</string>
     <string name="wireguard_reserved">Reserved</string>
-    <string name="bootstrap_dns">Bootstrap DNS</string>
     <string name="use_local_dns_as_bootstrap_dns">Use system DNS as Bootstrap DNS</string>
     <string name="brook_fragment">Fragment</string>
     <string name="action_flash_on">Turn on flash</string>
@@ -487,8 +446,6 @@
     <string name="nat_external_address">External Address</string>
     <string name="subscription_expire">Expire: %s</string>
     <string name="show_group_name_in_notification">Show group name in notification</string>
-    <string name="remote_dns_query_strategy">Remote DNS query strategy</string>
-    <string name="direct_dns_query_strategy">Direct DNS query strategy</string>
     <string name="route_rules_custom">Custom</string>
     <string name="rules_geosite_url">geosite.dat URL</string>
     <string name="rules_geoip_url">geoip.dat URL</string>
@@ -496,17 +453,12 @@
     <string name="mux_settings">Mux settings</string>
     <string name="update_subscription">Update subscription</string>
     <string name="group_not_a_subscription">This group is not a subscription.</string>
-    <string name="enable_fragment">Enable TLS Client Hello fragmentation</string>
-    <string name="enable_fragment_sum">May help circumvent SNI censorship. This option may get removed in the future.</string>
     <string name="fragment_length">Fragmentation length</string>
     <string name="fragment_interval">Fragmentation interval</string>
-    <string name="enable_fragment_for_direct">Also enable fragmentation for direct</string>
     <string name="probe_cert">Certificate prober</string>
     <string name="probe_cert_summary">Probe the TLS certificate of a server.</string>
     <string name="front_proxy">Front proxy</string>
     <string name="landing_proxy">Landing proxy</string>
-    <string name="resolve_destination_for_direct">Resolve destination (direct)</string>
-    <string name="edns_client_ip">EDNS client IP</string>
     <string name="allow_apps_bypass_vpn">Allow apps to bypass VPN</string>
     <string name="allow_apps_bypass_vpn_sum">Allow apps to bypass VPN using system-provided methods on their own</string>
     <string name="update_all_subscriptions">Update all subscriptions</string>
@@ -533,8 +485,6 @@
     <string name="root_ca_system_and_user">System and user</string>
     <string name="one_per_line">One per line.</string>
     <string name="one_per_line_format">One per line. Format:\n%s</string>
-    <string name="edns_client_ip_sum">Please input an IP address. IPv4 uses a subnet of /24 and IPv6 uses a subnet of /96.</string>
-    <string name="bootstrap_dns_sum">If the address of direct DNS is a domain name and "resolve destination" is enabled, use bootstrap DNS to resolve it. Please input a DNS server with IP address or with "+local".</string>
     <string name="more">More</string>
     <string name="acquire_wake_lock">Acquire WakeLock</string>
     <string name="log_level">Log level</string>
@@ -565,35 +515,19 @@
     <string name="fileSize_gibibyte">GiB</string>
     <string name="fileSize_tebibyte">TiB</string>
     <string name="fileSize_pebibyte">PiB</string>
-    <string name="enable_vpn_interface_ipv6_address_sum">Add IPv6 address to VPN interface</string>
     <string name="bypass_private_sum">Exclude private addresses from VPN</string>
-    <string name="sniffing_sum">Sniff domain name from HTTP Host, TLS SNI and QUIC SNI and sniff protocol type</string>
     <string name="hosts_sum">Resolve the specified domain name to the specified IP address</string>
-    <string name="domain_strategy_ipv4_only">IPv4 only</string>
-    <string name="domain_strategy_prefer_ipv4">Prefer IPv4</string>
-    <string name="domain_strategy_ipv4_and_ipv6">IPv4 and IPv6</string>
-    <string name="domain_strategy_prefer_ipv6">Prefer IPv6</string>
-    <string name="domain_strategy_ipv6_only">IPv6 only</string>
     <string name="disable_all">Disable all</string>
     <string name="enable_all">Enable all</string>
-    <string name="resolve_destination_for_server">Resolve destination (server address)</string>
     <plurals name="profile_multi_import_message">
         <item quantity="one">Are you sure you want to import %d profile to %s?</item>
         <item quantity="other">Are you sure you want to import %d profiles to %s?</item>
     </plurals>
-    <string name="route_mode">Route mode</string>
-    <string name="route_mode_rule">rule</string>
-    <string name="route_mode_global">global</string>
-    <string name="route_mode_direct">direct</string>
     <string name="action_shadowquic" translatable="false">ShadowQUIC</string>
     <string name="debug_log_sum">Running configuration will be printed to the system log, so the log will contain secret keys used to connect to servers. This log level is required for reporting issues, and please remove sensitive information before posting log files publicly.</string>
     <string name="do_not_show_again">Don\'t show again</string>
     <string name="format">Format: %s</string>
     <string name="mieru_handshake_mode">Handshake mode</string>
-    <string name="fragment_method">Fragmentation method</string>
-    <string name="tls_record_fragmentation">TLS record fragmentation</string>
-    <string name="tcp_segmentation">TCP segmentation</string>
-    <string name="tls_record_fragmentation_and_tcp_segmentation">TLS record fragmentation and TCP segmentation</string>
     <string name="pinned_peer_certificate_public_key_sha256">Pinned certificate public key SHA-256</string>
     <string name="pinned_peer_certificate_sha256">Pinned certificate SHA-256</string>
     <string name="pinned_peer_certificate_sha256_base64_dialog_message">Use with "skip certificate verification" if the certificate itself is untrusted or invalid. One per line in Base64 encoding.</string>
@@ -601,12 +535,9 @@
     <string name="mtls_certificate">mTLS certificate</string>
     <string name="mtls_certificate_private_key">mTLS certificate private key</string>
     <string name="delete_multi_confirm_prompt">Are you sure you want to remove these profiles?</string>
-    <string name="interrupt_reused_connections">Interrupt reused connections when network changes</string>
     <string name="create_shortcut">Create shortcut</string>
     <string name="mieru_port_range">Server port range</string>
     <string name="cag_grpc">gRPC settings</string>
-    <string name="grpc_service_name_compat">gRPC service name compatibility</string>
-    <string name="grpc_service_name_compat_sum">Be compatible with Xray\'s breaking change but break the compatibility with non-Xray servers.</string>
     <string name="grpc_multi_mode">Multi mode</string>
     <string name="import_routing_rules_warning">All existing rules will be deleted.</string>
     <string name="export_routing_rules_warning">It is for compatibility purpose only and does not contain complete information.</string>
@@ -615,8 +546,6 @@
     <string name="third_party_notices">Third party notices</string>
     <string name="regular_expression_filter1">Name inclusion (regular expression)</string>
     <string name="translation_platform">Translation platform</string>
-    <string name="discard_icmp">Discard ICMP</string>
-    <string name="discard_icmp_sum">Discard ICMP and ICMPv6</string>
     <string name="insecure_warn">Security tips</string>
     <string name="insecure_warn_sum">Display warnings for profiles with equivalent security to cleartext.</string>
     <string name="ech">ECH</string>
@@ -633,8 +562,6 @@
     <string name="reality_mldsa65_verify" translatable="false">REALITY mldsa65Verify</string>
     <string name="socks5_udp_authentication_warning">SOCKS5 UDP is not protected by username/password authentication. If UDP is enabled, the authentication can be bypassed easily.</string>
     <string name="enable_hysteria2_omit_max_datagram_frame_size">Enable Hysteria 2 OmitMaxDatagramFrameSize</string>
-    <string name="hysteria2_omit_max_datagram_frame_size" translatable="false">OmitMaxDatagramFrameSize</string>
-    <string name="hysteria2_omit_max_datagram_frame_size_sum">If the Hysteria 2 server does not support this breaking change, UDP will be unusable. This is a temporary option and may be removed in the future.</string>
     <string name="ssh_keepalive_interval">Keepalive interval (s)</string>
     <string name="custom_outbound">Custom outbound</string>
     <string name="hysteria2_gecko_max_packet_size">Maximum packet size</string>

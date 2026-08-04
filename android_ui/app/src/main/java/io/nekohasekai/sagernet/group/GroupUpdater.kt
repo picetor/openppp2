@@ -84,6 +84,7 @@ abstract class GroupUpdater {
                         SubscriptionType.RAW -> RawUpdater
                         else -> error("unsupported subscription type")
                     }.doUpdate(proxyGroup, subscription, userInterface, byUser)
+                    finishUpdate(proxyGroup)
                     true
                 } catch (e: Throwable) {
                     Logs.w(e)

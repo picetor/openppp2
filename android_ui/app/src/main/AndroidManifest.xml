@@ -207,8 +207,6 @@
         <activity
             android:name="io.nekohasekai.sagernet.ui.profile.ChainSettingsActivity" />
         <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.BalancerSettingsActivity" />
-        <activity
             android:name="io.nekohasekai.sagernet.ui.GroupSettingsActivity" />
         <activity
             android:name="io.nekohasekai.sagernet.ui.RouteSettingsActivity" />

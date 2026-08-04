@@ -91,6 +91,7 @@ class LogcatFragment : ToolbarFragment(R.layout.layout_logcat),
                         "libnaive:D",
                         "libshadowquic:D",
                         "Exclave:D",
+                        "ppp:D",
                         "*:S",
                     ).joinToString(",")
                 )

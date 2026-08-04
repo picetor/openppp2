@@ -337,12 +337,67 @@ class VpnService : BaseVpnService(),
         } catch (_: UnsatisfiedLinkError) {
         }
 
+        // Sync the in-app LogLevel setting (0=NONE, 1=ERROR, 2=WARNING,
+        // 3=INFO, 4=DEBUG) into the native core so LOG_INFO / LOG_DEBUG
+        // output (e.g. DirectDNS diagnostics) follows the drawer log level.
+        try {
+            libopenppp2.set_log_level(DataStore.logLevel)
+        } catch (_: UnsatisfiedLinkError) {
+        }
+
         // Ensure bundled rule assets (GeoSite.dat / GeoIP.dat / ip.txt /
         // ipv6.txt / dns-rules.txt) exist under files/rules before the
         // native core tries to load them.
         ensureRuleAssets()
 
-        val configResult = libopenppp2.set_app_configuration(configJson)
+        // Apply the in-app inbound settings (SOCKS5 + HTTP proxy) on top of
+        // the profile configuration so the toggles/ports/password actually
+        // drive what the native core listens on:
+        //  - requireSocks  -> socks-proxy.port = socksPort, bind 0.0.0.0
+        //    (LAN access is implicit, so no separate allowAccess toggle),
+        //    username/password from the settings when set.
+        //  - requireHttp   -> http-proxy.port = httpPort, bind 127.0.0.1
+        //    (loopback keeps the UI latency probe + system proxy working).
+        // A port of 0 disables the corresponding local listener natively
+        // (VEthernetLocalProxySwitcher::Open rejects bind_port <= MinPort),
+        // so turning a toggle off fully disables that inbound.
+        val effectiveConfigJson = run {
+            val root = try {
+                JSONObject(configJson)
+            } catch (_: Throwable) {
+                JSONObject()
+            }
+            val client = root.optJSONObject("client") ?: JSONObject().also { root.put("client", it) }
+
+            val httpProxy = client.optJSONObject("http-proxy") ?: JSONObject().also { client.put("http-proxy", it) }
+            if (DataStore.requireHttp) {
+                httpProxy.put("port", DataStore.httpPort)
+                httpProxy.put("bind", "127.0.0.1")
+            } else {
+                httpProxy.put("port", 0)
+                httpProxy.put("bind", "127.0.0.1")
+            }
+
+            val socksProxy = client.optJSONObject("socks-proxy") ?: JSONObject().also { client.put("socks-proxy", it) }
+            if (DataStore.requireSocks) {
+                socksProxy.put("port", DataStore.socksPort)
+                socksProxy.put("bind", "0.0.0.0")
+                socksProxy.put("username", DataStore.socksUsername ?: "")
+                socksProxy.put("password", DataStore.socksPassword ?: "")
+            } else {
+                socksProxy.put("port", 0)
+                socksProxy.put("bind", "0.0.0.0")
+            }
+
+            val tcp = root.optJSONObject("tcp") ?: JSONObject().also { root.put("tcp", it) }
+            val connect = tcp.optJSONObject("connect") ?: JSONObject().also { tcp.put("connect", it) }
+            if (connect.optInt("timeout", 0) <= 0) {
+                connect.put("timeout", 15)
+            }
+            root.toString()
+        }
+
+        val configResult = libopenppp2.set_app_configuration(effectiveConfigJson)
         Log.i(TAG, "set_app_configuration result=$configResult")
         if (configResult != 0) {
             throw IllegalStateException(
@@ -874,9 +929,11 @@ class VpnService : BaseVpnService(),
                 appendLine()
                 appendLine("rules:")
                 // User-editable route rules (RuleEntity). outbound == -1 -> direct.
-                val rules = ProfileManager.getRules().filter { it.enabled }
-                if (rules.isEmpty()) {
-                    // Fallback defaults: private ranges + the configured country.
+                val allRules = ProfileManager.getRules()
+                val enabledRules = allRules.filter { it.enabled }
+                if (allRules.isEmpty()) {
+                    // No rules at all in the database — first launch fallback:
+                    // private ranges + the configured country.
                     appendLine("  - ip-cidr,10.0.0.0/8,direct")
                     appendLine("  - ip-cidr,100.64.0.0/10,direct")
                     appendLine("  - ip-cidr,127.0.0.0/8,direct")
@@ -886,8 +943,11 @@ class VpnService : BaseVpnService(),
                     appendLine("  - domain-suffix,$country,direct")
                     appendLine("  - geosite,$country,direct")
                     appendLine("  - geoip,$country,direct")
+                } else if (enabledRules.isEmpty()) {
+                    // Rules exist but all are disabled — all traffic goes tunnel.
+                    // final: tunnel handles the default route.
                 } else {
-                    for (rule in rules) {
+                    for (rule in enabledRules) {
                         val action = if (rule.outbound == -1L) "direct" else "tunnel"
                         for (raw in rule.domains.split('\n')) {
                             val d = raw.trim()

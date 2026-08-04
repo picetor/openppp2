@@ -65,41 +65,21 @@ class ServiceNotification(
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     }
 
-    val trafficStatistics = DataStore.profileTrafficStatistics
-    val showDirectSpeed = DataStore.showDirectSpeed
-
+    // Traffic statistics display in the notification is always enabled.
     private val callback: ISagerNetServiceCallback by lazy {
         object : ISagerNetServiceCallback.Stub() {
             override fun stateChanged(state: Int, profileName: String?, msg: String?) {}   // ignore
             override fun trafficUpdated(profileId: Long, stats: TrafficStats, isCurrent: Boolean) {
-                if (!trafficStatistics || profileId == 0L || !isCurrent) return
+                if (profileId == 0L || !isCurrent) return
                 builder.apply {
-                    if (showDirectSpeed) {
-                        val speedDetail = (service as Context).getString(
-                            R.string.speed_detail, service.getString(
-                                R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.txRateProxy, DataStore.useIECUnit)
-                            ), service.getString(
-                                R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.rxRateProxy, DataStore.useIECUnit)
-                            ), service.getString(
-                                R.string.speed,
-                                FormatFileSizeCompat.formatFileSize(service, stats.txRateDirect, DataStore.useIECUnit)
-                            ), service.getString(
-                                R.string.speed,
-                                FormatFileSizeCompat.formatFileSize(service, stats.rxRateDirect, DataStore.useIECUnit)
-                            )
+                    val speedSimple = (service as Context).getString(
+                        R.string.traffic, service.getString(
+                            R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.txRateProxy, DataStore.useIECUnit)
+                        ), service.getString(
+                            R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.rxRateProxy, DataStore.useIECUnit)
                         )
-                        setStyle(NotificationCompat.BigTextStyle().bigText(speedDetail))
-                        setContentText(speedDetail)
-                    } else {
-                        val speedSimple = (service as Context).getString(
-                            R.string.traffic, service.getString(
-                                R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.txRateProxy, DataStore.useIECUnit)
-                            ), service.getString(
-                                R.string.speed, FormatFileSizeCompat.formatFileSize(service, stats.rxRateProxy, DataStore.useIECUnit)
-                            )
-                        )
-                        setContentText(speedSimple)
-                    }
+                    )
+                    setContentText(speedSimple)
                     setSubText(
                         service.getString(
                             R.string.traffic,
@@ -207,11 +187,10 @@ class ServiceNotification(
     }
 
     private fun updateCallback(screenOn: Boolean) {
-        if (!trafficStatistics) return
         if (screenOn) {
             service.data.binder.registerCallback(callback)
             service.data.binder.startListeningForBandwidth(
-                callback, DataStore.speedInterval.toLong()
+                callback, 1000L
             )
             callbackRegistered = true
         } else if (callbackRegistered) {    // unregister callback to save battery

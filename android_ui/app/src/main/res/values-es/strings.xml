@@ -45,7 +45,6 @@
     <string name="custom_config">Configuración personalizada</string>
     <string name="route_add">Crear ruta</string>
     <string name="port_local_dns">Puerto DNS local</string>
-    <string name="dns_hosts">Reescritura de dominio</string>
     <string name="fakedns_message">Puede hacer que otras aplicaciones necesiten reiniciarse para volver a conectarse a la red después de desconectar el proxy</string>
     <string name="group_delete_confirm_prompt">¿Realmente quieres eliminar este grupo?</string>
     <string name="action_import_err">No se pudo importar.</string>
@@ -106,7 +105,6 @@
     <string name="pinned_peer_certificate_chain_sha256">Cadena de certificado fijado SHA-256</string>
     <string name="certificates">Certificados</string>
     <string name="sni">SNI</string>
-    <string name="grpc_service_name">Nombre de servicio gRPC</string>
     <string name="kcp_seed">Semilla mKCP</string>
     <string name="quic_key">Clave QUIC</string>
     <string name="uuid">ID de usuario</string>
@@ -116,8 +114,6 @@
     <string name="protocol">Protocolo</string>
     <string name="dns_routing_message">Resuelve los dominios en rutas de omisión con el DNS directo</string>
     <string name="enable_dns_routing">Activar enrutamiento DNS</string>
-    <string name="direct_dns">DNS directo</string>
-    <string name="remote_dns">DNS remoto</string>
     <string name="cag_dns">Ajustes de DNS</string>
     <string name="connection_test_error">Error: %s</string>
     <string name="connection_test_available_http">Éxito: El protocolo de enlace HTTP tardó %d ms</string>
@@ -137,8 +133,6 @@
     <string name="proxied_apps">VPN por aplicación</string>
     <string name="mux_concurrency">Conexiones simultáneas de Mux</string>
     <string name="enable_mux">Activar Mux</string>
-    <string name="traffic_sniffing">Activar escaneo</string>
-    <string name="domain_strategy">Estrategia de dominio</string>
     <string name="route_not_asset">No es un archivo de recurso: Se esperaba .dat, pero se obtuvo %s</string>
     <string name="route_asset_updated">Actualizado</string>
     <string name="route_asset_no_update">Ya está actualizado</string>
@@ -170,9 +164,7 @@
     <string name="server_address">Servidor</string>
     <string name="profile_name">Nombre de perfil</string>
     <string name="connection_test_url">URL de prueba de conexión</string>
-    <string name="transproxy_mode">Modo de proxy transparente</string>
     <string name="require_transproxy">Activar proxy transparente de entrada</string>
-    <string name="enable_fakedns">Activar DNS falso</string>
     <string name="speed_detail">Proxy: %1$s↑ %2$s↓ \nDirecto: %3$s↑ %4$s↓</string>
     <string name="security_settings">Ajustes de seguridad</string>
     <string name="show_direct_speed_sum">Muestra también la velocidad de tráfico directo en la notificación</string>
@@ -235,8 +227,6 @@
     <string name="route_need_vpn">La regla de enrutamiento `%s` requiere VPN, ignorada.</string>
     <string name="traffic_statistics_summary">Puede aumentar el consumo de energía</string>
     <string name="no_statistics">Aún no hay estadísticas</string>
-    <string name="ssh_auth_type_none">Ninguno</string>
-    <string name="ssh_public_key">Clave pública</string>
     <string name="ssh_private_key">Clave privada</string>
     <string name="ssh_private_key_passphrase">Frase de contraseña de clave privada</string>
     <string name="menu_tools">Herramientas</string>
@@ -281,7 +271,6 @@
     <string name="connection_test">Prueba de conexión</string>
     <string name="clear_traffic_statistics">Borrar estadísticas de tráfico</string>
     <string name="unavailable">No disponible</string>
-    <string name="probe_interval">Intervalo de observación del balanceador (s)</string>
     <string name="random">Aleatorio</string>
     <string name="list">Lista</string>
     <string name="auto">Automático</string>
@@ -314,10 +303,6 @@
     <string name="circular_reference">Referencia circular</string>
     <string name="config_settings">Configuración</string>
     <string name="chain_settings">Ajustes de cadena</string>
-    <string name="balancer_strategy">Estrategia</string>
-    <string name="balancer_type">Tipo</string>
-    <string name="balancer">Balanceador</string>
-    <string name="balancer_settings">Ajustes de balanceador</string>
     <string name="proxy_chain">Cadena de proxy</string>
     <string name="stopping">Deteniendo…</string>
     <string name="stop">Detener</string>
@@ -347,10 +332,7 @@
     <string name="tasker_settings">Ajustes de Tasker</string>
     <string name="packet_encoding">Codificación de paquetes</string>
     <string name="experimental_reduced_iv_head_entropy">Esta es la propuesta de GFWReport para una contramedida para el comportamiento de bloqueo de protocolo de transmisión aleatorio observado en GFW. \n\nEsta opción reasigna los primeros 6 bytes de IV a caracteres imprimibles, es posible que cualquier persona en la ruta de red privilegiada identifique el protocolo cuando está activado.</string>
-    <string name="probe_url">URL de prueba personalizada</string>
     <string name="mtu">MTU</string>
-    <string name="destination_override_summary">Sobrescribe la dirección de destino con el nombre de dominio escaneado, no solo para enrutamiento</string>
-    <string name="resolve_destination">Resolver destino</string>
     <string name="route_play_store">Regla de Play Store para %s</string>
     <string name="missing_permission">Faltan permisos</string>
     <string name="location_disabled">Ubicación desactivada</string>
@@ -358,14 +340,10 @@
     <string name="network_type">Tipo de red</string>
     <string name="network_data">Red móvil</string>
     <string name="naive_insecure_concurrency_summary">Usa N conexiones de túnel concurrentes para ser más robusto en malas condiciones de red. Más conexiones hacen que el túnel sea más fácil de detectar y menos seguro. Este proyecto busca la máxima seguridad contra el análisis de tráfico. Usarlo de forma insegura anula su propósito. \n\nSi debes usar esto, prueba primero con N=2 para ver si resuelve tus problemas. Se recomienda encarecidamente no usar más de 4 conexiones.</string>
-    <string name="enable_pcap">Activar PCAP</string>
     <string name="use_local_dns_as_direct_dns">Usar DNS del sistema como DNS directo</string>
     <string name="profile_traffic_statistics_summary">Si se desactiva, el tráfico usado no será contado</string>
-    <string name="app_traffic_statistics">Estadísticas de tráfico de la app</string>
     <string name="profile_traffic_statistics">Estadísticas de tráfico de perfil</string>
     <string name="app_statistics_disabled">Estadísticas de tráfico de la app desactivadas</string>
-    <string name="tun_implementation">Implementación TCP/IP</string>
-    <string name="destination_override">Sobrescribir destino</string>
     <string name="pcap_summary">Guarda el tráfico en un archivo .pcap</string>
     <string name="pcap_notice">Los archivos Pcap se guardarán en %s</string>
     <string name="start">Iniciar</string>
@@ -398,7 +376,6 @@
     <string name="tuic_disable_sni">Desactivar SNI</string>
     <string name="flow">Fluir</string>
     <string name="ws_max_early_data">Datos iniciales máximos</string>
-    <string name="hijack_dns">Secuestrar DNS</string>
     <string name="reality_public_key">Clave pública REALITY</string>
     <string name="tuic_zero_rtt_handshake">Protocolo de enlace 0-RTT</string>
     <string name="alter_id">ID alternativo</string>
@@ -412,7 +389,6 @@
     <string name="reality_short_id">ID corto REALITY</string>
     <string name="use_local_dns_as_bootstrap_dns">Usar DNS del sistema como DNS de arranque</string>
     <string name="update_subscription">Actualizar suscripción</string>
-    <string name="enable_fragment_for_direct">Activar también fragmentación para directo</string>
     <string name="reality_fingerprint">Huella digital uTLS REALITY</string>
     <string name="action_flash_off">Apagar flash</string>
     <string name="action_flash_on">Encender flash</string>
@@ -420,17 +396,12 @@
     <string name="hysteria_hop_interval">Intervalo de salto de puerto (s)</string>
     <string name="mux_settings">Ajustes de Mux</string>
     <string name="wireguard_reserved">Reservado</string>
-    <string name="bootstrap_dns">DNS de arranque</string>
     <string name="brook_fragment">Fragmento</string>
-    <string name="remote_dns_query_strategy">Estrategia de consulta de DNS remoto</string>
-    <string name="direct_dns_query_strategy">Estrategia de consulta de DNS directo</string>
     <string name="route_rules_custom">Personalizado</string>
     <string name="rules_geosite_url">URL de geosite.dat</string>
     <string name="rules_geoip_url">URL de geoip.dat</string>
-    <string name="enable_fragment">Activar fragmentación de TLS Client Hello</string>
     <string name="http_proxy_exception_list">Lista de excepciones de proxy HTTP</string>
     <string name="group_not_a_subscription">Este grupo no es una suscripción.</string>
-    <string name="enable_fragment_sum">Puede ayudar a eludir la censura de SNI. Esta opción puede eliminarse en el futuro.</string>
     <string name="fragment_length">Longitud de fragmentación</string>
     <string name="fragment_interval">Intervalo de fragmentación</string>
     <string name="splithttp_mode">Modo</string>
@@ -452,8 +423,6 @@
     <string name="probe_cert">Probador de certificados</string>
     <string name="front_proxy">Proxy frontal</string>
     <string name="landing_proxy">Proxy de aterrizaje</string>
-    <string name="resolve_destination_for_direct">Resolver destino (directo)</string>
-    <string name="edns_client_ip">IP del cliente EDNS</string>
     <string name="allow_apps_bypass_vpn">Permitir que las apps omitan la VPN</string>
     <string name="ech_config">Configuración ECH</string>
     <string name="ech_doh_server">Servidor ECH DoH</string>
@@ -473,7 +442,6 @@
     <string name="fileSize_gibibyte">GiB</string>
     <string name="fileSize_tebibyte">TiB</string>
     <string name="fileSize_pebibyte">PiB</string>
-    <string name="hijack_dns_message">Secuestra las consultas DNS que no se envían a la dirección DNS de TUN con el escaneo de DNS</string>
     <string name="available">%d ms</string>
     <string name="traffic_uplink">%s | %s/s ↑</string>
     <string name="traffic_downlink">%s | %s/s ↓</string>
@@ -494,8 +462,6 @@
     <string name="root_ca_system_and_user">Sistema y usuario</string>
     <string name="one_per_line">Uno por línea.</string>
     <string name="one_per_line_format">Uno por línea. Formato:\n%s</string>
-    <string name="edns_client_ip_sum">Ingrese una dirección IP. IPv4 usa una subred de /24 e IPv6 usa una subred de /96.</string>
-    <string name="bootstrap_dns_sum">Si la dirección del DNS directo es un nombre de dominio y resolver destino está activado, usa el DNS de arranque para resolverlo. Ingrese un servidor DNS con dirección IP o con +local.</string>
     <string name="more">Más</string>
     <string name="fab_style">Estilo de botón flotante</string>
     <string name="wireguard_keepalive_interval">Keep-alive persistente (s)</string>
@@ -510,35 +476,19 @@
     <string name="anytls_min_idle_session">Sesiones inactivas mínimas</string>
     <string name="use_iec_unit">Usar prefijos binarios</string>
     <string name="use_iec_unit_sum">Usa prefijos binarios (1 KiB = 1024 bytes) en lugar de prefijos decimales (1 kB = 1000 bytes).</string>
-    <string name="enable_vpn_interface_ipv6_address_sum">Añade la dirección IPv6 a la interfaz VPN</string>
     <string name="bypass_private_sum">Excluye las direcciones privadas de la VPN</string>
-    <string name="sniffing_sum">Escanea el nombre de dominio desde el host HTTP, SNI TLS y SNI QUIC y escanea el tipo de protocolo</string>
     <string name="hosts_sum">Resuelve el nombre de dominio especificado a la dirección IP especificada</string>
-    <string name="domain_strategy_ipv4_only">Solo IPv4</string>
-    <string name="domain_strategy_prefer_ipv4">Preferir IPv4</string>
-    <string name="domain_strategy_ipv4_and_ipv6">IPv4 y IPv6</string>
-    <string name="domain_strategy_prefer_ipv6">Preferir IPv6</string>
-    <string name="domain_strategy_ipv6_only">Solo IPv6</string>
     <string name="disable_all">Desactivar todo</string>
     <string name="enable_all">Activar todo</string>
-    <string name="resolve_destination_for_server">Resolver destino (dirección del servidor)</string>
     <plurals name="profile_multi_import_message">
         <item quantity="one">¿Realmente quieres importar %d perfil a %s?</item>
         <item quantity="many">¿Realmente quieres importar %d perfiles a %s?</item>
         <item quantity="other">¿Realmente quieres importar %d perfiles a %s?</item>
     </plurals>
-    <string name="route_mode">Modo de ruta</string>
-    <string name="route_mode_rule">regla</string>
-    <string name="route_mode_global">global</string>
-    <string name="route_mode_direct">directo</string>
     <string name="debug_log_sum">La configuración en ejecución se imprimirá en el registro del sistema, por lo que el registro contendrá las claves secretas utilizadas para conectarse a los servidores. Este nivel de registro es necesario para informar de problemas. Elimine la información confidencial antes de publicar los archivos de registro.</string>
     <string name="do_not_show_again">No volver a mostrar</string>
     <string name="format">Formato: %s</string>
     <string name="mieru_handshake_mode">Modo de protocolo de enlace</string>
-    <string name="fragment_method">Método de fragmentación</string>
-    <string name="tls_record_fragmentation">Fragmentación de registros TLS</string>
-    <string name="tcp_segmentation">Segmentación TCP</string>
-    <string name="tls_record_fragmentation_and_tcp_segmentation">Fragmentación de registros TLS y segmentación TCP</string>
     <string name="pinned_peer_certificate_public_key_sha256">Clave pública del certificado fijado SHA-256</string>
     <string name="pinned_peer_certificate_sha256">Certificado fijado SHA-256</string>
     <string name="pinned_peer_certificate_sha256_base64_dialog_message">Utilícelo para omitir la verificación del certificado si el propio certificado no es de confianza o no es válido. Uno por línea en codificación Base64.</string>
@@ -547,11 +497,8 @@
     <string name="mtls_certificate_private_key">Clave privada del certificado mTLS</string>
     <string name="delete_multi_confirm_prompt">¿Realmente quieres eliminar estos perfiles?</string>
     <string name="create_shortcut">Crear acceso directo</string>
-    <string name="interrupt_reused_connections">Interrumpir conexiones reutilizadas cuando la red cambia</string>
     <string name="mieru_port_range">Rango de puertos del servidor</string>
     <string name="cag_grpc">Ajustes de gRPC</string>
-    <string name="grpc_service_name_compat">Compatibilidad del nombre del servicio gRPC</string>
-    <string name="grpc_service_name_compat_sum">Ser compatible con el cambio de ruptura de Xray, pero romper la compatibilidad con servidores que no sean de Xray.</string>
     <string name="grpc_multi_mode">Modo múltiple</string>
     <string name="import_routing_rules_warning">Se eliminarán todas las reglas existentes.</string>
     <string name="export_routing_rules_warning">Es solo para fines de compatibilidad y no contiene información completa.</string>
@@ -560,8 +507,6 @@
     <string name="third_party_notices">Avisos de terceros</string>
     <string name="regular_expression_filter1">Inclusión de nombre (expresión regular)</string>
     <string name="translation_platform">Plataforma de traducción</string>
-    <string name="discard_icmp">Descartar ICMP</string>
-    <string name="discard_icmp_sum">Descarta ICMP e ICMPv6</string>
     <string name="insecure_warn">Advertencias de seguridad</string>
     <string name="insecure_warn_sum">Muestra advertencias para perfiles con seguridad equivalente al texto sin cifrar.</string>
     <string name="ech">ECH</string>
@@ -573,11 +518,8 @@
     <string name="hysteria_hop_interval_max">Intervalo máximo de salto de puerto (s)</string>
     <string name="hysteria_bbr_profile">Perfil BBR</string>
     <string name="custom_package_name_or_uid">Nombre de paquete personalizado o UID</string>
-    <string name="balancer_use_landing_proxy">Usar proxy de aterrizaje de grupo</string>
-    <string name="balancer_use_front_proxy">Usar proxy frontal de grupo</string>
     <string name="socks5_udp_authentication_warning">SOCKS5 UDP no está protegido por autenticación con nombre de usuario y contraseña. Si UDP está activado, la autenticación se puede eludir fácilmente.</string>
     <string name="enable_hysteria2_omit_max_datagram_frame_size">Activar OmitMaxDatagramFrameSize de Hysteria 2</string>
-    <string name="hysteria2_omit_max_datagram_frame_size_sum">Si el servidor Hysteria 2 no es compatible con este cambio importante, UDP no se podrá utilizar. Esta es una opción temporal y puede eliminarse en el futuro.</string>
     <string name="ssh_keepalive_interval">Intervalo(s) de Keepalive</string>
     <string name="custom_outbound">Salida personalizada</string>
     <string name="hysteria2_gecko_max_packet_size">Tamaño máximo de paquete</string>

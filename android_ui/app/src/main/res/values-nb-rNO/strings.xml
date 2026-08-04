@@ -77,8 +77,6 @@
     <string name="action_export">Eksporter</string>
     <string name="clear_profiles">Tøm</string>
     <string name="config_settings">Oppsettsinnstillinger</string>
-    <string name="balancer_strategy">Strategi</string>
-    <string name="balancer_type">Type</string>
     <string name="select_profile">Velg profil</string>
     <string name="add_profile">Legg til profil</string>
     <string name="share">Del</string>
@@ -133,7 +131,6 @@
     <string name="clear_traffic_statistics">Slett trafikkstatistikk</string>
     <string name="always_show_address_sum">Vis alltid serveradressen på konfigurasjonskortet</string>
     <string name="always_show_address">Vis alltid adresse</string>
-    <string name="probe_interval">Balanser observasjonsintervall</string>
     <string name="random">Tilfeldig</string>
     <string name="list">Liste</string>
     <string name="auto">Automatisk</string>
@@ -174,8 +171,6 @@
     <string name="circular_reference_sum">Ruten kan ikke inneholde seg selv.</string>
     <string name="circular_reference">Sirkulær referanse</string>
     <string name="chain_settings">Kjedeinnstillinger</string>
-    <string name="balancer_settings">Balanseinnstillinger</string>
-    <string name="balancer">Balanser</string>
     <string name="custom_config">Egendefinert konfigur</string>
     <string name="proxy_chain">Mellomtjenerkjede</string>
     <string name="reboot_required">Kunne ikke starte VPN -tjenesten. Du må kanskje starte enheten på nytt.</string>
@@ -192,8 +187,6 @@
     <string name="proxied_apps">Apper VPN -modus</string>
     <string name="mux_concurrency">Mux samtidige tilkoblinger</string>
     <string name="enable_mux">Aktiver Multiplexer</string>
-    <string name="traffic_sniffing">Aktiver trafikksniff</string>
-    <string name="domain_strategy">Domeneløsningsstrategi</string>
     <string name="route_opt_bypass_lan">Omgå LAN</string>
     <string name="route_not_asset">Ikke en ressursfil: unntatt .dat, men %s</string>
     <string name="route_asset_updated">Oppdatert</string>
@@ -222,7 +215,6 @@
     <string name="certificates">Sertifikater</string>
     <string name="alpn">Forhandling av applikasjonslagsprotokoll</string>
     <string name="sni">Servernavn indikasjon</string>
-    <string name="grpc_service_name">gRPC -tjenestenavn</string>
     <string name="kcp_seed">mKCP frø</string>
     <string name="quic_key">QUIC NØKKEL</string>
     <string name="quic_security">QUIC Sikkerhet</string>
@@ -239,16 +231,11 @@
     <string name="server_address">Tjener</string>
     <string name="profile_name">Profil navn</string>
     <string name="connection_test_url">Tilkoblingstest -URL</string>
-    <string name="transproxy_mode">Transproxy -modus</string>
     <string name="require_transproxy">Aktiver Transproxy Inbound</string>
     <string name="port_local_dns">Lokal DNS port</string>
-    <string name="dns_hosts">Omskriving av domenet</string>
     <string name="fakedns_message">Kan føre til at andre applikasjoner må startes på nytt for å koble til nettverket igjen etter at proxy er stoppet</string>
-    <string name="enable_fakedns">Aktiver FakeDNS</string>
     <string name="dns_routing_message">Løs domener i bypass -ruter med direkte DNS</string>
     <string name="enable_dns_routing">Aktiver DNS -ruting</string>
-    <string name="direct_dns">Direkte DNS</string>
-    <string name="remote_dns">Ekstern DNS</string>
     <string name="cag_dns">DNS innstillinger</string>
     <string name="connection_test_error">Mislyktes: %s</string>
     <string name="connection_test_available_http">Suksess: HTTP håndtrykk tok %dms</string>
@@ -318,8 +305,6 @@
     <string name="menu_log">Logger</string>
     <string name="menu_tools">Verktøy</string>
     <string name="ssh_private_key">Privat nøkkel</string>
-    <string name="ssh_public_key">Offentlig nøkkel</string>
-    <string name="ssh_auth_type_none">Ingen</string>
     <string name="no_statistics">Ingen statistikk enda</string>
     <string name="route_for">Regel for %s</string>
     <string name="app_no_launcher">Programmet har ikke noe grensesnitt.</string>
