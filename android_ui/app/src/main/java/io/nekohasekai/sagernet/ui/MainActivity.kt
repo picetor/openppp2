@@ -270,26 +270,35 @@ class MainActivity : ThemedActivity(),
         val path = (url.path.ifEmpty { "/" }) + (url.query?.let { "?$it" } ?: "")
         val proxyPort = DataStore.httpPort
         val start = System.currentTimeMillis()
-        val raw = Socket()
+        var raw = Socket()
         try {
             // The local HTTP CONNECT proxy is opened by the VpnService core
             // when the tunnel comes up.  Right after the UI reports
             // Connected the listener may not be bound yet (a race of a few
             // hundred ms), so retry a handful of times on refusal instead of
-            // failing the very first tap.
+            // failing the very first tap.  A failed connect() poisons the
+            // Android socket instance (the next connect() on it throws
+            // SocketException: Socket closed), so allocate a fresh socket for
+            // every attempt.
             var lastRefusal: ConnectException? = null
             for (attempt in 0 until 5) {
+                val candidate = Socket()
                 try {
-                    raw.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), proxyPort), 20000)
+                    candidate.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), proxyPort), 20000)
+                    raw = candidate
                     lastRefusal = null
                     break
                 } catch (e: ConnectException) {
+                    candidate.close()
                     lastRefusal = e
                     try {
                         Thread.sleep(500L)
                     } catch (_: InterruptedException) {
                         break
                     }
+                } catch (e: Throwable) {
+                    candidate.close()
+                    throw e
                 }
             }
             if (lastRefusal != null) throw lastRefusal

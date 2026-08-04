@@ -203,7 +203,9 @@ class StatsBar @JvmOverloads constructor(
                         msg.contains("timeout") || msg.contains("deadline") -> {
                             msg = context.getString(R.string.connection_test_timeout)
                         }
-                        msg.contains("refused") || msg.contains("closed pipe") -> {
+                        msg.contains("refused") || msg.contains("closed pipe") ||
+                            msg.contains("socket closed") || msg.contains("Socket closed") ||
+                            msg.contains("connection reset") || msg.contains("Connection reset") -> {
                             msg = context.getString(R.string.connection_test_refused)
                         }
                     }
