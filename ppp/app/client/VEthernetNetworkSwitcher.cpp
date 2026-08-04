@@ -1,4 +1,4 @@
-﻿#include <ppp/app/client/VEthernetNetworkTcpipStack.h>
+#include <ppp/app/client/VEthernetNetworkTcpipStack.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/PeerPrefixRouteManager.h>
@@ -1457,10 +1457,16 @@ namespace ppp {
                 ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(value));
                 if (tag.empty() || tag == "direct") return false;
 
+                // "main" is the primary outbound itself (the configuration that
+                // owns the TUN). It is only selectable from the server menu when
+                // --server-dir contains a JSON with the same GUID/server, so it
+                // is normally NOT switchable back after a hot switch. Accept it
+                // explicitly so the hot-switch menu can always return to the
+                // primary configuration.
                 OutboundConfiguration* definition = NULLPTR;
                 for (OutboundConfiguration& outbound : outbound_configurations_) {
-                    if (outbound.server_menu &&
-                        ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag)) == tag) {
+                    if (ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag)) == tag &&
+                        (outbound.server_menu || tag == "main")) {
                         definition = &outbound;
                         break;
                     }
@@ -1477,6 +1483,12 @@ namespace ppp {
                 std::shared_ptr<VEthernetExchanger> abandoned;
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
+                    // Already the active primary outbound (and no switch in
+                    // flight): nothing to do.  This matters for "main", which is
+                    // now always present in the hot-switch menu.
+                    if (tag == primary_outbound_ && pending_outbound_.empty()) {
+                        return true;
+                    }
                     abandoned = std::move(pending_outbound_exchanger_);
                     pending_outbound_ = tag;
                     pending_outbound_exchanger_ = target;

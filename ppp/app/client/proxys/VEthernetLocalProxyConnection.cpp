@@ -164,31 +164,37 @@ namespace ppp {
                     auto self = shared_from_this();
                     if (auto switcher = exchanger_->GetSwitcher(); NULLPTR != switcher) {
                         if (auto tap = switcher->GetTap(); NULLPTR != tap && tap->IsHostedNetwork()) {
-                            boost::system::error_code ec;
-                            boost::asio::ip::address address = StringToAddress(destinationEP->Host.data(), ec);
-                            if (ec) {
-                                address = ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(destinationEP->Host.data(), destinationEP->Port, y).address();
-                            }
+                            // Domain targets must keep their hostname so the tunnel server
+                            // resolves them (OnConnectHost).  The local resolver may be
+                            // DNS-polluted (e.g. GFW poisoning), which would rewrite
+                            // www.google.com into an attacker IP and break the tunnel.
+                            if (destinationEP->Type != ppp::app::protocol::AddressType::Domain) {
+                                boost::system::error_code ec;
+                                boost::asio::ip::address address = StringToAddress(destinationEP->Host.data(), ec);
+                                if (ec) {
+                                    address = ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(destinationEP->Host.data(), destinationEP->Port, y).address();
+                                }
 
-                            if (ppp::net::IPEndPoint::IsInvalid(address)) {
-                                return false;
-                            }
+                                if (ppp::net::IPEndPoint::IsInvalid(address)) {
+                                    return false;
+                                }
 
-                            int rinetd_status = VEthernetNetworkTcpipConnection::Rinetd(self,
-                                exchanger_,
-                                context_,
-                                strand_,
-                                configuration,
-                                socket,
-                                boost::asio::ip::tcp::endpoint(address, destinationEP->Port),
-                                connection_rinetd_,
-                                y);
-                            if (rinetd_status < 1) {
-                                return rinetd_status == 0;
-                            }
+                                int rinetd_status = VEthernetNetworkTcpipConnection::Rinetd(self,
+                                    exchanger_,
+                                    context_,
+                                    strand_,
+                                    configuration,
+                                    socket,
+                                    boost::asio::ip::tcp::endpoint(address, destinationEP->Port),
+                                    connection_rinetd_,
+                                    y);
+                                if (rinetd_status < 1) {
+                                    return rinetd_status == 0;
+                                }
 
-                            destinationEP->Host = address.to_string();
-                            destinationEP->Type = address.is_v4() ? ppp::app::protocol::AddressType::IPv4 : ppp::app::protocol::AddressType::IPv6;
+                                destinationEP->Host = address.to_string();
+                                destinationEP->Type = address.is_v4() ? ppp::app::protocol::AddressType::IPv4 : ppp::app::protocol::AddressType::IPv6;
+                            }
                         }
                     }
 

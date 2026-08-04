@@ -1896,6 +1896,61 @@ namespace ppp
                 return events;
             }
 
+            int GetAllNicsDnsAddresses(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept
+            {
+                dns_map.clear();
+
+                ULONG bufLen = 15000;
+                ppp::vector<BYTE> buffer(bufLen);
+                PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+                DWORD ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                if (ret == ERROR_BUFFER_OVERFLOW)
+                {
+                    buffer.resize(bufLen);
+                    pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                    ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                }
+
+                if (ret != NO_ERROR)
+                {
+                    return 0;
+                }
+
+                // Only connected (OperStatus == Up) adapters are captured.  A
+                // disconnected adapter has no active traffic and its stale DNS
+                // configuration is intentionally left untouched.
+                int count = 0;
+                for (PIP_ADAPTER_ADDRESSES p = pAddresses; p != NULLPTR; p = p->Next)
+                {
+                    if (p->OperStatus != IfOperStatusUp)
+                    {
+                        continue;
+                    }
+
+                    ppp::vector<ppp::string> dns_v4_list;
+                    for (PIP_ADAPTER_DNS_SERVER_ADDRESS dns = p->FirstDnsServerAddress; dns != NULLPTR; dns = dns->Next)
+                    {
+                        if (dns->Address.lpSockaddr->sa_family == AF_INET)
+                        {
+                            SOCKADDR_IN* addr4 = reinterpret_cast<SOCKADDR_IN*>(dns->Address.lpSockaddr);
+                            char buf[INET_ADDRSTRLEN];
+                            if (NULLPTR != ::inet_ntop(AF_INET, &addr4->sin_addr, buf, sizeof(buf)))
+                            {
+                                dns_v4_list.emplace_back(ppp::string(buf));
+                            }
+                        }
+                    }
+
+                    if (!dns_v4_list.empty())
+                    {
+                        dns_map[(int)p->IfIndex] = std::move(dns_v4_list);
+                        count++;
+                    }
+                }
+                return count;
+            }
+
             int GetInterfaceMtu(int interface_index) noexcept
             {
                 std::shared_ptr<MIB_IFROW> ifRow = GetIfEntry(interface_index);

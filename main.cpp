@@ -852,7 +852,10 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
     ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
     for (auto& status : statuses)
     {
-        if (status.server_menu)
+        // Always offer the primary configuration ("main") so the user can hot
+        // switch back after moving to a --server-dir server, even when the
+        // primary JSON is not duplicated inside the server directory.
+        if (status.server_menu || status.tag == "main")
         {
             servers.emplace_back(std::move(status));
         }
@@ -1684,7 +1687,9 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
             for (auto& status : statuses)
             {
-                if (status.server_menu)
+                // Same rule as HandleServerSelection: "main" (the primary
+                // configuration) is always a valid hot-switch target.
+                if (status.server_menu || status.tag == "main")
                 {
                     servers.emplace_back(std::move(status));
                 }

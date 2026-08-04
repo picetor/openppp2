@@ -36,6 +36,14 @@ namespace ppp {
 
 #if defined(_ANDROID)
                 buffer_ = Executors::GetCachedBuffer(context_);
+                // The Android libopenppp2 run() io_context is never registered
+                // with Executors::Internal->Buffers, so GetCachedBuffer()
+                // returns null there. Fall back to a dedicated allocation,
+                // otherwise UDP receive (Loopback) runs with a null buffer.
+                if (NULLPTR == buffer_) {
+                    buffer_ = ppp::threading::BufferswapAllocator::MakeByteArray(
+                        configuration_->GetBufferAllocator(), PPP_BUFFER_SIZE);
+                }
                 ProtectorNetwork = switcher_->GetProtectorNetwork();
 #endif
             }

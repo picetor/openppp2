@@ -87,6 +87,48 @@ namespace ppp {
 
                         return ppp::win32::network::SetIPv6DefaultGateway(route.InterfaceIndex, route.Gateway, metric);
                     }
+
+                    static bool IsIPv6AddressPresent(int interface_index, const ppp::string& address) noexcept {
+                        if (interface_index < 0 || address.empty()) {
+                            return false;
+                        }
+
+                        PMIB_UNICASTIPADDRESS_TABLE table = NULLPTR;
+                        if (::GetUnicastIpAddressTable(AF_INET6, &table) != NO_ERROR || NULLPTR == table) {
+                            return false;
+                        }
+
+                        bool present = false;
+                        for (ULONG i = 0; i < table->NumEntries && !present; ++i) {
+                            const MIB_UNICASTIPADDRESS_ROW& row = table->Table[i];
+                            if (row.InterfaceIndex != static_cast<ULONG>(interface_index)) {
+                                continue;
+                            }
+
+                            char text[INET6_ADDRSTRLEN] = { 0 };
+                            const IN6_ADDR& addr = row.Address.Ipv6.sin6_addr;
+                            if (NULLPTR == ::inet_ntop(AF_INET6, &addr, text, sizeof(text))) {
+                                continue;
+                            }
+
+                            ppp::string text_str(text);
+                            if (text_str.size() != address.size()) {
+                                continue;
+                            }
+
+                            bool same = true;
+                            for (std::size_t j = 0; j < text_str.size(); ++j) {
+                                if (std::tolower((unsigned char)text_str[j]) != std::tolower((unsigned char)address[j])) {
+                                    same = false;
+                                    break;
+                                }
+                            }
+                            present = same;
+                        }
+
+                        ::FreeMibTable(table);
+                        return present;
+                    }
                 }
 
                 bool QueryOriginalDefaultRoute(int& interface_index, ppp::string& gateway, int& metric) noexcept {
@@ -226,6 +268,21 @@ namespace ppp {
                     std::string addr_std = address.to_string();
                     ppp::string addr_str(addr_std.data(), addr_std.size());
                     if (!ppp::win32::network::SetIPv6Address(context.InterfaceIndex, addr_str, prefix_length)) {
+                        // The address may already exist on the TAP interface -- a
+                        // reconnect after a hot reload (ReloadOutboundConfiguration)
+                        // reapplies the same server lease without removing it first,
+                        // and `netsh interface ipv6 add address` then fails.  In that
+                        // case the kernel-side address is already present and usable,
+                        // so treat it as applied instead of leaving the client with
+                        // no IPv6 assignment (which makes TranslateIPv6Packet drop
+                        // every IPv6 packet with "no usable IPv6 assignment").
+                        if (IsIPv6AddressPresent(context.InterfaceIndex, addr_str)) {
+                            LOG_WARN("ApplyClientAddress: %s/%d already present on ifIndex=%d, treating as applied",
+                                addr_std.c_str(), prefix_length, context.InterfaceIndex);
+                            state.AddressApplied = true;
+                            state.Address = addr_str;
+                            return true;
+                        }
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ClientAddressApplyFailed);
                     }
 

@@ -96,6 +96,7 @@ namespace ppp
 
             int                                                 SetAllNicsDnsAddresses(ppp::unordered_map<int, ppp::vector<boost::asio::ip::address>>& addresses) noexcept;
             int                                                 SetAllNicsDnsAddresses(ppp::vector<boost::asio::ip::address>& servers, ppp::unordered_map<int, ppp::vector<boost::asio::ip::address>>& addresses) noexcept;
+            int                                                 GetAllNicsDnsAddresses(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
 
             struct RouteAddStatistics final
             {

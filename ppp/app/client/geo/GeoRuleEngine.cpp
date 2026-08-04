@@ -822,11 +822,6 @@ namespace ppp {
                         rules_.emplace_back(std::move(rule));
                     }
 
-                    if (rules_.empty()) {
-                        error = "geo rules file contains no routing rules";
-                        return false;
-                    }
-
                     SiteTable sites;
                     if (!wanted_sites.empty()) {
                         if (!LoadSiteData(geosite_path, wanted_sites, sites)) {

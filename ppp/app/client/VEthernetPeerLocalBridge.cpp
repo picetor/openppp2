@@ -95,7 +95,8 @@ namespace ppp {
                     }
 
                     icmp_socket_ = socket;
-                    icmp_buffer_ = configuration_->GetBufferAllocator()->MakeArray<Byte>(PPP_BUFFER_SIZE);
+                    icmp_buffer_ = ppp::threading::BufferswapAllocator::MakeByteArray(
+                        configuration_->GetBufferAllocator(), PPP_BUFFER_SIZE);
                     if (NULLPTR == icmp_buffer_) {
                         if (icmp_socket_) {
                             boost::system::error_code close_ec;
@@ -121,7 +122,8 @@ namespace ppp {
                 }
 
                 socket_ = socket;
-                buffer_ = configuration_->GetBufferAllocator()->MakeArray<Byte>(PPP_BUFFER_SIZE);
+                buffer_ = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration_->GetBufferAllocator(), PPP_BUFFER_SIZE);
                 if (NULLPTR == buffer_) {
                     ppp::net::Socket::Closesocket(socket_);
                     socket_.reset();
@@ -364,7 +366,8 @@ namespace ppp {
                 }
 
                 auto self = shared_from_this();
-                std::shared_ptr<Byte> copy = configuration_->GetBufferAllocator()->MakeArray<Byte>(packet_length);
+                std::shared_ptr<Byte> copy = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration_->GetBufferAllocator(), packet_length);
                 if (NULLPTR == copy) {
                     return false;
                 }
@@ -444,7 +447,8 @@ namespace ppp {
                 ip->dest = client_ip_;
                 ip->chksum = ppp::net::native::inet_chksum(ip, (int)sizeof(ip_hdr));
 
-                std::shared_ptr<Byte> out = configuration_->GetBufferAllocator()->MakeArray<Byte>(bytes_transferred + 1);
+                std::shared_ptr<Byte> out = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration_->GetBufferAllocator(), bytes_transferred + 1);
                 if (NULLPTR == out) {
                     return false;
                 }
@@ -473,7 +477,8 @@ namespace ppp {
                     return false;
                 }
 
-                std::shared_ptr<Byte> buffer = configuration_->GetBufferAllocator()->MakeArray<Byte>(total_length + 1);
+                std::shared_ptr<Byte> buffer = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration_->GetBufferAllocator(), total_length + 1);
                 if (NULLPTR == buffer) {
                     return false;
                 }
@@ -545,7 +550,8 @@ namespace ppp {
                 }
 
                 auto self = shared_from_this();
-                std::shared_ptr<Byte> copy = configuration_->GetBufferAllocator()->MakeArray<Byte>(data_length);
+                std::shared_ptr<Byte> copy = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration_->GetBufferAllocator(), data_length);
                 if (NULLPTR == copy) {
                     return false;
                 }
