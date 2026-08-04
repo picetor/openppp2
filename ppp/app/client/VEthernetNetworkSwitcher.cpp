@@ -1606,6 +1606,12 @@ namespace ppp {
                     pending_outbound_deadline_ = 0;
                     pending_primary_switch_ = false;
                     outbound_affinities_.clear();
+                    // The outbound has just been switched (hot swap). Flush the DNS
+                    // cache so answers learned through the previous outbound (e.g. a
+                    // Japan exit) cannot be served to the new configuration (e.g. a
+                    // Hong Kong exit). Stale answers would otherwise only be bounded
+                    // by their TTL. Mirrors the Android set_app_configuration path.
+                    ppp::net::asio::vdns::ClearCache();
                 }
 
                 if (primary_switch) {
@@ -5532,8 +5538,12 @@ namespace ppp {
                             // Skip DNS servers inside the TAP virtual subnet. They are reachable
                             // on-link through the virtual gateway, and pinning them via the
                             // physical gateway would shadow the virtual gateway /32 route.
+                            // dip is in network byte order (to_uint), while tap_virtual_mask
+                            // and tap_virtual_network are host byte order (ntohl); convert
+                            // dip before comparing or the skip never matches and the virtual
+                            // gateway DNS gets pinned through the physical gateway.
                             if (tap_virtual_mask != IPEndPoint::AnyAddress &&
-                                (dip & tap_virtual_mask) == tap_virtual_network) {
+                                (ntohl(dip) & tap_virtual_mask) == tap_virtual_network) {
                                 continue;
                             }
 
@@ -5597,9 +5607,13 @@ namespace ppp {
                                 if (row.dwForwardMask != 0xffffffffu) {
                                     continue;
                                 }
-                                uint32_t dest = row.dwForwardDest;
+                                // GetIpForwardTable returns addresses in network byte order,
+                                // while tap_virtual_network/mask are host byte order (ntohl).
+                                // Compare in host byte order or the stale-route cleanup
+                                // never matches and the hijacked /32 route survives forever.
+                                uint32_t dest = ntohl(row.dwForwardDest);
                                 if ((dest & tap_virtual_mask) == tap_virtual_network &&
-                                    row.dwForwardNextHop != tap->GatewayServer) {
+                                    ntohl(row.dwForwardNextHop) != ntohl(tap->GatewayServer)) {
                                     ppp::win32::network::Router::Delete(row);
                                 }
                             }
@@ -6819,6 +6833,9 @@ namespace ppp {
                 boost::asio::ip::address serverIP;
                 bool geo_direct_dns = SelectDirectDnsServer(
                     stl::transform<ppp::string>(qs.mName), serverIP);
+                LOG_DEBUG("DNS pipeline: query host=%s type=%d address_query=%d geo_direct_dns=%d dest=%s",
+                    qs.mName.data(), (int)qs.mType, (int)address_query, (int)geo_direct_dns,
+                    destinationIP.to_string().data());
                 // Direct GeoSite decisions must be resolved by a direct DNS server.
                 // A tunnel-origin cache answer can point a domestic domain at an
                 // overseas CDN and must not win before the domain policy is observed.
@@ -6826,6 +6843,7 @@ namespace ppp {
                     !ppp::net::asio::vdns::QueryCache2(qs.mName.data(), m, qs.mType == ::dns::RecordType::kA ?
                     ppp::net::asio::vdns::AddressFamily::kA : ppp::net::asio::vdns::AddressFamily::kAAAA).empty()) {
 
+                    LOG_DEBUG("DNS pipeline: cache hit host=%s, answering from cache", qs.mName.data());
                     // Prefer IPv4: cache is always clean (filtered before AddCache),
                     // so no need to strip here. Forward directly.
                     std::size_t dns_size = 0;
@@ -6843,6 +6861,7 @@ namespace ppp {
                         qs.mName.data(), serverIP.to_string().data());
                 }
                 elif(std::shared_ptr<ITap> tap = GetTap(); IPAddressIsGatewayServer(packet->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
+                    LOG_DEBUG("DNS pipeline: gateway target host=%s, using dnsServers head", qs.mName.data());
                     auto& dnsServers = ppp::net::asio::vdns::servers;
                     if (dnsServers->empty()) {
                         return false;
@@ -6853,14 +6872,19 @@ namespace ppp {
                 else {
                     ppp::app::client::dns::Rule::Ptr rulePtr = ppp::app::client::dns::Rule::Get(stl::transform<ppp::string>(qs.mName), dns_ruless_[0], dns_ruless_[1], dns_ruless_[2]);
                     if (NULLPTR == rulePtr) {
+                        LOG_DEBUG("DNS pipeline: rule miss host=%s, falling back to tunnel", qs.mName.data());
                         return false;
                     }
 
                     if (rulePtr->Server == destinationIP) {
+                        LOG_DEBUG("DNS pipeline: rule server == destination, falling back to tunnel host=%s server=%s",
+                            qs.mName.data(), rulePtr->Server.to_string().data());
                         return false;
                     }
 
                     serverIP = rulePtr->Server;
+                    LOG_DEBUG("DNS pipeline: rule hit host=%s server=%s nic=%d",
+                        qs.mName.data(), serverIP.to_string().data(), (int)rulePtr->Nic);
                 }
 
                 std::shared_ptr<boost::asio::io_context> context = exchanger->GetContext();
