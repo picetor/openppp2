@@ -260,7 +260,7 @@ namespace ppp {
                 virtual bool                                                        OnTick(uint64_t now) noexcept override;
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;
-                virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept;
+                virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions, const std::shared_ptr<VEthernetExchanger>& source = NULLPTR) noexcept;
                 bool                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept;
                 void                                                                FlushPendingAAAAResponses() noexcept;
                 void                                                                FlushExpiredPendingAAAAResponses() noexcept;
@@ -461,6 +461,11 @@ namespace ppp {
                 };
                 std::unordered_map<ppp::string, std::shared_ptr<PendingAAAAResponse>> pending_aaaa_;
 
+                // Prefer IPv4: cached per active outbound so DNS hot paths can read it
+                // without locking (locked write happens only in
+                // CompletePendingOutboundSwitch / constructor).
+                std::atomic<bool>                                                   prefer_ipv4_ = false;
+
                 RouteInformationTablePtr                                            rib_;
                 ForwardInformationTablePtr                                          fib_;
                 // Peer-prefix site-to-site routing state. applied_peer_prefix_routes_
@@ -524,6 +529,16 @@ namespace ppp {
                 int                                                                 ipv6_client_route_prefix_length_ = 0;
                 bool                                                                ipv6_client_nat_mode_ = false;
                 bool                                                                ipv6_client_state_captured_ = false;
+                // Whether the active outbound's server can carry IPv6, decided by
+                // the client configuration's server.ipv6 section (mode Nat66/Gua)
+                // -- the authoritative statement about the server.  NOT the
+                // AssignedIPv6Mode echo, which can read None during a reconnect
+                // or on old server builds.  When false the server cannot carry
+                // IPv6, so the client must keep local IPv6 direct connectivity
+                // (host SLAAC, domestic IPv6, ...) instead of fail-closing the
+                // physical NIC; tunnel IPv6 is simply dropped by
+                // TranslateIPv6Packet.
+                bool                                                                ipv6_server_has_dataplane_ = false;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;

@@ -1,4 +1,4 @@
-#include <ppp/configurations/AppConfiguration.h>
+﻿#include <ppp/configurations/AppConfiguration.h>
 #include <ppp/cryptography/Ciphertext.h>
 #include <ppp/cryptography/ssea.h>
 #include <ppp/threading/Thread.h>
@@ -782,7 +782,14 @@ namespace ppp {
             config.server.ipv6.mode = NormalizeIPv6Mode(config.server.ipv6.mode);
             bool ipv6_server_enabled = config.server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66 ||
                 config.server.ipv6.mode == AppConfiguration::IPv6Mode_Gua;
-            if (ipv6_server_enabled && !SupportsServerIPv6DataPlane()) {
+            // A client profile (client.server configured) must keep the server.ipv6
+            // section intact: it is the authoritative signal that the remote server
+            // carries an IPv6 data plane. Disabling it on Windows/macOS/Android
+            // clients made the client believe the server has no IPv6 and caused all
+            // tunnel IPv6 traffic to be dropped. The platform capability check below
+            // only gates server-side hosting on THIS host (no client.server set).
+            const bool is_client_profile = !config.client.server.empty();
+            if (ipv6_server_enabled && !is_client_profile && !SupportsServerIPv6DataPlane()) {
                 // Platform does not support server-side IPv6 data plane (Linux-only feature).
                 // Silently disable IPv6 mode instead of failing config load, so that the same
                 // config file can be shared between Linux servers and Windows/macOS clients.

@@ -1,4 +1,4 @@
-#include <ppp/app/client/VEthernetNetworkSwitcher.h>
+﻿#include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/VEthernetDatagramPort.h>
 #include <ppp/app/protocol/VirtualEthernetPacket.h>
@@ -74,6 +74,17 @@ namespace ppp {
                 }
                 
                 buffer_                   = Executors::GetCachedBuffer(context);
+                // Android's libopenppp2 run() creates a dedicated io_context
+                // that is never registered with Executors::Internal->Buffers,
+                // so GetCachedBuffer() returns null there and DNS-direct
+                // (RedirectDnsServer) silently bails out before the query is
+                // even sent (buffer==NO), leaving the resolver to fall back
+                // to the tunnel and answer domestic domains with overseas IPs.
+                // Fall back to a dedicated allocation in that case.
+                if (NULLPTR == buffer_) {
+                    buffer_ = ppp::threading::BufferswapAllocator::MakeByteArray(
+                        configuration->GetBufferAllocator(), PPP_BUFFER_SIZE);
+                }
                 server_url_.port          = 0;
                 server_url_.protocol_type = ProtocolType::ProtocolType_PPP;
             }
@@ -83,16 +94,55 @@ namespace ppp {
             }
 
             bool VEthernetExchanger::TranslateIPv6Packet(Byte* packet, int packet_length, bool outbound) noexcept {
-                if (primary_outbound_ || NULLPTR == packet || packet_length < ppp::ipv6::IPv6_HEADER_MIN_SIZE) return true;
+                // NOTE: the primary_outbound_ fast-path is intentionally removed.
+                // The desktop primary outbound uses ApplyClientAddress to make the
+                // TAP address equal the server-assigned address, so the identity
+                // checks below (source == assigned / destination == tap) return
+                // true and no translation happens -- identical behavior.
+                // On Android ApplyClientAddress cannot change the TUN address
+                // (VpnService.Builder fixes it to the leak-block ULA), so the TAP
+                // address stays fd00:6f70:656e:7070::2 while the server assigns
+                // fd42:4242:4242::/64. Skipping translation here sent packets with
+                // a fd00::2 source to the server; its NAT66 reply had destination
+                // fd00::2, which fails the server-side fd42::/64 PrefixMatch and is
+                // silently dropped. Removing the fast-path lets Android translate
+                // between the TUN ULA and the assigned address like the server
+                // expects, without any behavior change on desktop.
+                if (NULLPTR == packet || packet_length < ppp::ipv6::IPv6_HEADER_MIN_SIZE) return true;
                 if ((packet[0] >> 4) != ppp::ipv6::IPv6_VERSION) return true;
+                if (NULLPTR == switcher_) return false;
+                auto tap = switcher_->GetTap();
+
+                // Whether THIS outbound's server can carry IPv6 is decided by
+                // THIS outbound's configuration (server.ipv6 section) -- not by
+                // the TUN address, which the primary outbound may have populated
+                // while a secondary server has no IPv6 data plane at all.  Per
+                // the design rule "配置里面有v6才是代表服务器有v6", each outbound
+                // answers for its own server: a config without server.ipv6 means
+                // that server rejects/drops tunnel IPv6, so this outbound must
+                // never relay v6 even if the TUN happens to carry an address.
+                std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                const bool outbound_has_ipv6_dataplane = NULLPTR != configuration &&
+                    (configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
+                     configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua);
+                if (!outbound_has_ipv6_dataplane) {
+                    LOG_DEBUG("VEthernetExchanger::TranslateIPv6Packet: outbound=%s config has no IPv6 data plane (server.ipv6.mode=none), tunnel IPv6 dropped",
+                        outbound_tag_.data());
+                    return false;
+                }
 
                 boost::asio::ip::address assigned;
                 {
                     SynchronizedObjectScope scope(syncobj_);
                     assigned = assigned_ipv6_address_;
                 }
-                if (NULLPTR == switcher_) return false;
-                auto tap = switcher_->GetTap();
+                // The TUN address is global (populated by the primary outbound via
+                // ApplyClientAddress) and is the translation anchor this outbound
+                // must rewrite to/from its own per-outbound assigned address.  It
+                // is NOT the capability signal: per-outbound capability was already
+                // decided above by THIS outbound's server.ipv6 config.  If the TUN
+                // has no IPv6 address there is nothing to translate on behalf of
+                // any outbound, so this remains a hard requirement.
                 if (!assigned.is_v6() || NULLPTR == tap || !tap->IPv6Address.is_v6()) {
                     LOG_DEBUG("VEthernetExchanger::TranslateIPv6Packet: outbound=%s has no usable IPv6 assignment",
                         outbound_tag_.data());
@@ -1450,6 +1500,11 @@ namespace ppp {
                 boost::asio::post(*context,
                     [self, this, context, ei, information]() noexcept {
                         information_ = ei;
+                        // Cache the latest extensions (IPv6 lease, NAT mode, ...)
+                        // so a hot outbound switch can replay the assignment after
+                        // CompletePendingOutboundSwitch promotes this exchanger to
+                        // primary, even if the server never re-sends extensions.
+                        information_extensions_ = information.Extensions;
                         if (!disposed_) {
                             {
                                 // A reconnect may intentionally return no IPv6 lease,
@@ -1476,7 +1531,15 @@ namespace ppp {
                                 (int)information.Extensions.AssignedIPv6Mode);
                             if (primary_outbound_) {
                                 if (!information.ExtendedJson.empty()) {
-                                    switcher_->ApplyIPv6Assignment(information.Extensions);
+                                    // Pass `self` as the source: during a hot outbound
+                                    // switch this exchanger is already primary and
+                                    // received server extensions BEFORE
+                                    // CompletePendingOutboundSwitch updated the
+                                    // switcher's exchanger_, so the IPv6 data plane
+                                    // decision must follow THIS outbound's config.
+                                    std::shared_ptr<VEthernetExchanger> source =
+                                        std::dynamic_pointer_cast<VEthernetExchanger>(self);
+                                    switcher_->ApplyIPv6Assignment(information.Extensions, source);
                                 }
                                 switcher_->ApplyPeerPrefixRoutes(information.Extensions);
                             }

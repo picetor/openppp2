@@ -139,6 +139,20 @@ namespace ppp {
                 block_quic_      = false;
                 icmppackets_aid_ = RandomNext();
 
+                prefer_ipv4_ = (NULLPTR != configuration_ && configuration_->udp.dns.prefer_ipv4);
+
+                // The server.ipv6 section of the primary configuration is the
+                // authoritative statement of whether the server carries IPv6.
+                // Initialized here so RestoreNetworkTakeover / OpenTransmission
+                // can make the right leak-block decision even before the first
+                // Information arrives.
+                if (NULLPTR != configuration_) {
+                    const ppp::configurations::AppConfiguration::IPv6Mode mode = configuration_->server.ipv6.mode;
+                    ipv6_server_has_dataplane_ =
+                        mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
+                        mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
+                }
+
                 peer_prefix_routes_ = std::make_unique<PeerPrefixRouteManager>();
                 if (NULLPTR != peer_prefix_routes_) {
                     peer_prefix_routes_->Bind(this);
@@ -484,7 +498,7 @@ namespace ppp {
             // Returns true if the caller should forward the response now.
             // Returns false if the caller should hold the response (AAAA with no A cache yet).
             bool VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept {
-                if (!configuration_ || !configuration_->udp.dns.prefer_ipv4) {
+                if (!prefer_ipv4_.load()) {
                     return true;
                 }
                 if (m.questions.empty()) {
@@ -1503,6 +1517,28 @@ namespace ppp {
                     if (NULLPTR != allocator && allocator->IsVaild()) {
                         configuration->SetBufferAllocator(allocator);
                     }
+                    else {
+                        LOG_ERROR("VEthernetNetworkSwitcher::ReloadOutboundConfiguration: buffer allocator unavailable, outbound=%s, path=%s",
+                            outbound.tag.data(), outbound.source_path.data());
+                    }
+                }
+                if (NULLPTR == configuration->GetBufferAllocator()) {
+                    // The reloaded configuration declares no vmem pool (or the
+                    // pool could not be created). A BufferswapAllocator is a
+                    // server-independent packet memory pool, so inherit the
+                    // previous outbound allocator (falling back to the switcher
+                    // primary allocator) rather than leaving bridges
+                    // (VEthernetPeerLocalBridgeConnection) with a null
+                    // GetBufferAllocator(), which crashed on the first packet.
+                    std::shared_ptr<ppp::threading::BufferswapAllocator> previous =
+                        NULLPTR != outbound.configuration ?
+                            outbound.configuration->GetBufferAllocator() : NULLPTR;
+                    if (NULLPTR == previous) {
+                        previous = configuration_->GetBufferAllocator();
+                    }
+                    if (NULLPTR != previous) {
+                        configuration->SetBufferAllocator(previous);
+                    }
                 }
                 outbound.configuration = configuration;
                 LOG_INFO("VEthernetNetworkSwitcher::ReloadOutboundConfiguration: loaded, outbound=%s, path=%s, server=%s",
@@ -1553,6 +1589,7 @@ namespace ppp {
                 ppp::string previous_tag;
                 std::shared_ptr<VEthernetExchanger> previous;
                 std::shared_ptr<VEthernetExchanger> replaced;
+                std::shared_ptr<VEthernetExchanger> target;
                 bool preserve_previous = false;
                 bool primary_switch = false;
                 {
@@ -1561,8 +1598,7 @@ namespace ppp {
                     target_tag = pending_outbound_;
                     previous_tag = active_outbound_.empty() ? ppp::string("main") : active_outbound_;
                     preserve_previous = IsRouteOutbound(previous_tag);
-                    std::shared_ptr<VEthernetExchanger> target =
-                        std::move(pending_outbound_exchanger_);
+                    target = std::move(pending_outbound_exchanger_);
                     primary_switch = pending_primary_switch_;
                     if (NULLPTR == target) {
                         pending_outbound_.clear();
@@ -1606,6 +1642,39 @@ namespace ppp {
                     pending_outbound_deadline_ = 0;
                     pending_primary_switch_ = false;
                     outbound_affinities_.clear();
+                    // Cache the prefer-IPv4 flag of the now-active outbound so DNS
+                    // hot paths (StripAAAADnsResponseIfIPv4Available and the
+                    // DispatchLocalDnsQuery completion) can read it without locking.
+                    // The write happens only under GetSynchronizedObject() here and in
+                    // the constructor, so the atomic read never races a shared_ptr
+                    // copy of exchanger_.
+                    bool active_prefer_ipv4 = false;
+                    if (NULLPTR != target) {
+                        std::shared_ptr<ppp::configurations::AppConfiguration> active_configuration = target->GetConfiguration();
+                        if (NULLPTR != active_configuration) {
+                            active_prefer_ipv4 = active_configuration->udp.dns.prefer_ipv4;
+                        }
+                    }
+                    prefer_ipv4_.store(active_prefer_ipv4);
+                    // Reflect the new active outbound's IPv6 capability.  The
+                    // server.ipv6 section of the outbound configuration is the
+                    // authoritative statement of whether the server can carry
+                    // IPv6 (not the AssignedIPv6Mode echo).  A server without
+                    // IPv6 must never disable the host's own direct IPv6, so the
+                    // leak block decision follows this flag.
+                    {
+                        bool active_has_ipv6_dataplane = false;
+                        if (NULLPTR != target) {
+                            std::shared_ptr<ppp::configurations::AppConfiguration> active_configuration = target->GetConfiguration();
+                            if (NULLPTR != active_configuration) {
+                                const ppp::configurations::AppConfiguration::IPv6Mode mode = active_configuration->server.ipv6.mode;
+                                active_has_ipv6_dataplane =
+                                    mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
+                                    mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
+                            }
+                        }
+                        ipv6_server_has_dataplane_ = active_has_ipv6_dataplane;
+                    }
                     // The outbound has just been switched (hot swap). Flush the DNS
                     // cache so answers learned through the previous outbound (e.g. a
                     // Japan exit) cannot be served to the new configuration (e.g. a
@@ -1632,6 +1701,18 @@ namespace ppp {
                 }
                 if (NULLPTR != replaced && replaced != exchanger_) replaced->Dispose();
                 UpdateRemoteUri();
+                if (primary_switch && NULLPTR != target) {
+                    // Hot-switch replay: server extensions are normally received by
+                    // the pending exchanger BEFORE this switch completes, and the
+                    // first ApplyIPv6Assignment pass may have consulted the OLD
+                    // outbound configuration (GetExchanger() still returned the
+                    // previous primary) and taken the no-data-plane branch.  Now
+                    // that exchanger_ points at the new primary, re-apply the
+                    // cached assignment so the TUN always carries the new server's
+                    // IPv6 route -- even if that server never re-sends extensions.
+                    // The call is idempotent: identical state is skipped inside.
+                    ApplyIPv6Assignment(target->GetInformationExtensions(), target);
+                }
                 LOG_INFO("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: previous=%s, active=%s, forced=1",
                     previous_tag.data(), target_tag.data());
             }
@@ -1991,7 +2072,7 @@ namespace ppp {
                 return false;
             }
 
-            void VEthernetNetworkSwitcher::ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions) noexcept {
+            void VEthernetNetworkSwitcher::ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions, const std::shared_ptr<VEthernetExchanger>& source) noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: entered, AssignedIPv6Mode=%d, AssignedIPv6Address=%s, AssignedIPv6Gateway=%s, AssignedIPv6Dns1=%s, AssignedIPv6Dns2=%s",
                     (int)extensions.AssignedIPv6Mode,
                     extensions.AssignedIPv6Address.is_v6() ? extensions.AssignedIPv6Address.to_string().c_str() : "(none)",
@@ -2007,12 +2088,62 @@ namespace ppp {
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: proxy-only mode, skipping IPv6 assignment");
                     return;
                 }
-                if (extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_None) {
+
+                // The authoritative signal for "does the server carry IPv6" is the
+                // active outbound configuration's server.ipv6 section -- NOT the
+                // AssignedIPv6Mode echoed back by the server, which can read None
+                // during a reconnect, or when the server is slow to provision, or
+                // when an old server build never sends the extension.  If the
+                // configuration declares no IPv6 mode, the server cannot carry
+                // IPv6 at all: the host's own direct IPv6 (SLAAC, domestic IPv6,
+                // ...) must keep working and tunnel IPv6 is simply dropped by
+                // TranslateIPv6Packet.  Only a configuration-declared IPv6 data
+                // plane authorizes fail-closing the physical NIC while the
+                // managed routes are applied.
+                // The authoritative "server carries IPv6" signal must follow the
+                // exchanger that ACTUALLY received the extensions (the caller).
+                // During a hot outbound switch the pending exchanger is already
+                // primary (primary_outbound_=true) and receives server extensions
+                // BEFORE CompletePendingOutboundSwitch promotes it into
+                // exchanger_, so GetExchanger() would still return the OLD
+                // outbound whose configuration (e.g. no server.ipv6 section)
+                // would wrongly reject the new server's IPv6 data plane.
+                std::shared_ptr<ppp::configurations::AppConfiguration> active_configuration;
+                if (NULLPTR != source) {
+                    active_configuration = source->GetConfiguration();
+                }
+                if (NULLPTR == active_configuration) {
+                    if (std::shared_ptr<VEthernetExchanger> active_exchanger = GetExchanger(); NULLPTR != active_exchanger) {
+                        active_configuration = active_exchanger->GetConfiguration();
+                    }
+                }
+                if (NULLPTR == active_configuration) {
+                    active_configuration = configuration_;
+                }
+                const ppp::configurations::AppConfiguration::IPv6Mode server_ipv6_mode =
+                    NULLPTR != active_configuration
+                        ? active_configuration->server.ipv6.mode
+                        : ppp::configurations::AppConfiguration::IPv6Mode_None;
+                const bool has_ipv6_dataplane =
+                    server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
+                    server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
+                ipv6_server_has_dataplane_ = has_ipv6_dataplane;
+
+                if (!has_ipv6_dataplane) {
                     // A reconnect can explicitly withdraw a previously assigned IPv6
                     // data plane.  Leaving the old TAP /1 routes or trusting the
                     // cached TAP gateway in that case lets Windows select the
                     // physical NIC's global IPv6 address again.
-                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Assignment: IPv6Mode=None, disabling tunnel IPv6 and restoring leak block");
+                    //
+                    // The server has no IPv6 data plane at all (the client
+                    // configuration declares no server.ipv6 mode).  This must NOT
+                    // disable local IPv6: the host itself needs direct IPv6
+                    // connectivity (SLAAC addresses, domestic IPv6, etc.) while
+                    // tunnel IPv6 is simply rejected/dropped by
+                    // TranslateIPv6Packet.  So remove the TUN /1 sink and restore
+                    // the physical NIC default routes instead of re-installing the
+                    // leak block.
+                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Assignment: server has no IPv6 data plane (config server.ipv6.mode=none), keeping local IPv6 direct, tunnel IPv6 will be dropped");
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     RestoreIPv6Assignment();
 #endif
@@ -2034,7 +2165,12 @@ namespace ppp {
                     for (const boost::asio::ip::address& address : dynamic_addresses) {
                         DeleteGeoDynamicRoute(address);
                     }
-                    ApplyWindowsIPv6LeakBlockRoutes();
+                    // Restore local IPv6 direct connectivity: remove the TUN
+                    // ::/1+8000::/1 sink and re-enable the physical NIC default
+                    // routes that the leak block suppressed.  Server-side IPv6 is
+                    // absent, so the tunnel cannot carry IPv6 anyway -- dropping
+                    // the /1 sink lets the host's own IPv6 work normally again.
+                    RemoveWindowsIPv6LeakBlock();
 #endif
                     return;
                 }
@@ -2144,8 +2280,10 @@ namespace ppp {
                     // connection. Keep this call for compatibility with an already
                     // established transport created by an older startup path.
                     boost::asio::ip::address server_address;
-                    if (auto exchanger = exchanger_) {
-                        server_address = exchanger->server_url_.remoteEP.address();
+                    std::shared_ptr<VEthernetExchanger> route_exchanger =
+                        NULLPTR != source ? source : exchanger_;
+                    if (route_exchanger) {
+                        server_address = route_exchanger->server_url_.remoteEP.address();
                     }
                     if (server_address.is_v6() && !server_address.is_unspecified()) {
 #if defined(_WIN32)
@@ -3347,7 +3485,7 @@ namespace ppp {
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
                         std::shared_ptr<ppp::string> processed = response;
-                        if (!direct_query && configuration_->udp.dns.prefer_ipv4) {
+                        if (!direct_query && prefer_ipv4_.load()) {
                             ::dns::Message message;
                             if (message.decode(reinterpret_cast<const uint8_t*>(response->data()), response->size()) == ::dns::BufferResult::NoError &&
                                 StripAAAADnsResponseIfIPv4Available(message)) {
@@ -3812,12 +3950,32 @@ namespace ppp {
                 }
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
 #if defined(_WIN32)
-                // Fail closed before opening any server transmission. Until the
-                // peer explicitly supplies a working IPv6 dataplane, locally
-                // originated public IPv6 must not escape through the physical NIC.
-                if (!ApplyWindowsIPv6LeakBlockRoutes()) {
-                    LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
-                    return false;
+                // Whether the server carries IPv6 is decided by the client
+                // configuration's server.ipv6 section -- the user's authoritative
+                // statement about the server.  Only a configuration-declared IPv6
+                // data plane authorizes fail-closing the physical NIC while the
+                // managed routes are applied.  A server without IPv6 can never
+                // carry it anyway: the host's own direct IPv6 (SLAAC, domestic
+                // IPv6, ...) must keep working and tunnel IPv6 is simply dropped
+                // by TranslateIPv6Packet.
+                {
+                    const ppp::configurations::AppConfiguration::IPv6Mode server_ipv6_mode =
+                        NULLPTR != configuration_
+                            ? configuration_->server.ipv6.mode
+                            : ppp::configurations::AppConfiguration::IPv6Mode_None;
+                    const bool has_ipv6_dataplane =
+                        server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
+                        server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
+                    ipv6_server_has_dataplane_ = has_ipv6_dataplane;
+                    if (has_ipv6_dataplane) {
+                        if (!ApplyWindowsIPv6LeakBlockRoutes()) {
+                            LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
+                            return false;
+                        }
+                    }
+                    else {
+                        RemoveWindowsIPv6LeakBlock();
+                    }
                 }
 #endif
                 }
@@ -4206,7 +4364,27 @@ namespace ppp {
                     }
                     int tap_if_index = tun_ni->Index;
                     int dns_if_index = tap_if_index;
+                    // Snapshot the original IPv4 DNS of every CONNECTED NIC so
+                    // shutdown can restore them.  Only adapters with OperStatus Up
+                    // are captured (disconnected adapters keep their own stale DNS
+                    // and are never touched).  The TUN entry is kept authoritative
+                    // for the tunnel itself.
+                    ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v4;
+                    ppp::win32::network::GetAllNicsDnsAddresses(all_dns_v4);
                     ni_dns_servers_.clear();
+                    for (auto&& [if_index, servers] : all_dns_v4) {
+                        ppp::vector<boost::asio::ip::address> addrs;
+                        for (const auto& s : servers) {
+                            boost::system::error_code ec;
+                            boost::asio::ip::address ip = StringToAddress(s.data(), ec);
+                            if (!ec) {
+                                addrs.emplace_back(ip);
+                            }
+                        }
+                        if (!addrs.empty()) {
+                            ni_dns_servers_[if_index] = std::move(addrs);
+                        }
+                    }
                     ni_dns_servers_[tap_if_index] = tun_ni->DnsAddresses;
                     ppp::vector<ppp::string> system_dns_strings;
                     system_dns_strings.emplace_back(tun_ni->GatewayServer.to_string());
@@ -4219,6 +4397,20 @@ namespace ppp {
                         route_added_.store(false);
                         LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot set TUN DNS");
                         return false;
+                    }
+                    // Pin every other connected NIC's IPv4 resolver to the local
+                    // loopback proxy 127.0.0.1.  The Windows DNS Client queries
+                    // every NIC's resolvers in parallel and accepts the first
+                    // answer; a physical NIC still pointing at the ISP resolver
+                    // would answer instantly with GFW-polluted records and steal
+                    // the answer from the tunnel DNS.  Disconnected adapters are
+                    // already excluded by the snapshot above and are not touched.
+                    ppp::vector<int> non_tap_v4_indexes;
+                    for (auto&& [if_index, servers] : all_dns_v4) {
+                        if (if_index != tap_if_index && !servers.empty()) {
+                            ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" });
+                            non_tap_v4_indexes.emplace_back(if_index);
+                        }
                     }
 
                     ni_dns_servers_v6_.clear();
@@ -4242,12 +4434,15 @@ namespace ppp {
                         ni_dns_servers_v6_ = all_dns_v6;
                         for (const auto& [if_index, servers] : all_dns_v6) {
                             if (if_index != tap_if_index && !servers.empty()) {
+                                // Pin the resolver to the local proxy ::1 only.  Do NOT
+                                // disable IPv6 router discovery (RA) on the underlying
+                                // NICs: RA is what keeps SLAAC public IPv6 addresses
+                                // alive on the host (e.g. vEthernet (Debian)).  Killing
+                                // it silently removes the host's public IPv6 and breaks
+                                // IPv6-only server connectivity.  RDNSS re-injection of
+                                // the ISP resolver is instead defeated by re-pinning
+                                // ::1 every 30s via the DNS guard timer below.
                                 ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
-                                // Disable RA so RDNSS cannot re-inject the ISP IPv6
-                                // resolver on Hyper-V vSwitch/underlying NICs.
-                                if (ppp::win32::network::SetIPv6RouterDiscovery(if_index, false)) {
-                                    ni_router_discovery_disabled_v6_.emplace(if_index);
-                                }
                                 non_tap_v6_indexes.emplace_back(if_index);
                             }
                         }
@@ -4260,14 +4455,14 @@ namespace ppp {
                     if (NULLPTR != dns_guard_timer_) {
                         dns_guard_active_.store(true);
                         dns_guard_timer_->TickEvent =
-                            [self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v6_indexes](ppp::threading::Timer*, ppp::threading::Timer::TickEventArgs&) noexcept {
+                            [self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v4_indexes, non_tap_v6_indexes](ppp::threading::Timer*, ppp::threading::Timer::TickEventArgs&) noexcept {
                                 if (!self->dns_guard_active_.load()) {
                                     return;
                                 }
 
                                 self->dns_guard_workers_.fetch_add(1);
                                 try {
-                                    std::thread([self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v6_indexes]() noexcept {
+                                    std::thread([self, tap_if_index, dns_if_index, system_dns_strings, non_tap_v4_indexes, non_tap_v6_indexes]() noexcept {
                                         if (!self->dns_guard_active_.load()) {
                                             self->dns_guard_workers_.fetch_sub(1);
                                             return;
@@ -4275,6 +4470,13 @@ namespace ppp {
 
                                         HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
                                         if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
+                                            // DHCP may re-inject ISP IPv4 DNS after
+                                            // takeover; keep every connected non-TAP
+                                            // NIC pinned to the local proxy so the
+                                            // tunnel resolver always wins the race.
+                                            for (int if_index : non_tap_v4_indexes) {
+                                                ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" });
+                                            }
                                             // DHCPv6/RA may re-inject ISP IPv6 DNS after
                                             // takeover; keep every non-TAP NIC pinned to
                                             // the local proxy so the tunnel resolver
@@ -4365,12 +4567,23 @@ namespace ppp {
                 // can be stale after reconnect, while a server without IPv6 sends
                 // no IPv6 extension at all.  Only a successfully applied managed
                 // IPv6 default route authorizes IPv6 egress.
-                if (NULLPTR != tap && (!ipv6_client_state_captured_ || !ipv6_client_state_.DefaultRouteApplied)) {
+                // When the server has no IPv6 data plane (ipv6_server_has_dataplane_
+                // == false) the tunnel cannot carry IPv6 anyway, so the leak block
+                // must NOT be installed -- the host keeps its own direct IPv6
+                // connectivity and tunnel IPv6 is simply dropped.
+                if (NULLPTR != tap && ipv6_server_has_dataplane_ &&
+                    (!ipv6_client_state_captured_ || !ipv6_client_state_.DefaultRouteApplied)) {
                     // Remove active-store routes left by an older build or an
                     // unclean shutdown. Any prefix longer than /1 would otherwise
                     // override the leak block and expose the physical IPv6 address.
                     DeleteWindowsIPv6BypassRoutes();
                     ApplyWindowsIPv6LeakBlockRoutes();
+                }
+                else if (NULLPTR != tap && !ipv6_server_has_dataplane_) {
+                    // Server cannot carry IPv6: never disable local IPv6.  Drop the
+                    // TUN /1 sink and restore the physical NIC default routes so the
+                    // host's own IPv6 keeps working while the tunnel rejects IPv6.
+                    RemoveWindowsIPv6LeakBlock();
                 }
 #elif defined(_MACOS)
                 // Delete all found default gateway routes.
@@ -6189,7 +6402,12 @@ namespace ppp {
                         RestoreIPv6Assignment();
                     }
 #if defined(_WIN32)
-                    if (network_takeover_stopping_.load()) {
+                    // If the server has no IPv6 data plane, local IPv6 direct
+                    // connectivity must be preserved (never fail-closed on a
+                    // server that cannot carry IPv6).  Only a server with an
+                    // IPv6 data plane gets the selective leak block while the
+                    // managed routes are re-established.
+                    if (network_takeover_stopping_.load() || !ipv6_server_has_dataplane_) {
                         RemoveWindowsIPv6LeakBlock();
                     }
                     else {
@@ -6206,11 +6424,8 @@ namespace ppp {
                 ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
                 ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
                 ppp::tap::TapWindows::DnsFlushResolverCache();
-                // Re-enable IPv6 router discovery on the NICs that had it disabled
-                // during takeover so RA/RDNSS can resume after the tunnel shuts down.
-                for (int if_index : ni_router_discovery_disabled_v6_) {
-                    ppp::win32::network::SetIPv6RouterDiscovery(if_index, true);
-                }
+                // Router discovery is no longer disabled during takeover (see
+                // ApplyNetworkTakeover), so there is nothing to re-enable here.
                 ni_router_discovery_disabled_v6_.clear();
                 // DNS is restored before the loopback service is stopped so there
                 // is no interval where physical NICs point at an unbound port.
@@ -6225,11 +6440,17 @@ namespace ppp {
                     RestoreIPv6Assignment();
                 }
 #if defined(_WIN32)
-                // A temporary primary-outbound failure must stay fail-closed. Only
+                // A temporary primary-outbound failure must stay fail-closed only
+                // when the server actually carries IPv6.  For a server without an
+                // IPv6 data plane the tunnel cannot carry IPv6 anyway, so keep the
+                // host's direct IPv6 working instead of suppressing it.  Only
                 // Dispose() sets network_takeover_stopping_ and permits host IPv6
                 // restoration.
-                if (!network_takeover_stopping_.load()) {
+                if (!network_takeover_stopping_.load() && ipv6_server_has_dataplane_) {
                     ApplyWindowsIPv6LeakBlockRoutes();
+                }
+                else {
+                    RemoveWindowsIPv6LeakBlock();
                 }
 #endif
                 LOG_INFO("VEthernetNetworkSwitcher::RestoreNetworkState: routes and DNS restored");
@@ -6684,8 +6905,10 @@ namespace ppp {
                 boost::system::error_code ec;
                 boost::asio::ip::udp::endpoint serverEP(serverIP, frame->Destination.Port);
 
+                LOG_INFO("DirectDNS enter: server=%s port=%u", serverIP.to_string().c_str(), (uint32_t)frame->Destination.Port);
                 bool opened = ppp::coroutines::asio::async_open(y, *socket, serverEP.protocol());
                 if (!opened) {
+                    LOG_INFO("DirectDNS enter: server=%s async_open=FAILED", serverIP.to_string().c_str());
                     return false;
                 }
 
@@ -6706,9 +6929,12 @@ namespace ppp {
                 // IsBypassIpAddress() geo/FIB gate is unreliable here and
                 // previously skipped protect() for 223.5.5.5/119.29.29.29.
                 if (!serverIP.is_loopback()) {
-                    auto protector_network = GetProtectorNetwork(); 
+                    auto protector_network = GetProtectorNetwork();
+                    LOG_INFO("DirectDNS protect: server=%s port=%u handle=%d protector=%s", serverIP.to_string().c_str(), (uint32_t)frame->Destination.Port, handle, (NULLPTR != protector_network) ? "yes" : "NO");
                     if (NULLPTR != protector_network) {
-                        if (!protector_network->Protect(handle, y)) {
+                        bool protect_ok = protector_network->Protect(handle, y);
+                        LOG_INFO("DirectDNS protect: server=%s handle=%d result=%d", serverIP.to_string().c_str(), handle, (int)protect_ok);
+                        if (!protect_ok) {
                             return false;
                         }
                     }
@@ -6771,11 +6997,37 @@ namespace ppp {
                                     } else {
                                         size_t new_sz = 0;
                                         if (m.encode(reinterpret_cast<uint8_t*>(buffer.get()), sz, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
-                                            DatagramOutput(sourceEP, destinationEP, buffer.get(), static_cast<int>(new_sz));
+                                            const bool output = DatagramOutput(sourceEP, destinationEP, buffer.get(), static_cast<int>(new_sz));
+                                            if (!m.questions.empty()) {
+                                                char answer_ips[512] = { 0 };
+                                                size_t used = 0;
+                                                for (auto& ans : m.answers) {
+                                                    if (used >= sizeof(answer_ips) - 64) {
+                                                        break;
+                                                    }
+                                                    char tmp[64];
+                                                    if (ans.mType == ::dns::RecordType::kA) {
+                                                        auto rdata = ans.getRData<::dns::RDataA>();
+                                                        if (rdata && inet_ntop(AF_INET, rdata->getAddress(), tmp, sizeof(tmp))) {
+                                                            used += (size_t)snprintf(answer_ips + used, sizeof(answer_ips) - used, "%s%s", used ? "," : "", tmp);
+                                                        }
+                                                    }
+                                                    else if (ans.mType == ::dns::RecordType::kAAAA) {
+                                                        auto rdata = ans.getRData<::dns::RDataAAAA>();
+                                                        if (rdata && inet_ntop(AF_INET6, rdata->getAddress(), tmp, sizeof(tmp))) {
+                                                            used += (size_t)snprintf(answer_ips + used, sizeof(answer_ips) - used, "%s%s", used ? "," : "", tmp);
+                                                        }
+                                                    }
+                                                }
+                                                LOG_INFO("DirectDNS response: host=%s bytes=%u output=%d ips=[%s]", m.questions[0].mName.data(), (uint32_t)new_sz, (int)output, answer_ips);
+                                            }
                                         }
                                     }
                                 }
                             }
+                        }
+                        else if (ec) {
+                            LOG_INFO("DirectDNS response: ec=%s sz=%u", ec.message().c_str(), (uint32_t)sz);
                         }
 
                         ppp::net::Socket::Closesocket(socket);
@@ -6889,22 +7141,26 @@ namespace ppp {
 
                 std::shared_ptr<boost::asio::io_context> context = exchanger->GetContext();
                 if (NULLPTR == context) {
+                    LOG_INFO("DirectDNS spawn: host=%s context=NO", qs.mName.data());
                     return false;
                 }
 
                 std::shared_ptr<Byte> buffer = exchanger->GetBuffer();
                 if (NULLPTR == buffer) {
+                    LOG_INFO("DirectDNS spawn: host=%s buffer=NO", qs.mName.data());
                     return false;
                 }
 
                 const std::shared_ptr<boost::asio::ip::udp::socket> socket = make_shared_object<boost::asio::ip::udp::socket>(*context);
                 if (!socket) {
+                    LOG_INFO("DirectDNS spawn: host=%s socket=NO", qs.mName.data());
                     return false;
                 }
 
                 const auto self = shared_from_this();
                 const auto allocator = configuration_->GetBufferAllocator();
 
+                LOG_INFO("DirectDNS spawn: host=%s server=%s context=OK buffer=OK socket=OK alloc=%s", qs.mName.data(), serverIP.to_string().c_str(), (NULLPTR != allocator) ? "OK" : "NO");
                 return ppp::coroutines::YieldContext::Spawn(allocator.get(), *context,
                     [self, this, socket, buffer, frame, messages, context, serverIP, destinationIP](ppp::coroutines::YieldContext& y) noexcept {
                         return RedirectDnsServer(y, socket, buffer, serverIP, frame, messages, context, destinationIP);

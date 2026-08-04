@@ -31,6 +31,7 @@ namespace ppp {
             public:
                 typedef std::shared_ptr<VEthernetNetworkSwitcher>                       VEthernetNetworkSwitcherPtr;
                 typedef ppp::app::protocol::VirtualEthernetInformation                  VirtualEthernetInformation;
+                typedef ppp::app::protocol::VirtualEthernetInformationExtensions       VirtualEthernetInformationExtensions;
                 typedef ppp::auxiliary::UriAuxiliary                                    UriAuxiliary;
                 typedef UriAuxiliary::ProtocolType                                      ProtocolType;
                 typedef ppp::threading::Timer                                           Timer;
@@ -84,6 +85,7 @@ namespace ppp {
                 std::shared_ptr<vmux::vmux_net>                                         GetMux()                noexcept { return mux_; }
                 VEthernetNetworkSwitcherPtr                                             GetSwitcher()           noexcept { return switcher_; }
                 std::shared_ptr<VirtualEthernetInformation>                             GetInformation()        noexcept { return information_; }
+                const VirtualEthernetInformationExtensions&                             GetInformationExtensions() const noexcept { return information_extensions_; }
                 ITransmissionPtr                                                        GetTransmission()       noexcept { return transmission_; }
                 int                                                                     GetReconnectionCount()  noexcept { return reconnection_count_; }
                 NetworkState                                                            GetMuxNetworkState()    noexcept;
@@ -282,6 +284,7 @@ namespace ppp {
                 boost::asio::ip::address                                                assigned_ipv6_address_;
                 IForwardingPtr                                                          forwarding_;
                 std::shared_ptr<VirtualEthernetInformation>                             information_;
+                VirtualEthernetInformationExtensions                                    information_extensions_;
                 VEthernetDatagramPortTable                                              datagrams_;
                 DatagramPacketHandlerTable                                              datagram_handlers_;
                 ITransmissionPtr                                                        transmission_;
