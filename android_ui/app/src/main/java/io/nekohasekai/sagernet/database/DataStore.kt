@@ -184,6 +184,7 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var requireHttp by configurationStore.boolean(Key.REQUIRE_HTTP) { false }
     var appendHttpProxy by configurationStore.boolean(Key.APPEND_HTTP_PROXY) { true }
     var httpProxyException by configurationStore.string(Key.HTTP_PROXY_EXCEPTION)
+    var allowAccess by configurationStore.boolean(Key.ALLOW_ACCESS) { false }
     var connectionTestURL by configurationStore.string(Key.CONNECTION_TEST_URL) { CONNECTION_TEST_URL }
     var alwaysShowAddress by configurationStore.boolean(Key.ALWAYS_SHOW_ADDRESS)
     var showGroupName by configurationStore.boolean(Key.SHOW_GROUP_NAME)

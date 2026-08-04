@@ -1177,3 +1177,27 @@ namespace ppp {
         }
     }
 }
+
+#if defined(_ANDROID)
+namespace ppp { namespace diagnostics {
+    // DEBUG default: preserve the previous always-on behaviour until the App
+    // applies its own logLevel via libopenppp2.set_log_level().
+    int g_log_level = 4;
+
+    int LogPrint(int level, const char* tag, const char* fmt, ...) noexcept {
+        // Map Android log priorities (VERBOSE=2, DEBUG=3, INFO=4, WARN=5,
+        // ERROR=6, FATAL=7) to the App LogLevel thresholds (0=NONE, 1=ERROR,
+        // 2=WARNING, 3=INFO, 4=DEBUG).
+        static constexpr int threshold[8] = { 0, 0, 5, 4, 3, 2, 1, 1 };
+        const int index = level >= 2 && level <= 7 ? level : 4;
+        if (g_log_level < threshold[index]) {
+            return 0;
+        }
+        va_list args;
+        va_start(args, fmt);
+        const int rc = __android_log_vprint(level, tag, fmt, args);
+        va_end(args);
+        return rc;
+    }
+}}
+#endif

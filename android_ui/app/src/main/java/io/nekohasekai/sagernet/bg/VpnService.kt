@@ -353,11 +353,11 @@ class VpnService : BaseVpnService(),
         // Apply the in-app inbound settings (SOCKS5 + HTTP proxy) on top of
         // the profile configuration so the toggles/ports/password actually
         // drive what the native core listens on:
-        //  - requireSocks  -> socks-proxy.port = socksPort, bind 0.0.0.0
-        //    (LAN access is implicit, so no separate allowAccess toggle),
+        //  - requireSocks  -> socks-proxy.port = socksPort, bind 127.0.0.1
+        //    by default; 0.0.0.0 when allowAccess is on (LAN reachable),
         //    username/password from the settings when set.
         //  - requireHttp   -> http-proxy.port = httpPort, bind 127.0.0.1
-        //    (loopback keeps the UI latency probe + system proxy working).
+        //    by default; 0.0.0.0 when allowAccess is on (LAN reachable).
         // A port of 0 disables the corresponding local listener natively
         // (VEthernetLocalProxySwitcher::Open rejects bind_port <= MinPort),
         // so turning a toggle off fully disables that inbound.
@@ -368,11 +368,12 @@ class VpnService : BaseVpnService(),
                 JSONObject()
             }
             val client = root.optJSONObject("client") ?: JSONObject().also { root.put("client", it) }
+            val inboundBind = if (DataStore.allowAccess) "0.0.0.0" else "127.0.0.1"
 
             val httpProxy = client.optJSONObject("http-proxy") ?: JSONObject().also { client.put("http-proxy", it) }
             if (DataStore.requireHttp) {
                 httpProxy.put("port", DataStore.httpPort)
-                httpProxy.put("bind", "127.0.0.1")
+                httpProxy.put("bind", inboundBind)
             } else {
                 httpProxy.put("port", 0)
                 httpProxy.put("bind", "127.0.0.1")
@@ -381,12 +382,12 @@ class VpnService : BaseVpnService(),
             val socksProxy = client.optJSONObject("socks-proxy") ?: JSONObject().also { client.put("socks-proxy", it) }
             if (DataStore.requireSocks) {
                 socksProxy.put("port", DataStore.socksPort)
-                socksProxy.put("bind", "0.0.0.0")
+                socksProxy.put("bind", inboundBind)
                 socksProxy.put("username", DataStore.socksUsername ?: "")
                 socksProxy.put("password", DataStore.socksPassword ?: "")
             } else {
                 socksProxy.put("port", 0)
-                socksProxy.put("bind", "0.0.0.0")
+                socksProxy.put("bind", "127.0.0.1")
             }
 
             val tcp = root.optJSONObject("tcp") ?: JSONObject().also { root.put("tcp", it) }

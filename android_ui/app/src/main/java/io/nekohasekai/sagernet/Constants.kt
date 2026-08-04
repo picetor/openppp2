@@ -51,6 +51,7 @@ object Key {
     const val APPEND_HTTP_PROXY = "appendHttpProxy"
     const val HTTP_PROXY_EXCEPTION = "httpProxyException"
     const val HTTP_PORT = "httpPort"
+    const val ALLOW_ACCESS = "allowAccess"
 
     const val CONNECTION_TEST_URL = "connectionTestURL"
     const val PROBE_URL = "probeUrl"

@@ -876,13 +876,26 @@ extern "C" {
 
 #if defined(_ANDROID)
 #include <android/log.h>
+#include <cstdarg>
 
-// 定义日志输出函数
+namespace ppp { namespace diagnostics {
+    // App-configured log verbosity mirroring io.nekohasekai.sagernet.LogLevel:
+    // 0=NONE, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG. Defaults to DEBUG so
+    // existing behaviour (all levels printed) is preserved until the App
+    // applies its own setting via libopenppp2.set_log_level().
+    extern int g_log_level;
+    inline void SetLogLevel(int level) noexcept { g_log_level = level < 0 ? 0 : (level > 4 ? 4 : level); }
+    inline int GetLogLevel() noexcept { return g_log_level; }
+    int LogPrint(int level, const char* tag, const char* fmt, ...) noexcept;
+}}
+
+// 定义日志输出函数。所有级别经 ppp::diagnostics::LogPrint 统一路由，
+// 使抽屉日志视图遵循 App 内设置的日志级别。
 #define LOG_TAG (BOOST_BEAST_VERSION_STRING)
-#define LOG_INFO(...)               __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOG_ERROR(...)              __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOG_WARN(...)               __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOG_DEBUG(...)              __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOG_INFO(...)               ppp::diagnostics::LogPrint(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOG_ERROR(...)              ppp::diagnostics::LogPrint(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_WARN(...)               ppp::diagnostics::LogPrint(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define LOG_DEBUG(...)              ppp::diagnostics::LogPrint(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LIBOPENPPP2_CLASSNAME       "supersocksr/ppp/android/c/libopenppp2"
 
 #if defined(_WIN32)

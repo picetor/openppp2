@@ -321,6 +321,10 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         portHttp.setOnBindEditTextListener(EditTextPreferenceModifiers.Port)
         portHttp.isVisible = requireHttp.isChecked
         portHttp.onPreferenceChangeListener = reloadListener
+
+        // LAN access rebinds the HTTP/SOCKS inbounds from loopback to
+        // 0.0.0.0, which only takes effect when the VPN is (re)started.
+        findPreference<SwitchPreference>(Key.ALLOW_ACCESS)!!.onPreferenceChangeListener = reloadListener
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             requireHttp.setOnPreferenceChangeListener { _, newValue ->
                 portHttp.isVisible = newValue as Boolean
