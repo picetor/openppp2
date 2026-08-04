@@ -1450,6 +1450,20 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1mux_1accel
 
 // package: supersocksr.ppp.android.c
 // public final class libopenpppp2
+// public native int set_log_level(int level)
+//
+// Mirrors the in-app LogLevel setting (0=NONE, 1=ERROR, 2=WARNING,
+// 3=INFO, 4=DEBUG). The native core gates LOG_INFO / LOG_DEBUG /
+// LOG_WARN output on this threshold, so the drawer log view reflects
+// the same verbosity. May be called any time, including before run().
+// Returns LIBOPENPPP2_ERROR_SUCCESS (0).
+__LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1log_1level(JNIEnv* env, jobject* this_, jint level) noexcept {
+    ppp::diagnostics::SetLogLevel(level);
+    return LIBOPENPPP2_ERROR_SUCCESS;
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
 // public native bool set_root_path(string path)
 //
 // Changes the process working directory so that relative paths embedded in
