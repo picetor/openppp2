@@ -152,7 +152,6 @@ namespace ppp {
                 static_allocated_context_.reset();
                 switcher_->DeleteExchanger(this);
                 switcher_->DeleteNatInformation(this, address_);
-                switcher_->DeletePeerPrefixGateway(GetId());
                 switcher_->StaticEchoUnallocated(static_echo_session_id_.exchange(0));
             }
 
@@ -1054,41 +1053,20 @@ namespace ppp {
                 }
 
                 VES::NatInformationPtr source = switcher_->FindNatInformation(ip->src);
-                if (NULLPTR == source && switcher_->IsPeerRoutingEnabled()) {
-                    // Return traffic from a peer-prefix network (e.g. a reply
-                    // sourced by a LAN host behind a gateway peer). The source
-                    // address is not a virtual IP in nats_, so resolve the
-                    // announcing gateway through the peer RIB and use its NAT
-                    // mapping as the source so the reply can be forwarded.
-                    uint32_t via = switcher_->FindGatewayVirtualIPForDestination(ip->src);
-                    if (via != 0) {
-                        source = switcher_->FindNatInformation(via);
-                    }
-                }
                 if (NULLPTR == source) {
                     return false;
                 }
 
                 static const auto forward = 
                     [](VirtualEthernetSwitcher* switcher, uint32_t destination, Byte* packet, int packet_length, YieldContext& y) noexcept -> int {
-                        bool via_gateway = false;
                         VES::NatInformationPtr nat = switcher->FindNatInformation(destination);
-                        if (NULLPTR == nat && switcher->IsPeerRoutingEnabled()) {
-                            uint32_t via = switcher->FindGatewayVirtualIPForDestination(destination);
-                            if (via != 0) {
-                                nat = switcher->FindNatInformation(via);
-                                via_gateway = (NULLPTR != nat);
-                            }
-                        }
                         if (NULLPTR == nat) {
                             return 0;
                         }
 
-                        if (!via_gateway) {
-                            uint32_t mask = nat->SubmaskAddress;
-                            if ((destination & mask) != (nat->IPAddress & mask)) {
-                                return 0;
-                            }
+                        uint32_t mask = nat->SubmaskAddress;
+                        if ((destination & mask) != (nat->IPAddress & mask)) {
+                            return 0;
                         }
 
                         std::shared_ptr<VirtualEthernetExchanger>& exchanger = nat->Exchanger;
@@ -1614,14 +1592,13 @@ namespace ppp {
                 const VirtualEthernetInformationExtensions& request = information.Extensions;
                 bool has_ipv6_request = request.RequestedIPv6Address.is_v6();
                 bool has_ipv4_request = request.ClientIPv4Req.enabled;
-                bool has_peer_route_request = request.PeerRouteAnnounce.HasAny();
                 bool is_server_response = request.AssignedIPv6Address.is_v6() || request.IPv6StatusCode != VirtualEthernetInformationExtensions::IPv6Status_None;
                 if (is_server_response) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolPacketActionInvalid);
                     return false;
                 }
 
-                if (!has_ipv6_request && !has_ipv4_request && !has_peer_route_request) {
+                if (!has_ipv6_request && !has_ipv4_request) {
                     return OnInformation(transmission, information.Base, y);
                 }
 
@@ -1636,16 +1613,6 @@ namespace ppp {
                 // Process IPv4 request if present.
                 if (has_ipv4_request) {
                     switcher_->UpdateIPv4Request(GetId(), request, response);
-                }
-
-                // Process peer prefix route announcement if present.
-                if (has_peer_route_request) {
-                    auto self = std::dynamic_pointer_cast<VirtualEthernetExchanger>(shared_from_this());
-                    switcher_->UpdatePeerRouteAnnounce(self, request, response);
-                }
-
-                if (switcher_->IsPeerRoutingEnabled()) {
-                    switcher_->BuildPeerRouteTableSnapshot(response.PeerRouteTable);
                 }
 
                 // The base info quota/expire fields MUST satisfy the client-side

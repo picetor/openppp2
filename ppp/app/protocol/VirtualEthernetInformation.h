@@ -9,7 +9,6 @@
 #include <ppp/stdafx.h>
 #include <ppp/auxiliary/JsonAuxiliary.h>
 #include <ppp/net/IPEndPoint.h>
-#include <ppp/app/protocol/PeerPrefixRoute.h>
 
 namespace ppp {
     namespace app {
@@ -231,21 +230,6 @@ namespace ppp {
                  * server did not process an IPv4 request.
                  */
                 ClientIPv4Assignment                                ClientIPv4Assign;
-
-                /** @brief Client prefix announcement for site-to-site gateway routing.
-                 *
-                 * Sent by the client during handshake to register the site prefix(s)
-                 * it can reach behind its TAP.  Wire key "peer-route-announce".
-                 */
-                PeerRouteAnnounceMessage                            PeerRouteAnnounce;
-
-                /** @brief Server prefix routing snapshot for clients.
-                 *
-                 * Returned by the server in the INFO envelope so every client can
-                 * install routes towards remote site prefixes via the announcing
-                 * gateway peer's virtual address.  Wire key "peer-route-table".
-                 */
-                PeerRouteTableMessage                               PeerRouteTable;
 
                 /** @brief Detailed IPv6 provisioning outcomes.
                  *

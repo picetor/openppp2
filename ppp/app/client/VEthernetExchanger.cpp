@@ -194,7 +194,6 @@ namespace ppp {
             void VEthernetExchanger::Finalize() noexcept {
                 VirtualEthernetMappingPortTable mappings;
                 VEthernetDatagramPortTable datagrams;
-                VEthernetPeerLocalBridgeTable peer_local_bridges;
                 ITransmissionPtr transmission;
                 DeadlineTimerTable deadline_timers;
                 std::shared_ptr<vmux::vmux_net> mux;
@@ -209,9 +208,6 @@ namespace ppp {
 
                     datagrams = std::move(datagrams_);
                     datagrams_.clear();
-
-                    peer_local_bridges = std::move(peer_local_bridges_);
-                    peer_local_bridges_.clear();
 
                     deadline_timers = std::move(deadline_timers_);
                     deadline_timers_.clear();
@@ -236,152 +232,12 @@ namespace ppp {
                 Dictionary::ReleaseAllObjects(mappings);
                 Dictionary::ReleaseAllObjects(datagrams);
 
-                for (auto&& [_, bridge] : peer_local_bridges) {
-                    if (NULLPTR != bridge) {
-                        bridge->Dispose();
-                    }
-                }
-                peer_local_bridges.clear();
-
                 if (NULLPTR != mux) {
                     mux->close_exec();
                 }
                 if (NULLPTR != forwarding) {
                     forwarding->Dispose();
                 }
-            }
-
-            void VEthernetExchanger::CleanupPeerLocalBridges() noexcept {
-                VEthernetPeerLocalBridgeTable disposed_bridges;
-                UInt64 now = ppp::threading::Executors::GetTickCount();
-                for (;;) {
-                    SynchronizedObjectScope scope(syncobj_);
-                    for (auto it = peer_local_bridges_.begin(); it != peer_local_bridges_.end();) {
-                        VEthernetPeerLocalBridgeConnectionPtr bridge = it->second;
-                        if (NULLPTR == bridge || bridge->IsDisposed()) {
-                            disposed_bridges.emplace(it->first, bridge);
-                            it = peer_local_bridges_.erase(it);
-                        }
-                        else {
-                            ++it;
-                        }
-                    }
-                    break;
-                }
-
-                for (auto&& [_, bridge] : disposed_bridges) {
-                    if (NULLPTR != bridge) {
-                        bridge->Dispose();
-                    }
-                }
-            }
-
-            VEthernetExchanger::VEthernetPeerLocalBridgeConnectionPtr VEthernetExchanger::GetOrCreatePeerLocalBridge(
-                const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
-                if (NULLPTR == transmission || NULLPTR == packet || packet_length < (int)sizeof(ppp::net::native::ip_hdr)) {
-                    return NULLPTR;
-                }
-
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration || !configuration->client.peer_local_bridge) {
-                    return NULLPTR;
-                }
-
-                if ((packet[0] >> 4) != ppp::net::native::ip_hdr::IP_VER) {
-                    return NULLPTR;
-                }
-
-                int ip_length = packet_length;
-                ppp::net::native::ip_hdr* ip = ppp::net::native::ip_hdr::Parse(packet, ip_length);
-                if (NULLPTR == ip || ip_length < (int)sizeof(ppp::net::native::ip_hdr)) {
-                    return NULLPTR;
-                }
-
-                int ip_proto = ppp::net::native::ip_hdr::IPH_PROTO(ip);
-                VEthernetPeerLocalBridgeConnection::BridgeProtocol protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP;
-                if (ip_proto == ppp::net::native::ip_hdr::IP_PROTO_TCP) {
-                    protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP;
-                }
-                else if (ip_proto == ppp::net::native::ip_hdr::IP_PROTO_ICMP) {
-                    protocol = VEthernetPeerLocalBridgeConnection::BridgeProtocol_ICMP;
-                }
-                else {
-                    return NULLPTR;
-                }
-
-                // Only bridge destinations inside a locally announced peer prefix.
-                if (!switcher_->IsLocalAnnouncedPeerPrefix(ip->dest)) {
-                    return NULLPTR;
-                }
-
-                VEthernetPeerLocalBridgeKey key;
-                key.client_ip   = ip->src;
-                key.client_port = 0;
-                key.server_ip   = ip->dest;
-                key.server_port = 0;
-
-                ppp::net::native::tcp_hdr* tcp = NULLPTR;
-                if (protocol == VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP) {
-                    Byte* tcp_start = (Byte*)packet + (ppp::net::native::ip_hdr::IPH_HL(ip) << 2);
-                    int tcp_available = ip_length - (int)(tcp_start - (Byte*)packet);
-                    if (tcp_available < (int)sizeof(ppp::net::native::tcp_hdr)) {
-                        return NULLPTR;
-                    }
-
-                    tcp = ppp::net::native::tcp_hdr::Parse(ip, tcp_start, tcp_available);
-                    if (NULLPTR == tcp) {
-                        return NULLPTR;
-                    }
-
-                    key.client_port = tcp->src;
-                    key.server_port = tcp->dest;
-                }
-
-                VEthernetPeerLocalBridgeConnectionPtr bridge;
-                for (;;) {
-                    SynchronizedObjectScope scope(syncobj_);
-                    auto it = peer_local_bridges_.find(key);
-                    if (it != peer_local_bridges_.end()) {
-                        bridge = it->second;
-                        if (NULLPTR != bridge && !bridge->IsDisposed()) {
-                            break;
-                        }
-                        peer_local_bridges_.erase(it);
-                    }
-
-                    if (protocol == VEthernetPeerLocalBridgeConnection::BridgeProtocol_TCP) {
-                        // Only a fresh TCP SYN may create a new bridge; stray
-                        // packets without an established bridge are dropped.
-                        Byte tcp_flags = ppp::net::native::tcp_hdr::TCPH_FLAGS(tcp);
-                        if (!(tcp_flags & ppp::net::native::tcp_hdr::TCP_SYN)) {
-                            break;
-                        }
-                    }
-
-                    auto self = std::static_pointer_cast<VEthernetExchanger>(shared_from_this());
-                    bridge = make_shared_object<VEthernetPeerLocalBridgeConnection>(
-                        self, transmission, key.client_ip, key.client_port, key.server_ip, key.server_port, protocol);
-                    if (NULLPTR == bridge) {
-                        break;
-                    }
-                    if (!bridge->Open(y)) {
-                        bridge->Dispose();
-                        bridge.reset();
-                        break;
-                    }
-                    peer_local_bridges_[key] = bridge;
-                    break;
-                }
-                return bridge;
-            }
-
-            bool VEthernetExchanger::OnPeerLocalBridge(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
-                VEthernetPeerLocalBridgeConnectionPtr bridge = GetOrCreatePeerLocalBridge(transmission, packet, packet_length, y);
-                if (NULLPTR == bridge) {
-                    return false;
-                }
-
-                return bridge->OnTunnelPacket(packet, packet_length);
             }
 
             void VEthernetExchanger::Dispose() noexcept {
@@ -846,7 +702,6 @@ namespace ppp {
                                 LOG_DEBUG("VEthernetExchanger::Loopback: link established, entering data loop");
                                 ExchangeToEstablishState(); {
                                     transmission_ = transmission; {
-                                        SendRequestedPeerRouteAnnounce(transmission, y);
                                         RegisterAllMappingPorts();
                                         if (StaticEchoAllocatedToRemoteExchanger(y) && Run(transmission, y)) {
                                             run_once = true;
@@ -1329,84 +1184,12 @@ namespace ppp {
                 LOG_DEBUG("DATAPLANE VEthernetExchanger::OnNat: entry, vnet=%d, is_ipv6=%d, len=%d, first=0x%02x",
                     (int)vnet, (int)is_ipv6, packet_length, NULLPTR != packet ? (int)packet[0] : -1);
                 if (vnet || is_ipv6 || (NULLPTR != packet && packet_length >= (int)sizeof(ppp::net::native::ip_hdr) && (packet[0] >> 4) == ppp::net::native::ip_hdr::IP_VER)) {
-                    AppConfigurationPtr configuration = GetConfiguration();
-
-                    // Peer local bridge gate: when client.peer-local-bridge is
-                    // enabled, inbound IPv4 TCP packets whose destination lies
-                    // inside a locally announced peer prefix (e.g. 192.168.68.0/24)
-                    // are intercepted here. Instead of injecting them into the
-                    // TAP/OS protocol stack (which would require a working return
-                    // route via the LAN gateway), openppp2 actively connects to
-                    // the target device from the local host and bridges the data.
-                    if (NULLPTR != configuration && configuration->client.peer_local_bridge) {
-                        bool consumed = OnPeerLocalBridge(transmission, packet, packet_length, y);
-                        if (consumed) {
-                            return true;
-                        }
-                    }
-
-                    // Peer gateway forward gate: unless client.peer-gateway-forward
-                    // is enabled, inbound packets must be addressed to this host's
-                    // own virtual address.  Otherwise a malicious peer could use
-                    // this client as an open relay through the gateway session.
-                    std::shared_ptr<ppp::tap::ITap> tap = switcher_->GetTap();
-                    if (NULLPTR != configuration && NULLPTR != tap && !configuration->client.peer_gateway_forward) {
-                        bool destination_matches = false;
-                        const Byte version = packet[0] >> 4;
-                        if (version == ppp::net::native::ip_hdr::IP_VER) {
-                            int ip_length = packet_length;
-                            ppp::net::native::ip_hdr* ip = ppp::net::native::ip_hdr::Parse(packet, ip_length);
-                            destination_matches = NULLPTR != ip && ip->dest == tap->IPAddress;
-                        }
-                        else if (version == ppp::ipv6::IPv6_VERSION) {
-                            boost::asio::ip::address_v6 source;
-                            boost::asio::ip::address_v6 destination;
-                            boost::asio::ip::address assigned = assigned_ipv6_address_;
-                            destination_matches = assigned.is_v6() &&
-                                ppp::ipv6::TryParsePacket(packet, packet_length, source, destination) &&
-                                destination == assigned.to_v6();
-                        }
-
-                        if (!destination_matches) {
-                            ppp::telemetry::Log(ppp::telemetry::Level::kInfo, "client_exchanger", "peer gateway forward rejected");
-                            ppp::telemetry::Count("client.peer_gateway_forward.rejected", 1);
-                            return false;
-                        }
-                    }
-
                     if (!TranslateIPv6Packet(packet, packet_length, false)) return false;
                     return switcher_->Output(packet, packet_length);
                 }
                 else {
                     return false; // Immediate return false and forcefully close the connection due to a suspected malicious attack on the client.
                 }
-            }
-
-            /** @brief Sends the configured peer prefix gateway announcement to the server. */
-            bool VEthernetExchanger::SendRequestedPeerRouteAnnounce(const ITransmissionPtr& transmission, YieldContext& y) noexcept {
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration || NULLPTR == transmission) {
-                    return false;
-                }
-
-                InformationEnvelope envelope;
-                if (!configuration->client.peer_route_announce.empty()) {
-                    envelope.Extensions.PeerRouteAnnounce.enabled = true;
-                    envelope.Extensions.PeerRouteAnnounce.action = "register";
-                    for (const auto& item : configuration->client.peer_route_announce) {
-                        ppp::app::protocol::PeerPrefixRouteEntry entry;
-                        entry.network = item.network;
-                        entry.prefix = item.prefix;
-                        envelope.Extensions.PeerRouteAnnounce.prefixes.emplace_back(entry);
-                    }
-                }
-
-                if (!envelope.Extensions.HasAny()) {
-                    return false;
-                }
-
-                envelope.ExtendedJson = envelope.Extensions.ToJson();
-                return DoInformation(transmission, envelope, y);
             }
 
             bool VEthernetExchanger::OnMux(const ITransmissionPtr& transmission, uint16_t vlan, uint16_t max_connections, bool acceleration, Byte ordering_caps, YieldContext& y) noexcept {
@@ -1470,9 +1253,6 @@ namespace ppp {
                             }
                             if (primary_outbound_) {
                                 switcher_->OnInformation(ei);
-                                // Apply static peer routes even when server does not support ExtendedJson
-                                ppp::app::protocol::VirtualEthernetInformationExtensions empty_extensions;
-                                switcher_->ApplyPeerPrefixRoutes(empty_extensions);
                             }
                             elif(!ei->Valid()) {
                                 if (ITransmissionPtr transmission = transmission_; NULLPTR != transmission) {
@@ -1541,7 +1321,6 @@ namespace ppp {
                                         std::dynamic_pointer_cast<VEthernetExchanger>(self);
                                     switcher_->ApplyIPv6Assignment(information.Extensions, source);
                                 }
-                                switcher_->ApplyPeerPrefixRoutes(information.Extensions);
                             }
                         }
                     });

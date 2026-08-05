@@ -36,13 +36,11 @@ namespace ppp {
         namespace client {
             class VEthernetExchanger;
             class VEthernetDatagramPort;
-            class PeerPrefixRouteManager;
 
             class VEthernetNetworkSwitcher : public ppp::ethernet::VEthernet {
             private:
                 friend class                                                        VEthernetExchanger;
                 friend class                                                        VEthernetDatagramPort;
-                friend class                                                        PeerPrefixRouteManager;
 
             private:    
                 typedef struct {    
@@ -184,10 +182,6 @@ namespace ppp {
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
                 bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
-                void                                                                ClearPeerPrefixRoutes() noexcept;
-                bool                                                                ApplyPeerPrefixRoutes(const ppp::app::protocol::VirtualEthernetInformationExtensions& extensions) noexcept;
-                const ppp::net::native::RouteEntry*                                 FindAppliedPeerPrefixRoute(uint32_t destination) noexcept;
-                const ppp::vector<ppp::net::native::RouteEntry>&                     GetAppliedPeerPrefixRoutes() const noexcept { return applied_peer_prefix_routes_; }
 
             public: 
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
@@ -395,7 +389,6 @@ namespace ppp {
                 bool                                                                IPAddressIsGatewayServer(UInt32 ip, UInt32 gw, UInt32 mask) noexcept { return ip == gw ? true : htonl((ntohl(gw) & ntohl(mask)) + 1) == ip; }
                 bool                                                                EchoOtherServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
                 bool                                                                EchoGatewayServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
-                bool                                                                IsLocalAnnouncedPeerPrefix(uint32_t source) noexcept;
 
             private:    
                 VirtualEthernetLoggerPtr                                            logger_;
@@ -468,13 +461,6 @@ namespace ppp {
 
                 RouteInformationTablePtr                                            rib_;
                 ForwardInformationTablePtr                                          fib_;
-                // Peer-prefix site-to-site routing state. applied_peer_prefix_routes_
-                // mirrors the host routes installed through PeerPrefixRouteManager so
-                // OnPacketInput can longest-prefix-match outbound packets that target
-                // remote site prefixes outside the local TAP subnet.
-                ppp::vector<ppp::net::native::RouteEntry>                          applied_peer_prefix_routes_;
-                ppp::vector<ppp::app::protocol::PeerPrefixRouteEntry>              dynamic_peer_routes_;
-                std::unique_ptr<PeerPrefixRouteManager>                            peer_prefix_routes_;
                 ppp::string                                                         server_ru_;
                 std::shared_ptr<aggligator::aggligator>                             aggligator_;
                 IForwardingPtr                                                      forwarding_;

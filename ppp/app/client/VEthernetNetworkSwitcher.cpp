@@ -1,7 +1,6 @@
 #include <ppp/app/client/VEthernetNetworkTcpipStack.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
-#include <ppp/app/client/PeerPrefixRouteManager.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxyConnection.h>
 #include <ppp/IDisposable.h>
@@ -151,11 +150,6 @@ namespace ppp {
                     ipv6_server_has_dataplane_ =
                         mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
                         mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
-                }
-
-                peer_prefix_routes_ = std::make_unique<PeerPrefixRouteManager>();
-                if (NULLPTR != peer_prefix_routes_) {
-                    peer_prefix_routes_->Bind(this);
                 }
 
 #if defined(PPP_LOG_VERBOSE)
@@ -384,15 +378,7 @@ namespace ppp {
                     return false;
                 }
                 if (packet->src != tap->IPAddress) {
-                    // Peer gateway forward: a reply sourced by a local LAN host
-                    // behind this gateway client (an announced peer prefix, e.g.
-                    // 192.168.11.2 behind PVE's TAP 192.168.12.2) is not the TAP
-                    // address itself.  Relay it only when the source falls inside
-                    // one of this client's announced prefixes; without this the
-                    // return traffic is silently dropped on the outbound path.
-                    if (!IsLocalAnnouncedPeerPrefix(packet->src)) {
-                        return false;
-                    }
+                    return false;
                 }
 
                 uint32_t gw = tap->GatewayServer;
@@ -403,15 +389,7 @@ namespace ppp {
 
                 if (destination != ppp::net::native::ip_hdr::IP_ADDR_BROADCAST_VALUE) {
                     if ((destination & mask) != (gw & mask)) {
-                        // Peer-prefix site-to-site routing: a packet targeting a
-                        // remote site prefix outside the local TAP subnet is routed
-                        // via the announcing gateway peer's virtual address.  The
-                        // server performs the longest-prefix gateway lookup, so the
-                        // client only needs to accept the packet when it matches an
-                        // applied peer prefix route.
-                        if (NULLPTR == FindAppliedPeerPrefixRoute(destination)) {
-                            return false;
-                        }
+                        return false;
                     }
                 }
 
@@ -1093,21 +1071,6 @@ namespace ppp {
                     frame->Ttl = ttl;
                     packet->Ttl = ttl;
 
-                    // Peer-prefix site-to-site routing: when the destination
-                    // matches an applied peer prefix route, send the ICMP packet
-                    // via NAT protocol so the server can forward it through the
-                    // peer gateway instead of using a raw socket.
-                    if (NULLPTR != FindAppliedPeerPrefixRoute(frame->Destination)) {
-                        auto exchanger = GetExchanger(Ipep::ToAddress(frame->Destination));
-                        if (NULLPTR != exchanger) {
-                            std::shared_ptr<BufferSegment> messages = IPFrame::ToArray(allocator, packet.get());
-                            if (NULLPTR != messages) {
-                                return exchanger->Nat(messages->Buffer.get(), messages->Length);
-                            }
-                        }
-                        return false;
-                    }
-
                     return EchoOtherServer(GetExchanger(Ipep::ToAddress(frame->Destination)), packet, allocator);
                 }
             }
@@ -1457,6 +1420,21 @@ namespace ppp {
                 ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(value));
                 if (tag.empty() || tag == "direct") return false;
 
+                // Already the active primary outbound (and no switch in flight):
+                // nothing to do.  This matters for "main", which is now always
+                // present in the hot-switch menu.  The check MUST run before
+                // ReloadOutboundConfiguration/NewExchanger/Open below: re-selecting
+                // the same tag would otherwise leak an orphan exchanger whose
+                // Loopback keeps reconnecting to the same server (the server
+                // rejects the duplicate session_id, producing an endless
+                // connect -> handshake success -> read failed loop).
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    if (tag == primary_outbound_ && pending_outbound_.empty()) {
+                        return true;
+                    }
+                }
+
                 // "main" is the primary outbound itself (the configuration that
                 // owns the TUN). It is only selectable from the server menu when
                 // --server-dir contains a JSON with the same GUID/server, so it
@@ -1483,12 +1461,6 @@ namespace ppp {
                 std::shared_ptr<VEthernetExchanger> abandoned;
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
-                    // Already the active primary outbound (and no switch in
-                    // flight): nothing to do.  This matters for "main", which is
-                    // now always present in the hot-switch menu.
-                    if (tag == primary_outbound_ && pending_outbound_.empty()) {
-                        return true;
-                    }
                     abandoned = std::move(pending_outbound_exchanger_);
                     pending_outbound_ = tag;
                     pending_outbound_exchanger_ = target;
@@ -1539,8 +1511,7 @@ namespace ppp {
                     // pool could not be created). A BufferswapAllocator is a
                     // server-independent packet memory pool, so inherit the
                     // previous outbound allocator (falling back to the switcher
-                    // primary allocator) rather than leaving bridges
-                    // (VEthernetPeerLocalBridgeConnection) with a null
+                    // primary allocator) rather than leaving bridges with a null
                     // GetBufferAllocator(), which crashed on the first packet.
                     std::shared_ptr<ppp::threading::BufferswapAllocator> previous =
                         NULLPTR != outbound.configuration ?
@@ -2431,67 +2402,6 @@ namespace ppp {
                     }
                 }
 #endif
-            }
-
-            void VEthernetNetworkSwitcher::ClearPeerPrefixRoutes() noexcept {
-                if (NULLPTR != peer_prefix_routes_) {
-                    peer_prefix_routes_->Clear();
-                }
-            }
-
-            bool VEthernetNetworkSwitcher::ApplyPeerPrefixRoutes(const VirtualEthernetInformationExtensions& extensions) noexcept {
-                if (NULLPTR == peer_prefix_routes_) {
-                    return false;
-                }
-
-                return peer_prefix_routes_->Apply(extensions);
-            }
-
-            const ppp::net::native::RouteEntry* VEthernetNetworkSwitcher::FindAppliedPeerPrefixRoute(uint32_t destination) noexcept {
-                const ppp::net::native::RouteEntry* best = NULLPTR;
-                for (const auto& route : applied_peer_prefix_routes_) {
-                    if (route.Prefix <= 0 || route.Prefix > ppp::net::native::MAX_PREFIX_VALUE_V4) {
-                        continue;
-                    }
-
-                    uint32_t mask = ppp::net::IPEndPoint::PrefixToNetmask(route.Prefix);
-                    if ((destination & mask) != (route.Destination & mask)) {
-                        continue;
-                    }
-
-                    if (NULLPTR == best || route.Prefix > best->Prefix) {
-                        best = &route;
-                    }
-                }
-
-                return best;
-            }
-
-            bool VEthernetNetworkSwitcher::IsLocalAnnouncedPeerPrefix(uint32_t source) noexcept {
-                std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
-                if (NULLPTR == configuration) {
-                    return false;
-                }
-
-                for (const auto& item : configuration->client.peer_route_announce) {
-                    if (item.prefix <= 0 || item.prefix > ppp::net::native::MAX_PREFIX_VALUE_V4 || item.network.empty()) {
-                        continue;
-                    }
-
-                    boost::system::error_code ec;
-                    boost::asio::ip::address address = StringToAddress(item.network.c_str(), ec);
-                    if (ec || !address.is_v4()) {
-                        continue;
-                    }
-
-                    uint32_t network = htonl(address.to_v4().to_uint());
-                    uint32_t mask = ppp::net::IPEndPoint::PrefixToNetmask(item.prefix);
-                    if ((source & mask) == (network & mask)) {
-                        return true;
-                    }
-                }
-
-                return false;
             }
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
@@ -5897,11 +5807,10 @@ namespace ppp {
                     if (route.dwForwardDest == ip) {
                         uint32_t mask = IPEndPoint::PrefixToNetmask(prefix);
                         if (route.dwForwardMask == mask && route.dwForwardNextHop == gw) {
-                            // The peer-prefix route already exists in the system table
+                            // The route already exists in the system table
                             // (e.g. a leftover from a previous process). Re-adding it
-                            // would fail with ERROR_OBJECT_ALREADY_EXISTS, which made
-                            // ApplyPeerPrefixRoutes silently skip the route while the
-                            // OS route table still carried it. Treat it as installed.
+                            // would fail with ERROR_OBJECT_ALREADY_EXISTS, so the
+                            // OS route table still carries it. Treat it as installed.
                             return true;
                         }
                         ppp::win32::network::Router::Delete(route);
@@ -6244,18 +6153,6 @@ namespace ppp {
                     return false;
                 }
 
-                // Peer-prefix destinations (e.g. 192.168.11.0/24 announced by a peer
-                // gateway) must always be treated as direct: mux/direct
-                // sub-transmission terminates on the VPN server, which cannot reach
-                // peer LANs. Direct connects are routed through the TAP data plane,
-                // where peer-prefix TCP/UDP/ICMP is NAT'd via the announcing peer
-                // gateway. This check must precede Geo rules so a proxy policy can
-                // never override peer reachability.
-                uint32_t peer_prefix_ip = htonl(ip.to_v4().to_uint());
-                if (NULLPTR != FindAppliedPeerPrefixRoute(peer_prefix_ip)) {
-                    return true;
-                }
-
                 if (geo_rules_) {
                     auto decision = geo_rules_->MatchAddress(ip, ppp::threading::Executors::GetTickCount());
                     if (decision.Matched()) {
@@ -6549,9 +6446,6 @@ namespace ppp {
                 fib_ = NULLPTR;
                 fib6_ = NULLPTR;
 #endif
-
-                // Remove peer-prefix host routes installed for site-to-site routing.
-                ClearPeerPrefixRoutes();
 
                 // Clear all route tables and forwarding tables held by the current object.
                 LoadAllIPListWithFilePaths(boost::asio::ip::address_v4::any());
