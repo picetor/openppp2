@@ -1447,9 +1447,10 @@ namespace ppp {
                     // structured server event log (`server.log`) so the operator
                     // sees it on BOTH log channels.  Telemetry (the other
                     // channel) was already emitted inside the inner handshake.
-                    if (ppp::diagnostics::GetLastErrorCode() == ppp::diagnostics::ErrorCode::ObfuscationFlagsMismatch) {
-                        VirtualEthernetLoggerPtr logger = GetLogger();
-                        if (NULLPTR != logger) {
+                    ppp::diagnostics::ErrorCode handshake_error = ppp::diagnostics::GetLastErrorCode();
+                    VirtualEthernetLoggerPtr logger = GetLogger();
+                    if (NULLPTR != logger) {
+                        if (handshake_error == ppp::diagnostics::ErrorCode::ObfuscationFlagsMismatch) {
                             const auto& k = configuration_->key;
                             char buf[256];
                             int n = snprintf(buf, sizeof(buf),
@@ -1463,6 +1464,15 @@ namespace ppp {
                                 k.kf);
                             (void)n;
                             logger->Mismatch(transmission, ppp::string(buf));
+                        }
+                        else {
+                            // Any other handshake failure (timeout, wrong key,
+                            // bad protocol) should be visible in the event log
+                            // too, not just mismatches.
+                            char buf[128];
+                            int n = snprintf(buf, sizeof(buf), "handshake failed, error=%d", (int)handshake_error);
+                            (void)n;
+                            logger->Warn(ppp::string(buf));
                         }
                     }
 
@@ -2110,6 +2120,16 @@ namespace ppp {
 
                 if (ok) {
                     OpenLogger();
+
+                    // Emit the UCP listener-startup line now that the logger
+                    // exists (OpenUcpServer() runs earlier in the chain).
+                    VirtualEthernetLoggerPtr logger = GetLogger();
+                    if (NULLPTR != logger && configuration_->ucp.listen.port > IPEndPoint::MinPort) {
+                        char buf[128];
+                        int n = snprintf(buf, sizeof(buf), "UCP server listening on port %d", configuration_->ucp.listen.port);
+                        (void)n;
+                        logger->Info(ppp::string(buf));
+                    }
                 }
 
                 return ok;
@@ -2696,6 +2716,9 @@ namespace ppp {
                     ucp_server_ = ucp_server;
                 }
 
+                // NOTE: the logger is opened by OpenLogger() after the whole
+                // subsystem chain, so GetLogger() is still null here; the UCP
+                // listener-startup line is emitted from Open() instead.
                 AcceptUcpConnections(ucp_server);
                 return true;
             }
@@ -2723,6 +2746,16 @@ namespace ppp {
                         AcceptUcpConnections(server);
 
                         if (error != ucp::UcpError::None || NULLPTR == connection) {
+                            // Log accept failures so a broken UCP listener is
+                            // visible in the structured event log instead of
+                            // failing silently on the worker thread.
+                            VirtualEthernetLoggerPtr logger = GetLogger();
+                            if (NULLPTR != logger) {
+                                char buf[128];
+                                int n = snprintf(buf, sizeof(buf), "UCP accept failed, error=%d", (int)error);
+                                (void)n;
+                                logger->Warn(ppp::string(buf));
+                            }
                             return;
                         }
 
@@ -2742,8 +2775,22 @@ namespace ppp {
 
                                 transmission->Statistics = NewStatistics();
                                 if (!transmission->StartReceive()) {
+                                    VirtualEthernetLoggerPtr logger = GetLogger();
+                                    if (NULLPTR != logger) {
+                                        logger->Warn("UCP transmission StartReceive failed");
+                                    }
                                     transmission->Dispose();
                                     return;
+                                }
+
+                                // Log the accepted UCP session so connection
+                                // activity is visible in the event log.
+                                VirtualEthernetLoggerPtr logger = GetLogger();
+                                if (NULLPTR != logger) {
+                                    ucp::string remote = connection->GetRemoteEndpoint();
+                                    ppp::string msg = "UCP session accepted, remote=";
+                                    msg += ppp::string(remote.data(), remote.size());
+                                    logger->Info(msg);
                                 }
 
                                 auto allocator = transmission->BufferAllocator;

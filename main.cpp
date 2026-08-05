@@ -2108,6 +2108,16 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     }
     else
     {
+        // Route the server module logger (VirtualEthernetLogger -> server.log)
+        // to the same --log-file destination.  Without this, server-side
+        // module logs (handshake, sessions, mismatches...) go to the JSON
+        // configured server.log instead of the file the operator asked for,
+        // which made --log-file appear to capture nothing on the server.
+        if (LOG_FILE_PATH_.size() > 0)
+        {
+            configuration->server.log = LOG_FILE_PATH_;
+        }
+
         // Gets whether client mode or server mode is currently running.
         ppp::string mode;
         static constexpr const char* mode_keys[] = { "--mode", "--m", "-mode", "-m" };
