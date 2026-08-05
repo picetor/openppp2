@@ -41,10 +41,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Checkout UCP library (sibling, Track B ucp:// tunnel)
-        uses: actions/checkout@v5
-        with:
-          repository: picetor/ucp
-          path: ../ucp
+        run: git clone --depth 1 https://github.com/picetor/ucp.git "${{ runner.workspace }}/ucp"
 
       - name: Build ${{ matrix.variant }} with musl
         env:
