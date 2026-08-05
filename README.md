@@ -738,7 +738,7 @@ tail -f ./ppp_debug.log
 
 ## 🔗 隧道协议配置
 
-openppp2 支持三种隧道传输协议：**PPP**（原生 TCP）、**WS**（WebSocket）、**WSS**（WebSocket over TLS）。切换协议只需修改 `appsettings.json` 中 `client.server` 的值，CLI 始终用 `--mode=client` 即可。
+openppp2 支持四种隧道传输协议：**PPP**（原生 TCP）、**WS**（WebSocket）、**WSS**（WebSocket over TLS）、**UCP**（基于 UDP 的可靠传输）。切换协议只需修改 `appsettings.json` 中 `client.server` 的值，CLI 始终用 `--mode=client` 即可。
 
 ### PPP（原生 TCP 直连）
 
@@ -832,17 +832,66 @@ CDN 优选 IP 场景需额外配置 `client.websocket`：
 
 > 无论哪种协议，客户端启动命令统一为 `ppp --mode=client`，服务器端为 `./ppp`。
 
+### UCP（基于 UDP 的可靠传输）
+
+UCP（Universal Communication Protocol）是在 UDP 之上实现的有序可靠传输隧道，内置
+KCC2.0 拥塞控制、FEC 前向纠错、SACK/NAK 丢包恢复，特别适合 UDP 可用但 TCP 被限速
+/干扰的高丢包网络。服务端监听端口固定为 `20001`（`PPP_UCP_SYS_PORT`）。
+
+**appsettings.json**（服务器端需开启 `ucp.listen.port`，否则客户端连接不上）：
+```json
+{
+    "ucp": {
+        "listen": { "port": 20001 },
+        "mss": 0,
+        "fec": {
+            "group": 0,
+            "redundancy": 0.0
+        },
+        "inactive": {
+            "timeout": 0,
+            "keep-alived": [0, 0]
+        }
+    }
+}
+```
+字段说明：
+- `listen.port`：UCP 监听端口，`0` 表示禁用 UCP 监听器（默认关闭）。
+- `mss`：最大分段大小，`0` 使用引擎默认值 1220。
+- `fec.group`：FEC 组大小，`0` 使用引擎默认值 8。
+- `fec.redundancy`：FEC 冗余率 `[0.0, 1.0]`，`0` 禁用 FEC。
+- `inactive.timeout`：断线超时（秒），`0` 使用引擎默认值。
+- `inactive.keep-alived`：保活间隔范围 `[min, max]`（秒）。
+
+客户端：
+```json
+{
+    "client": {
+        "server": "ucp://服务器IP:20001/"
+    }
+}
+```
+端口可省略，默认 `20001`：`"ucp://服务器IP/"`。
+
+> UCP 与 `udp.static`（静态 UDP 回声）机制完全独立、可共存：UCP 走
+> `OpenUcpTransmission` 专用连接，`udp.static.servers` 只服务于 UDP 数据报的静态
+> 转发。服务器可同时开启 `tcp.listen` / `udp.listen` / `ucp.listen`，客户端按
+> `client.server` 的 scheme 选择隧道。
+
 ### 协议对比
 
-| | PPP | WS | WSS |
-|---|---|---|---|
-| 加密 | AES 应用层加密 | AES 应用层加密 | TLS + AES 双层 |
-| 端口 | 自定义 | 80/自定义 | 443/自定义 |
-| CDN | ❌ | ✅ | ✅ |
-| 伪装 | ❌ | HTTP 头伪装 | HTTPS 伪装 |
-| 推荐场景 | 内网/直连 | 内网穿透 | 生产公网 |
+| | PPP | WS | WSS | UCP |
+|---|---|---|---|---|
+| 传输层 | TCP | TCP | TCP | UDP |
+| 加密 | AES 应用层加密 | AES 应用层加密 | TLS + AES 双层 | AES 应用层加密 |
+| 可靠传输 | TCP 内核保证 | TCP 内核保证 | TCP 内核保证 | UCP 自身（SACK/NAK/FEC） |
+| 拥塞控制 | TCP 内核 | TCP 内核 | TCP 内核 | KCC2.0 |
+| 端口 | 自定义 | 80/自定义 | 443/自定义 | 20001/自定义 |
+| CDN | ❌ | ✅ | ✅ | ❌ |
+| 伪装 | ❌ | HTTP 头伪装 | HTTPS 伪装 | ❌ |
+| 推荐场景 | 内网/直连 | 内网穿透 | 生产公网 | 高丢包/UDP 友好网络 |
 
-> PPP 模式虽然不走 TLS，但数据仍然经过应用层 AES 加密（由 `key.protocol` / `key.transport` 控制）。WSS 模式在此基础上增加了 TLS 传输层加密。
+> PPP 模式虽然不走 TLS，但数据仍然经过应用层 AES 加密（由 `key.protocol` / `key.transport` 控制）。WSS 模式在此基础上增加了 TLS 传输层加密。UCP 的数据面同样经过应用层 AES 加密。
 
 ---
 
