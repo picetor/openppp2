@@ -130,6 +130,8 @@ class MainActivity : ThemedActivity(),
             binding.drawerLayout.removeView(binding.navView)
         }
         navigation.setNavigationItemSelectedListener(this)
+        navigation.getHeaderView(0)?.findViewById<TextView>(R.id.nav_header_version)?.text =
+            "v${BuildConfig.VERSION_NAME}"
         if (resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL) {
             ViewCompat.setOnApplyWindowInsetsListener(navigation) { v, insets ->
                 val bars = insets.getInsets(

@@ -14,5 +14,6 @@ local.properties
 /app/src/main/assets/exclave-core/*.dat
 /service_account_credentials.json
 jniLibs/
+release.keystore
 go.work
 go.work.sum

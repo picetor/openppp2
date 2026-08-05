@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Exclave</string>
+    <string name="app_name" translatable="false">OpenPPP2</string>
     <string name="project">Project</string>
+    <string name="project_description">Next-generation security network access technology, providing high-performance Virtual Ethernet tunneling service.</string>
     <string name="github">Source code</string>
+    <string name="upstream_repository">Original repository</string>
+    <string name="reference_repository">Reference repository</string>
+    <string name="our_repository">This repository</string>
+    <string name="android_framework">Android framework</string>
     <string name="app_version">Version</string>
     <string name="version_x">Version (%s)</string>
     <string name="logcat">Export debug information</string>

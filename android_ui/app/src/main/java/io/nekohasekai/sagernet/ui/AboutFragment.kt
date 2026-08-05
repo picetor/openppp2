@@ -103,6 +103,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                         .addItem(MaterialAboutTitleItem.Builder()
                             .icon(R.mipmap.ic_launcher)
                             .text(R.string.app_name)
+                            .subText(R.string.project_description)
                             .setOnLongClickAction {
                                 AlertDialog.Builder(activityContext).apply {
                                     setView(NestedScrollView(activityContext).apply {
@@ -129,7 +130,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                             .setOnClickAction {
                                 startActivity(Intent(
                                     Intent.ACTION_VIEW,
-                                    "https://github.com/ExclaveNetwork/Exclave/releases".toUri()
+                                    "https://github.com/liulilittle/openppp2/releases".toUri()
                                 ))
                             }
                             .setOnLongClickAction {
@@ -144,7 +145,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                             .setOnClickAction {
                                 startActivity(Intent(
                                     Intent.ACTION_VIEW,
-                                    "https://github.com/ltworf/openppp2".toUri()
+                                    "https://github.com/liulilittle/openppp2".toUri()
                                 ))
                             }
                             .build())
@@ -172,22 +173,46 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                         .outline(false)
                         .title(R.string.project)
                         .addItem(MaterialAboutActionItem.Builder()
-                            .icon(R.drawable.ic_baseline_sanitizer_24)
-                            .text(R.string.github)
+                            .icon(R.drawable.ic_baseline_link_24)
+                            .text(R.string.upstream_repository)
+                            .subText("liulilittle/openppp2")
                             .setOnClickAction {
                                 startActivity(Intent(
                                     Intent.ACTION_VIEW,
-                                    "https://github.com/ExclaveNetwork/Exclave".toUri()
+                                    "https://github.com/liulilittle/openppp2".toUri()
                                 ))
                             }
                             .build())
                         .addItem(MaterialAboutActionItem.Builder()
-                            .icon(R.drawable.baseline_translate_24)
-                            .text(R.string.translation_platform)
+                            .icon(R.drawable.ic_baseline_compare_arrows_24)
+                            .text(R.string.reference_repository)
+                            .subText("Miaocchi/openppp2")
                             .setOnClickAction {
                                 startActivity(Intent(
                                     Intent.ACTION_VIEW,
-                                    "https://hosted.weblate.org/projects/exclave/".toUri()
+                                    "https://github.com/Miaocchi/openppp2".toUri()
+                                ))
+                            }
+                            .build())
+                        .addItem(MaterialAboutActionItem.Builder()
+                            .icon(R.drawable.ic_baseline_home_24)
+                            .text(R.string.our_repository)
+                            .subText("picetor/openppp2")
+                            .setOnClickAction {
+                                startActivity(Intent(
+                                    Intent.ACTION_VIEW,
+                                    "https://github.com/picetor/openppp2".toUri()
+                                ))
+                            }
+                            .build())
+                        .addItem(MaterialAboutActionItem.Builder()
+                            .icon(R.drawable.ic_baseline_developer_board_24)
+                            .text(R.string.android_framework)
+                            .subText("ExclaveNetwork/Exclave")
+                            .setOnClickAction {
+                                startActivity(Intent(
+                                    Intent.ACTION_VIEW,
+                                    "https://github.com/ExclaveNetwork/Exclave".toUri()
                                 ))
                             }
                             .build())
