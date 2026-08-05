@@ -103,7 +103,6 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                         .addItem(MaterialAboutTitleItem.Builder()
                             .icon(R.mipmap.ic_launcher)
                             .text(R.string.app_name)
-                            .subText(R.string.project_description)
                             .setOnLongClickAction {
                                 AlertDialog.Builder(activityContext).apply {
                                     setView(NestedScrollView(activityContext).apply {
@@ -122,6 +121,10 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                                     setPositiveButton(android.R.string.ok, null)
                                 }.show()
                             }
+                            .build())
+                        .addItem(MaterialAboutActionItem.Builder()
+                            .icon(R.drawable.ic_baseline_info_24)
+                            .text(R.string.project_description)
                             .build())
                         .addItem(MaterialAboutActionItem.Builder()
                             .icon(R.drawable.ic_baseline_update_24)
@@ -206,7 +209,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                             }
                             .build())
                         .addItem(MaterialAboutActionItem.Builder()
-                            .icon(R.drawable.ic_baseline_developer_board_24)
+                            .icon(R.drawable.baseline_developer_board_24)
                             .text(R.string.android_framework)
                             .subText("ExclaveNetwork/Exclave")
                             .setOnClickAction {
