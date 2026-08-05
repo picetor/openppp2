@@ -35,7 +35,13 @@ namespace ppp {
             , connection_owner_(connection)
             , network_(network)
             , remoteEP_(remoteEP) {
-            StartDriving();
+            // NOTE: StartDriving() must NOT be called here.  It captures
+            // shared_from_this(), but enable_shared_from_this is wired up by
+            // std::shared_ptr only AFTER this constructor returns.  Calling it
+            // from the ctor body throws std::bad_weak_ptr (verified on MSVC),
+            // which escapes the noexcept ctor chain and terminates the process
+            // (observed as a 28s freeze on the client).  StartDriving() is
+            // invoked from StartReceive() once construction is complete.
         }
 
         IUcpTransmission::IUcpTransmission(
@@ -276,6 +282,12 @@ namespace ppp {
             if (NULLPTR == connection || disposed_ || closed_) {
                 return false;
             }
+
+            // Start the DoEvents driving thread now that the object is fully
+            // constructed (shared_from_this() is safe here).  Server mode has
+            // no network_ (the hosting VirtualEthernetSwitcher drives
+            // DoEvents), so StartDriving() no-ops for it.
+            StartDriving();
 
             std::shared_ptr<BufferswapAllocator> allocator = this->BufferAllocator;
             std::shared_ptr<Byte> buffer = BufferswapAllocator::MakeByteArray(allocator, IUCP_RECEIVE_BUFFER_SIZE);

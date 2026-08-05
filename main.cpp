@@ -1327,11 +1327,12 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             using NAC = VirtualEthernetSwitcher::NetworkAcceptorCategories;
 
             // List listening ports for various services
-            const char* categories[] = { "ppp+tcp", "ppp+udp", "ppp+ws", "ppp+wss", "cdn+1", "cdn+2" };
+            const char* categories[] = { "ppp+tcp", "ppp+udp", "ppp+ucp", "ppp+ws", "ppp+wss", "cdn+1", "cdn+2" };
             VirtualEthernetSwitcher::NetworkAcceptorCategories categoriess[] =
             {
                 NAC::NetworkAcceptorCategories_Tcpip,
                 NAC::NetworkAcceptorCategories_Udpip,
+                NAC::NetworkAcceptorCategories_Ucp,
                 NAC::NetworkAcceptorCategories_WebSocket,
                 NAC::NetworkAcceptorCategories_WebSocketSSL,
                 NAC::NetworkAcceptorCategories_CDN1,

@@ -3901,6 +3901,19 @@ namespace ppp {
                         }
                     }
                 }
+                elif (categories == NetworkAcceptorCategories_Ucp) {
+                    std::shared_ptr<ucp::UcpServer> ucp_server = ucp_server_;
+                    if (NULLPTR != ucp_server) {
+                        ucp::Endpoint local = ucp_server->GetLocalEndpoint();
+                        if (local.port > IPEndPoint::MinPort && local.port <= IPEndPoint::MaxPort) {
+                            boost::asio::ip::address address = StringToAddress(local.address.c_str(), ec);
+                            if (ec || address.is_unspecified()) {
+                                address = boost::asio::ip::address_v6::any();
+                            }
+                            return boost::asio::ip::tcp::endpoint(address, local.port);
+                        }
+                    }
+                }
                 elif(categories >= NetworkAcceptorCategories_Min && categories < NetworkAcceptorCategories_Max) {
                     std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor = acceptors_[categories];
                     if (NULLPTR != acceptor) {

@@ -326,6 +326,7 @@ namespace ppp {
                  *  - `NetworkAcceptorCategories_CDN1`       — first CDN relay acceptor.
                  *  - `NetworkAcceptorCategories_CDN2`       — second CDN relay acceptor.
                  *  - `NetworkAcceptorCategories_Udpip`      — UDP static-echo acceptor (sentinel).
+                 *  - `NetworkAcceptorCategories_Ucp`        — UCP datagram listener.
                  */
                 typedef enum {
                     NetworkAcceptorCategories_Min,
@@ -336,6 +337,7 @@ namespace ppp {
                     NetworkAcceptorCategories_CDN2,                                        ///< CDN relay acceptor 2.
                     NetworkAcceptorCategories_Max,
                     NetworkAcceptorCategories_Udpip       = NetworkAcceptorCategories_Max, ///< UDP static-echo (sentinel).
+                    NetworkAcceptorCategories_Ucp,                                         ///< UCP datagram listener.
                 }                                                       NetworkAcceptorCategories;
 
                 /**
