@@ -154,6 +154,9 @@ namespace ppp {
             else if (proto_string == "socks") {
                 protocol_type = ProtocolType_Socks;
             }
+            else if (proto_string == "ucp") {
+                protocol_type = ProtocolType_UCP;
+            }
             else {
                 return ""; 
             }
@@ -212,6 +215,9 @@ namespace ppp {
                 }
                 else if (protocol_type == ProtocolType_HttpSSL || protocol_type == ProtocolType_WebSocketSSL) {
                     port_number = PPP_HTTPS_SYS_PORT;
+                }
+                else if (protocol_type == ProtocolType_UCP) {
+                    port_number = PPP_UCP_SYS_PORT;
                 }
                 else {
                     return ""; 

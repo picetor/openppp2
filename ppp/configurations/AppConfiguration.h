@@ -111,6 +111,18 @@ namespace ppp {
             }                                                               udp;            ///< UDP protocol and session parameters.
             struct {
                 struct {
+                    int                                                     port;           ///< UCP listen port; 0 disables the UCP listener.
+                }                                                           listen;
+                int                                                         mss;            ///< UCP maximum segment size; 0 uses the engine default (1220).
+                int                                                         fec_group;      ///< UCP FEC group size; 0 uses the engine default (8).
+                double                                                      fec_redundancy; ///< UCP FEC redundancy ratio in [0.0, 1.0]; 0 disables FEC.
+                struct {
+                    int                                                     timeout;        ///< Disconnect timeout in seconds; 0 uses the engine default.
+                    int                                                     keep_alived[2]; ///< Keep-alive interval range [min, max] in seconds.
+                }                                                           inactive;
+            }                                                               ucp;            ///< UCP (UDP reliable transport) tunnel parameters.
+            struct {
+                struct {
                     int                                                     timeout;        ///< Idle timeout in seconds before an established TCP session is closed.
                 }                                                           inactive;
                 struct {

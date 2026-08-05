@@ -19,6 +19,7 @@
 #include <ppp/coroutines/YieldContext.h>
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/transmissions/ITcpipTransmission.h>
+#include <ppp/transmissions/IUcpTransmission.h>
 #include <ppp/transmissions/IWebsocketTransmission.h>
 #include <ppp/diagnostics/Telemetry.h>
 
@@ -450,6 +451,10 @@ namespace ppp {
                 LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, connecting to %s:%d, protocol=%d, hostname=%s, path=%s",
                     outbound_tag_.data(), strand.get(), address.data(), remotePort, (int)protocol_type, hostname.data(), path.data());
 
+                if (protocol_type == ProtocolType::ProtocolType_UCP) {
+                    return OpenUcpTransmission(context, strand, y, address, remotePort, remoteEP);
+                }
+
                 std::shared_ptr<boost::asio::ip::tcp::socket> socket = NewAsynchronousSocket(context, strand, remoteEP.protocol(), y);
                 if (!socket) {
                     LOG_DEBUG("VEthernetExchanger::OpenTransmission: NewAsynchronousSocket failed");
@@ -496,6 +501,111 @@ namespace ppp {
                 LOG_DEBUG("VEthernetExchanger::OpenTransmission: outbound=%s, transport_trace=%p, connected to %s:%d, creating transmission",
                     outbound_tag_.data(), strand.get(), address.data(), remotePort);
                 return NewTransmission(context, strand, socket, protocol_type, hostname, path);
+            }
+
+            VEthernetExchanger::ITransmissionPtr VEthernetExchanger::OpenUcpTransmission(
+                const ContextPtr&                                                   context,
+                const StrandPtr&                                                    strand,
+                YieldContext&                                                       y,
+                const ppp::string&                                                  address,
+                int                                                                 port,
+                const boost::asio::ip::tcp::endpoint&                              remoteEP) noexcept {
+
+                if (disposed_) {
+                    return NULLPTR;
+                }
+
+                if (NULLPTR == context) {
+                    return NULLPTR;
+                }
+
+                std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return NULLPTR;
+                }
+
+                LOG_DEBUG("VEthernetExchanger::OpenUcpTransmission: outbound=%s, connecting UCP to %s:%d",
+                    outbound_tag_.data(), address.data(), port);
+
+                // Build the UCP engine parameters from the ucp configuration section.
+                ucp::UcpConfiguration ucp_config = ucp::UcpConfiguration::GetOptimizedConfig();
+                if (configuration->ucp.mss > 0) {
+                    ucp_config.Mss = configuration->ucp.mss;
+                }
+                if (configuration->ucp.fec_group > 0) {
+                    ucp_config.FecGroupSize = configuration->ucp.fec_group;
+                }
+                if (configuration->ucp.fec_redundancy > 0.0) {
+                    ucp_config.FecRedundancy = std::min<double>(1.0, configuration->ucp.fec_redundancy);
+                }
+                if (configuration->ucp.inactive.timeout > 0) {
+                    ucp_config.DisconnectTimeoutMicros = (int64_t)configuration->ucp.inactive.timeout * 1000000;
+                }
+                if (configuration->ucp.inactive.keep_alived[0] > 0) {
+                    ucp_config.KeepAliveIntervalMicros = (int64_t)configuration->ucp.inactive.keep_alived[0] * 1000000;
+                }
+
+                // The datagram network owns the local UDP socket (ephemeral port) and
+                // drives the UCP protocol machinery on a background receive thread.
+                std::shared_ptr<ucp::UcpDatagramNetwork> network =
+                    ppp::make_shared_object<ucp::UcpDatagramNetwork>(ucp_config);
+                if (NULLPTR == network) {
+                    return NULLPTR;
+                }
+
+                std::shared_ptr<ucp::UcpConnection> connection = network->CreateConnection(ucp_config);
+                if (NULLPTR == connection) {
+                    return NULLPTR;
+                }
+
+                // Connect asynchronously; UCP callbacks may fire on UCP worker
+                // threads, so bounce the resume back onto the openppp2 context.
+                using atomic_int = std::atomic<int>;
+                std::shared_ptr<atomic_int> status = ppp::make_shared_object<atomic_int>(-1);
+                if (NULLPTR == status) {
+                    return NULLPTR;
+                }
+
+                ucp::string remote_string = ucp::Endpoint(address.data(), (uint16_t)port).ToString();
+                auto self = shared_from_this();
+                boost::asio::post(*context,
+                    [self, this, context, network, connection, remote_string, status, &y]() noexcept {
+                        connection->ConnectAsync(network.get(), remote_string,
+                            [self, this, context, status, &y](ucp::UcpError error, uint32_t) noexcept {
+                                bool ok = (error == ucp::UcpError::None);
+                                boost::asio::post(*context,
+                                    [self, this, status, &y, ok]() noexcept {
+                                        ppp::coroutines::asio::R(y, *status, ok);
+                                    });
+                            });
+                    });
+
+                y.Suspend();
+                if (status->load() <= 0) {
+                    LOG_DEBUG("VEthernetExchanger::OpenUcpTransmission: connect failed, remote=%s:%d",
+                        address.data(), port);
+                    connection->Close();
+                    return NULLPTR;
+                }
+
+                LOG_DEBUG("VEthernetExchanger::OpenUcpTransmission: connected to %s:%d, creating transmission",
+                    address.data(), port);
+
+                auto transmission = ppp::make_shared_object<ppp::transmissions::IUcpTransmission>(
+                    context, strand, configuration, network, connection, remoteEP);
+                if (NULLPTR == transmission) {
+                    connection->Close();
+                    return NULLPTR;
+                }
+
+                transmission->QoS = switcher_->GetQoS();
+                transmission->Statistics = switcher_->GetStatistics();
+                if (!transmission->StartReceive()) {
+                    transmission->Dispose();
+                    return NULLPTR;
+                }
+
+                return transmission;
             }
 
             bool VEthernetExchanger::Open() noexcept {

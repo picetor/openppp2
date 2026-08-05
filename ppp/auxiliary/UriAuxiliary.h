@@ -20,6 +20,7 @@ namespace ppp {
                 ProtocolType_HttpSSL,
                 ProtocolType_WebSocket,
                 ProtocolType_WebSocketSSL,
+                ProtocolType_UCP,
             }                                           ProtocolType;
             static ppp::string                          Parse(
                 const ppp::string&                      url,

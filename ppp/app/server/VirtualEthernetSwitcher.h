@@ -45,6 +45,10 @@
 #include <ppp/app/server/IPv4LeasePool.h>
 #include <ppp/tap/ITap.h>
 
+namespace ucp {
+    class UcpServer;
+}
+
 namespace ppp {
     namespace app {
         namespace server {
@@ -571,6 +575,10 @@ namespace ppp {
                 bool                                                    CreateAlwaysTimeout() noexcept;
                 /** @brief Opens the UDP socket for static-echo datagram processing. */
                 bool                                                    OpenDatagramSocket() noexcept;
+                /** @brief Opens the UCP server listener if a port is configured. */
+                bool                                                    OpenUcpServer() noexcept;
+                /** @brief Chains the next UCP accept; dispatches accepted connections. */
+                void                                                    AcceptUcpConnections(const std::shared_ptr<ucp::UcpServer>& server) noexcept;
                 /** @brief Creates and starts the DNS namespace cache if the TTL is non-zero. */
                 bool                                                    OpenNamespaceCacheIfNeed() noexcept;
                 /** @brief Enables loopback receive path on the static-echo UDP socket. */
@@ -844,6 +852,7 @@ namespace ppp {
                 IPv4LeasePool                                           ipv4_pool_;                     ///< IPv4 address lease pool for automatic/manual client assignment.
 
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>         acceptors_[NetworkAcceptorCategories_Max]; ///< One acceptor per category.
+                std::shared_ptr<ucp::UcpServer>                         ucp_server_;                    ///< UCP server listener; null when disabled.
             };
         }
     }

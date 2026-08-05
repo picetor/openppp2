@@ -358,6 +358,7 @@ static constexpr int                                                        PPP_
 static constexpr int                                                        PPP_DNS_SYS_PORT                = 53;
 static constexpr int                                                        PPP_HTTP_SYS_PORT               = 80;
 static constexpr int                                                        PPP_HTTPS_SYS_PORT              = 443;
+static constexpr int                                                        PPP_UCP_SYS_PORT                = 20001;
 static constexpr int                                                        PPP_UDP_TIMER_INTERVAL          = 10;
 static constexpr int                                                        PPP_MEMORY_ALIGNMENT_SIZE       = 16;
 static constexpr int                                                        PPP_MUX_ACCELERATION_REMOTE     = 1;

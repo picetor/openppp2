@@ -284,6 +284,14 @@ namespace ppp {
             config.tcp.cwnd = 0;
             config.tcp.rwnd = 0;
 
+            config.ucp.listen.port = IPEndPoint::MinPort;
+            config.ucp.mss = 0;
+            config.ucp.fec_group = 0;
+            config.ucp.fec_redundancy = 0.0;
+            config.ucp.inactive.timeout = 0;
+            config.ucp.inactive.keep_alived[0] = 0;
+            config.ucp.inactive.keep_alived[1] = 0;
+
             config.mux.connect.timeout = PPP_MUX_CONNECT_TIMEOUT;
             config.mux.inactive.timeout = PPP_MUX_INACTIVE_TIMEOUT;
             config.mux.mode = "compat";
@@ -1376,6 +1384,14 @@ namespace ppp {
             config.tcp.cwnd = std::max<int>(0, JsonAuxiliary::AsValue<int>(json["tcp"]["cwnd"]));
             config.tcp.rwnd = std::max<int>(0, JsonAuxiliary::AsValue<int>(json["tcp"]["rwnd"]));
 
+            config.ucp.listen.port = JsonAuxiliary::AsValue<int>(json["ucp"]["listen"]["port"]);
+            config.ucp.mss = JsonAuxiliary::AsValue<int>(json["ucp"]["mss"]);
+            config.ucp.fec_group = JsonAuxiliary::AsValue<int>(json["ucp"]["fec"]["group"]);
+            config.ucp.fec_redundancy = JsonAuxiliary::AsValue<double>(json["ucp"]["fec"]["redundancy"]);
+            config.ucp.inactive.timeout = JsonAuxiliary::AsValue<int>(json["ucp"]["inactive"]["timeout"]);
+            config.ucp.inactive.keep_alived[0] = JsonAuxiliary::AsValue<int>(json["ucp"]["inactive"]["keep-alived"][0]);
+            config.ucp.inactive.keep_alived[1] = JsonAuxiliary::AsValue<int>(json["ucp"]["inactive"]["keep-alived"][1]);
+
             config.mux.inactive.timeout = JsonAuxiliary::AsValue<int>(json["mux"]["inactive"]["timeout"]);
             config.mux.connect.timeout = JsonAuxiliary::AsValue<int>(json["mux"]["connect"]["timeout"]);
             config.mux.congestions = (int)JsonAuxiliary::AsInt64(json["mux"]["congestions"], -1);
@@ -1629,6 +1645,21 @@ namespace ppp {
             tcp["cwnd"] = config.tcp.cwnd;
             tcp["rwnd"] = config.tcp.rwnd;
             root["tcp"] = tcp;
+
+            // Set ucp structure
+            Json::Value ucp;
+            ucp["listen"]["port"] = config.ucp.listen.port;
+            ucp["mss"] = config.ucp.mss;
+            ucp["fec"]["group"] = config.ucp.fec_group;
+            ucp["fec"]["redundancy"] = config.ucp.fec_redundancy;
+            ucp["inactive"]["timeout"] = config.ucp.inactive.timeout;
+
+            // Set ucp keep-alived structure
+            Json::Value config_ucp_inactive_keep_alived(Json::arrayValue);
+            config_ucp_inactive_keep_alived.append(config.ucp.inactive.keep_alived[0]);
+            config_ucp_inactive_keep_alived.append(config.ucp.inactive.keep_alived[1]);
+            ucp["inactive"]["keep-alived"] = config_ucp_inactive_keep_alived;
+            root["ucp"] = ucp;
 
             // Set mux structure
             Json::Value mux;

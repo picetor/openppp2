@@ -73,19 +73,19 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(ProjectDir)..\ucp\cpp\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x86-windows-static\include;$(ProjectDir)..\ucp\cpp\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
     <LibraryPath>$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x86-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x64-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x64-windows-static\include;$(ProjectDir)..\ucp\cpp\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
     <LibraryPath>$(ProjectDir)..\vcpkg_installed\x64-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x64-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x64-windows-static\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)\common;$(ProjectDir)\common\lwip\include;$(ProjectDir)\common\lwip\my;$(ProjectDir)\common\json\include;$(ProjectDir)..\vcpkg_installed\x64-windows-static\include;$(ProjectDir)..\ucp\cpp\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
     <LibraryPath>$(ProjectDir)..\vcpkg_installed\x64-windows-static\lib;$(ProjectDir)..\vcpkg_installed\x64-windows-static\lib\manual-link;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -167,7 +167,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x32-1_91.lib;boost_coroutine-vc145-mt-x32-1_91.lib;boost_thread-vc145-mt-x32-1_91.lib;boost_filesystem-vc145-mt-x32-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x32-1_91.lib;boost_coroutine-vc145-mt-x32-1_91.lib;boost_thread-vc145-mt-x32-1_91.lib;boost_filesystem-vc145-mt-x32-1_91.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -194,7 +194,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <Profile>true</Profile>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -225,11 +225,27 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="common\aesni\aes.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_packet_codec.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_pcb.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_cc.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_pacing.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_fec_codec.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_time.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_rto_estimator.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_global_kf_estimator.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_sack_generator.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_configuration.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_connection.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_server.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_network.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_datagram_network.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\udp_socket_transport.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\dtls_transport.cpp" />
     <ClCompile Include="common\aesni\impl\simd_aes_128_cfb.cpp" />
     <ClCompile Include="common\aesni\impl\simd_aes_256_cfb.cpp" />
     <ClCompile Include="common\aesni\impl\simd_aes_128_gcm.cpp" />
@@ -374,6 +390,7 @@
     <ClCompile Include="ppp\transmissions\ITcpipTransmission.cpp" />
     <ClCompile Include="ppp\transmissions\ITransmission.cpp" />
     <ClCompile Include="ppp\transmissions\ITransmissionQoS.cpp" />
+    <ClCompile Include="ppp\transmissions\IUcpTransmission.cpp" />
     <ClCompile Include="ppp\transmissions\IWebsocketTransmission.cpp" />
     <ClCompile Include="ppp\transmissions\proxys\IForwarding.cpp" />
     <ClCompile Include="windows\ppp\app\client\lsp\PaperAirplaneConnection.cpp" />
@@ -702,6 +719,7 @@
     <ClInclude Include="ppp\net\asio\IAsynchronousWriteIoQueue.h" />
     <ClInclude Include="ppp\transmissions\ITcpipTransmission.h" />
     <ClInclude Include="ppp\transmissions\ITransmission.h" />
+    <ClInclude Include="ppp\transmissions\IUcpTransmission.h" />
     <ClInclude Include="ppp\transmissions\IWebsocketTransmission.h" />
     <ClInclude Include="ppp\transmissions\proxys\IForwarding.h" />
     <ClInclude Include="ppp\transmissions\templates\WebSocket.h" />

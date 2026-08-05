@@ -159,6 +159,13 @@ namespace ppp {
 
             protected:
                 virtual std::shared_ptr<boost::asio::ip::tcp::socket>                   NewAsynchronousSocket(const ContextPtr& context, const StrandPtr& strand, const boost::asio::ip::tcp& protocol, ppp::coroutines::YieldContext& y) noexcept;
+                virtual ITransmissionPtr                                                OpenUcpTransmission(
+                    const ContextPtr&                                                   context,
+                    const StrandPtr&                                                    strand,
+                    YieldContext&                                                       y,
+                    const ppp::string&                                                  address,
+                    int                                                                 port,
+                    const boost::asio::ip::tcp::endpoint&                              remoteEP) noexcept;
                 virtual bool                                                            Loopback(const ContextPtr& context, YieldContext& y) noexcept;
                 virtual bool                                                            PacketInput(const ITransmissionPtr& transmission, Byte* p, int packet_length, YieldContext& y) noexcept;
 

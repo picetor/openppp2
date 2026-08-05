@@ -223,8 +223,25 @@ FILE(GLOB_RECURSE SOURCE_FILES
     ${PROJECT_SOURCE_DIR}/ppp/*.c 
     ${PROJECT_SOURCE_DIR}/ppp/*.cpp)
 
+# UCP (Universal Communication Protocol) tunnel support.
+# The UCP library lives in a sibling repository (default: ../ucp/cpp relative
+# to this project).  Its sources are compiled directly into the openppp2
+# executable; quic_transport.cpp is excluded because it requires libquiche.
+SET(UCP_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../ucp/cpp" CACHE PATH "UCP C++ source directory (containing include/ucp)")
+IF(EXISTS "${UCP_SOURCE_DIR}/include/ucp/ucp_server.h")
+    MESSAGE(STATUS "UCP integration enabled: ${UCP_SOURCE_DIR}")
+    INCLUDE_DIRECTORIES(${UCP_SOURCE_DIR}/include)
+    FILE(GLOB UCP_SOURCE_FILES "${UCP_SOURCE_DIR}/src/*.cpp")
+    LIST(REMOVE_ITEM UCP_SOURCE_FILES "${UCP_SOURCE_DIR}/src/quic_transport.cpp")
+    # UCP sources rely on the NULLPTR macro; openppp2 defines it in stdafx.h
+    # behind an #if !defined guard, so this is safe for both code bases.
+    ADD_DEFINITIONS(-DNULLPTR=nullptr)
+ELSE()
+    MESSAGE(STATUS "UCP integration disabled: ${UCP_SOURCE_DIR}/include/ucp not found")
+ENDIF()
+
 # Add the compiled output binary files.
-ADD_EXECUTABLE(${NAME} ${PROJECT_SOURCE_DIR}/main.cpp ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES})
+ADD_EXECUTABLE(${NAME} ${PROJECT_SOURCE_DIR}/main.cpp ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES} ${UCP_SOURCE_FILES})
 
 # Set the compilation output files path.
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

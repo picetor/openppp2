@@ -34,7 +34,9 @@
 #include <ppp/collections/Dictionary.h>
 #include <ppp/threading/Executors.h>
 #include <ppp/transmissions/ITcpipTransmission.h>
+#include <ppp/transmissions/IUcpTransmission.h>
 #include <ppp/transmissions/IWebsocketTransmission.h>
+#include <ucp/ucp_server.h>
 
 /**
  * @file VirtualEthernetSwitcher.cpp
@@ -2053,6 +2055,7 @@ namespace ppp {
                     OpenIPv6TransitIfNeed() &&
                     OpenNamespaceCacheIfNeed() &&
                     OpenDatagramSocket() &&
+                    OpenUcpServer() &&
                     OpenIPv6NeighborProxyIfNeed();
 
                 // When the IPv6 transit TAP is up, configure kernel-level IPv6 forwarding
@@ -2650,6 +2653,121 @@ namespace ppp {
             }
 
             /**
+             * @brief Opens the UCP server listener when a port is configured.
+             * @return true when the UCP listener is disabled, opened, or port invalid.
+             */
+            bool VirtualEthernetSwitcher::OpenUcpServer() noexcept {
+                if (disposed_) {
+                    return false;
+                }
+
+                int bind_port = configuration_->ucp.listen.port;
+                if (bind_port <= IPEndPoint::MinPort || bind_port > IPEndPoint::MaxPort) {
+                    return true; // UCP disabled.
+                }
+
+                ucp::UcpConfiguration ucp_config;
+                if (configuration_->ucp.mss > 0) {
+                    ucp_config.Mss = configuration_->ucp.mss;
+                }
+                if (configuration_->ucp.fec_group > 0) {
+                    ucp_config.FecGroupSize = configuration_->ucp.fec_group;
+                }
+                if (configuration_->ucp.fec_redundancy > 0.0) {
+                    ucp_config.FecRedundancy = std::min<double>(1.0, configuration_->ucp.fec_redundancy);
+                }
+                if (configuration_->ucp.inactive.timeout > 0) {
+                    ucp_config.DisconnectTimeoutMicros = (int64_t)configuration_->ucp.inactive.timeout * 1000000;
+                }
+                if (configuration_->ucp.inactive.keep_alived[0] > 0) {
+                    ucp_config.KeepAliveIntervalMicros = (int64_t)configuration_->ucp.inactive.keep_alived[0] * 1000000;
+                }
+
+                std::shared_ptr<ucp::UcpServer> ucp_server = ppp::make_shared_object<ucp::UcpServer>(ucp_config);
+                if (NULLPTR == ucp_server) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::MemoryAllocationFailed);
+                    return false;
+                }
+
+                ucp_server->Start(bind_port);
+
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    ucp_server_ = ucp_server;
+                }
+
+                AcceptUcpConnections(ucp_server);
+                return true;
+            }
+
+            /**
+             * @brief Chains the next UCP accept and dispatches accepted connections
+             *        onto the openppp2 context as IUcpTransmission sessions.
+             * @param server UCP server listener to accept from.
+             */
+            void VirtualEthernetSwitcher::AcceptUcpConnections(const std::shared_ptr<ucp::UcpServer>& server) noexcept {
+                if (disposed_ || NULLPTR == server) {
+                    return;
+                }
+
+                std::shared_ptr<boost::asio::io_context> context = context_;
+                if (NULLPTR == context) {
+                    return;
+                }
+
+                auto self = shared_from_this();
+                server->AcceptAsync(
+                    [self, this, context, server](ucp::UcpError error, ucp::UcpConnection* connection) noexcept {
+                        // Chain the next accept before dispatching so the accept
+                        // queue stays drained even while sessions are being built.
+                        AcceptUcpConnections(server);
+
+                        if (error != ucp::UcpError::None || NULLPTR == connection) {
+                            return;
+                        }
+
+                        // The callback may fire on a UCP worker thread; move the
+                        // session construction onto the openppp2 context.
+                        boost::asio::post(*context,
+                            [self, this, context, connection]() noexcept {
+                                if (disposed_) {
+                                    return;
+                                }
+
+                                auto transmission = ppp::make_shared_object<ppp::transmissions::IUcpTransmission>(
+                                    context, NULLPTR, configuration_, connection);
+                                if (NULLPTR == transmission) {
+                                    return;
+                                }
+
+                                transmission->Statistics = NewStatistics();
+                                if (!transmission->StartReceive()) {
+                                    transmission->Dispose();
+                                    return;
+                                }
+
+                                auto allocator = transmission->BufferAllocator;
+                                YieldContext::Spawn(allocator.get(), *context,
+                                    [self, this, context, transmission](YieldContext& y) noexcept {
+                                        int status = Run(context, transmission, y);
+                                        if (status != STATUS_RUNNING_SWAP) {
+                                            if (status < STATUS_RUNNING_SWAP) {
+                                                ppp::diagnostics::ErrorCode error_code = ppp::diagnostics::GetLastErrorCode();
+                                                if (ppp::diagnostics::ErrorCode::SocketDisconnected != error_code) {
+                                                    FlowerArrangement(
+                                                        transmission,
+                                                        y);
+                                                }
+                                            }
+
+                                            transmission->Dispose();
+                                        }
+                                    });
+                            });
+                    });
+            }
+
+            /**
              * @brief Continues asynchronous UDP receive loop for static-echo packets.
              * @return true when receive loop is armed.
              */
@@ -3124,6 +3242,7 @@ namespace ppp {
                 // Snapshot acceptors under the lock so that socket close syscalls
                 // (which may block or invoke OS callbacks) run outside syncobj_.
                 std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptors_snapshot[NetworkAcceptorCategories_Max];
+                std::shared_ptr<ucp::UcpServer> ucp_server;
 
                 for (;;) {
                     SynchronizedObjectScope scope(syncobj_);
@@ -3135,6 +3254,9 @@ namespace ppp {
                         acceptors_snapshot[i] = std::move(acceptors_[i]);
                         acceptors_[i].reset();
                     }
+
+                    ucp_server = std::move(ucp_server_);
+                    ucp_server_.reset();
 
                     cache          = std::move(namespace_cache_);
 
@@ -3179,6 +3301,14 @@ namespace ppp {
                     if (NULLPTR != acceptors_snapshot[i]) {
                         Socket::Closesocket(acceptors_snapshot[i]);
                     }
+                }
+
+                // Stop the UCP server outside the lock: Stop() drains the accept
+                // queue and disposes every connection entry (invoking callbacks).
+                if (NULLPTR != ucp_server) {
+                    ucp_server->Stop();
+                    ucp_server->Dispose();
+                    ucp_server.reset();
                 }
 
                 CloseIPv6TransitSsmtContexts();
