@@ -142,8 +142,24 @@ FILE(GLOB_RECURSE SOURCE_FILES
     ${PROJECT_ROOT_DIR}/android/OpenPPP2TelemetryBridge.cpp
     ${PROJECT_ROOT_DIR}/ppp/diagnostics/Telemetry.cpp)
 
+# UCP (Universal Communication Protocol) tunnel support (Track B ucp:// tunnel).
+# The UCP library lives in a sibling repository (default: ../../ucp/cpp relative
+# to PROJECT_ROOT_DIR, i.e. d:/github/ucp locally or $GITHUB_WORKSPACE/../ucp on CI).
+SET(UCP_SOURCE_DIR "${PROJECT_ROOT_DIR}/../ucp/cpp" CACHE PATH "UCP C++ source directory (containing include/ucp)")
+IF(EXISTS "${UCP_SOURCE_DIR}/include/ucp/ucp_server.h")
+    MESSAGE(STATUS "UCP integration enabled: ${UCP_SOURCE_DIR}")
+    INCLUDE_DIRECTORIES(${UCP_SOURCE_DIR}/include)
+    FILE(GLOB UCP_SOURCE_FILES "${UCP_SOURCE_DIR}/src/*.cpp")
+    LIST(REMOVE_ITEM UCP_SOURCE_FILES "${UCP_SOURCE_DIR}/src/quic_transport.cpp")
+    # UCP sources rely on the NULLPTR macro; ucp_memory.h/ucp_vector.h define it
+    # with #ifndef guards, but keep the definition for safety.
+    ADD_DEFINITIONS(-DNULLPTR=nullptr)
+ELSE()
+    MESSAGE(STATUS "UCP integration disabled: ${UCP_SOURCE_DIR}/include/ucp not found")
+ENDIF()
+
 # Add the compiled output binary files.
-ADD_LIBRARY(${NAME} SHARED ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES})
+ADD_LIBRARY(${NAME} SHARED ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES} ${UCP_SOURCE_FILES})
 
 # Set the compilation output files path.
 SET(LIBRARY_OUTPUT_PATH ${PROJECT_ROOT_DIR}/bin/android/${ANDROID_ABI})

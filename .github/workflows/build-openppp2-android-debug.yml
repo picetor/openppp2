@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - inet6
+      - ucp
     paths:
       - ".github/workflows/build-openppp2-android-debug.yml"
       - "android/**"
@@ -15,6 +16,7 @@ on:
   pull_request:
     branches:
       - inet6
+      - ucp
     paths:
       - ".github/workflows/build-openppp2-android-debug.yml"
       - "android/**"
@@ -45,6 +47,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Checkout UCP library (sibling, Track B ucp:// tunnel)
+        uses: actions/checkout@v5
+        with:
+          repository: picetor/ucp
+          path: ../ucp
 
       - name: Set up Java 21
         uses: actions/setup-java@v5

@@ -2,7 +2,7 @@ name: Build openppp2 (Linux amd64 musl Debug)
 
 on:
   push:
-    branches: [inet6]
+    branches: [inet6, ucp]
     paths:
       - 'common/**'
       - 'ppp/**'
@@ -11,6 +11,7 @@ on:
       - 'CMakeLists.txt'
       - 'main.cpp'
       - 'glibc_compat.h'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 jobs:
@@ -20,10 +21,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Checkout UCP library (sibling, Track B ucp:// tunnel)
+        uses: actions/checkout@v5
+        with:
+          repository: picetor/ucp
+          path: ../ucp
+
       - name: Build Debug with musl
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -v "$GITHUB_WORKSPACE/../ucp:/ucp" \
             alpine:3.21 sh -exc '
               sh tools/ci/prepare-musl-deps.sh /tmp/openppp2-3rd
               sh tools/ci/build-musl.sh amd64 base Debug /tmp/openppp2-3rd
