@@ -829,13 +829,16 @@ namespace ppp {
 
                 uint64_t deadline = last_ + static_cast<uint64_t>(max_timeout_ms + EXTRA_FAULT_TOLERANT_TIME);
                 if (now >= deadline) {
-                    // Original version has no idle-timeout death logic.
-                    // Keepalive is for liveness check only; the session is kept alive
-                    // by the read loop in VirtualEthernetLinklayer::Run().
-                    // We log but do NOT return false — the connection survives.
-                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: idle timeout exceeded (LOG ONLY, not killing session), now=%llu, deadline=%llu, last=%llu, elapsed_ms=%llu",
+                    // The peer has been silent beyond the maximum idle timeout plus
+                    // fault tolerance: the connection is considered dead.  Return
+                    // false so the owner (server/client exchanger) disposes the
+                    // session and reports an "offline" event promptly, instead of
+                    // leaving a ghost session until the management panel's own
+                    // heartbeat timeout (NodeOfflineAfter) expires.
+                    LOG_DEBUG("VirtualEthernetLinklayer::DoKeepAlived: idle timeout exceeded, connection considered dead, now=%llu, deadline=%llu, last=%llu, elapsed_ms=%llu",
                         (unsigned long long)now, (unsigned long long)deadline, (unsigned long long)last_,
                         (unsigned long long)(now - last_));
+                    return false;
                 }
 
                 uint64_t next_ka = next_ka_;

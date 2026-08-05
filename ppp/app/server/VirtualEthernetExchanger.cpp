@@ -854,7 +854,12 @@ namespace ppp {
 
                         UploadTrafficToManagedServer();
                         DoMuxEvents();
-                        DoKeepAlived(GetTransmission(), now);
+                        if (!DoKeepAlived(GetTransmission(), now)) {
+                            // The peer is gone; DoKeepAlived has posted the
+                            // dispose. Skip the remaining maintenance work on a
+                            // session that is being torn down.
+                            return;
+                        }
 
                         Dictionary::UpdateAllObjects(datagrams_, now);
                         Dictionary::UpdateAllObjects2(mappings_, now);
@@ -1248,19 +1253,19 @@ namespace ppp {
                     return false;
                 }
 
-                // Original version does NOT kill the session on idle timeout.
-                // Keepalive only checks liveness; the real session lifetime is
-                // determined by the read loop in VirtualEthernetLinklayer::Run().
+                // When the underlying liveness check fails (idle timeout exceeded
+                // or keepalive push error) the connection is dead. Dispose the
+                // session so the managed server reports an "offline" event and the
+                // management panel drops the device promptly, instead of waiting
+                // for its own heartbeat timeout (NodeOfflineAfter, default 90s).
                 if (VirtualEthernetLinklayer::DoKeepAlived(transmission, now)) {
                     return true;
                 }
 
-                // Return true so Update() does not erase this exchanger from the map.
-                // The session stays alive; disposal happens naturally when the
-                // read loop exits (EOF or error), not on idle timeout.
-                LOG_DEBUG("VirtualEthernetExchanger::DoKeepAlived: base DoKeepAlived returned false (LOG ONLY), session stays alive, session_id=%s",
+                LOG_DEBUG("VirtualEthernetExchanger::DoKeepAlived: liveness check failed, disposing session, session_id=%s",
                     ppp::auxiliary::StringAuxiliary::Int128ToGuidString(GetId()).data());
-                return true;
+                Dispose();
+                return false;
             }
 
             bool VirtualEthernetExchanger::StaticEchoEchoToDestination(const std::shared_ptr<ppp::app::protocol::VirtualEthernetPacket>& packet, const boost::asio::ip::udp::endpoint& sourceEP) noexcept {
