@@ -1,8 +1,6 @@
-﻿val isGithubActions = System.getenv("GITHUB_ACTIONS") == "true"
-
-pluginManagement {
+﻿pluginManagement {
     repositories {
-        if (isGithubActions) {
+        if (System.getenv("GITHUB_ACTIONS") == "true") {
             // GitHub-hosted runners are in the US: use upstream sources directly.
             gradlePluginPortal()
             google()
@@ -23,7 +21,7 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
-        if (isGithubActions) {
+        if (System.getenv("GITHUB_ACTIONS") == "true") {
             google()
             mavenCentral()
             gradlePluginPortal()
