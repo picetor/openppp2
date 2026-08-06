@@ -2821,14 +2821,18 @@ namespace ppp {
                                 auto diag_timer = std::make_shared<boost::asio::steady_timer>(*context);
                                 auto diag_weak = std::weak_ptr<VirtualEthernetSwitcher>(self);
                                 std::function<void()> diag_loop;
-                                diag_loop = [diag_weak, this, context, transmission, connection, diag_timer, &diag_loop]() noexcept {
+                                diag_loop = [diag_weak, this, context, transmission, diag_timer, &diag_loop]() noexcept {
                                     std::shared_ptr<VirtualEthernetSwitcher> strong = diag_weak.lock();
-                                    if (NULLPTR == strong || disposed_) {
+                                    // The loop is driven by the transmission lifetime:
+                                    // once it is disposed (connection_ NULLPTR) or the
+                                    // switcher is released we stop scheduling ourselves.
+                                    if (NULLPTR == strong || disposed_ || transmission->IsDisposed()) {
                                         return;
                                     }
                                     VirtualEthernetLoggerPtr logger = GetLogger();
-                                    if (NULLPTR != logger && NULLPTR != connection) {
-                                        ucp::UcpConnectionDiagnostics diag = connection->GetDiagnostics();
+                                    ucp::UcpConnection* conn = transmission->GetUcpConnection();
+                                    if (NULLPTR != logger && NULLPTR != conn) {
+                                        ucp::UcpConnectionDiagnostics diag = conn->GetDiagnostics();
                                         uint64_t incoming = 0;
                                         uint64_t outgoing = 0;
                                         if (NULLPTR != transmission && NULLPTR != transmission->Statistics) {

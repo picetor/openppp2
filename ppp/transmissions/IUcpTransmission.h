@@ -64,6 +64,12 @@ namespace ppp {
             virtual std::shared_ptr<Byte>                                                       ReadBytes(YieldContext& y, int length) noexcept;
             /** @brief Starts the UCP receive pump; call once after construction. */
             bool                                                                                StartReceive() noexcept;
+            /** @brief True once Dispose/Finalize has run; the connection pointer
+             *         returned by GetUcpConnection() is NULLPTR afterwards. */
+            bool                                                                                IsDisposed() const noexcept { return disposed_; }
+            /** @brief Returns the raw UCP connection pointer, or NULLPTR once
+             *         the transmission has been finalized. */
+            ucp::UcpConnection*                                                                 GetUcpConnection() const noexcept { return connection_; }
 
         protected:
             virtual std::shared_ptr<Byte>                                                       DoReadBytes(YieldContext& y, int length) noexcept;
