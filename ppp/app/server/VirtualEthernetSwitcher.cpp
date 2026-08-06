@@ -2813,52 +2813,6 @@ namespace ppp {
                                     logger->Info(msg);
                                 }
 
-                                // Periodic UCP connection diagnostics (1 Hz):
-                                // state/flight/cwnd/pacing/byte counters reveal
-                                // whether the server is receiving client data and
-                                // whether the fair-queue flush gate is actually
-                                // releasing packets.
-                                auto diag_timer = std::make_shared<boost::asio::steady_timer>(*context);
-                                auto diag_weak = std::weak_ptr<VirtualEthernetSwitcher>(self);
-                                std::function<void()> diag_loop;
-                                diag_loop = [diag_weak, this, context, transmission, diag_timer, &diag_loop]() noexcept {
-                                    std::shared_ptr<VirtualEthernetSwitcher> strong = diag_weak.lock();
-                                    // The loop is driven by the transmission lifetime:
-                                    // once it is disposed (connection_ NULLPTR) or the
-                                    // switcher is released we stop scheduling ourselves.
-                                    if (NULLPTR == strong || disposed_ || transmission->IsDisposed()) {
-                                        return;
-                                    }
-                                    VirtualEthernetLoggerPtr logger = GetLogger();
-                                    ucp::UcpConnection* conn = transmission->GetUcpConnection();
-                                    if (NULLPTR != logger && NULLPTR != conn) {
-                                        ucp::UcpConnectionDiagnostics diag = conn->GetDiagnostics();
-                                        uint64_t incoming = 0;
-                                        uint64_t outgoing = 0;
-                                        if (NULLPTR != transmission && NULLPTR != transmission->Statistics) {
-                                            incoming = transmission->Statistics->IncomingTraffic.load(std::memory_order_relaxed);
-                                            outgoing = transmission->Statistics->OutgoingTraffic.load(std::memory_order_relaxed);
-                                        }
-                                        char buf[384];
-                                        int n = snprintf(buf, sizeof(buf),
-                                            "UCP diag: state=%d flight=%lld cwnd=%d pacing=%.0f sent=%lld recv=%lld dataPkts=%d retx=%d ackPkts=%d rtt=%lld rwnd=%u rx=%llu tx=%llu",
-                                            diag.State, (long long)diag.FlightBytes, diag.CongestionWindowBytes,
-                                            diag.PacingRateBytesPerSecond, (long long)diag.BytesSent, (long long)diag.BytesReceived,
-                                            diag.SentDataPackets, diag.RetransmittedPackets, diag.SentAckPackets,
-                                            (long long)diag.LastRttMicros, diag.RemoteWindowBytes,
-                                            (unsigned long long)incoming, (unsigned long long)outgoing);
-                                        (void)n;
-                                        logger->Info(ppp::string(buf));
-                                    }
-                                    diag_timer->expires_after(std::chrono::seconds(1));
-                                    diag_timer->async_wait([diag_loop](const boost::system::error_code& ec) noexcept {
-                                        if (!ec) {
-                                            diag_loop();
-                                        }
-                                    });
-                                };
-                                diag_loop();
-
                                 auto allocator = transmission->BufferAllocator;
                                 YieldContext::Spawn(allocator.get(), *context,
                                     [self, this, context, transmission](YieldContext& y) noexcept {
