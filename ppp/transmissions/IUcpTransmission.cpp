@@ -271,8 +271,33 @@ namespace ppp {
 
         void IUcpTransmission::DriveLoop() noexcept {
             UcpNetworkPtr network = network_;
+            int64_t diagnosticsCounter = 0;
             while (driving_ && network) {
                 network->DoEvents();
+                if (0 == (diagnosticsCounter++ % 5000)) {
+                    ucp::UcpConnection* connection = connection_;
+                    if (NULLPTR != connection && !disposed_) {
+                        ucp::UcpConnectionDiagnostics diag = connection->GetDiagnostics();
+                        LOG_DEBUG("IUcpTransmission::DriveLoop: state=%d flight=%lld rwnd=%u cwnd=%d pacing=%.0f sentData=%d retrans=%d sentAck=%d sentNak=%d bytesSent=%lld bytesRecv=%lld rttUs=%lld delivered=%lld dgrams=%lld sndBlock=%lld sndErr=%lld recvErr=%lld",
+                            (int)diag.State,
+                            (long long)diag.FlightBytes,
+                            (unsigned)diag.RemoteWindowBytes,
+                            diag.CongestionWindowBytes,
+                            diag.PacingRateBytesPerSecond,
+                            diag.SentDataPackets,
+                            diag.RetransmittedPackets,
+                            diag.SentAckPackets,
+                            diag.SentNakPackets,
+                            (long long)diag.BytesSent,
+                            (long long)diag.BytesReceived,
+                            (long long)diag.LastRttMicros,
+                            (long long)diag.TotalDelivered,
+                            (long long)network->GetReceivedDatagramCount(),
+                            (long long)network->GetSendWouldBlockCount(),
+                            (long long)network->GetSendErrorCount(),
+                            (long long)network->GetReceiveReArmErrorCount());
+                    }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }

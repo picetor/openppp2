@@ -3707,6 +3707,26 @@ namespace ppp {
                 TickIPv6Leases(now);
                 RefreshIPv6NeighborProxyIfNeed();
 
+                // UCP server receive-path diagnostics (throttled to ~5 s).
+                // A growing dgrams counter while the client session idles out
+                // proves client UDP datagrams are still arriving at the host;
+                // decodeFail growth means they arrive but fail UCP decoding.
+                static int64_t ucp_diag_tick = 0;
+                if (0 == (ucp_diag_tick++ % 5)) {
+                    std::shared_ptr<ucp::UcpServer> ucp_server = ucp_server_;
+                    if (NULLPTR != ucp_server) {
+                        VirtualEthernetLoggerPtr logger = GetLogger();
+                        if (NULLPTR != logger) {
+                            char buf[192];
+                            int n = snprintf(buf, sizeof(buf), "UCP server diag: dgrams=%lld decodeFail=%lld",
+                                (long long)ucp_server->GetReceivedDatagramCount(),
+                                (long long)ucp_server->GetDecodeFailureCount());
+                            (void)n;
+                            logger->Info(ppp::string(buf));
+                        }
+                    }
+                }
+
                 VirtualEthernetNamespaceCachePtr cache = namespace_cache_;
                 if (NULLPTR != cache) {
                     cache->Update();
