@@ -78,7 +78,7 @@ namespace ppp {
             void                                                                                OnConnectionClosed() noexcept;
             void                                                                                StartDriving() noexcept;
             void                                                                                DriveLoop() noexcept;
-            void                                                                                ReceiveMore(const std::shared_ptr<Byte>& buffer) noexcept;
+            void                                                                                ReceiveMore() noexcept;
 
         private:
             bool                                                                                disposed_ = false;

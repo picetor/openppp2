@@ -289,17 +289,11 @@ namespace ppp {
             // DoEvents), so StartDriving() no-ops for it.
             StartDriving();
 
-            std::shared_ptr<BufferswapAllocator> allocator = this->BufferAllocator;
-            std::shared_ptr<Byte> buffer = BufferswapAllocator::MakeByteArray(allocator, IUCP_RECEIVE_BUFFER_SIZE);
-            if (NULLPTR == buffer) {
-                return false;
-            }
-
-            ReceiveMore(buffer);
+            ReceiveMore();
             return true;
         }
 
-        void IUcpTransmission::ReceiveMore(const std::shared_ptr<Byte>& buffer) noexcept {
+        void IUcpTransmission::ReceiveMore() noexcept {
             ucp::UcpConnection* connection = connection_;
             if (NULLPTR == connection || disposed_ || closed_) {
                 return;
@@ -320,6 +314,25 @@ namespace ppp {
                     });
             }
 
+            // CRITICAL: allocate a FRESH buffer for every chained receive.
+            // UcpPcb::ReceiveAsync memcpy()s the received bytes into the caller's
+            // buffer, and the completion callback runs as soon as that copy is
+            // done -- the bytes are NOT owned by UCP afterwards.  The previous
+            // code reused a single buffer across the whole receive chain: when a
+            // second chunk arrived before the application had drained the first
+            // one, the memcpy() overwrote the first chunk's bytes while its
+            // RxChunk was still queued, corrupting the byte stream (base94
+            // decode failures, bogus huge lengths like 518601, and
+            // VirtualEthernetLinklayer "PacketInput failed" after a few hundred
+            // bytes).  Each chunk must own its own memory so queued data can
+            // never be overwritten by a later receive.
+            std::shared_ptr<BufferswapAllocator> allocator = this->BufferAllocator;
+            std::shared_ptr<Byte> buffer = BufferswapAllocator::MakeByteArray(allocator, IUCP_RECEIVE_BUFFER_SIZE);
+            if (NULLPTR == buffer) {
+                LOG_DEBUG("IUcpTransmission::ReceiveMore: buffer allocation failed, this=%p", (void*)this);
+                return;
+            }
+
             auto self = std::static_pointer_cast<IUcpTransmission>(shared_from_this());
             connection->ReceiveAsync(buffer.get(), 0, IUCP_RECEIVE_BUFFER_SIZE,
                 [self, this, buffer](ucp::UcpError error, int32_t n) noexcept {
@@ -337,7 +350,7 @@ namespace ppp {
                     }
 
                     WakeupReaders();
-                    ReceiveMore(buffer);
+                    ReceiveMore();
                 });
         }
 
