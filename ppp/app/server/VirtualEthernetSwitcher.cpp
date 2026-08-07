@@ -3717,21 +3717,34 @@ namespace ppp {
                 // A growing dgrams counter while the client session idles out
                 // proves client UDP datagrams are still arriving at the host;
                 // decodeFail growth means they arrive but fail UCP decoding.
+                // Send-path counters (conns/sentPkts/sentBytes/retrans/flight)
+                // come from UcpServer::GetSendStatistics which only reads
+                // per-PCB atomic counters under the server map lock -- safe
+                // from any thread (no per-PCB locks, no raw UcpConnection*).
+                // Diagnostic readout:
+                //   sentPkts/sentBytes frozen + data frozen + ack growing
+                //     -> server send path stalled (FlushSendQueue deadlock)
+                //   retrans growing -> RTO storms / lost packets
+                //   flight frozen non-zero -> stuck waiting for acks
                 static int64_t ucp_diag_tick = 0;
                 if (0 == (ucp_diag_tick++ % 5)) {
                     std::shared_ptr<ucp::UcpServer> ucp_server = ucp_server_;
                     if (NULLPTR != ucp_server) {
                         VirtualEthernetLoggerPtr logger = GetLogger();
                         if (NULLPTR != logger) {
-                            char buf[256];
+                            long long sentPkts = 0, sentBytes = 0, retrans = 0, flight = 0;
+                            ucp_server->GetSendStatistics(sentPkts, sentBytes, retrans, flight);
+                            char buf[384];
                             int n = snprintf(buf, sizeof(buf),
-                                "UCP server diag: dgrams=%lld decodeFail=%lld syn=%lld ack=%lld data=%lld other=%lld",
+                                "UCP server diag: dgrams=%lld decodeFail=%lld syn=%lld ack=%lld data=%lld other=%lld conns=%lld sentPkts=%lld sentBytes=%lld retrans=%lld flight=%lld",
                                 (long long)ucp_server->GetReceivedDatagramCount(),
                                 (long long)ucp_server->GetDecodeFailureCount(),
                                 (long long)ucp_server->GetReceivedSynCount(),
                                 (long long)ucp_server->GetReceivedAckCount(),
                                 (long long)ucp_server->GetReceivedDataCount(),
-                                (long long)ucp_server->GetReceivedOtherCount());
+                                (long long)ucp_server->GetReceivedOtherCount(),
+                                (long long)ucp_server->GetActiveConnectionCount(),
+                                sentPkts, sentBytes, retrans, flight);
                             (void)n;
                             logger->Info(ppp::string(buf));
                         }
