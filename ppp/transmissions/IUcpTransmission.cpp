@@ -257,16 +257,23 @@ namespace ppp {
         }
 
         void IUcpTransmission::StartDriving() noexcept {
-            if (NULLPTR == network_) {
-                return;
-            }
-
-            driving_ = true;
-            auto self = std::static_pointer_cast<IUcpTransmission>(shared_from_this());
-            driving_thread_ = std::thread(
-                [self]() noexcept {
-                    self->DriveLoop();
-                });
+            // OPTIMIZATION: per-connection 1ms busy loop removal.
+            //
+            // The UcpDatagramNetwork owns an event_thread_ that already drives
+            // DoEvents() on a 1ms cadence for every connection sharing that
+            // network.  A per-connection DriveLoop thread here would redundantly
+            // drive the SAME DoEvents() again -- one extra 1ms busy loop per
+            // connection -- so CPU scales linearly with the connection count
+            // (the "mux=0 connection storm -> 100% CPU" failure mode observed on
+            // both client and server).  DoEvents() is already serviced by the
+            // network's event thread, so this dedicated thread is pure waste;
+            // drop it.
+            //
+            // NOTE: DriveLoop() also emitted the per-second UCP diagnostics
+            // LOG_DEBUG lines.  Those are compiled out in Release builds
+            // (PPP_LOG_VERBOSE undefined), so no diagnostics are lost in
+            // production.  For Debug diagnostics use a sampling profiler or the
+            // network event thread instead.
         }
 
         void IUcpTransmission::DriveLoop() noexcept {
@@ -308,10 +315,9 @@ namespace ppp {
                 return false;
             }
 
-            // Start the DoEvents driving thread now that the object is fully
-            // constructed (shared_from_this() is safe here).  Server mode has
-            // no network_ (the hosting VirtualEthernetSwitcher drives
-            // DoEvents), so StartDriving() no-ops for it.
+            // The UcpDatagramNetwork's event_thread_ drives DoEvents() for all
+            // connections sharing this network; no per-connection driving
+            // thread is needed (see StartDriving()).
             StartDriving();
 
             ReceiveMore();
