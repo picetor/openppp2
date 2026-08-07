@@ -274,7 +274,7 @@ namespace ppp {
             int64_t diagnosticsCounter = 0;
             while (driving_ && network) {
                 network->DoEvents();
-                if (0 == (diagnosticsCounter++ % 5000)) {
+                if (0 == (diagnosticsCounter++ % 1000)) {
                     ucp::UcpConnection* connection = connection_;
                     if (NULLPTR != connection && !disposed_) {
                         ucp::UcpConnectionDiagnostics diag = connection->GetDiagnostics();

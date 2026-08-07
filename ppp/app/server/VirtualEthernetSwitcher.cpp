@@ -3717,10 +3717,15 @@ namespace ppp {
                     if (NULLPTR != ucp_server) {
                         VirtualEthernetLoggerPtr logger = GetLogger();
                         if (NULLPTR != logger) {
-                            char buf[192];
-                            int n = snprintf(buf, sizeof(buf), "UCP server diag: dgrams=%lld decodeFail=%lld",
+                            char buf[256];
+                            int n = snprintf(buf, sizeof(buf),
+                                "UCP server diag: dgrams=%lld decodeFail=%lld syn=%lld ack=%lld data=%lld other=%lld",
                                 (long long)ucp_server->GetReceivedDatagramCount(),
-                                (long long)ucp_server->GetDecodeFailureCount());
+                                (long long)ucp_server->GetDecodeFailureCount(),
+                                (long long)ucp_server->GetReceivedSynCount(),
+                                (long long)ucp_server->GetReceivedAckCount(),
+                                (long long)ucp_server->GetReceivedDataCount(),
+                                (long long)ucp_server->GetReceivedOtherCount());
                             (void)n;
                             logger->Info(ppp::string(buf));
                         }
