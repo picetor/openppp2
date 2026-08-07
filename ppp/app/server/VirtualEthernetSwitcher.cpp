@@ -2707,6 +2707,12 @@ namespace ppp {
                 }
 
                 ucp::UcpConfiguration ucp_config;
+                // NOTE: MTU discovery probes consume a data sequence number but are
+                // sent outside the send buffer (not retransmittable).  A lost probe
+                // permanently stalls the peer's next-expected sequence (silent
+                // one-way stall, same as the client side).  Disable until
+                // SendMtuProbe retransmission is fixed in the ucp library.
+                ucp_config.EnableMtuDiscovery = false;
                 if (configuration_->ucp.mss > 0) {
                     ucp_config.Mss = configuration_->ucp.mss;
                 }

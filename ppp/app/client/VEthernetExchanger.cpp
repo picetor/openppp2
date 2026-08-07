@@ -529,6 +529,14 @@ namespace ppp {
 
                 // Build the UCP engine parameters from the ucp configuration section.
                 ucp::UcpConfiguration ucp_config = ucp::UcpConfiguration::GetOptimizedConfig();
+                // NOTE: MTU discovery probes consume a data sequence number but are
+                // sent outside the send buffer (not retransmittable).  If a probe is
+                // lost on the path, the peer's next-expected sequence stalls at the
+                // probe's sequence forever and every subsequent data segment piles up
+                // in the receive buffer without being delivered (silent one-way
+                // stall, server VPN layer sees no data and idle-times-out the
+                // session).  Disable until SendMtuProbe retransmission is fixed.
+                ucp_config.EnableMtuDiscovery = false;
                 if (configuration->ucp.mss > 0) {
                     ucp_config.Mss = configuration->ucp.mss;
                 }
