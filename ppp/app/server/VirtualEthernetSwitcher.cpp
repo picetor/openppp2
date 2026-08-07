@@ -3732,7 +3732,7 @@ namespace ppp {
                     if (NULLPTR != ucp_server) {
                         VirtualEthernetLoggerPtr logger = GetLogger();
                         if (NULLPTR != logger) {
-                            long long sentPkts = 0, sentBytes = 0, retrans = 0, flight = 0;
+                            int64_t sentPkts = 0, sentBytes = 0, retrans = 0, flight = 0;
                             ucp_server->GetSendStatistics(sentPkts, sentBytes, retrans, flight);
                             char buf[384];
                             int n = snprintf(buf, sizeof(buf),
@@ -3744,7 +3744,8 @@ namespace ppp {
                                 (long long)ucp_server->GetReceivedDataCount(),
                                 (long long)ucp_server->GetReceivedOtherCount(),
                                 (long long)ucp_server->GetActiveConnectionCount(),
-                                sentPkts, sentBytes, retrans, flight);
+                                (long long)sentPkts, (long long)sentBytes,
+                                (long long)retrans, (long long)flight);
                             (void)n;
                             logger->Info(ppp::string(buf));
                         }
