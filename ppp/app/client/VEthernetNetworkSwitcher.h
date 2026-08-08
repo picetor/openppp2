@@ -180,6 +180,7 @@ namespace ppp {
                 std::shared_ptr<aggligator::aggligator>                             GetAggligator()              noexcept { return aggligator_; }
                 bool                                                                IsBlockQUIC()                noexcept { return block_quic_; }
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
+                bool                                                                IsTunnelServerAddress(const boost::asio::ip::address& ip) const noexcept;
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
                 bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
 

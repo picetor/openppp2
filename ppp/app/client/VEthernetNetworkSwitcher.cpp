@@ -6150,6 +6150,66 @@ namespace ppp {
             }
 #endif
 
+            /** @brief True when @p ip belongs to a configured tunnel server endpoint.
+             *  The server's own address must ALWAYS bypass the tunnel: after TUN
+             *  takeover the kernel routes every destination through the TUN
+             *  (GetBestInterfaceIP returns the TUN IP), so the FIB-based
+             *  IsBypassIpAddress() check cannot identify the server address and
+             *  the client's own traffic to the server IP is injected into the
+             *  tunnel, NAT-looped back by the server and re-injected -- a
+             *  6800-packet/2s loop storm right after connect (server IP x1013
+             *  GetExchanger lookups), pinning both CPUs at 100%. */
+            bool VEthernetNetworkSwitcher::IsTunnelServerAddress(const boost::asio::ip::address& ip) const noexcept {
+                auto parse_host = [](const ppp::string& server) -> boost::asio::ip::address {
+                    if (server.empty()) {
+                        return boost::asio::ip::address();
+                    }
+                    ppp::string host = server;
+                    size_t scheme = host.find("://");
+                    if (scheme != ppp::string::npos) {
+                        host = host.substr(scheme + 3);
+                    }
+                    size_t slash = host.find('/');
+                    if (slash != ppp::string::npos) {
+                        host = host.substr(0, slash);
+                    }
+                    size_t colon = host.rfind(':');
+                    if (colon != ppp::string::npos) {
+                        // host:port (IPv4 or bare IPv6 host with port)
+                        if (ppp::string::npos == host.find(']')) {
+                            host = host.substr(0, colon);
+                        }
+                    }
+                    host.erase(0, host.find_first_not_of(" 	"));
+                    size_t end = host.find_last_not_of(" 	");
+                    if (end != ppp::string::npos) {
+                        host = host.substr(0, end + 1);
+                    }
+                    if (host.size() > 1 && host.front() == '[' && host.back() == ']') {
+                        host = host.substr(1, host.size() - 2);
+                    }
+                    boost::system::error_code ec;
+                    return ppp::StringToAddress(host, ec);
+                };
+                auto match = [&ip](const boost::asio::ip::address& a) -> bool {
+                    return !a.is_unspecified() && a == ip;
+                };
+                for (const auto& outbound : outbound_configurations_) {
+                    if (NULLPTR != outbound.configuration &&
+                        match(parse_host(outbound.configuration->client.server))) {
+                        return true;
+                    }
+                }
+                if (NULLPTR != configuration_) {
+                    for (const auto& s : configuration_->udp.static_.servers) {
+                        if (match(parse_host(s))) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
             bool VEthernetNetworkSwitcher::IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept {
                 if (!ip.is_v4()) {
                     return false;
@@ -6165,6 +6225,14 @@ namespace ppp {
 
                 if (ppp::net::IPEndPoint::IsInvalid(ip)) {
                     return false;
+                }
+
+                // Hard bypass: a configured tunnel server endpoint must never be
+                // injected into the tunnel (loop storm).  This must run BEFORE the
+                // FIB query, which is unreliable once TUN takeover has re-pointed
+                // every route (incl. the server IP) at the TUN.
+                if (IsTunnelServerAddress(ip)) {
+                    return true;
                 }
 
                 if (geo_rules_) {
@@ -6228,6 +6296,12 @@ namespace ppp {
 
                 if (ppp::net::IPEndPoint::IsInvalid(ip)) {
                     return false;
+                }
+
+                // Hard bypass for IPv6 tunnel servers (same loop-storm rationale
+                // as IsBypassIpAddress).
+                if (IsTunnelServerAddress(ip)) {
+                    return true;
                 }
 
                 if (geo_rules_) {
