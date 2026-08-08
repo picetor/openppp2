@@ -1715,11 +1715,25 @@ namespace ppp {
                     return exchanger_;
                 }
                 if (!geo_rules_) {
+                    // Without geo rules the tunnel MUST still bypass the VPN
+                    // server's own IP (and any destination whose route is the
+                    // physical NIC).  Otherwise the client's traffic to the
+                    // server IP is injected into the tunnel, the server NATs it
+                    // back to itself, and the two ends loop the packets around:
+                    // observed as a 6800-packet / 2s storm right after connect
+                    // (GetExchanger: destination=23.249.25.106 x1013) pinning
+                    // both CPUs at 100%.
 #if defined(_ANDROID) || defined(_IPHONE)
                     if (IsBypassIpAddress(destination) || IsBypassIpAddress6(destination)) {
                         LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=carrier, reason=ip_bypass_without_geo",
                             ppp::net::Ipep::ToAddressString<ppp::string>(destination).data());
                         return exchanger_;
+                    }
+#else
+                    if (IsBypassIpAddress(destination) || IsBypassIpAddress6(destination)) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, action=direct, selected_outbound=direct, reason=ip_bypass_without_geo",
+                            ppp::net::Ipep::ToAddressString<ppp::string>(destination).data());
+                        return NULLPTR;
                     }
 #endif
                     std::shared_ptr<VEthernetExchanger> active = get_active();
