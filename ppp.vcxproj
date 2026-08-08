@@ -231,6 +231,7 @@
   <ItemGroup>
     <ClCompile Include="common\aesni\aes.cpp" />
     <ClCompile Include="..\ucp\cpp\src\ucp_packet_codec.cpp" />
+    <ClCompile Include="..\ucp\cpp\src\ucp_thread_pool.cpp" />
     <ClCompile Include="..\ucp\cpp\src\ucp_pcb.cpp" />
     <ClCompile Include="..\ucp\cpp\src\ucp_cc.cpp" />
     <ClCompile Include="..\ucp\cpp\src\ucp_pacing.cpp" />

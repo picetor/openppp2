@@ -2713,6 +2713,12 @@ namespace ppp {
                 // one-way stall, same as the client side).  Disable until
                 // SendMtuProbe retransmission is fixed in the ucp library.
                 ucp_config.EnableMtuDiscovery = false;
+                // ACK coalescing: same rationale as the client side
+                // (VEthernetExchanger.cpp) -- merge ACKs into a 2ms window so the
+                // client's per-data-packet ACK flood (~18K ACK/s at 11.5MB/s
+                // download) is reduced ~10-20x, cutting sender-side ACK processing
+                // CPU (the dominant server cost during bulk transfer).
+                ucp_config.SetDelayedAckTimeoutMicros(2000);
                 if (configuration_->ucp.mss > 0) {
                     ucp_config.Mss = configuration_->ucp.mss;
                 }

@@ -537,6 +537,14 @@ namespace ppp {
                 // stall, server VPN layer sees no data and idle-times-out the
                 // session).  Disable until SendMtuProbe retransmission is fixed.
                 ucp_config.EnableMtuDiscovery = false;
+                // ACK coalescing: the default 100us delayed-ACK window makes the
+                // receiver answer (almost) every data packet with a dedicated ACK
+                // (~1.8 ACKs per data packet observed at 11.5MB/s download), which
+                // floods the sender with ~18K ACK/s and dominates server CPU.
+                // Raising it to 2ms merges ACKs (Reno-style, bounded by the
+                // recv-window) and cuts ACK traffic by ~10-20x with no visible
+                // latency impact on bulk transfer.
+                ucp_config.SetDelayedAckTimeoutMicros(2000);
                 if (configuration->ucp.mss > 0) {
                     ucp_config.Mss = configuration->ucp.mss;
                 }
