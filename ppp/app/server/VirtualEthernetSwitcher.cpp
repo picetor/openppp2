@@ -3753,7 +3753,69 @@ namespace ppp {
                                 (long long)sentPkts, (long long)sentBytes,
                                 (long long)retrans, (long long)flight);
                             (void)n;
+#if defined(_LINUX)
+                            // Thread-level CPU diagnosis: when the server idles at
+                            // 100% while dgrams=0/conns=0, the busy loop lives in a
+                            // worker thread that produces no log traffic.  Sample
+                            // each thread's utime+stime from /proc/self/task and
+                            // append the top CPU consumers (tid+name) to the diag
+                            // line so the offending thread shows up in the log.
+                            ppp::string thread_cpu;
+                            {
+                                static ppp::map<long, long long> prev_ticks;
+                                static long long prev_wall_ms = 0;
+                                long hz = ::sysconf(_SC_CLK_TCK);
+                                if (hz <= 0) hz = 100;
+                                struct timespec ts;
+                                ::clock_gettime(CLOCK_MONOTONIC, &ts);
+                                long long now_ms = (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+                                long long wall_ms = prev_wall_ms ? (now_ms - prev_wall_ms) : 0;
+                                prev_wall_ms = now_ms;
+                                thread_cpu = " THREADS:";
+                                DIR* dir = ::opendir("/proc/self/task");
+                                if (dir) {
+                                    struct dirent* ent;
+                                    while ((ent = ::readdir(dir)) != NULL) {
+                                        long tid = ::atol(ent->d_name);
+                                        if (tid <= 0) continue;
+                                        char path[64];
+                                        snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", tid);
+                                        FILE* f = ::fopen(path, "r");
+                                        if (!f) continue;
+                                        char line[512];
+                                        size_t ln = ::fread(line, 1, sizeof(line) - 1, f);
+                                        ::fclose(f);
+                                        line[ln] = 0;
+                                        char* openp = strchr(line, '(');
+                                        if (!openp) continue;
+                                        char* closep = strrchr(line, ')');
+                                        if (!closep) continue;
+                                        std::string comm(openp + 1, closep);
+                                        long long utime = 0, stime = 0;
+                                        if (2 != sscanf(closep + 1,
+                                                        "%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %lld %lld",
+                                                        &utime, &stime)) {
+                                            continue;
+                                        }
+                                        long long ticks = utime + stime;
+                                        long long prev = prev_ticks[tid];
+                                        prev_ticks[tid] = ticks;
+                                        if (wall_ms > 0 && prev > 0) {
+                                            double cpu = (double)(ticks - prev) / (double)hz / ((double)wall_ms / 1000.0) * 100.0;
+                                            if (cpu >= 1.0) {
+                                                char tb[96];
+                                                snprintf(tb, sizeof(tb), " [%ld]%s=%.0f%%", tid, comm.c_str(), cpu);
+                                                thread_cpu += tb;
+                                            }
+                                        }
+                                    }
+                                    ::closedir(dir);
+                                }
+                            }
+                            logger->Info(ppp::string(buf) + thread_cpu);
+#else
                             logger->Info(ppp::string(buf));
+#endif
                         }
                     }
                 }
