@@ -1324,6 +1324,13 @@ namespace ppp {
                         tag == primary_outbound_ : tag == active_outbound_;
                     status.server_menu = outbound.server_menu;
                     status.route_used = outbound.route_used;
+                    if (current != outbound_exchangers_.end() && NULLPTR != current->second) {
+                        status.probe_enabled = NULLPTR != outbound.configuration && outbound.configuration->client.probe.enabled;
+                        status.probe_checked = current->second->GetProbeChecked();
+                        status.probe_reachable = current->second->GetProbeReachable();
+                        status.probe_rtt_ms = current->second->GetProbeRtt();
+                        status.probe_server = current->second->GetProbeServer();
+                    }
                     statuses.emplace_back(std::move(status));
                 }
                 if (statuses.empty() && NULLPTR != exchanger_) {
@@ -1334,6 +1341,11 @@ namespace ppp {
                     status.state = static_cast<int>(exchanger_->GetNetworkState());
                     status.reconnects = exchanger_->GetReconnectionCount();
                     status.active = true;
+                    status.probe_enabled = configuration_->client.probe.enabled;
+                    status.probe_checked = exchanger_->GetProbeChecked();
+                    status.probe_reachable = exchanger_->GetProbeReachable();
+                    status.probe_rtt_ms = exchanger_->GetProbeRtt();
+                    status.probe_server = exchanger_->GetProbeServer();
                     statuses.emplace_back(std::move(status));
                 }
                 return statuses;

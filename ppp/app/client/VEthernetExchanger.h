@@ -15,6 +15,7 @@
 #include <ppp/threading/Timer.h>
 #include <ppp/auxiliary/UriAuxiliary.h>
 #include <ppp/transmissions/proxys/IForwarding.h>
+#include <ppp/app/client/ConnectivityProbe.h>
 
 namespace ppp {
     namespace app {
@@ -83,6 +84,10 @@ namespace ppp {
                 const VirtualEthernetInformationExtensions&                             GetInformationExtensions() const noexcept { return information_extensions_; }
                 ITransmissionPtr                                                        GetTransmission()       noexcept { return transmission_; }
                 int                                                                     GetReconnectionCount()  noexcept { return reconnection_count_; }
+                int                                                                     GetProbeRtt()           noexcept;
+                bool                                                                    GetProbeReachable()     noexcept;
+                bool                                                                    GetProbeChecked()       noexcept;
+                ppp::string                                                             GetProbeServer()        noexcept;
                 NetworkState                                                            GetMuxNetworkState()    noexcept;
                 virtual bool                                                            Open()                  noexcept;
                 virtual void                                                            Dispose()               noexcept;
@@ -172,6 +177,36 @@ namespace ppp {
                 void                                                                    ExchangeToEstablishState() noexcept;
                 void                                                                    ExchangeToConnectingState() noexcept;
                 void                                                                    ExchangeToReconnectingState() noexcept;
+                bool                                                                    ProbeSelectServerEndPoint(
+                    YieldContext&                                                       y,
+                    const ppp::vector<ppp::string>&                                     entries,
+                    ppp::string&                                                        hostname,
+                    ppp::string&                                                        address,
+                    ppp::string&                                                        path,
+                    int&                                                                port,
+                    ProtocolType&                                                       protocol_type,
+                    ppp::string&                                                        server,
+                    boost::asio::ip::tcp::endpoint&                                     remoteEP) noexcept;
+                bool                                                                    ProbeCandidateEndpoint(
+                    ConnectivityProbe::ProbeType                                        probe_type,
+                    const boost::asio::ip::tcp::endpoint&                               remoteEP,
+                    const ppp::string&                                                  hostname,
+                    const ppp::string&                                                  path,
+                    int                                                                 stage,
+                    int                                                                 timeout_ms,
+                    const ppp::string&                                                  ws_host,
+                    const ppp::string&                                                  ws_sni,
+                    YieldContext&                                                       y,
+                    int&                                                                rtt_ms,
+                    const ConnectivityProbe::ProtectSocketHandler&                     protect) noexcept;
+                void                                                                    StoreProbeResult(
+                    const ppp::string&                                                  entry,
+                    ConnectivityProbe::ProbeType                                        probe_type,
+                    bool                                                                reachable,
+                    int                                                                 rtt_ms,
+                    int                                                                 stage,
+                    uint64_t                                                            now,
+                    uint64_t                                                            ttl_ms) noexcept;
                 int                                                                     EchoLanToRemoteExchanger(const ITransmissionPtr& transmission, YieldContext& y) noexcept;
                 bool                                                                    SendEchoKeepAlivePacket(UInt64 now, bool immediately) noexcept;
                 bool                                                                    ReceiveFromDestination(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length) noexcept;
@@ -287,6 +322,13 @@ namespace ppp {
                 uint16_t                                                                mux_vlan_           = 0;
                 
                 int                                                                     reconnection_count_ = 0;
+
+                typedef ppp::unordered_map<ppp::string, ConnectivityProbe::Result>      ProbeResultTable;
+                ProbeResultTable                                                        probe_results_;
+                std::atomic<int>                                                        probe_rtt_ms_       = -1;
+                std::atomic<bool>                                                       probe_reachable_    = false;
+                std::atomic<bool>                                                       probe_checked_      = false;
+                ppp::string                                                             probe_server_;
 
                 struct {
                     boost::asio::ip::tcp::endpoint                                      remoteEP;

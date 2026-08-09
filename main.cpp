@@ -1720,22 +1720,59 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                     if (slash != ppp::string::npos) value.erase(slash);
                     return value;
                 };
+                auto probe_suffix = [](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
+                {
+                    ppp::string suffix;
+                    if (outbound.probe_enabled && outbound.probe_checked)
+                    {
+                        if (outbound.probe_reachable && outbound.probe_rtt_ms >= 0)
+                        {
+                            suffix = "  (";
+                            suffix += stl::to_string<ppp::string>(outbound.probe_rtt_ms);
+                            suffix += "ms)";
+                        }
+                        else
+                        {
+                            suffix = "  (unreachable)";
+                        }
+                    }
+                    return suffix;
+                };
+                auto effective_entry = [server_endpoint](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
+                {
+                    ppp::string effective;
+                    if (!outbound.probe_server.empty())
+                    {
+                        ppp::string base = server_endpoint(outbound.server);
+                        std::size_t scheme = base.find("://");
+                        ppp::string base_endpoint = scheme == ppp::string::npos ? base : base.substr(scheme + 3);
+                        if (base_endpoint != outbound.probe_server)
+                        {
+                            effective = "  -> ";
+                            effective += outbound.probe_server;
+                        }
+                    }
+                    return effective;
+                };
                 for (std::size_t i = first; i < last; ++i)
                 {
                     const auto& outbound = servers[i];
                     bool connected = outbound.state ==
                         VEthernetExchanger::NetworkState_Established;
-                    const char* usage = outbound.route_used ? " used" :
+                    ppp::string usage = outbound.route_used ? " used" :
                         (connected ? " connected" : "");
+                    usage += probe_suffix(outbound);
                     ppp::string endpoint = server_endpoint(outbound.server);
+                    ppp::string effective = effective_entry(outbound);
                     if (i == server_selection_ && console_highlight)
                     {
                         printfn.Highlighted(">%-1c %-24s%s",
                             outbound.active ? '*' : ' ',
                             outbound.display_name.data(),
-                            usage);
-                        printfn.Highlighted("   %s",
-                            endpoint.empty() ? "(not configured)" : endpoint.data());
+                            usage.data());
+                        printfn.Highlighted("   %s%s",
+                            endpoint.empty() ? "(not configured)" : endpoint.data(),
+                            effective.data());
                     }
                     else
                     {
@@ -1743,9 +1780,10 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                             i == server_selection_ ? '>' : ' ',
                             outbound.active ? '*' : ' ',
                             outbound.display_name.data(),
-                            usage);
-                        printfn("   %s",
-                            endpoint.empty() ? "(not configured)" : endpoint.data());
+                            usage.data());
+                        printfn("   %s%s",
+                            endpoint.empty() ? "(not configured)" : endpoint.data(),
+                            effective.data());
                     }
                 }
             }

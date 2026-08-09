@@ -1,4 +1,4 @@
-﻿#include <ppp/app/client/VEthernetNetworkSwitcher.h>
+#include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/VEthernetDatagramPort.h>
 #include <ppp/app/protocol/VirtualEthernetPacket.h>
@@ -45,6 +45,56 @@ namespace ppp {
             static constexpr int SEND_ECHO_KEEP_ALIVE_PACKET_MMX_TIMEOUT = SEND_ECHO_KEEP_ALIVE_PACKET_MAX_TIMEOUT << 2;
             static constexpr int STATIC_ECHO_KEEP_ALIVED_ID              = IPEndPoint::NoneAddress - 1;
 
+            namespace {
+                /**
+                 * @brief One tunnel entry candidate that can be probed.
+                 */
+                struct ProbeCandidateEntry final {
+                    ppp::string                         entry;              ///< Normalized "host:port" cache key.
+                    ppp::string                         hostname;           ///< Host name parsed from the entry URL.
+                    ppp::string                         address;            ///< Resolved IP address.
+                    ppp::string                         path;               ///< WebSocket path (inherited from client.server).
+                    ppp::string                         server;             ///< Normalized URL used by server_url_.
+                    int                                 port = IPEndPoint::MinPort;
+                    VEthernetExchanger::ProtocolType    protocol_type = VEthernetExchanger::ProtocolType::ProtocolType_PPP;
+                    boost::asio::ip::tcp::endpoint      remoteEP;
+                    ConnectivityProbe::ProbeType        probe_type = ConnectivityProbe::ProbeType_Tcp;
+                    ppp::string                         probe_category;
+                    bool                                probed = false;
+                    bool                                reachable = false;
+                    int                                 rtt_ms = 0;
+                };
+
+                /**
+                 * @brief Maps a tunnel protocol to the probe that exercises its transport.
+                 */
+                ConnectivityProbe::ProbeType ProbeTypeFromProtocol(VEthernetExchanger::ProtocolType protocol_type) noexcept {
+                    if (protocol_type == VEthernetExchanger::ProtocolType::ProtocolType_Http ||
+                        protocol_type == VEthernetExchanger::ProtocolType::ProtocolType_WebSocket) {
+                        return ConnectivityProbe::ProbeType_WebSocket;
+                    }
+                    elif(protocol_type == VEthernetExchanger::ProtocolType::ProtocolType_HttpSSL ||
+                        protocol_type == VEthernetExchanger::ProtocolType::ProtocolType_WebSocketSSL) {
+                        return ConnectivityProbe::ProbeType_WebSocketSSL;
+                    }
+                    return ConnectivityProbe::ProbeType_Tcp;
+                }
+
+                /**
+                 * @brief Normalizes a resolved address into the "host:port" probe key.
+                 */
+                ppp::string NormalizeProbeEntry(const ppp::string& address, int port) noexcept {
+                    if (address.empty() || port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
+                        return ppp::string();
+                    }
+
+                    ppp::string entry = address.find(':') != ppp::string::npos ? "[" + address + "]" : address;
+                    entry += ":";
+                    entry += stl::to_string<ppp::string>(port);
+                    return entry;
+                }
+            }
+
             VEthernetExchanger::VEthernetExchanger(
                 const VEthernetNetworkSwitcherPtr&      switcher,
                 const AppConfigurationPtr&              configuration,
@@ -88,6 +138,406 @@ namespace ppp {
                 server_url_.port          = 0;
                 server_url_.protocol_type = ProtocolType::ProtocolType_PPP;
             }
+
+            int VEthernetExchanger::GetProbeRtt() noexcept {
+                return probe_rtt_ms_.load();
+            }
+
+            bool VEthernetExchanger::GetProbeReachable() noexcept {
+                return probe_reachable_.load();
+            }
+
+            bool VEthernetExchanger::GetProbeChecked() noexcept {
+                return probe_checked_.load();
+            }
+
+            ppp::string VEthernetExchanger::GetProbeServer() noexcept {
+                SynchronizedObjectScope scope(syncobj_);
+                return probe_server_;
+            }
+
+            bool VEthernetExchanger::ProbeCandidateEndpoint(
+                ConnectivityProbe::ProbeType                                    probe_type,
+                const boost::asio::ip::tcp::endpoint&                           remoteEP,
+                const ppp::string&                                              hostname,
+                const ppp::string&                                              path,
+                int                                                             stage,
+                int                                                             timeout_ms,
+                const ppp::string&                                              ws_host,
+                const ppp::string&                                              ws_sni,
+                YieldContext&                                                   y,
+                int&                                                            rtt_ms,
+                const ConnectivityProbe::ProtectSocketHandler&                  protect) noexcept {
+
+                rtt_ms = 0;
+                if (disposed_) {
+                    return false;
+                }
+                if (remoteEP.port() <= IPEndPoint::MinPort || remoteEP.port() > IPEndPoint::MaxPort) {
+                    return false;
+                }
+                if (IPEndPoint::IsInvalid(remoteEP.address())) {
+                    return false;
+                }
+
+                // stage 1/2 only exercises the TCP transport; stage 3 upgrades
+                // the WebSocket/TLS layers exactly like the real transmission.
+                if (stage <= 2 || probe_type == ConnectivityProbe::ProbeType_Tcp) {
+                    return ConnectivityProbe::ProbeTcp(remoteEP, timeout_ms, y, rtt_ms, protect);
+                }
+                if (probe_type == ConnectivityProbe::ProbeType_WebSocket) {
+                    ppp::string host = ws_host.empty() ? hostname : ws_host;
+                    return ConnectivityProbe::ProbeWebSocket(remoteEP, host, path, timeout_ms, y, rtt_ms, protect);
+                }
+                if (probe_type == ConnectivityProbe::ProbeType_WebSocketSSL) {
+                    ppp::string host = ws_host.empty() ? hostname : ws_host;
+                    ppp::string sni = ws_sni.empty() ? host : ws_sni;
+                    return ConnectivityProbe::ProbeWebSocketSSL(remoteEP, host, sni, path, timeout_ms, y, rtt_ms, protect);
+                }
+                return ConnectivityProbe::ProbeTcp(remoteEP, timeout_ms, y, rtt_ms, protect);
+            }
+
+            void VEthernetExchanger::StoreProbeResult(
+                const ppp::string&                                              entry,
+                ConnectivityProbe::ProbeType                                    probe_type,
+                bool                                                            reachable,
+                int                                                             rtt_ms,
+                int                                                             stage,
+                uint64_t                                                        now,
+                uint64_t                                                        ttl_ms) noexcept {
+
+                if (entry.empty()) {
+                    return;
+                }
+
+                ConnectivityProbe::Result result;
+                result.entry = entry;
+                result.type = static_cast<uint8_t>(probe_type);
+                result.reachable = reachable;
+                result.rtt_ms = rtt_ms;
+                result.stage = static_cast<uint8_t>(stage);
+                result.timestamp = now;
+                result.ttl_ms = static_cast<int>(ttl_ms);
+                result.penalty_until = 0;
+
+                SynchronizedObjectScope scope(syncobj_);
+                probe_results_[entry] = result;
+            }
+
+            bool VEthernetExchanger::ProbeSelectServerEndPoint(
+                YieldContext&                                                   y,
+                const ppp::vector<ppp::string>&                                 entries,
+                ppp::string&                                                    hostname,
+                ppp::string&                                                    address,
+                ppp::string&                                                    path,
+                int&                                                            port,
+                ProtocolType&                                                   protocol_type,
+                ppp::string&                                                    server,
+                boost::asio::ip::tcp::endpoint&                                 remoteEP) noexcept {
+
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+                if (!y) {
+                    return false;
+                }
+                if (disposed_) {
+                    return false;
+                }
+
+                // Parse every entry.  The primary carries a full URL (scheme,
+                // path and websocket overrides); backup entries are bare
+                // "IP:port" strings that inherit the primary transport.
+                ppp::string primary_address;
+                ppp::string primary_path;
+                ProtocolType primary_protocol = ProtocolType::ProtocolType_PPP;
+                ppp::vector<ProbeCandidateEntry> candidates;
+                candidates.reserve(entries.size());
+                for (const ppp::string& entry : entries) {
+                    if (entry.empty()) {
+                        continue;
+                    }
+
+                    ProbeCandidateEntry candidate;
+                    bool is_primary = primary_address.empty();
+                    if (is_primary) {
+                        ppp::string entry_hostname;
+                        ppp::string entry_address;
+                        ppp::string entry_path;
+                        int entry_port = IPEndPoint::MinPort;
+                        ProtocolType entry_protocol = ProtocolType::ProtocolType_PPP;
+                        ppp::string abs_url;
+                        ppp::string entry_server = UriAuxiliary::Parse(entry, entry_hostname, entry_address,
+                            entry_path, entry_port, entry_protocol, &abs_url, y);
+                        if (entry_server.empty() || entry_hostname.empty() || entry_address.empty()) {
+                            continue;
+                        }
+                        if (entry_port <= IPEndPoint::MinPort || entry_port > IPEndPoint::MaxPort) {
+                            continue;
+                        }
+
+                        // The socks scheme is parser-only for tunnels; it lands
+                        // on the raw TCP transport, so probe it as plain TCP.
+                        if (entry_protocol == ProtocolType::ProtocolType_Socks) {
+                            entry_protocol = ProtocolType::ProtocolType_PPP;
+                        }
+
+                        IPEndPoint ipep(entry_address.data(), entry_port);
+                        if (IPEndPoint::IsInvalid(ipep)) {
+                            continue;
+                        }
+
+                        candidate.hostname = entry_hostname;
+                        candidate.address = entry_address;
+                        candidate.path = entry_path;
+                        candidate.server = entry_server;
+                        candidate.port = entry_port;
+                        candidate.protocol_type = entry_protocol;
+                        candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
+                        candidate.probe_type = ProbeTypeFromProtocol(entry_protocol);
+
+                        primary_address = entry_address;
+                        primary_path = entry_path;
+                        primary_protocol = entry_protocol;
+                    }
+                    else {
+                        ppp::string host_string;
+                        int entry_port = 0;
+                        if (!Ipep::ParseEndPoint(entry, host_string, entry_port)) {
+                            continue;
+                        }
+                        if (entry_port <= IPEndPoint::MinPort || entry_port > IPEndPoint::MaxPort) {
+                            continue;
+                        }
+
+                        host_string = LTrim(RTrim(host_string));
+                        if (host_string.empty()) {
+                            continue;
+                        }
+
+                        boost::asio::ip::address address = Ipep::ToAddress(host_string, false);
+                        if (IPEndPoint::IsInvalid(address)) {
+                            continue; // Backups must be IP literals, not domains.
+                        }
+
+                        IPEndPoint ipep(host_string.data(), entry_port);
+                        if (IPEndPoint::IsInvalid(ipep)) {
+                            continue;
+                        }
+
+                        // Backups reuse the primary scheme and path.
+                        candidate.hostname = host_string;
+                        candidate.address = host_string;
+                        candidate.path = primary_path;
+                        candidate.port = entry_port;
+                        candidate.protocol_type = primary_protocol;
+                        candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
+                        candidate.probe_type = ProbeTypeFromProtocol(primary_protocol);
+                        candidate.server = entry; // Informational only; the legacy path owns the URL.
+                    }
+
+                    candidate.probe_category = candidate.probe_type == ConnectivityProbe::ProbeType_WebSocket ? "ws" :
+                        (candidate.probe_type == ConnectivityProbe::ProbeType_WebSocketSSL ? "wss" : "tcp");
+                    candidate.entry = NormalizeProbeEntry(candidate.address, candidate.port);
+                    if (candidate.entry.empty()) {
+                        continue;
+                    }
+
+                    candidates.emplace_back(std::move(candidate));
+                }
+                if (candidates.empty()) {
+                    return false;
+                }
+
+#if defined(_WIN32)
+                // Pin every candidate's route on the physical adapter so probe
+                // sockets never enter the TAP (self-loop) during reconnection.
+                if (NULLPTR != switcher_) {
+                    for (const ProbeCandidateEntry& candidate : candidates) {
+                        boost::asio::ip::address probe_ip = candidate.remoteEP.address();
+                        if (probe_ip.is_v4()) {
+                            switcher_->EnsureWindowsIPv4ServerRoute(probe_ip);
+                        }
+                        elif(probe_ip.is_v6()) {
+                            switcher_->EnsureWindowsIPv6ServerRoute(probe_ip);
+                        }
+                    }
+                }
+#endif
+
+                ConnectivityProbe::ProtectSocketHandler protector;
+#if defined(_LINUX)
+                if (NULLPTR != switcher_) {
+                    std::shared_ptr<ppp::net::ProtectorNetwork> protector_network = switcher_->GetProtectorNetwork();
+                    if (NULLPTR != protector_network) {
+                        protector = [protector_network](int sockfd) noexcept {
+                            return protector_network->Protect(sockfd);
+                        };
+                    }
+                }
+#endif
+
+                const auto& probe_cfg = configuration->client.probe;
+                const int stage = probe_cfg.stage;
+                const int timeout_ms = std::max<int>(50, probe_cfg.timeout_ms);
+                const uint64_t ttl_ms = static_cast<uint64_t>(std::max<int>(1, probe_cfg.ttl_seconds)) * 1000;
+                const bool parallel = probe_cfg.parallel;
+                const bool categories_empty = probe_cfg.categories.empty();
+                const ppp::string ws_host = configuration->client.websocket.host;
+                const ppp::string ws_sni = configuration->client.websocket.sni;
+                const uint64_t now = Executors::GetTickCount();
+
+                // Build the job list: entries that need a live probe this round.
+                ppp::vector<int> job_indices;
+                job_indices.reserve(candidates.size());
+                for (std::size_t i = 0; i < candidates.size(); i++) {
+                    ProbeCandidateEntry& candidate = candidates[i];
+                    if (!categories_empty && probe_cfg.categories.find(candidate.probe_category) == probe_cfg.categories.end()) {
+                        continue; // Category excluded by configuration; never probed.
+                    }
+
+                    bool cached = false;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        auto it = probe_results_.find(candidate.entry);
+                        if (it != probe_results_.end()) {
+                            const ConnectivityProbe::Result& result = it->second;
+                            if (result.penalty_until > now) {
+                                candidate.reachable = false; // Temporarily blacklisted.
+                                candidate.probed = true;
+                                cached = true;
+                            }
+                            elif(result.reachable && static_cast<int>(result.stage) >= stage &&
+                                now < result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
+                                candidate.reachable = true;
+                                candidate.rtt_ms = result.rtt_ms;
+                                candidate.probed = true;
+                                cached = true;
+                            }
+                        }
+                    }
+                    if (!cached) {
+                        job_indices.emplace_back(static_cast<int>(i));
+                    }
+                }
+
+                // Probe the pending entries (parallel or serial).
+                if (!job_indices.empty()) {
+                    if (parallel && job_indices.size() > 1) {
+                        struct ProbeWaitState final {
+                            std::atomic<int> pending = 0;
+                            ppp::vector<ProbeCandidateEntry>* candidates = NULLPTR;
+                            YieldContext* parent = NULLPTR;
+                            int stage = 0;
+                            int timeout_ms = 0;
+                            ppp::string ws_host;
+                            ppp::string ws_sni;
+                        };
+                        ProbeWaitState state;
+                        state.pending = static_cast<int>(job_indices.size());
+                        state.candidates = &candidates;
+                        state.parent = &y;
+                        state.stage = stage;
+                        state.timeout_ms = timeout_ms;
+                        state.ws_host = ws_host;
+                        state.ws_sni = ws_sni;
+
+                        boost::asio::io_context& context = y.GetContext();
+                        auto self = shared_from_this();
+                        for (int index : job_indices) {
+                            bool spawned = YieldContext::Spawn(NULLPTR, context,
+                                [self, this, index, protector, &state](YieldContext& cy) noexcept {
+                                    ProbeCandidateEntry& candidate = (*state.candidates)[index];
+                                    int rtt = 0;
+                                    bool ok = false;
+                                    if (!disposed_) {
+                                        ok = ProbeCandidateEndpoint(candidate.probe_type,
+                                            candidate.remoteEP, candidate.hostname, candidate.path,
+                                            state.stage, state.timeout_ms, state.ws_host, state.ws_sni, cy, rtt, protector);
+                                    }
+                                    candidate.reachable = ok;
+                                    candidate.rtt_ms = rtt;
+                                    candidate.probed = true;
+
+                                    if (state.pending.fetch_sub(1) == 1) {
+                                        state.parent->R(); // Last one wakes the caller.
+                                    }
+                                });
+                            if (!spawned) {
+                                // Spawn failed; account for the missing job so the
+                                // caller is still woken when the remaining probes finish.
+                                if (state.pending.fetch_sub(1) == 1) {
+                                    state.parent->R();
+                                }
+                            }
+                        }
+                        y.Suspend();
+                    }
+                    else {
+                        for (int index : job_indices) {
+                            ProbeCandidateEntry& candidate = candidates[index];
+                            int rtt = 0;
+                            bool ok = ProbeCandidateEndpoint(candidate.probe_type,
+                                candidate.remoteEP, candidate.hostname, candidate.path,
+                                stage, timeout_ms, ws_host, ws_sni, y, rtt, protector);
+                            candidate.reachable = ok;
+                            candidate.rtt_ms = rtt;
+                            candidate.probed = true;
+                        }
+                    }
+
+                    // Persist the fresh outcomes so the next round can use the cache.
+                    for (int index : job_indices) {
+                        const ProbeCandidateEntry& candidate = candidates[index];
+                        StoreProbeResult(candidate.entry, candidate.probe_type,
+                            candidate.reachable, candidate.rtt_ms, stage, now, ttl_ms);
+                    }
+                }
+
+                // Pick the reachable entry with the lowest RTT.
+                int best_index = -1;
+                int best_rtt = INT_MAX;
+                for (std::size_t i = 0; i < candidates.size(); i++) {
+                    const ProbeCandidateEntry& candidate = candidates[i];
+                    if (!candidate.probed || !candidate.reachable) {
+                        continue;
+                    }
+                    if (candidate.rtt_ms >= 0 && candidate.rtt_ms < best_rtt) {
+                        best_rtt = candidate.rtt_ms;
+                        best_index = static_cast<int>(i);
+                    }
+                }
+
+                if (best_index < 0) {
+                    probe_rtt_ms_.store(-1);
+                    probe_reachable_.store(false);
+                    probe_checked_.store(true);
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        probe_server_.clear();
+                    }
+                    return false; // Fall back to the legacy primary-only path.
+                }
+
+                const ProbeCandidateEntry& best = candidates[best_index];
+                hostname = best.hostname;
+                address = best.address;
+                path = best.path;
+                port = best.port;
+                protocol_type = best.protocol_type;
+                server = best.server;
+                remoteEP = best.remoteEP;
+                probe_rtt_ms_.store(best.rtt_ms);
+                probe_reachable_.store(true);
+                probe_checked_.store(true);
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    probe_server_ = best.entry;
+                }
+                return true;
+            }
+
 
             VEthernetExchanger::~VEthernetExchanger() noexcept {
                 Finalize();
@@ -352,6 +802,30 @@ namespace ppp {
                     SynchronizedObjectScope scope(syncobj_);
                     forwarding = forwarding_;
                 }
+#if !defined(_ANDROID)
+                // Probe-driven entry selection: pick the lowest-latency reachable
+                // candidate from [client.server, client.servers ...] before the
+                // first (or re-)connection.  Skipped while a forwarding proxy
+                // owns the path or when no coroutine context is available.
+                if (NULLPTR == forwarding && configuration->client.probe.enabled && y != NULLPTR) {
+                    ppp::vector<ppp::string> entries;
+                    entries.reserve(1 + configuration->client.servers.size());
+                    entries.emplace_back(configuration->client.server);
+                    for (const ppp::string& entry : configuration->client.servers) {
+                        entries.emplace_back(entry);
+                    }
+                    if (ProbeSelectServerEndPoint(*y, entries, hostname, address, path, port, protocol_type, server, remoteEP)) {
+                        server_url_.remoteEP      = remoteEP;
+                        server_url_.hostname      = hostname;
+                        server_url_.address       = address;
+                        server_url_.path          = path;
+                        server_url_.server        = server;
+                        server_url_.port          = port;
+                        server_url_.protocol_type = protocol_type;
+                        return true;
+                    }
+                }
+#endif
                 if (NULLPTR != forwarding) {
                     ppp::string abs_url;
                     server = UriAuxiliary::Parse(client_server_string, hostname, address, path, port, protocol_type, &abs_url, *y, false);
@@ -1130,7 +1604,27 @@ namespace ppp {
                 sekap_next_ = 0;
                 network_state_.exchange(NetworkState_Reconnecting);
                 reconnection_count_++;
+
+                // Probe-driven failover: blacklist the entry that just failed
+                // and drop the cached endpoint so the next connection attempt
+                // re-selects the best reachable candidate.
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR != configuration && configuration->client.probe.enabled) {
+                    if (server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
+                        ppp::string entry = NormalizeProbeEntry(server_url_.address, server_url_.port);
+                        if (!entry.empty()) {
+                            SynchronizedObjectScope scope(syncobj_);
+                            auto it = probe_results_.find(entry);
+                            if (it != probe_results_.end()) {
+                                it->second.reachable = false;
+                                it->second.penalty_until = Executors::GetTickCount() + static_cast<uint64_t>(it->second.ttl_ms);
+                            }
+                        }
+                    }
+                    server_url_.port = 0;
+                }
             }
+
 
             bool VEthernetExchanger::RegisterAllMappingPorts() noexcept {
                 if (disposed_) {

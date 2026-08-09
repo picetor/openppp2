@@ -327,6 +327,9 @@
     <ClCompile Include="ppp\app\client\VEthernetExchanger.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+<ClCompile Include="ppp\app\client\ConnectivityProbe.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="ppp\app\client\VEthernetDatagramPort.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -1335,6 +1338,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ppp\app\client\VEthernetExchanger.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+<ClInclude Include="ppp\app\client\ConnectivityProbe.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ppp\app\client\VEthernetDatagramPort.h">

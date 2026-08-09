@@ -102,6 +102,11 @@ namespace ppp {
                     bool                                                            active = false;
                     bool                                                            server_menu = false;
                     bool                                                            route_used = false;
+                    bool                                                            probe_enabled = false;
+                    bool                                                            probe_checked = false;
+                    bool                                                            probe_reachable = false;
+                    int                                                             probe_rtt_ms = -1;
+                    ppp::string                                                     probe_server;
                 };
                 typedef ppp::vector<OutboundConfiguration>                         OutboundConfigurationList;
                 typedef ppp::vector<OutboundStatus>                                OutboundStatusList;

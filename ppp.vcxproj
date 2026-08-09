@@ -323,6 +323,7 @@
     <ClCompile Include="ppp\net\http\HttpClient.cpp" />
     <ClCompile Include="ppp\net\native\dnsx.cpp" />
     <ClCompile Include="ppp\net\rinetd\RinetdConnection.cpp" />
+<ClCompile Include="ppp\app\client\ConnectivityProbe.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetDatagramPort.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetExchanger.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkSwitcher.cpp" />
@@ -631,6 +632,7 @@
     <ClInclude Include="ppp\net\http\HttpClient.h" />
     <ClInclude Include="ppp\net\http\httplib.h" />
     <ClInclude Include="ppp\net\rinetd\RinetdConnection.h" />
+<ClInclude Include="ppp\app\client\ConnectivityProbe.h" />
     <ClInclude Include="ppp\app\client\VEthernetDatagramPort.h" />
     <ClInclude Include="ppp\app\client\VEthernetExchanger.h" />
     <ClInclude Include="ppp\app\client\VEthernetNetworkSwitcher.h" />
