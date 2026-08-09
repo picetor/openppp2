@@ -5,7 +5,6 @@ import io.nekohasekai.sagernet.ktx.Logs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -40,6 +39,9 @@ object LogCollector {
     private var bytesWritten = 0L
     private var logDir: File? = null
 
+    @Volatile
+    private var collecting = false
+
     private val logTags = arrayOf(
         "AndroidRuntime:D",
         "ProxyInstance:D",
@@ -59,6 +61,7 @@ object LogCollector {
         synchronized(lock) {
             if (job != null) return
             logDir = File(context.filesDir, "logs").apply { mkdirs() }
+            collecting = true
             job = GlobalScope.launch(Dispatchers.IO) {
                 try {
                     runCollector()
@@ -66,6 +69,7 @@ object LogCollector {
                     Logs.w(e)
                 } finally {
                     synchronized(lock) {
+                        collecting = false
                         closeWriter()
                         try {
                             process?.destroy()
@@ -81,6 +85,7 @@ object LogCollector {
 
     fun stop() {
         synchronized(lock) {
+            collecting = false
             job?.cancel()
             job = null
             closeWriter()
@@ -128,7 +133,7 @@ object LogCollector {
         synchronized(lock) { this.process = process }
         val stdout = BufferedReader(InputStreamReader(process.inputStream))
         try {
-            while (coroutineContext.isActive) {
+            while (collecting) {
                 val line = stdout.readLine() ?: break
                 appendLine(line)
             }
