@@ -128,7 +128,7 @@ object LogCollector {
         synchronized(lock) { this.process = process }
         val stdout = BufferedReader(InputStreamReader(process.inputStream))
         try {
-            while (isActive) {
+            while (coroutineContext.isActive) {
                 val line = stdout.readLine() ?: break
                 appendLine(line)
             }
