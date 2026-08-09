@@ -317,24 +317,45 @@ namespace ppp {
                         }
 
                         boost::asio::ip::address address = Ipep::ToAddress(host_string, false);
-                        if (IPEndPoint::IsInvalid(address)) {
-                            continue; // Backups must be IP literals, not domains.
+                        if (IPEndPoint::IsInvalid(address) && Ipep::IsDomainAddress(host_string)) {
+                            // Hostname backup entry: resolve it now so ws/wss and
+                            // ppp tunnels can use domains exactly like the primary.
+                            // Resolution may suspend this coroutine; no lock is
+                            // held on this path.
+                            boost::asio::ip::udp::endpoint resolved =
+                                ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::udp>(
+                                    host_string.data(), entry_port, y);
+                            address = resolved.address();
                         }
 
-                        IPEndPoint ipep(host_string.data(), entry_port);
+                        std::string address_string = address.to_string();
+                        ppp::string address_string_ppp(address_string.data(), address_string.size());
+                        IPEndPoint ipep(address_string_ppp.data(), entry_port);
                         if (IPEndPoint::IsInvalid(ipep)) {
-                            continue;
+                            // Unresolvable host: keep the entry visible in the
+                            // status page but mark it unreachable instead of
+                            // silently dropping it.
+                            candidate.hostname = host_string;
+                            candidate.address = host_string;
+                            candidate.path = primary_path;
+                            candidate.port = entry_port;
+                            candidate.protocol_type = primary_protocol;
+                            candidate.probe_type = ProbeTypeFromProtocol(primary_protocol);
+                            candidate.server = entry;
+                            candidate.probed = true;   // Decided without a probe.
+                            candidate.reachable = false;
                         }
-
-                        // Backups reuse the primary scheme and path.
-                        candidate.hostname = host_string;
-                        candidate.address = host_string;
-                        candidate.path = primary_path;
-                        candidate.port = entry_port;
-                        candidate.protocol_type = primary_protocol;
-                        candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
-                        candidate.probe_type = ProbeTypeFromProtocol(primary_protocol);
-                        candidate.server = entry; // Informational only; the legacy path owns the URL.
+                        else {
+                            // Backups reuse the primary scheme and path.
+                            candidate.hostname = host_string;
+                            candidate.address = host_string;
+                            candidate.path = primary_path;
+                            candidate.port = entry_port;
+                            candidate.protocol_type = primary_protocol;
+                            candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
+                            candidate.probe_type = ProbeTypeFromProtocol(primary_protocol);
+                            candidate.server = entry; // Informational only; the legacy path owns the URL.
+                        }
                     }
 
                     candidate.probe_category = candidate.probe_type == ConnectivityProbe::ProbeType_WebSocket ? "ws" :
@@ -393,6 +414,9 @@ namespace ppp {
                 job_indices.reserve(candidates.size());
                 for (std::size_t i = 0; i < candidates.size(); i++) {
                     ProbeCandidateEntry& candidate = candidates[i];
+                    if (candidate.probed) {
+                        continue; // Already decided (e.g. unresolvable host); no probe needed.
+                    }
                     if (!categories_empty && probe_cfg.categories.find(candidate.probe_category) == probe_cfg.categories.end()) {
                         continue; // Category excluded by configuration; never probed.
                     }
@@ -506,6 +530,30 @@ namespace ppp {
                     if (candidate.rtt_ms >= 0 && candidate.rtt_ms < best_rtt) {
                         best_rtt = candidate.rtt_ms;
                         best_index = static_cast<int>(i);
+                    }
+                }
+
+                // Hysteresis: keep the cached endpoint when its RTT is within 30%
+                // of the best candidate, so jitter does not bounce reconnects
+                // between near-equal entries.  Applies only when the cached
+                // endpoint (server_url_) is still reachable this round.
+                if (best_index >= 0 && server_url_.port > IPEndPoint::MinPort &&
+                    server_url_.port <= IPEndPoint::MaxPort) {
+                    ppp::string current_entry = server_url_.server.find("://") == ppp::string::npos ?
+                        NormalizeProbeEntry(server_url_.hostname, server_url_.port) :
+                        NormalizeProbeEntry(server_url_.address, server_url_.port);
+                    if (!current_entry.empty()) {
+                        for (std::size_t i = 0; i < candidates.size(); i++) {
+                            const ProbeCandidateEntry& candidate = candidates[i];
+                            if (candidate.entry != current_entry || !candidate.probed ||
+                                !candidate.reachable || candidate.rtt_ms < 0) {
+                                continue;
+                            }
+                            if (candidate.rtt_ms * 10 <= best_rtt * 13) {
+                                best_index = static_cast<int>(i); // Within +30%: keep it.
+                            }
+                            break;
+                        }
                     }
                 }
 
@@ -771,17 +819,6 @@ namespace ppp {
                     return false;
                 }
 
-                if (server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
-                    remoteEP      = server_url_.remoteEP;
-                    hostname      = server_url_.hostname;
-                    address       = server_url_.address;
-                    path          = server_url_.path;
-                    server        = server_url_.server;
-                    port          = server_url_.port;
-                    protocol_type = server_url_.protocol_type;
-                    return true;
-                }
-
                 std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
                 if (!configuration) {
                     return false;
@@ -802,12 +839,15 @@ namespace ppp {
                     SynchronizedObjectScope scope(syncobj_);
                     forwarding = forwarding_;
                 }
-#if !defined(_ANDROID)
                 // Probe-driven entry selection: pick the lowest-latency reachable
-                // candidate from [client.server, client.servers ...] before the
-                // first (or re-)connection.  Skipped while a forwarding proxy
-                // owns the path or when no coroutine context is available.
-                if (NULLPTR == forwarding && configuration->client.probe.enabled && y != NULLPTR) {
+                // candidate from [client.server, client.servers ...] before each
+                // connection attempt.  The switcher pre-resolves the endpoint
+                // (server_url_) with a NULL coroutine context during startup, so
+                // the probe must run even when that cached endpoint is already
+                // valid.  Skipped while a forwarding proxy owns the path, when
+                // no coroutine context is available, or when the master switch
+                // client.probe.enabled is false (legacy single-entry behavior).
+                if (NULLPTR == forwarding && y != NULLPTR && configuration->client.probe.enabled) {
                     ppp::vector<ppp::string> entries;
                     entries.reserve(1 + configuration->client.servers.size());
                     entries.emplace_back(configuration->client.server);
@@ -825,7 +865,16 @@ namespace ppp {
                         return true;
                     }
                 }
-#endif
+                if (server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
+                    remoteEP      = server_url_.remoteEP;
+                    hostname      = server_url_.hostname;
+                    address       = server_url_.address;
+                    path          = server_url_.path;
+                    server        = server_url_.server;
+                    port          = server_url_.port;
+                    protocol_type = server_url_.protocol_type;
+                    return true;
+                }
                 if (NULLPTR != forwarding) {
                     ppp::string abs_url;
                     server = UriAuxiliary::Parse(client_server_string, hostname, address, path, port, protocol_type, &abs_url, *y, false);
@@ -1609,9 +1658,17 @@ namespace ppp {
                 // and drop the cached endpoint so the next connection attempt
                 // re-selects the best reachable candidate.
                 AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR != configuration && configuration->client.probe.enabled) {
-                    if (server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
-                        ppp::string entry = NormalizeProbeEntry(server_url_.address, server_url_.port);
+                if (NULLPTR != configuration) {
+                    if (configuration->client.probe.enabled &&
+                        server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
+                        // Backups carry a bare "host:port" entry in server_url_.server
+                        // (no scheme); the primary carries a full URL.  Use the
+                        // hostname for bare entries so the blacklist key matches the
+                        // probe cache key ("host:port" / "[ipv6]:port") even when
+                        // the entry is a hostname that resolved to a different IP.
+                        ppp::string entry = server_url_.server.find("://") == ppp::string::npos ?
+                            NormalizeProbeEntry(server_url_.hostname, server_url_.port) :
+                            NormalizeProbeEntry(server_url_.address, server_url_.port);
                         if (!entry.empty()) {
                             SynchronizedObjectScope scope(syncobj_);
                             auto it = probe_results_.find(entry);

@@ -1,11 +1,13 @@
 ﻿# 客户端隧道连通性测试设计文档（全隧道类型）
 
-> 状态：已实现（桌面端，除安卓）
+> 方案评估与 PPP 多入口拓展：[MULTI_ENTRY_PPP_CN.md](./MULTI_ENTRY_PPP_CN.md)
+
+> 状态：已实现（桌面端 + 安卓；安卓支持连接前选优与故障切换，5 秒后台刷新与页面展示仍为桌面端）
 > 目标版本：`ppp --mode=client`
 > 关联：[`MULTI_ENTRY_CN.md`](./MULTI_ENTRY_CN.md)（多入口 + tcping 优选）
 > 实现说明：[`CONNECTIVITY_TEST_IMPLEMENTATION_CN.md`](./CONNECTIVITY_TEST_IMPLEMENTATION_CN.md)
 > 实现范围（2026-08，用户改口后落地）：A1-A3 主隧道 + `client.servers` 多入口探测、缓存/TTL/惩罚、
-> SERVERS 页展示 RTT 与生效入口；B2 代理路径、C1/C2 静态 UDP、周期 TTL 重探、滞回优选暂未实现。
+> SERVERS 页展示 RTT 与生效入口、全配置每 5 秒后台刷新（未连接出口仅 L1）、滞回优选已实现；B2 代理路径、C1/C2 静态 UDP 暂未实现。
 
 ---
 
@@ -135,7 +137,7 @@ struct ConnectivityProbeResult {
 | 首次启动、接管前 | 主动探测全部入口/通道（此时无 TAP 接管，无自环风险） |
 | 重连（`ExchangeToReconnectingState`，`:1128`） | 解锁 + 失效缓存 + 重新探测选择 |
 | 正常 Established | 锁定，**零探测开销**（只在重连时参与） |
-| 周期刷新 | `OnUpdate(now)`（`VEthernetNetworkSwitcher.cpp:7106`，约 500ms tick）检查 TTL 过期 → spawn 后台重探 |
+| 周期刷新 | `OnTick(now)`（`VEthernetNetworkSwitcher.cpp`）每 5 秒对全部菜单出口 spawn 后台重探（`RefreshOutboundProbes`，Windows 先钉物理网卡 /32 路由防自环） |
 
 ### 3.4 绕过 VPN 自环（强制）
 
@@ -214,7 +216,7 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 
 ## 5. 配置设计
 
-新增 `client.probe`（可选；缺省/关闭 → 行为与现状完全一致）：
+新增 `client.probe`（可选；缺省即用内置默认值，功能为客户端内置、默认开启，`enabled` 可关闭）：
 
 ```json
 "client": {
@@ -233,7 +235,7 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `enabled` | bool | `false` | 关闭 = 纯故障切换（与现状一致，无任何探测） |
+| `enabled` | bool | `true` | 探测总开关；`false` 关闭连接前选优与 5 秒后台刷新（回退主入口） |
 | `timeout-ms` | int | `800` | 单入口/单通道探测超时，超时视为不可达 |
 | `ttl-seconds` | int | `30` | 探测结果有效期，过期后周期重探 |
 | `parallel` | bool | `true` | 并行探测全部；`false` 串行 |
@@ -242,7 +244,7 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 
 语义：
 
-- 缺省或 `enabled=false` → 不创建任何探测器，`GetRemoteEndPoint` 原逻辑不变，零回归风险。
+- 功能为客户端内置、默认开启（`client.probe.enabled` 可关闭）：每次首次连接 / 重连前对入口执行探测选优（Android 同样生效）；有转发代理（`server_proxy`）或 `enabled:false` 除外。
 - `stage` 允许用户在"只测 TCP（快但可能误判 TLS/WS 不可用）"与"测到 TLS/WS（准但慢）"间权衡；
   `MULTI_ENTRY` 的 tcping 只测 TCP 层正是 `stage=1` 的特例；`stage` 不开放 L4/L5（见 §8）。
 
@@ -252,8 +254,8 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 
 | 文件 | 改动 |
 |------|------|
-| `ppp/configurations/AppConfiguration.h` | `client` 新增 `struct { enabled; timeout_ms; ttl_seconds; parallel; stage; categories; } probe;` |
-| `ppp/configurations/AppConfiguration.cpp` | 默认 `enabled=false`、`timeout-ms=800`、`ttl-seconds=30`、`stage=3`；`Load` 解析 `client.probe` |
+| `ppp/configurations/AppConfiguration.h` | `client` 新增 `struct { enabled; timeout_ms; ttl_seconds; parallel; stage; categories; } probe;`（内置默认开启） |
+| `ppp/configurations/AppConfiguration.cpp` | 默认 `enabled=true`、`timeout-ms=800`、`ttl-seconds=30`、`parallel=true`、`stage=3`；`Load` 解析 `client.probe` |
 | `ppp/app/client/ConnectivityProbe.h/.cpp`（新增） | `ConnectivityProbeResult` / `ConnectivityProbeEntry`；探测器工厂 `Create(type)`；`ProbeAll()` 并发编排；缓存 / TTL / 滞回 / 惩罚 |
 | `ppp/app/client/VEthernetExchanger.cpp` | `GetRemoteEndPoint()`（:319）接入探测结果作为候选排序；`ExchangeToReconnectingState()`（:1128）失效缓存 + 解锁；`Loopback()`（:676）握手成功置锁 |
 | `ppp/app/client/VEthernetNetworkSwitcher.cpp` | `OnUpdate()`（:7106）周期检查 TTL 过期 → spawn 重探；`GetOutboundStatuses()`（:1333）显示当前生效入口 + 各级 RTT |
@@ -277,7 +279,7 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 5. **自环**：TAP 接管后触发探测，抓包确认探测 SYN 走物理网卡、不进隧道、无环路流量。
 6. **优选联动**：接 `MULTI_ENTRY` 验证——RTT 差异明显选最低；+20% 不切、+200% 切；
    假阳性入口被临时拉黑；TTL 过期后重探切次优。
-7. **回归**：`client.probe` 缺省或 `enabled=false` → 与现状逐字节一致，零探测开销、零自环。
+7. **回归**：探测为默认行为；探测全部失败时自动回落旧的主入口逻辑，确认不影响连接。
 
 ---
 
@@ -303,7 +305,7 @@ TAP 接管后，探测 socket 的 SYN/握手包若进隧道会自我循环。所
 - [ ] 探测 TLS 是否镜像真实连接的"不校验 CA"策略（推荐：镜像，避免假阴性）？
 - [x] 探测结果已上报 TUI SERVERS 页（`GetOutboundStatuses` + `main.cpp`）。
 - [ ] 是否需要英文版（`CONNECTIVITY_TEST.md`）？
-- [x] 已实现（桌面端），见顶部"实现范围"。
+- [x] 已实现（桌面端 + 安卓连接前选优），见顶部"实现范围"。
 
 
 

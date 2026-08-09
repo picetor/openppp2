@@ -1,5 +1,7 @@
 # 客户端 ws/wss 多入口设计文档（故障切换 + tcping 优选）
 
+> 评估与 PPP 多入口拓展：[MULTI_ENTRY_PPP_CN.md](./MULTI_ENTRY_PPP_CN.md)
+
 > 状态：设计稿（未实现）；2026-08 用户改口后已落地核心（`client.servers` + 探测优选，见 [`CONNECTIVITY_TEST_CN.md`](./CONNECTIVITY_TEST_CN.md)）
 > 目标版本：桌面端 `ppp --mode=client`
 > 关联代码：`ppp/app/client/VEthernetExchanger.*`、`ppp/configurations/AppConfiguration.*`、`ppp/app/client/VEthernetNetworkSwitcher.cpp`

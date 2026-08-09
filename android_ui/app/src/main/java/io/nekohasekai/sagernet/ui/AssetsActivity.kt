@@ -381,10 +381,27 @@ class AssetsActivity : ThemedActivity() {
             val browserDownloadUrl = assetToDownload.getString("browser_download_url")
                 ?: error("browser_download_url not found for $fileName")
 
-            downloadTo(browserDownloadUrl, file, versionFile, tagName)
+            try {
+                downloadTo(browserDownloadUrl, file, versionFile, tagName)
+            } catch (e: Exception) {
+                // Primary GitHub download failed (unstable tunnel, rate limit,
+                // ...): retry through the jsdelivr CDN mirror.
+                val fallback = jsdelivrFallback(browserDownloadUrl)
+                if (fallback == null) throw e
+                Logs.w("geo update primary source failed, trying jsdelivr CDN: ${e.readableMessage}")
+                downloadTo(fallback, file, null, null)
+            }
         } catch (e: Exception) {
-            Logs.w(e)
-            throw e
+            // GitHub API unreachable (no overseas route): fall back to the
+            // jsdelivr @release mirror, skipping the version comparison.
+            val fallback = jsdelivrReleaseMirror(repo, fileName)
+            Logs.w("geo update GitHub API failed, trying jsdelivr CDN: ${e.readableMessage}")
+            try {
+                downloadTo(fallback, file, null, null)
+            } catch (e2: Exception) {
+                e.addSuppressed(e2)
+                throw e
+            }
         }
     }
 
@@ -406,11 +423,19 @@ class AssetsActivity : ThemedActivity() {
         }
     }
 
-    /** Convert a GitHub releases/latest/download URL to its jsdelivr CDN mirror. */
+    /** Convert a GitHub release asset URL to its jsdelivr CDN mirror.
+     *  Accepts both .../releases/latest/download/<file> (custom URL) and
+     *  .../releases/download/<tag>/<file> (GitHub API browser_download_url). */
     private fun jsdelivrFallback(url: String): String? {
-        val m = Regex("https://github\\.com/([\\w.-]+/[\\w.-]+)/releases/latest/download/(.+)").find(url)
+        val m = Regex("https://github\\.com/([\\w.-]+/[\\w.-]+)/releases/(?:latest/)?download/(.+)").find(url)
             ?: return null
         return "https://cdn.jsdelivr.net/gh/${m.groupValues[1]}@release/${m.groupValues[2]}"
+    }
+
+    /** Direct jsdelivr @release mirror used when the GitHub API itself is
+     *  unreachable; skips the version comparison (no version file). */
+    private fun jsdelivrReleaseMirror(repo: String, fileName: String): String {
+        return "https://cdn.jsdelivr.net/gh/$repo@release/$fileName"
     }
 
     /** Restore a bundled IP rule file (ip.txt / ipv6.txt / dns-rules.txt)

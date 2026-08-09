@@ -1,7 +1,5 @@
 ﻿#include <ppp/app/client/ConnectivityProbe.h>
 
-#if !defined(_ANDROID)
-
 #include <ppp/coroutines/asio/asio.h>
 #include <ppp/diagnostics/Stopwatch.h>
 #include <ppp/ssl/SSL.h>
@@ -352,21 +350,3 @@ namespace ppp {
         }
     }
 }
-
-#else
-
-namespace ppp {
-    namespace app {
-        namespace client {
-            typedef ppp::coroutines::YieldContext                                       YieldContext;
-            typedef ppp::net::IPEndPoint                                                IPEndPoint;
-
-            bool ConnectivityProbe::ProbeTcp(const TCPEndPoint&, int, YieldContext&, int&, const ProtectSocketHandler&) noexcept { return false; }
-            bool ConnectivityProbe::ProbeWebSocket(const TCPEndPoint&, const ppp::string&, const ppp::string&, int, YieldContext&, int&, const ProtectSocketHandler&) noexcept { return false; }
-            bool ConnectivityProbe::ProbeWebSocketSSL(const TCPEndPoint&, const ppp::string&, const ppp::string&, const ppp::string&, int, YieldContext&, int&, const ProtectSocketHandler&) noexcept { return false; }
-            bool ConnectivityProbe::ProbeUdp(const UDPEndPoint&, int, YieldContext&, int&, const ProtectSocketHandler&) noexcept { return false; }
-        }
-    }
-}
-
-#endif

@@ -106,9 +106,10 @@ class OpenPPP2Instance(
 
     private fun buildVpnOptionsJson(): String {
         val options = JSONObject()
-        options.put("tunIp", "10.0.0.2")
-        options.put("tunMask", "255.255.255.0")
-        options.put("tunPrefix", 24)
+        val tunPrefix = DataStore.tunPrefix.coerceIn(16, 30)
+        options.put("tunIp", DataStore.tunIp)
+        options.put("tunMask", tunMaskFor(tunPrefix))
+        options.put("tunPrefix", tunPrefix)
         options.put("route", "0.0.0.0")
         options.put("routePrefix", 0)
         options.put("dns1", DataStore.tunnelDns1)
@@ -149,5 +150,15 @@ class OpenPPP2Instance(
         options.put("geoRules", geoRules)
 
         return options.toString()
+    }
+
+    /** Convert a subnet prefix (16-30) to a dotted IPv4 netmask. */
+    private fun tunMaskFor(prefix: Int): String {
+        val p = prefix.coerceIn(0, 32)
+        val mask = if (p == 0) 0L else (0xFFFFFFFFL shl (32 - p)) and 0xFFFFFFFFL
+        return "%d.%d.%d.%d".format(
+            (mask shr 24) and 0xFF, (mask shr 16) and 0xFF,
+            (mask shr 8) and 0xFF, mask and 0xFF
+        )
     }
 }

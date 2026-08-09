@@ -218,6 +218,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     ppp::android::InitializeProtectBridge(vm, env);
     ppp::android::InitializeTelemetryBridge(vm, env);
     libopenppp2_cache_runtime_snapshot_method(vm, env);
+
+    // Real-time mode (--rt) defaults to yes in the upstream CLI.  The Android
+    // bridge does not parse CLI arguments, so enable it here to match.
+    ppp::RT = true;
     return JNI_VERSION_1_6;
 }
 

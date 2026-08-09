@@ -1036,7 +1036,7 @@ namespace ppp
         return resultQuotient;
     }
 
-#else   // !defined(_PPP_INT128) ¨C use compiler's built-in __int128_t
+#else   // !defined(_PPP_INT128) -- use compiler's built-in __int128_t
     typedef __int128_t Int128;
 #endif
 

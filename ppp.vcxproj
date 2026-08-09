@@ -192,7 +192,9 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <Profile>true</Profile>
+      <Profile>false</Profile>
+      <OptimizeReferences>false</OptimizeReferences>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
       <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>

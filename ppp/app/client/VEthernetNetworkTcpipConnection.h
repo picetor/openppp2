@@ -158,7 +158,7 @@ namespace ppp {
                                     break;
                                 }
 
-                                if (ppp::threading::Executors::GetTickCount() >= deadline) {
+                                if (static_cast<uint64_t>(ppp::threading::Executors::GetTickCount()) >= static_cast<uint64_t>(deadline)) {
                                     LOG_DEBUG("VEthernetNetworkTcpipConnection::Mux: wait established timeout, state=%d, host=%s, port=%d",
                                         (int)network_state, host.data(), port);
                                     return 1;

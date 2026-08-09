@@ -17,7 +17,7 @@ namespace ppp {
              * session on the peer (ghost sessions).  All probing I/O runs on
              * the caller's io_context and honours a per-entry timeout.
              *
-             * Not available on Android (feature is desktop-only).
+             * Available on desktop, Android and iOS.
              */
             class ConnectivityProbe final {
             public:

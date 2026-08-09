@@ -49,6 +49,14 @@ import org.json.JSONObject
 import supersocksr.ppp.android.c.libopenppp2
 import android.net.VpnService as BaseVpnService
 
+/** Private/LAN CIDRs backing the "bypass private addresses" rule card.
+ *  Concrete CIDRs keep the rule independent of GeoIP.dat categories
+ *  (the stock v2fly geoip.dat has no "private" entry). */
+private val PRIVATE_LAN_CIDRS = listOf(
+    "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+)
+
 @SuppressLint("VpnServicePolicy")
 class VpnService : BaseVpnService(),
     BaseService.Interface {
@@ -934,13 +942,11 @@ class VpnService : BaseVpnService(),
                 val enabledRules = allRules.filter { it.enabled }
                 if (allRules.isEmpty()) {
                     // No rules at all in the database — first launch fallback:
-                    // private ranges + the configured country.
-                    appendLine("  - ip-cidr,10.0.0.0/8,direct")
-                    appendLine("  - ip-cidr,100.64.0.0/10,direct")
-                    appendLine("  - ip-cidr,127.0.0.0/8,direct")
-                    appendLine("  - ip-cidr,169.254.0.0/16,direct")
-                    appendLine("  - ip-cidr,172.16.0.0/12,direct")
-                    appendLine("  - ip-cidr,192.168.0.0/16,direct")
+                    // private ranges (gated by the global LAN bypass switch)
+                    // + the configured country.
+                    if (DataStore.bypassLan) {
+                        for (cidr in PRIVATE_LAN_CIDRS) appendLine("  - ip-cidr,$cidr,direct")
+                    }
                     appendLine("  - domain-suffix,$country,direct")
                     appendLine("  - geosite,$country,direct")
                     appendLine("  - geoip,$country,direct")
@@ -958,6 +964,15 @@ class VpnService : BaseVpnService(),
                         for (raw in rule.ip.split('\n')) {
                             val i = raw.trim()
                             if (i.isEmpty()) continue
+                            // "geoip:private" has no entry in the stock v2fly
+                            // GeoIP.dat and would fail the whole geo rule load;
+                            // expand it to concrete private CIDRs instead.
+                            if (i == "geoip:private") {
+                                if (DataStore.bypassLan) {
+                                    for (cidr in PRIVATE_LAN_CIDRS) appendLine("  - ip-cidr,$cidr,$action")
+                                }
+                                continue
+                            }
                             appendLine("  - ${toGeoRule(i)},$action")
                         }
                     }

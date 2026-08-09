@@ -102,9 +102,9 @@ namespace ppp {
                     bool                                                            active = false;
                     bool                                                            server_menu = false;
                     bool                                                            route_used = false;
-                    bool                                                            probe_enabled = false;
                     bool                                                            probe_checked = false;
                     bool                                                            probe_reachable = false;
+                    bool                                                            probe_enabled  = true;
                     int                                                             probe_rtt_ms = -1;
                     ppp::string                                                     probe_server;
                 };
@@ -372,6 +372,10 @@ namespace ppp {
 #endif
 #endif
                 bool                                                                ApplyGeoStaticRoutes() noexcept;
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                bool                                                                RefreshOutboundProbes(ppp::coroutines::YieldContext& y) noexcept;
+                void                                                                OnTickRefreshOutboundProbes(uint64_t now) noexcept;
+#endif
                 bool                                                                RefreshDirectDnsServers() noexcept;
                 bool                                                                SelectDirectDnsServer(const ppp::string& host, boost::asio::ip::address& server) noexcept;
                 void                                                                ObserveGeoDnsResponse(const void* packet, int packet_size) noexcept;
@@ -412,6 +416,19 @@ namespace ppp {
                     uint64_t                                                        expires_at = 0;
                 };
                 ppp::unordered_map<ppp::string, OutboundAffinity>                  outbound_affinities_;
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                struct OutboundProbeStatus final {
+                    bool                                                            checked       = false;
+                    bool                                                            reachable     = false;
+                    int                                                             rtt_ms        = -1;
+                    ppp::string                                                     server;        ///< Best reachable entry ("host:port"); empty when none is reachable.
+                    uint64_t                                                        updated_at    = 0;
+                };
+                typedef ppp::unordered_map<ppp::string, OutboundProbeStatus>        OutboundProbeStatusTable;
+                OutboundProbeStatusTable                                            outbound_probe_statuses_;
+                std::atomic<uint64_t>                                               next_outbound_probe_refresh_ = 0;
+                std::atomic<bool>                                                   outbound_probe_refreshing_ = false;
+#endif
                 std::shared_ptr<ppp::configurations::AppConfiguration>              configuration_;
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               qos_;
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        statistics_;

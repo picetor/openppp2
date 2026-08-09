@@ -132,6 +132,19 @@ jobs:
           test -s ../bin/android/arm64-v8a/libopenppp2.so
           test -s ../bin/android/x86_64/libopenppp2.so
 
+      - name: Verify probe symbols in native libraries
+        shell: bash
+        run: |
+          NM="${ANDROID_SDK_ROOT}/ndk/${{ env.ANDROID_NDK_R20B }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          for lib in bin/android/arm64-v8a/libopenppp2.so bin/android/x86_64/libopenppp2.so; do
+            test -s "${lib}"
+            if ! "${NM}" --defined-only "${lib}" | grep -q "ConnectivityProbe"; then
+              echo "ERROR: probe symbols missing from ${lib}" >&2
+              exit 1
+            fi
+          done
+          echo "Probe symbols verified in native libraries"
+
       - name: Copy native libraries into Android app
         shell: bash
         working-directory: android_ui

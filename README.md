@@ -28,6 +28,7 @@
   - [服务器端 IPv6 模式](#-服务器端-ipv6-模式)
   - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
 - [WSS 优选 IP 加速](#-wss-优选-ip-加速)
+- [客户端多入口 + 连通性检测（自动优选）](#-客户端多入口--连通性检测自动优选)
 - [SOCKS5 代理](#-socks5-代理)
 - [改进与修复](#-改进与修复)
 - [CLI 参数对比](#-cli-参数对比)
@@ -323,6 +324,85 @@ IPv6 DNS 不使用客户端的 `--dns=` 参数，而是在服务端 `appsettings
 | `websocket.sni` | TLS SNI 字段，设为真实域名 |
 
 `host` 和 `sni` 同时支持 WS (`ws://`) 和 WSS (`wss://`) 隧道。留空时行为与原版完全一致。
+
+### 🌐 客户端多入口 + 连通性检测（自动优选）
+
+客户端内置入口连通性检测与多入口自动优选（默认开启，`client.probe.enabled` 开关可关闭），桌面端与安卓通用（安卓不做 5 秒后台刷新与页面延迟显示）；
+ppp / ws / wss 隧道通用。
+
+#### 配置
+
+```json
+{
+    "client": {
+        "server":  "wss://104.16.1.1:443/tun",
+        "servers": [
+            "104.16.2.2:443",
+            "[2400:cb00:2049:1::c629:d7a2]:443",
+            "backup.example.com:443"
+        ],
+        "websocket": {
+            "host": "your-domain.com",
+            "sni":  "your-domain.com"
+        },
+        "probe": {
+            "enabled":     true,
+            "timeout-ms":  800,
+            "ttl-seconds": 30,
+            "parallel":    true,
+            "stage":       3,
+            "categories":  ["tcp", "ws", "wss"]
+        }
+    }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `client.servers` | 备用入口数组：`IP:port` / `[IPv6]:port` / `host:port`（域名，探测前自动解析）；继承主入口的 scheme、path 与 `websocket.host/sni` |
+| `probe.enabled` | 探测总开关（默认 `true`）：`false` 关闭探测选优与 5 秒后台刷新，回退主入口逻辑（多入口不参与选优） |
+| `probe.timeout-ms` | 单入口探测超时（毫秒，下限 50） |
+| `probe.ttl-seconds` | 探测结果有效期（秒，下限 1）；有效期内连接选优命中缓存免探 |
+| `probe.parallel` | 并行探测全部待测入口；`false` 为串行 |
+| `probe.stage` | 探测深度：`1` = 仅 TCP connect；`3` = TLS/WebSocket Upgrade（上限，不做 L4/L5） |
+| `probe.categories` | 只探测列出的类别（`tcp`/`ws`/`wss`）；空 = 全部 |
+
+#### 行为
+
+- **连接前探测选优**：首次连接 / 断线重连前对 `[server] + servers` 全部入口探测，选择 RTT 最低且可达的入口；
+  有 `server_proxy`（上游 HTTP/SOCKS 代理）或 `probe.enabled:false` 时不探测。
+- **滞回防抖**：当前入口 RTT 在最优值 130% 以内时保持当前入口，网络抖动不来回横跳。
+- **故障切换**：入口连接/握手失败会被临时拉黑，重连自动换下一个可达入口；全部不可达时回落主入口逻辑。
+- **每 5 秒后台刷新**：所有菜单出口持续探测（未建立连接的出口只做 L1 TCP 探测，降低服务器 TLS 开销），
+  SERVERS 页显示各出口 `(RTTms)` / `(unreachable)`，生效入口与配置不同时显示 ` -> 生效入口`；`probe.enabled:false` 时显示 `(probe off)`。
+- **防自环**：Windows 探测前将候选路由 pin 到物理网卡（/32、/128），Linux 用 socket protect，探测流量不进 TUN。
+- 探测结果仅存内存（不写回配置、不增删入口），重启后重新探测。
+
+#### 示例：ppp 多入口（v4 / v6 / 域名混用）
+
+```json
+{
+    "client": {
+        "server":  "ppp://23.249.25.106:20000",
+        "servers": [
+            "95.181.190.118:20000",
+            "[2400:c620:2e:8dfe:0000:0000:0000:0001]:40675",
+            "kt-nat3.aursys.cfd:10005"
+        ],
+        "probe": {
+            "enabled":     true,
+            "timeout-ms":  800,
+            "ttl-seconds": 30,
+            "parallel":    true,
+            "stage":       1,
+            "categories":  ["tcp"]
+        }
+    }
+}
+```
+
+> IPv6 地址建议一律带方括号（`[2400::1]:port`）；带端口时无括号也能解析（兼容旧配置），
+> 但无端口或压缩格式存在歧义。ppp 入口探测天然为 TCP-only，`stage:1` 最省探测开销。
 
 ---
 

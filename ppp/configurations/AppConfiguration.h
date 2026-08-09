@@ -254,7 +254,7 @@ namespace ppp {
                 }                                                           websocket;      ///< WebSocket Host/SNI override for CDN-optimized routing.
                 ppp::string                                                 log;            ///< Client-side event log file path; empty disables client logging.
                 struct {
-                    bool                                                    enabled         = false;        ///< Master switch; false = pure failover (no probing), identical to legacy behavior.
+                    bool                                                    enabled         = true;         ///< Master switch; false = no probing, legacy single-entry behavior.
                     int                                                     timeout_ms      = 800;          ///< Per-entry probe timeout in milliseconds.
                     int                                                     ttl_seconds     = 30;           ///< Probe result validity in seconds before a background refresh.
                     bool                                                    parallel        = true;         ///< Probe all entries concurrently; false probes serially.

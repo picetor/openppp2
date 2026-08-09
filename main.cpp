@@ -1722,8 +1722,12 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                 };
                 auto probe_suffix = [](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
                 {
+                    if (!outbound.probe_enabled)
+                    {
+                        return ppp::string("  (probe off)");
+                    }
                     ppp::string suffix;
-                    if (outbound.probe_enabled && outbound.probe_checked)
+                    if (outbound.probe_checked)
                     {
                         if (outbound.probe_reachable && outbound.probe_rtt_ms >= 0)
                         {

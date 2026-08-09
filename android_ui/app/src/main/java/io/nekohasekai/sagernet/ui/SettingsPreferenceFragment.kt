@@ -243,6 +243,11 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         findPreference<EditTextPreference>(Key.DNS2)!!.onPreferenceChangeListener = reloadListener
 
         // openppp2 tunnel parameters
+        findPreference<EditTextPreference>(Key.TUN_IP)!!.onPreferenceChangeListener = reloadListener
+        findPreference<EditTextPreference>(Key.TUN_PREFIX)!!.apply {
+            setOnBindEditTextListener(EditTextPreferenceModifiers.Number)
+            onPreferenceChangeListener = reloadListener
+        }
         findPreference<ListPreference>(Key.TUN_MUX)!!.onPreferenceChangeListener = reloadListener
         findPreference<EditTextPreference>(Key.TUN_MUX_ACCELERATION)!!.onPreferenceChangeListener = reloadListener
         findPreference<EditTextPreference>(Key.EXTRA_ARGS)!!.apply {
@@ -353,17 +358,11 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             httpProxyException.onPreferenceChangeListener = reloadListener
         }
 
-        findPreference<EditTextPreference>(Key.PPROF_SERVER)!!.apply {
-            isVisible = DataStore.enableDebug
-            onPreferenceChangeListener = reloadListener
-        }
-
         findPreference<EditTextPreference>(Key.EXPERIMENTAL_FLAGS)!!.isVisible = DataStore.enableDebug
 
         // misc settings
         findPreference<SwitchPreference>(Key.SHOW_GROUP_NAME)!!.onPreferenceChangeListener = reloadListener
         findPreference<SwitchPreference>(Key.ACQUIRE_WAKE_LOCK)!!.onPreferenceChangeListener = reloadListener
-        findPreference<EditTextPreference>(Key.STUN_SERVERS)!!.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
         findPreference<ListPreference>(Key.FAB_STYLE)!!.setOnPreferenceChangeListener { _, _ ->
             requireActivity().apply {
                 this.finish()

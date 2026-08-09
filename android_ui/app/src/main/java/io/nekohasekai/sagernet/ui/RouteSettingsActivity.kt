@@ -37,7 +37,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
-import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceDataStore
 import androidx.preference.PreferenceFragmentCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -55,7 +54,6 @@ import io.nekohasekai.sagernet.ktx.onMainDispatcher
 import io.nekohasekai.sagernet.ktx.runOnDefaultDispatcher
 import io.nekohasekai.sagernet.ktx.runOnMainDispatcher
 import io.nekohasekai.sagernet.utils.PackageCache
-import io.nekohasekai.sagernet.widget.AppListPreference
 
 @Suppress("UNCHECKED_CAST")
 class RouteSettingsActivity(
@@ -175,26 +173,9 @@ class RouteSettingsActivity(
         }
     }
 
-    val selectAppList = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { (_, _) ->
-        apps.postUpdate()
-    }
-
     lateinit var outbound: ListPreference
-    lateinit var apps: AppListPreference
-    lateinit var customPackageNames: EditTextPreference
-    lateinit var networkType: MultiSelectListPreference
-    lateinit var ssid: EditTextPreference
-
     fun PreferenceFragmentCompat.viewCreated(view: View, savedInstanceState: Bundle?) {
-        findPreference<EditTextPreference>(Key.ROUTE_SOURCE_PORT)!!.dialogMessage = getString(R.string.format, "53,443,1000-2000")
-        findPreference<EditTextPreference>(Key.ROUTE_PORT)!!.dialogMessage = getString(R.string.format, "53,443,1000-2000")
         outbound = findPreference(Key.ROUTE_OUTBOUND)!!
-        apps = findPreference(Key.ROUTE_PACKAGES)!!
-        customPackageNames = findPreference(Key.ROUTE_CUSTOM_PACKAGE_NAME_OR_UID)!!
-        networkType = findPreference(Key.ROUTE_NETWORK_TYPE)!!
-        ssid = findPreference(Key.ROUTE_SSID)!!
 
         // Multi-line entry fields: keep one-entry-per-line formatting in the
         // dialog instead of collapsing everything to a single row.
@@ -202,19 +183,6 @@ class RouteSettingsActivity(
             .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
         findPreference<EditTextPreference>(Key.ROUTE_IP)!!
             .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
-        findPreference<EditTextPreference>(Key.ROUTE_SOURCE)!!
-            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
-        findPreference<EditTextPreference>(Key.ROUTE_PROTOCOL)!!
-            .setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
-        customPackageNames.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
-        ssid.setOnBindEditTextListener(EditTextPreferenceModifiers.Multiline)
-
-        apps.isEnabled = customPackageNames.text.isNullOrEmpty()
-        customPackageNames.setOnPreferenceChangeListener { _, newValue ->
-            apps.isEnabled = (newValue as String).isEmpty()
-            true
-        }
-
         val outboundEntries = resources.getStringArray(R.array.outbound_entry)
         if (DataStore.routeOutbound == 3) {
             // https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-s2-release/core/java/android/preference/ListPreference.java#167
@@ -236,61 +204,6 @@ class RouteSettingsActivity(
                     true
                 }
             }
-        }
-
-        apps.setOnPreferenceClickListener {
-            selectAppList.launch(
-                Intent(
-                    this@RouteSettingsActivity, AppListActivity::class.java
-                )
-            )
-            true
-        }
-
-        fun updateNetwork(newValues: Set<String> = networkType.values) {
-            networkType.summary = if (newValues.isEmpty()) {
-                getString(androidx.preference.R.string.not_set)
-            } else {
-                val types = mutableListOf<String>()
-                if (newValues.contains("data")) types.add(getString(R.string.network_data))
-                if (newValues.contains("wifi")) types.add(getString(R.string.network_wifi))
-                if (newValues.contains("bluetooth")) types.add(getString(R.string.network_bt))
-                if (newValues.contains("ethernet")) types.add(getString(R.string.network_eth))
-                if (newValues.contains("usb")) types.add(getString(R.string.network_usb))
-                if (newValues.contains("satellite")) types.add(getString(R.string.network_satellite))
-                types.joinToString("\n")
-            }
-            ssid.isVisible = newValues.contains("wifi")
-        }
-
-        updateNetwork()
-
-        networkType.setOnPreferenceChangeListener { _, newValues ->
-            newValues as Set<String>
-            when {
-                newValues.contains("usb") -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-                    runOnMainDispatcher {
-                        MaterialAlertDialogBuilder(this@RouteSettingsActivity)
-                            .setMessage(getString(R.string.network_invalid, "12"))
-                            .setPositiveButton(android.R.string.ok, null)
-                            .show()
-                    }
-                }
-                newValues.contains("satellite") -> {
-                    if (Build.VERSION.SDK_INT == Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-                        SdkExtensions.getExtensionVersion(Build.VERSION_CODES.UPSIDE_DOWN_CAKE) < 12 ||
-                        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                        runOnMainDispatcher {
-                            MaterialAlertDialogBuilder(this@RouteSettingsActivity)
-                                .setMessage(getString(R.string.network_invalid, "15"))
-                                .setPositiveButton(android.R.string.ok, null)
-                                .show()
-                        }
-                    }
-                }
-            }
-            updateNetwork(newValues)
-            true
         }
     }
 

@@ -131,3 +131,8 @@ MISSING*
 # PI-related local workspace files
 .pi-web/
 *.pi
+
+# Temporary analysis and dump artifacts
+.tmp/
+*.tmp
+*.dmp

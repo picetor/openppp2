@@ -1,4 +1,4 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 3.0.0) 
+CMAKE_MINIMUM_REQUIRED(VERSION 3.12.0) 
 
 # Define the solutions name.
 SET(NAME ppp)
@@ -107,7 +107,7 @@ IF(__SIMD__)
     ENDIF()
 
     # AES is enabled, the source code of AES/128/256/CFB related to the library needs to be compiled.
-    FILE(GLOB_RECURSE AES_NI_SOURCE_FILES 
+    FILE(GLOB_RECURSE AES_NI_SOURCE_FILES CONFIGURE_DEPENDS 
         ${PROJECT_SOURCE_DIR}/common/aesni/impl/*.c 
         ${PROJECT_SOURCE_DIR}/common/aesni/impl/*.cpp)
 ENDIF()
@@ -194,17 +194,17 @@ LINK_DIRECTORIES(
 
 # Set the compiled source file search directorys.
 IF(PLATFORM_SYSTEM_DARWIN)
-    FILE(GLOB_RECURSE PLATFORM_SOURCE_FILES 
+    FILE(GLOB_RECURSE PLATFORM_SOURCE_FILES CONFIGURE_DEPENDS 
         ${PROJECT_SOURCE_DIR}/darwin/*.c 
         ${PROJECT_SOURCE_DIR}/darwin/*.cpp)
 ELSE()
-    FILE(GLOB_RECURSE PLATFORM_SOURCE_FILES 
+    FILE(GLOB_RECURSE PLATFORM_SOURCE_FILES CONFIGURE_DEPENDS 
         ${PROJECT_SOURCE_DIR}/linux/*.c 
         ${PROJECT_SOURCE_DIR}/linux/*.cpp)
 ENDIF()
 
 # List of common cpp source files compilations for ppp/unix cmake solution projects.
-FILE(GLOB_RECURSE SOURCE_FILES 
+FILE(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS 
     ${PROJECT_SOURCE_DIR}/common/lwip/my/*.c 
     ${PROJECT_SOURCE_DIR}/common/lwip/core/*.c 
     ${PROJECT_SOURCE_DIR}/common/lwip/api/*.c 

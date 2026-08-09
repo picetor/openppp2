@@ -362,7 +362,7 @@ namespace ppp {
             config.client.server = "";
             config.client.servers.clear();
             config.client.server_proxy = "";
-            config.client.probe.enabled = false;
+            config.client.probe.enabled = true;
             config.client.probe.timeout_ms = 800;
             config.client.probe.ttl_seconds = 30;
             config.client.probe.parallel = true;
@@ -1545,7 +1545,7 @@ namespace ppp {
             {
                 const Json::Value& probe_json = json["client"]["probe"];
                 if (probe_json.isObject()) {
-                    config.client.probe.enabled = JsonAuxiliary::AsValue<bool>(probe_json["enabled"]);
+                    AssignBoolIfPresent(config.client.probe.enabled, probe_json["enabled"]);
                     config.client.probe.timeout_ms = std::max<int>(50, JsonAuxiliary::AsValue<int>(probe_json["timeout-ms"]));
                     config.client.probe.ttl_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["ttl-seconds"]));
                     config.client.probe.parallel = JsonAuxiliary::AsValue<bool>(probe_json["parallel"]);
