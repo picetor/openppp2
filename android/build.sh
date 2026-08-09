@@ -33,6 +33,30 @@ PPP_build() {
         -DANDROID_STL=c++_static \
         $OTHER_ARGS
     make -j $(lscpu | grep "^CPU(s):" | awk '{print $2}')
+
+    # Release builds strip .symtab from the final .so, so verify the probe
+    # implementation in the intermediate object file instead (object files
+    # always keep .symtab).  This guards against FILE(GLOB_RECURSE) silently
+    # missing newly added sources.
+    NM_TOOL=""
+    if [ -x "${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" ]; then
+        NM_TOOL="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+    elif command -v llvm-nm >/dev/null 2>&1; then
+        NM_TOOL="llvm-nm"
+    fi
+    if [ -n "${NM_TOOL}" ]; then
+        PROBE_OBJ=$(find . -name "ConnectivityProbe.cpp.o" | head -n 1)
+        if [ -z "${PROBE_OBJ}" ]; then
+            echo "ERROR: ConnectivityProbe.cpp.o not found in build outputs" >&2
+            exit 1
+        fi
+        if ! "${NM_TOOL}" --defined-only "${PROBE_OBJ}" | grep -q "ConnectivityProbe"; then
+            echo "ERROR: probe symbols missing from ${PROBE_OBJ}" >&2
+            exit 1
+        fi
+    else
+        echo "WARNING: llvm-nm not found, skipping probe symbol verification" >&2
+    fi
     cd ..
     rm -rf build/
 }
