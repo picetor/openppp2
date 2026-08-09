@@ -20,7 +20,6 @@
 import com.android.build.api.dsl.ApplicationExtension
 import com.android.build.api.dsl.CommonExtension
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension
-import com.android.build.api.variant.FilterConfiguration
 import com.android.build.api.variant.impl.VariantOutputImpl
 import org.apache.tools.ant.filters.StringInputStream
 import org.gradle.api.JavaVersion
@@ -135,14 +134,7 @@ fun Project.setupAppCommon(projectName: String = "") {
         bundle.language.enableSplit = false
         @Suppress("UnstableApiUsage")
         bundle.abi.enableSplit = false
-        if (gradle.startParameter.taskNames.isNotEmpty() && gradle.startParameter.taskNames.any { it.lowercase().contains("assemble") }) {
-            splits.abi.apply {
-                isEnable = true
-                isUniversalApk = false
-                reset()
-                include("x86", "x86_64", "armeabi-v7a", "arm64-v8a")
-            }
-        }
+
     }
     val cleanTask = tasks.register("cleanAboutLibrariesGenerated") {
         delete(layout.buildDirectory.dir("generated/aboutLibraries"))
@@ -220,12 +212,7 @@ fun Project.setupApp() {
     androidComponents.apply {
         onVariants { variant ->
             variant.outputs.forEach { output ->
-                when (output.filters.find { it.filterType == FilterConfiguration.FilterType.ABI }?.identifier) {
-                    "arm64-v8a" -> output.versionCode.set(verCode + 4)
-                    "x86_64" -> output.versionCode.set(verCode + 3)
-                    "armeabi-v7a" -> output.versionCode.set(verCode + 2)
-                    "x86" -> output.versionCode.set(verCode + 1)
-                }
+
                 (output as? VariantOutputImpl)?.let { variantOutputImpl ->
                     val versionName = variantOutputImpl.versionName.orNull.orEmpty()
                     variantOutputImpl.outputFileName.set(variantOutputImpl.outputFileName.get()

@@ -183,25 +183,28 @@ jobs:
       - name: Upload debug APKs
         uses: actions/upload-artifact@v4
         with:
-          name: openppp2-android-debug-apks-${{ github.sha }}
+          name: openppp2-android-debug-apk
           path: android_ui/app/build/outputs/apk/oss/debug/*.apk
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
       - name: Upload release APKs
         uses: actions/upload-artifact@v4
         with:
-          name: openppp2-android-release-apks-${{ github.sha }}
+          name: openppp2-android-release-apk
           path: android_ui/app/build/outputs/apk/oss/release/*.apk
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
       - name: Upload native Android libraries
         uses: actions/upload-artifact@v4
         with:
-          name: openppp2-android-libs-${{ github.sha }}
+          name: openppp2-android-libs
           path: |
             bin/android/arm64-v8a/libopenppp2.so
             bin/android/x86_64/libopenppp2.so
           if-no-files-found: error
+          overwrite: true
           retention-days: 14

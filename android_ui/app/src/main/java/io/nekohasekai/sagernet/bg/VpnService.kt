@@ -121,6 +121,7 @@ class VpnService : BaseVpnService(),
         activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
         activeGatewayLoopback = null
         stopLinkStatePoller()
+        LogCollector.stop()
         vpnThread?.interrupt()
         vpnThread = null
         try {
@@ -587,6 +588,7 @@ class VpnService : BaseVpnService(),
         // boost::asio deep handler chains.
         isRunning = true
         startLinkStatePoller()
+        LogCollector.start(this)
         vpnThread = Thread(null, Runnable {
             try {
                 Log.i(TAG, "vpnThread started, calling run(0)")

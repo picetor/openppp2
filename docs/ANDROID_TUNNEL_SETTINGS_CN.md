@@ -96,3 +96,21 @@ VpnService.startVpn()                           android_ui/.../bg/VpnService.kt:
 - **重启生效**：隧道参数修改后需重建 VPN（现有 reloadListener 机制即可，服务重启自动重建）。
 - **IPv6**：目前固定 `IPV6_BLOCK_ADDRESS`（泄漏阻断 ULA），P0 不做 IPv6 地址自定义；如需再评估 `tun-ip6` 参数。
 - **文档同步**：P0/P1 每完成一批，更新本表与 README 安卓说明。
+
+## 5. 后台静默日志采集（✅ 已实现）
+
+目的：断流/卡顿发生时无需一直开着日志页，也能拿到 VPN 运行期间的完整日志。
+
+| 项 | 说明 |
+|---|---|
+| 触发 | VPN 前台服务启动即采集（`VpnService.startVpn` 中 `LogCollector.start`），停止时关闭（`killProcesses` 中 `LogCollector.stop`），静默运行 |
+| 采集范围 | 本 app 进程日志：原生 `ppp`、`Exclave`、`VpnService`、`AndroidRuntime`、`ProxyInstance` 等 tag（与日志页过滤器一致）；非 root 读不到系统/其他 app 日志 |
+| 落盘 | `filesDir/logs/ppp-<时间戳>.log`，`logcat -v threadtime` 格式，UTF-8，**逐行 flush**（崩溃/杀进程不丢已采日志） |
+| 滚动 | 单文件 5MB 自动换新文件，最多保留 3 个，最旧自动删除 |
+| 导出 | 日志页「发送日志」：报告先附后台采集文件尾部（最近 512KB），再附当前 `logcat -d` |
+| 崩溃保留 | `CrashHandler` 崩溃报告自动附带采集文件内容；即使 logcat 环形缓冲被清空（`logcat -c` / 系统回收），文件历史仍在 |
+| 跨进程 | 采集由 `:bg` 进程（VpnService）写入，主进程崩溃时 `LogCollector.snapshot()` 按文件名读取，不依赖内存状态 |
+
+注意：
+- 手动「清空日志」（`logcat -c`）只清系统环形缓冲，不影响采集文件。
+- 采集文件在应用私有目录：卸载或「清除数据」会删除；崩溃报告与导出经 FileProvider 分享出去。

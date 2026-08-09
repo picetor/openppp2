@@ -25,6 +25,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import com.jakewharton.processphoenix.ProcessPhoenix
 import io.nekohasekai.sagernet.BuildConfig
+import io.nekohasekai.sagernet.bg.LogCollector
 import io.nekohasekai.sagernet.database.preference.PublicDatabase
 import io.nekohasekai.sagernet.ktx.Logs
 import io.nekohasekai.sagernet.ktx.app
@@ -52,6 +53,9 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
         report += "Thread: $thread\n\n"
 
         report += formatThrowable(throwable) + "\n\n"
+
+        report += "Collected background log (filesDir/logs, kept across crashes):\n\n"
+        report += LogCollector.snapshot(app) + "\n\n"
 
         report += "Logcat: \n\n"
 
