@@ -1,28 +1,6 @@
-name: Android APK Debug & Release
+name: Android
 
 on:
-  push:
-    branches:
-      - inet6
-    paths:
-      - ".github/workflows/android-debug.yml"
-      - "android/**"
-      - "android_ui/**"
-      - "common/**"
-      - "ppp/**"
-      - "linux/**"
-      - "CMakeLists.txt"
-  pull_request:
-    branches:
-      - inet6
-    paths:
-      - ".github/workflows/android-debug.yml"
-      - "android/**"
-      - "android_ui/**"
-      - "common/**"
-      - "ppp/**"
-      - "linux/**"
-      - "CMakeLists.txt"
   workflow_dispatch:
 
 permissions:
