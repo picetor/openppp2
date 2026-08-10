@@ -32,6 +32,7 @@ import io.nekohasekai.sagernet.R
 import io.nekohasekai.sagernet.SagerNet
 import io.nekohasekai.sagernet.databinding.LayoutLogcatBinding
 import io.nekohasekai.sagernet.ktx.*
+import io.nekohasekai.sagernet.bg.LogCollector
 import io.nekohasekai.sagernet.utils.ColorUtils
 import io.nekohasekai.sagernet.utils.CrashHandler
 import java.io.BufferedReader
@@ -147,6 +148,10 @@ class LogcatFragment : ToolbarFragment(R.layout.layout_logcat),
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.action_log_files -> {
+                (activity as? MainActivity)?.displayFragment(LogFilesFragment())
+                true
+            }
             R.id.action_clear_logcat -> {
                 runOnIoDispatcher {
                     val command = listOf("logcat", "-c")
@@ -166,6 +171,11 @@ class LogcatFragment : ToolbarFragment(R.layout.layout_logcat),
 
                     var report = CrashHandler.buildReportHeader()
 
+                    val collected = LogCollector.snapshot(context)
+                    if (collected.isNotEmpty()) {
+                        report += "Collected background log (filesDir/logs): \n\n"
+                        report += collected + "\n\n"
+                    }
                     report += "Logcat: \n\n"
 
                     logFile.writeText(report)

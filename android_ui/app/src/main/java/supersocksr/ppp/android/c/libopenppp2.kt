@@ -29,21 +29,24 @@ class libopenppp2 {
          * uid from its 13000 uidrange rules, falling through to `ip rule 31000
          * fwmark 0x0/0xffff iif lo lookup <wlan0>`), skip protect() so the
          * socket stays unmarked and exits over the physical network.
+         *
+         * MUST stay IO/log-free: native code calls this from the boost::context
+         * fiber stack, and on Android 12+ ART CheckJNI aborts with an invalid
+         * JNI transition frame whenever a fiber-triggered call touches a
+         * jstring (android.util.Log is the first victim). The native bridge
+         * (OpenPPP2VpnProtectBridge) already decides ColorOS devices natively;
+         * this method is the non-ColorOS fallback.
          */
         @JvmStatic
         fun protect(sockfd: Int): Boolean {
             val service = VpnService.instance
             if (service == null) {
-                android.util.Log.w("openppp2", "protect failed: service missing fd=$sockfd")
                 return false
             }
             if (protectHijacked) {
-                android.util.Log.i("openppp2", "protect skipped (ColorOS fwmark hijack) fd=$sockfd")
                 return true
             }
-            val ok = service.protect(sockfd)
-            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok")
-            return ok
+            return service.protect(sockfd)
         }
 
         /**
@@ -51,47 +54,45 @@ class libopenppp2 {
          * (0xc022a) back into the VPN table, and our uid can still reach the
          * physical network unmarked.
          *
-         * Detection: ordinary apps have no NET_ADMIN, so `ip rule` fails with
-         * "Cannot bind netlink socket: Permission denied". We therefore key on
-         * Build.MANUFACTURER/BRAND (realme/OPPO/OnePlus run ColorOS, which
-         * installs the hijack rule) and additionally try `ip rule` as a
-         * cross-check when permitted. On ColorOS the VPN app uid is excluded
-         * from the 13000 uidrange rules, so an unmarked socket falls through to
-         * `ip rule 31000 fwmark 0x0/0xffff iif lo lookup <wlan0>` and exits over
-         * the physical NIC - exactly what skipping protect() achieves.
+         * Detection keys on Build.MANUFACTURER/BRAND (realme/OPPO/OnePlus run
+         * ColorOS, which installs the hijack rule). The `ip rule` cross-check
+         * is diagnostic only and lives in ensureProtectHijackedChecked(),
+         * because Runtime.exec()/ProcessBuilder from a JNI-attached native
+         * thread (the VPN thread calling protect()) aborts ART with an invalid
+         * JNI transition frame. This lazy must therefore stay IO/log-free so
+         * it is safe to evaluate from the fiber stack.
          */
         private val protectHijacked: Boolean by lazy {
             val manufacturer = (android.os.Build.MANUFACTURER ?: "").lowercase()
             val brand = (android.os.Build.BRAND ?: "").lowercase()
-            val colorOS = manufacturer.contains("realme") || manufacturer.contains("oppo") ||
+            manufacturer.contains("realme") || manufacturer.contains("oppo") ||
                 manufacturer.contains("oneplus") || manufacturer.contains("oplus") ||
                 brand.contains("realme") || brand.contains("oppo") ||
                 brand.contains("oneplus") || brand.contains("oplus")
-            if (!colorOS) {
+        }
+
+        /**
+         * Pre-warms protectHijacked and runs the optional `ip rule`
+         * cross-check. MUST be called from a normal JVM thread (VpnService
+         * startup) before the native VPN thread starts: the native thread
+         * cannot spawn processes inside protect() without aborting ART.
+         */
+        @JvmStatic
+        fun ensureProtectHijackedChecked() {
+            val hijacked = protectHijacked
+            if (!hijacked) {
+                return
+            }
+            try {
+                val rule = Runtime.getRuntime()
+                    .exec(arrayOf("ip", "rule"))
+                    .inputStream.bufferedReader().readText()
                 android.util.Log.i(
                     "openppp2",
-                    "protect hijack: not ColorOS ($manufacturer/$brand), protect() normal"
+                    "protect hijack: ip-rule confirm=" + rule.contains("fwmark 0xc022a/0xcffff")
                 )
-                false
-            } else {
-                // Cross-check the actual hijack rule if `ip` is available.
-                var ipConfirms = false
-                try {
-                    val rule = Runtime.getRuntime()
-                        .exec(arrayOf("ip", "rule"))
-                        .inputStream.bufferedReader().readText()
-                    ipConfirms = rule.contains("fwmark 0xc022a/0xcffff")
-                    android.util.Log.i(
-                        "openppp2",
-                        "protect hijack: ColorOS ($manufacturer/$brand) ip-rule confirm=$ipConfirms"
-                    )
-                } catch (e: Throwable) {
-                    android.util.Log.i(
-                        "openppp2",
-                        "protect hijack: ColorOS ($manufacturer/$brand) ip not readable, skip protect()"
-                    )
-                }
-                true
+            } catch (e: Throwable) {
+                android.util.Log.i("openppp2", "protect hijack: ip not readable, skip protect()")
             }
         }
 

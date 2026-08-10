@@ -1,4 +1,4 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 3.0.0)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.12.0)
 
 # Define the solutions name.
 SET(NAME openppp2)
@@ -73,7 +73,7 @@ IF(__SIMD__)
     ENDIF()
 
     # AES is enabled, the source code of AES/128/256/CFB related to the library needs to be compiled.
-    FILE(GLOB_RECURSE AES_NI_SOURCE_FILES
+    FILE(GLOB_RECURSE AES_NI_SOURCE_FILES CONFIGURE_DEPENDS
         ${PROJECT_ROOT_DIR}/common/aesni/impl/*.c
         ${PROJECT_ROOT_DIR}/common/aesni/impl/*.cpp)
 ENDIF()
@@ -115,7 +115,7 @@ SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
 SET(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
 # List of common cpp source files compilations for ppp/unix cmake solution projects.
-FILE(GLOB_RECURSE SOURCE_FILES
+FILE(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS
     ${PROJECT_ROOT_DIR}/common/lwip/my/*.c
     ${PROJECT_ROOT_DIR}/common/lwip/core/*.c
     ${PROJECT_ROOT_DIR}/common/lwip/api/*.c

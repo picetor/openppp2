@@ -1,6 +1,7 @@
 #include <ppp/app/client/VEthernetNetworkTcpipStack.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
+#include <ppp/app/client/ConnectivityProbe.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxyConnection.h>
 #include <ppp/IDisposable.h>
@@ -11,6 +12,7 @@
 #include <ppp/threading/Executors.h>
 #include <ppp/collections/Dictionary.h>
 #include <ppp/auxiliary/StringAuxiliary.h>
+#include <ppp/auxiliary/UriAuxiliary.h>
 #include <ppp/tap/TapStub.h>
 #include <ppp/net/packet/IPFrame.h>
 #include <ppp/net/packet/UdpFrame.h>
@@ -63,6 +65,7 @@
 #endif
 
 using ppp::auxiliary::StringAuxiliary;
+using ppp::auxiliary::UriAuxiliary;
 using ppp::collections::Dictionary;
 using ppp::threading::Timer;
 using ppp::threading::Executors;
@@ -220,6 +223,8 @@ namespace ppp {
                 CompletePendingOutboundSwitch(now);
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
+                OnTickRefreshOutboundProbes(now);
+
                 if (!proxy_only_) {
                     UpdateNetworkTakeover(now);
                 }
@@ -354,6 +359,370 @@ namespace ppp {
 
                 return true;
             }
+
+#if !defined(_ANDROID) && !defined(_IPHONE)
+            namespace {
+                ConnectivityProbe::ProbeType ProbeTypeFromUriProtocol(UriAuxiliary::ProtocolType protocol_type) noexcept {
+                    if (protocol_type == UriAuxiliary::ProtocolType::ProtocolType_Http ||
+                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocket) {
+                        return ConnectivityProbe::ProbeType_WebSocket;
+                    }
+                    elif(protocol_type == UriAuxiliary::ProtocolType::ProtocolType_HttpSSL ||
+                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocketSSL) {
+                        return ConnectivityProbe::ProbeType_WebSocketSSL;
+                    }
+                    return ConnectivityProbe::ProbeType_Tcp;
+                }
+
+                ppp::string ProbeCategoryFromUriProtocol(UriAuxiliary::ProtocolType protocol_type) noexcept {
+                    if (protocol_type == UriAuxiliary::ProtocolType::ProtocolType_Http ||
+                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocket) {
+                        return ppp::string("ws");
+                    }
+                    elif(protocol_type == UriAuxiliary::ProtocolType::ProtocolType_HttpSSL ||
+                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocketSSL) {
+                        return ppp::string("wss");
+                    }
+                    return ppp::string("tcp");
+                }
+
+                ppp::string NormalizeProbeEntryString(const ppp::string& address, int port) noexcept {
+                    if (address.empty() || port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
+                        return ppp::string();
+                    }
+                    ppp::string entry = address.find(':') != ppp::string::npos ? "[" + address + "]" : address;
+                    entry += ":";
+                    entry += stl::to_string<ppp::string>(port);
+                    return entry;
+                }
+
+                bool ProbeOutboundCandidate(
+                    const ConnectivityProbe::TCPEndPoint&                     remoteEP,
+                    ConnectivityProbe::ProbeType                              probe_type,
+                    const ppp::string&                                        hostname,
+                    const ppp::string&                                        path,
+                    const ppp::string&                                        ws_host,
+                    const ppp::string&                                        ws_sni,
+                    int                                                       stage,
+                    int                                                       timeout_ms,
+                    ppp::coroutines::YieldContext&                            y,
+                    int&                                                      rtt_ms,
+                    const ConnectivityProbe::ProtectSocketHandler&            protect) noexcept {
+                    rtt_ms = 0;
+                    if (stage <= 2 || probe_type == ConnectivityProbe::ProbeType_Tcp) {
+                        return ConnectivityProbe::ProbeTcp(remoteEP, timeout_ms, y, rtt_ms, protect);
+                    }
+                    if (probe_type == ConnectivityProbe::ProbeType_WebSocket) {
+                        ppp::string host = ws_host.empty() ? hostname : ws_host;
+                        return ConnectivityProbe::ProbeWebSocket(remoteEP, host, path, timeout_ms, y, rtt_ms, protect);
+                    }
+                    if (probe_type == ConnectivityProbe::ProbeType_WebSocketSSL) {
+                        ppp::string host = ws_host.empty() ? hostname : ws_host;
+                        ppp::string sni = ws_sni.empty() ? host : ws_sni;
+                        return ConnectivityProbe::ProbeWebSocketSSL(remoteEP, host, sni, path, timeout_ms, y, rtt_ms, protect);
+                    }
+                    return ConnectivityProbe::ProbeTcp(remoteEP, timeout_ms, y, rtt_ms, protect);
+                }
+            }
+
+            void VEthernetNetworkSwitcher::OnTickRefreshOutboundProbes(uint64_t now) noexcept {
+                // Claim the refresh slot atomically so two tick paths can never
+                // both pass the gate and spawn a duplicate refresh.
+                if (outbound_probe_refreshing_.exchange(true)) {
+                    return;
+                }
+                if (now < next_outbound_probe_refresh_) {
+                    outbound_probe_refreshing_ = false;
+                    return;
+                }
+                next_outbound_probe_refresh_ = now + 5000;
+
+                std::shared_ptr<boost::asio::io_context> context = GetContext();
+                if (NULLPTR == context || context->stopped()) {
+                    outbound_probe_refreshing_ = false;
+                    return;
+                }
+
+                auto self = shared_from_this();
+                bool spawned = ppp::coroutines::YieldContext::Spawn(NULLPTR, *context,
+                    [self, this](ppp::coroutines::YieldContext& y) noexcept {
+                        RefreshOutboundProbes(y);
+                    });
+                if (!spawned) {
+                    outbound_probe_refreshing_ = false;
+                }
+            }
+            bool VEthernetNetworkSwitcher::RefreshOutboundProbes(ppp::coroutines::YieldContext& y) noexcept {
+                using ProtocolType = UriAuxiliary::ProtocolType;
+
+                struct Candidate final {
+                    ppp::string                                                     entry;
+                    ConnectivityProbe::ProbeType                                    probe_type = ConnectivityProbe::ProbeType_Tcp;
+                    boost::asio::ip::tcp::endpoint                                  remoteEP;
+                    ppp::string                                                     hostname;
+                    ppp::string                                                     path;
+                };
+                struct OutboundWork final {
+                    ppp::string                                                     tag;
+                    int                                                             timeout_ms = 800;
+                    int                                                             stage = 3;
+                    ppp::string                                                     ws_host;
+                    ppp::string                                                     ws_sni;
+                    ppp::vector<Candidate>                                          candidates;
+                };
+
+                // Snapshot the outbound list under the short lock only.  Building
+                // the work items below parses each candidate URI, and
+                // UriAuxiliary::Parse performs async DNS resolution that can
+                // suspend this stackful coroutine.  Holding syncobj_ across such
+                // a suspension is fatal: the per-packet data path (GetExchanger)
+                // locks the same mutex on the same io thread and deadlocks
+                // immediately (_RESOURCE_DEADLOCK_WOULD_OCCUR).
+                struct OutboundSnapshot final {
+                    ppp::string                                                     tag;
+                    std::shared_ptr<ppp::configurations::AppConfiguration>          configuration;
+                    bool                                                            established = false;
+                };
+                ppp::vector<OutboundSnapshot> outbounds;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    outbounds.reserve(outbound_configurations_.size());
+                    for (const OutboundConfiguration& outbound : outbound_configurations_) {
+                        ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
+                        if (!outbound.server_menu && tag != "main") {
+                            continue;
+                        }
+                        const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration = outbound.configuration;
+                        if (NULLPTR == configuration) {
+                            continue;
+                        }
+                        const ppp::string& client_server = configuration->client.server;
+                        if (client_server.empty()) {
+                            continue;
+                        }
+                        // Master probe switch: false disables the 5s background
+                        // refresh entirely -- no probing, no route pinning, and no
+                        // latency suffix on the SERVERS page for this outbound.
+                        if (!configuration->client.probe.enabled) {
+                            continue;
+                        }
+                        // An upstream proxy owns the real tunnel path; a direct probe
+                        // would measure the wrong hop, so leave those unprobed.
+                        if (!configuration->client.server_proxy.empty()) {
+                            continue;
+                        }
+
+                        bool established = false;
+                        auto exchanger = outbound_exchangers_.find(tag);
+                        if (exchanger != outbound_exchangers_.end() && NULLPTR != exchanger->second) {
+                            established = exchanger->second->GetNetworkState() ==
+                                VEthernetExchanger::NetworkState_Established;
+                        }
+
+                        outbounds.emplace_back(OutboundSnapshot{
+                            std::move(tag), configuration, established });
+                    }
+                }
+
+                ppp::vector<OutboundWork> works;
+                {
+                    works.reserve(outbounds.size());
+                    for (const OutboundSnapshot& outbound_ref : outbounds) {
+                        const ppp::string& tag = outbound_ref.tag;
+                        const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration = outbound_ref.configuration;
+                        const ppp::string& client_server = configuration->client.server;
+
+                        OutboundWork work;
+                        work.tag = tag;
+                        work.timeout_ms = std::max<int>(50, configuration->client.probe.timeout_ms);
+                        // Background refresh only needs L1 for outbounds without an
+                        // established tunnel; probing idle wss endpoints to L3 every
+                        // 5s burns server-side TLS handshakes for no user value.
+                        work.stage = outbound_ref.established ?
+                            std::min<int>(3, std::max<int>(1, configuration->client.probe.stage)) : 1;
+                        work.ws_host = configuration->client.websocket.host;
+                        work.ws_sni = configuration->client.websocket.sni;
+                        const ppp::unordered_set<ppp::string>& categories = configuration->client.probe.categories;
+                        const bool categories_empty = categories.empty();
+
+                        ppp::string primary_address;
+                        ppp::string primary_path;
+                        ProtocolType primary_protocol = ProtocolType::ProtocolType_PPP;
+                        {
+                            ppp::string entry_hostname;
+                            ppp::string entry_address;
+                            ppp::string entry_path;
+                            int entry_port = IPEndPoint::MinPort;
+                            ProtocolType entry_protocol = ProtocolType::ProtocolType_PPP;
+                            ppp::string abs_url;
+                            ppp::string entry_server = UriAuxiliary::Parse(client_server, entry_hostname, entry_address,
+                                entry_path, entry_port, entry_protocol, &abs_url, y);
+                            if (!entry_server.empty() && !entry_hostname.empty() && !entry_address.empty() &&
+                                entry_port > IPEndPoint::MinPort && entry_port <= IPEndPoint::MaxPort) {
+                                if (entry_protocol == ProtocolType::ProtocolType_Socks) {
+                                    entry_protocol = ProtocolType::ProtocolType_PPP;
+                                }
+                                IPEndPoint ipep(entry_address.data(), entry_port);
+                                if (!IPEndPoint::IsInvalid(ipep)) {
+                                    Candidate candidate;
+                                    candidate.entry = NormalizeProbeEntryString(entry_address, entry_port);
+                                    candidate.hostname = entry_hostname;
+                                    candidate.path = entry_path;
+                                    candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
+                                    candidate.probe_type = ProbeTypeFromUriProtocol(entry_protocol);
+                                    const ppp::string category = ProbeCategoryFromUriProtocol(entry_protocol);
+                                    if (categories_empty || categories.find(category) != categories.end()) {
+                                        work.candidates.emplace_back(std::move(candidate));
+                                    }
+                                    primary_address = entry_address;
+                                    primary_path = entry_path;
+                                    primary_protocol = entry_protocol;
+                                }
+                            }
+                        }
+
+                        if (!primary_address.empty()) {
+                            for (const ppp::string& entry : configuration->client.servers) {
+                                ppp::string host_string;
+                                int entry_port = 0;
+                                if (!Ipep::ParseEndPoint(entry, host_string, entry_port)) {
+                                    continue;
+                                }
+                                if (entry_port <= IPEndPoint::MinPort || entry_port > IPEndPoint::MaxPort) {
+                                    continue;
+                                }
+                                host_string = LTrim(RTrim(host_string));
+                                if (host_string.empty()) {
+                                    continue;
+                                }
+                                boost::asio::ip::address address = Ipep::ToAddress(host_string, false);
+                                if (IPEndPoint::IsInvalid(address) && Ipep::IsDomainAddress(host_string)) {
+                                    // Hostname backup entry: resolve it so ws/wss and ppp
+                                    // tunnels can use domains here as well.  Resolution may
+                                    // suspend this coroutine; no lock is held on this path.
+                                    boost::asio::ip::udp::endpoint resolved =
+                                        ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::udp>(
+                                            host_string.data(), entry_port, y);
+                                    address = resolved.address();
+                                }
+                                if (IPEndPoint::IsInvalid(address)) {
+                                    continue; // Unresolvable host; skip this round.
+                                }
+                                std::string address_string = address.to_string();
+                                ppp::string address_string_ppp(address_string.data(), address_string.size());
+                                IPEndPoint ipep(address_string_ppp.data(), entry_port);
+                                if (IPEndPoint::IsInvalid(ipep)) {
+                                    continue;
+                                }
+                                Candidate candidate;
+                                candidate.entry = NormalizeProbeEntryString(host_string, entry_port);
+                                candidate.hostname = host_string;
+                                candidate.path = primary_path;
+                                candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
+                                candidate.probe_type = ProbeTypeFromUriProtocol(primary_protocol);
+                                const ppp::string category = ProbeCategoryFromUriProtocol(primary_protocol);
+                                if (categories_empty || categories.find(category) != categories.end()) {
+                                    work.candidates.emplace_back(std::move(candidate));
+                                }
+                            }
+                        }
+
+                        if (!work.candidates.empty()) {
+                            works.emplace_back(std::move(work));
+                        }
+                    }
+                }
+
+                if (works.empty()) {
+                    outbound_probe_refreshing_ = false;
+                    return true;
+                }
+
+#if defined(_WIN32)
+                // Pin every candidate on the physical adapter so probe sockets
+                // never enter the TAP (self-loop) while the tunnel is up.
+                for (const OutboundWork& work : works) {
+                    for (const Candidate& candidate : work.candidates) {
+                        const boost::asio::ip::address& probe_ip = candidate.remoteEP.address();
+                        if (probe_ip.is_v4()) {
+                            EnsureWindowsIPv4ServerRoute(probe_ip);
+                        }
+                        elif(probe_ip.is_v6()) {
+                            EnsureWindowsIPv6ServerRoute(probe_ip);
+                        }
+                    }
+                }
+#endif
+
+                ConnectivityProbe::ProtectSocketHandler protector;
+#if defined(_LINUX)
+                {
+                    std::shared_ptr<ppp::net::ProtectorNetwork> protector_network = GetProtectorNetwork();
+                    if (NULLPTR != protector_network) {
+                        protector = [protector_network](int sockfd) noexcept {
+                            return protector_network->Protect(sockfd);
+                        };
+                    }
+                }
+#endif
+
+                struct ProbeRefreshState final {
+                    std::atomic<int>                            pending = 0;
+                    ppp::coroutines::YieldContext*              parent = NULLPTR;
+                };
+                ProbeRefreshState state;
+                state.pending = static_cast<int>(works.size());
+                state.parent = &y;
+
+                std::shared_ptr<boost::asio::io_context> context = GetContext();
+                if (NULLPTR == context) {
+                    outbound_probe_refreshing_ = false;
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                for (int i = 0; i < static_cast<int>(works.size()); i++) {
+                    bool spawned = ppp::coroutines::YieldContext::Spawn(NULLPTR, *context,
+                        [self, this, i, protector, &works, &state](ppp::coroutines::YieldContext& cy) noexcept {
+                            const OutboundWork& work = works[i];
+                            int best_rtt = INT_MAX;
+                            ppp::string best_entry;
+                            bool reachable = false;
+                            for (const Candidate& candidate : work.candidates) {
+                                int rtt = 0;
+                                bool ok = ProbeOutboundCandidate(candidate.remoteEP, candidate.probe_type,
+                                    candidate.hostname, candidate.path, work.ws_host, work.ws_sni,
+                                    work.stage, work.timeout_ms, cy, rtt, protector);
+                                if (ok && rtt >= 0 && rtt < best_rtt) {
+                                    best_rtt = rtt;
+                                    best_entry = candidate.entry;
+                                    reachable = true;
+                                }
+                            }
+                            {
+                                SynchronizedObjectScope scope(GetSynchronizedObject());
+                                OutboundProbeStatus& status = outbound_probe_statuses_[work.tag];
+                                status.checked = true;
+                                status.reachable = reachable;
+                                status.rtt_ms = reachable ? best_rtt : -1;
+                                status.server = reachable ? best_entry : ppp::string();
+                                status.updated_at = Executors::GetTickCount();
+                            }
+                            if (state.pending.fetch_sub(1) == 1) {
+                                state.parent->R();
+                            }
+                        });
+                    if (!spawned) {
+                        if (state.pending.fetch_sub(1) == 1) {
+                            state.parent->R();
+                        }
+                    }
+                }
+                y.Suspend();
+                outbound_probe_refreshing_ = false;
+                return true;
+            }
+#endif
 
             bool VEthernetNetworkSwitcher::OnPacketInput(ppp::net::native::ip_hdr* packet, int packet_length, int header_length, int proto, bool vnet) noexcept {
                 if (!vnet) {
@@ -1324,6 +1693,26 @@ namespace ppp {
                         tag == primary_outbound_ : tag == active_outbound_;
                     status.server_menu = outbound.server_menu;
                     status.route_used = outbound.route_used;
+                    status.probe_enabled = NULLPTR != outbound.configuration && outbound.configuration->client.probe.enabled;
+                    if (current != outbound_exchangers_.end() && NULLPTR != current->second) {
+                        status.probe_checked = current->second->GetProbeChecked();
+                        status.probe_reachable = current->second->GetProbeReachable();
+                        status.probe_rtt_ms = current->second->GetProbeRtt();
+                        status.probe_server = current->second->GetProbeServer();
+                    }
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                    // Background probe refresh covers every menu entry every 5s;
+                    // prefer its fresher result when available.
+                    {
+                        auto probe = outbound_probe_statuses_.find(tag);
+                        if (probe != outbound_probe_statuses_.end() && probe->second.checked) {
+                            status.probe_checked = true;
+                            status.probe_reachable = probe->second.reachable;
+                            status.probe_rtt_ms = probe->second.rtt_ms;
+                            status.probe_server = probe->second.server;
+                        }
+                    }
+#endif
                     statuses.emplace_back(std::move(status));
                 }
                 if (statuses.empty() && NULLPTR != exchanger_) {
@@ -1334,6 +1723,22 @@ namespace ppp {
                     status.state = static_cast<int>(exchanger_->GetNetworkState());
                     status.reconnects = exchanger_->GetReconnectionCount();
                     status.active = true;
+                    status.probe_enabled = NULLPTR != configuration_ && configuration_->client.probe.enabled;
+                    status.probe_checked = exchanger_->GetProbeChecked();
+                    status.probe_reachable = exchanger_->GetProbeReachable();
+                    status.probe_rtt_ms = exchanger_->GetProbeRtt();
+                    status.probe_server = exchanger_->GetProbeServer();
+#if !defined(_ANDROID) && !defined(_IPHONE)
+                    {
+                        auto probe = outbound_probe_statuses_.find("main");
+                        if (probe != outbound_probe_statuses_.end() && probe->second.checked) {
+                            status.probe_checked = true;
+                            status.probe_reachable = probe->second.reachable;
+                            status.probe_rtt_ms = probe->second.rtt_ms;
+                            status.probe_server = probe->second.server;
+                        }
+                    }
+#endif
                     statuses.emplace_back(std::move(status));
                 }
                 return statuses;

@@ -2,6 +2,8 @@
 #include <ppp/threading/Timer.h>
 #include <ppp/threading/Thread.h>
 
+#include <chrono>
+
 #include <ppp/app/mux/vmux.h>
 #include <ppp/app/mux/vmux_net.h>
 
@@ -428,8 +430,29 @@ namespace ppp
 
         bool Executors::Awaitable::Await() noexcept
         {
+            return Await(0);
+        }
+
+        bool Executors::Awaitable::Await(int timeout_ms) noexcept
+        {
             LK lk(mtx);
-            cv.wait(lk, [this]() noexcept {  return completed; });
+            if (timeout_ms <= 0)
+            {
+                cv.wait(lk, [this]() noexcept {  return completed; });
+            }
+            else
+            {
+                cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this]() noexcept {  return completed; });
+                if (!completed)
+                {
+                    // The dispatched task never ran (the io_context was
+                    // stopped or its worker thread is gone).  Reset the
+                    // flags and report failure; the caller must treat the
+                    // invocation as failed and never reuse this Awaitable.
+                    processed = false;
+                    return false;
+                }
+            }
 
             bool ok = false;
             ok = processed;

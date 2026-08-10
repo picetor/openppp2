@@ -209,11 +209,6 @@
             app:icon="@drawable/baseline_developer_board_24"
             app:key="acquireWakeLock"
             app:title="@string/acquire_wake_lock" />
-        <EditTextPreference
-            app:dialogMessage="@string/one_per_line"
-            app:icon="@drawable/ic_hardware_router"
-            app:key="stunServers"
-            app:title="@string/nat_stun_server_hint" />
         <io.nekohasekai.sagernet.widget.SimpleMenuPreference
             app:defaultValue="1"
             app:entries="@array/fab_style_entry"
@@ -232,17 +227,26 @@
             app:key="queryAllPackagesAlternativeMethod"
             app:title="@string/query_all_packages_alternative_method" />
         <EditTextPreference
-            app:dialogMessage="Example: 127.0.0.1:6060\nOpen http://127.0.0.1:6060/debug/pprof in your browser."
-            app:key="pprofServer"
-            app:title="pprof server listening address"
-            app:useSimpleSummaryProvider="true" />
-        <EditTextPreference
             app:dialogMessage="For testing purpose only.\nBreaking changes are expected.\nNo guarantee of existence."
             app:key="experimentalFlags"
             app:title="Experimental flags" />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/openppp2_tunnel_settings">
+        <EditTextPreference
+            app:defaultValue="10.0.0.2"
+            app:dialogMessage="@string/tun_ip_sum"
+            app:icon="@drawable/baseline_public_24"
+            app:key="tunIp"
+            app:title="@string/tun_ip"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:defaultValue="24"
+            app:dialogMessage="@string/tun_prefix_sum"
+            app:icon="@drawable/baseline_public_24"
+            app:key="tunPrefix"
+            app:title="@string/tun_prefix"
+            app:useSimpleSummaryProvider="true" />
         <io.nekohasekai.sagernet.widget.SimpleMenuPreference
             app:defaultValue="0"
             app:entries="@array/tun_mux_entry"

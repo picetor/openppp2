@@ -127,3 +127,12 @@ MISSING*
 
 # Local machine build environment and agent scratch files (never commit)
 .agents/
+
+# PI-related local workspace files
+.pi-web/
+*.pi
+
+# Temporary analysis and dump artifacts
+.tmp/
+*.tmp
+*.dmp

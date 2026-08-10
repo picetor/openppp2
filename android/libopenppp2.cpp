@@ -218,6 +218,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     ppp::android::InitializeProtectBridge(vm, env);
     ppp::android::InitializeTelemetryBridge(vm, env);
     libopenppp2_cache_runtime_snapshot_method(vm, env);
+
+    // Real-time mode (--rt) defaults to yes in the upstream CLI.  The Android
+    // bridge does not parse CLI arguments, so enable it here to match.
+    ppp::RT = true;
     return JNI_VERSION_1_6;
 }
 
@@ -759,6 +763,17 @@ static int                                                                      
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::RuntimeIoContextMissing, LIBOPENPPP2_ERROR_VETHERNET_PPPD_THREAD_NOT_RUNING);
     }
 
+    // The VPN worker owns this io_context.  When run() has already returned
+    // (or the worker thread died), a posted handler would never execute and
+    // Await() would block the caller forever - leaving the Android service
+    // stuck in the Stopping state with a dead switch.  Guard both conditions
+    // so every JNI call returns within the timeout.
+    if (context->stopped()) {
+        return libopenppp2_set_last_error_and_return(
+            ppp::diagnostics::ErrorCode::RuntimeEventDispatchFailed,
+            LIBOPENPPP2_ERROR_VETHERNET_PPPD_THREAD_NOT_RUNING);
+    }
+
     std::shared_ptr<Executors::Awaitable> awaitable = ppp::make_shared_object<Executors::Awaitable>();
     if (NULLPTR == awaitable) {
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::MemoryAllocationFailed, LIBOPENPPP2_ERROR_ALLOCATED_MEMORY);
@@ -771,8 +786,10 @@ static int                                                                      
             awaitable->Processed();
         });
 
-    bool ok = awaitable->Await();
+    bool ok = awaitable->Await(5000);
     if (!ok) {
+        __android_log_print(ANDROID_LOG_ERROR, "libopenppp2",
+            "invoke_on_run_context: dispatch timed out (io_context stopped or worker gone)");
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::RuntimeEventDispatchFailed, LIBOPENPPP2_ERROR_UNKNOWN);
     }
 
@@ -790,6 +807,12 @@ int                                                                         libo
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::RuntimeIoContextMissing, LIBOPENPPP2_ERROR_VETHERNET_PPPD_THREAD_NOT_RUNING);
     }
 
+    if (context->stopped()) {
+        return libopenppp2_set_last_error_and_return(
+            ppp::diagnostics::ErrorCode::RuntimeEventDispatchFailed,
+            LIBOPENPPP2_ERROR_VETHERNET_PPPD_THREAD_NOT_RUNING);
+    }
+
     std::shared_ptr<Executors::Awaitable> awaitable = ppp::make_shared_object<Executors::Awaitable>();
     if (NULLPTR == awaitable) {
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::MemoryAllocationFailed, LIBOPENPPP2_ERROR_ALLOCATED_MEMORY);
@@ -802,8 +825,10 @@ int                                                                         libo
             awaitable->Processed();
         });
 
-    bool ok = awaitable->Await();
+    bool ok = awaitable->Await(5000);
     if (!ok) {
+        __android_log_print(ANDROID_LOG_ERROR, "libopenppp2",
+            "Invoke: dispatch timed out (executor stopped or worker gone)");
         return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::RuntimeEventDispatchFailed, LIBOPENPPP2_ERROR_UNKNOWN);
     }
 

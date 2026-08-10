@@ -360,7 +360,14 @@ namespace ppp {
             config.client.mappings.clear();
             config.client.guid = StringAuxiliary::Int128ToGuidString(MAKE_OWORD(UINT64_MAX, UINT64_MAX));
             config.client.server = "";
+            config.client.servers.clear();
             config.client.server_proxy = "";
+            config.client.probe.enabled = true;
+            config.client.probe.timeout_ms = 800;
+            config.client.probe.ttl_seconds = 30;
+            config.client.probe.parallel = true;
+            config.client.probe.stage = 3;
+            config.client.probe.categories.clear();
             config.client.bandwidth = 0;
             config.client.reconnections.timeout = PPP_TCP_CONNECT_TIMEOUT;
             config.client.http_proxy.bind = "";
@@ -1230,6 +1237,72 @@ namespace ppp {
             return true;
         }
 
+        /**
+         * @brief Reads a JSON array of "IP:port" tokens into an ordered vector.
+         * @details Order-preserving counterpart of ReadJsonAllAddressStringToSet;
+         *          used by client.servers so failover order is deterministic.
+         * @param json Source JSON node (array/object/string).
+         * @param v Output vector of normalized "host:port" strings.
+         * @return True when token extraction succeeds (entries are filtered).
+         */
+        static bool ReadJsonAllAddressStringToVector(const Json::Value& json, ppp::vector<ppp::string>& v) noexcept {
+            v.clear();
+
+            ppp::unordered_set<ppp::string> seen;
+            auto visit =
+                [&seen, &v](const ppp::string& server_string) noexcept {
+                if (server_string.empty()) {
+                    return;
+                }
+
+                ppp::string host_string;
+                int port;
+                if (!ppp::net::Ipep::ParseEndPoint(server_string, host_string, port)) {
+                    return;
+                }
+
+                if (port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
+                    return;
+                }
+
+                if (!IPOrHostIsValid(host_string)) {
+                    return;
+                }
+
+                host_string = LTrim(RTrim(host_string));
+                if (host_string.empty()) {
+                    return;
+                }
+
+                ppp::string normalized = host_string + ":" + stl::to_string<ppp::string>(port);
+                if (seen.emplace(normalized).second) {
+                    v.emplace_back(std::move(normalized));
+                }
+                };
+
+            if (json.isObject()) {
+                for (ppp::string& k : json.getMemberNames()) {
+                    Json::Value item = json[k.data()];
+                    visit(LTrim(RTrim(JsonAuxiliary::AsString(item))));
+                }
+
+                return true;
+            }
+            elif(json.isArray()) {
+                Json::ArrayIndex json_size = json.size();
+                for (Json::ArrayIndex json_index = 0; json_index < json_size; json_index++) {
+                    Json::Value item = json[json_index];
+                    visit(LTrim(RTrim(JsonAuxiliary::AsString(item))));
+                }
+
+                return true;
+            }
+            elif(json.isString()) {
+                visit(LTrim(RTrim(JsonAuxiliary::AsString(json))));
+            }
+
+            return false;
+        }
         template <typename TValue>
         /**
          * @brief Assigns a JSON value when the node is present.
@@ -1467,7 +1540,20 @@ namespace ppp {
             config.client.reconnections.timeout = JsonAuxiliary::AsValue<int>(json["client"]["reconnections"]["timeout"]);
             config.client.guid = JsonAuxiliary::AsValue<ppp::string>(json["client"]["guid"]);
             config.client.server = JsonAuxiliary::AsValue<ppp::string>(json["client"]["server"]);
+            ReadJsonAllAddressStringToVector(json["client"]["servers"], config.client.servers);
             config.client.server_proxy = JsonAuxiliary::AsValue<ppp::string>(json["client"]["server-proxy"]);
+            {
+                const Json::Value& probe_json = json["client"]["probe"];
+                if (probe_json.isObject()) {
+                    AssignBoolIfPresent(config.client.probe.enabled, probe_json["enabled"]);
+                    config.client.probe.timeout_ms = std::max<int>(50, JsonAuxiliary::AsValue<int>(probe_json["timeout-ms"]));
+                    config.client.probe.ttl_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["ttl-seconds"]));
+                    config.client.probe.parallel = JsonAuxiliary::AsValue<bool>(probe_json["parallel"]);
+                    config.client.probe.stage = std::min<int>(3, std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["stage"])));
+                    config.client.probe.categories.clear();
+                    ReadJsonAllTokensToSet(probe_json["categories"], config.client.probe.categories);
+                }
+            }
             config.client.bandwidth = JsonAuxiliary::AsValue<int64_t>(json["client"]["bandwidth"]);
             config.client.http_proxy.port = JsonAuxiliary::AsValue<int>(json["client"]["http-proxy"]["port"]);
             config.client.http_proxy.bind = JsonAuxiliary::AsValue<ppp::string>(json["client"]["http-proxy"]["bind"]);
@@ -2019,3 +2105,7 @@ namespace ppp {
         }
     }
 }
+
+
+
+

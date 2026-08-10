@@ -63,6 +63,8 @@ object Key {
     const val DNS2 = "tunnelDns2"
     const val DNS_DIRECT1 = "directDns1"
     const val DNS_DIRECT2 = "directDns2"
+    const val TUN_IP = "tunIp"
+    const val TUN_PREFIX = "tunPrefix"
     const val TUN_MUX = "tunMux"
     const val TUN_MUX_ACCELERATION = "tunMuxAcceleration"
     const val TUN_VNET = "tunVnet"
@@ -77,8 +79,6 @@ object Key {
 
     const val LOG_LEVEL_DEBUG_WARNING_DISABLE = "logLevelDebugWarningDisable"
     const val ENABLE_DEBUG = "enableDebug"
-    const val PPROF_SERVER = "pprofServer"
-
     const val ALWAYS_SHOW_ADDRESS = "alwaysShowAddress"
     const val SHOW_GROUP_NAME = "showGroupName"
 
@@ -87,7 +87,6 @@ object Key {
     const val MTU = "mtu"
     const val ALLOW_APPS_BYPASS_VPN = "allowAppsBypassVpn"
     const val ACQUIRE_WAKE_LOCK = "acquireWakeLock"
-    const val STUN_SERVERS = "stunServers"
     const val FAB_STYLE = "fabStyle"
     const val USE_IEC_UNIT = "useIECUnit"
     const val QUERY_ALL_PACKAGES_ALTERNATIVE_METHOD = "queryAllPackagesAlternativeMethod"

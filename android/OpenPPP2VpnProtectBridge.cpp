@@ -7,6 +7,7 @@
 #include <ppp/diagnostics/Error.h>
 
 #include <android/log.h>
+#include <sys/system_properties.h>
 
 namespace ppp
 {
@@ -26,6 +27,66 @@ namespace ppp
                 bool                                                enabled = true;
                 std::mutex                                          syncobj;
             };
+
+            // ColorOS (realme/OPPO/OnePlus) installs
+            // `ip rule 13000 fwmark 0xc022a/0xcffff lookup <vpn-table>` which
+            // hijacks the 0xc022a fwmark that VpnService.protect() assigns,
+            // sending the "protected" socket straight back into the tunnel.
+            // When the hijack rule is present AND our uid still routes via the
+            // physical NIC (ColorOS excludes the VPN app uid from its 13000
+            // uidrange rules), protect() must be skipped so the socket stays
+            // unmarked and egresses over the physical network.
+            //
+            // The verdict is evaluated natively instead of calling back into
+            // Java: ProtectSocketFd() runs on the boost::context fiber stack
+            // (ProtectorNetwork::Protect -> ConnectivityProbe), and on
+            // Android 12+ ART CheckJNI aborts with an invalid JNI transition
+            // frame when a fiber enters the JVM - android.util.Log's
+            // GetStringUTFChars is the first victim.  Reading the build
+            // properties here keeps the whole protect() path JNI-free on
+            // ColorOS devices.
+            std::atomic<int> g_coloros_hijack_verdict{ -1 };
+
+            bool IsColorOSHijackDevice() noexcept
+            {
+                int verdict = g_coloros_hijack_verdict.load(std::memory_order_acquire);
+                if (verdict >= 0)
+                {
+                    return verdict == 1;
+                }
+
+                char manufacturer[PROP_VALUE_MAX] = { 0 };
+                char brand[PROP_VALUE_MAX] = { 0 };
+                __system_property_get("ro.product.manufacturer", manufacturer);
+                __system_property_get("ro.product.brand", brand);
+
+                auto contains_coloros = [](const char* value) noexcept -> bool
+                {
+                    if (NULLPTR == value || '\0' == *value)
+                    {
+                        return false;
+                    }
+
+                    std::string lower(value);
+                    for (std::string::size_type i = 0; i < lower.size(); i++)
+                    {
+                        char c = lower[i];
+                        if (c >= 'A' && c <= 'Z')
+                        {
+                            lower[i] = static_cast<char>(c - 'A' + 'a');
+                        }
+                    }
+
+                    return lower.find("realme") != std::string::npos ||
+                           lower.find("oppo") != std::string::npos ||
+                           lower.find("oneplus") != std::string::npos ||
+                           lower.find("oplus") != std::string::npos;
+                };
+
+                verdict = (contains_coloros(manufacturer) || contains_coloros(brand)) ? 1 : 0;
+                g_coloros_hijack_verdict.store(verdict, std::memory_order_release);
+                return verdict == 1;
+            }
 
             ProtectBridgeState& GetState() noexcept
             {
@@ -257,6 +318,15 @@ namespace ppp
             {
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtectorNetworkProtectInvalidSocket);
                 return false;
+            }
+
+            // ColorOS devices skip protect() (see IsColorOSHijackDevice).
+            // Returning early also avoids entering the JVM from the
+            // boost::context fiber stack, which ART CheckJNI rejects on
+            // Android 12+ with an invalid JNI transition frame.
+            if (IsColorOSHijackDevice())
+            {
+                return true;
             }
 
             JavaVM* vm = NULLPTR;

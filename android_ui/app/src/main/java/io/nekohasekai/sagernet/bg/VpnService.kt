@@ -49,6 +49,14 @@ import org.json.JSONObject
 import supersocksr.ppp.android.c.libopenppp2
 import android.net.VpnService as BaseVpnService
 
+/** Private/LAN CIDRs backing the "bypass private addresses" rule card.
+ *  Concrete CIDRs keep the rule independent of GeoIP.dat categories
+ *  (the stock v2fly geoip.dat has no "private" entry). */
+private val PRIVATE_LAN_CIDRS = listOf(
+    "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+)
+
 @SuppressLint("VpnServicePolicy")
 class VpnService : BaseVpnService(),
     BaseService.Interface {
@@ -105,7 +113,8 @@ class VpnService : BaseVpnService(),
     override fun killProcesses() {
         data.proxy?.close()
         try {
-            libopenppp2.stop()
+            val stopResult = libopenppp2.stop()
+            if (stopResult != 0) Logs.w("libopenppp2.stop returned $stopResult (timeout or not running)")
         } catch (e: Throwable) {
             Logs.w(e)
         }
@@ -113,6 +122,7 @@ class VpnService : BaseVpnService(),
         activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
         activeGatewayLoopback = null
         stopLinkStatePoller()
+        LogCollector.stop()
         vpnThread?.interrupt()
         vpnThread = null
         try {
@@ -534,6 +544,15 @@ class VpnService : BaseVpnService(),
 
         // Enable the native protect(fd) bridge.
         try {
+            // Pre-warm the ColorOS hijack decision on this JVM thread before
+            // the native VPN thread starts. The native thread must never run
+            // the `ip rule` exec inside protect() - ART aborts with an invalid
+            // JNI transition frame when a JNI-attached thread spawns a process.
+            libopenppp2.ensureProtectHijackedChecked()
+        } catch (e: Throwable) {
+            Logs.w(e)
+        }
+        try {
             libopenppp2.set_protect_enabled(true)
         } catch (e: Throwable) {
             Logs.w(e)
@@ -579,15 +598,22 @@ class VpnService : BaseVpnService(),
         // boost::asio deep handler chains.
         isRunning = true
         startLinkStatePoller()
+        LogCollector.start(this)
         vpnThread = Thread(null, Runnable {
+            var abnormalExit = false
+            var exitMessage: String? = null
             try {
                 Log.i(TAG, "vpnThread started, calling run(0)")
                 val result = libopenppp2.run(0)
                 Log.i(TAG, "libopenppp2.run returned=$result")
                 if (result != 0) {
-                    Logs.w("libopenppp2 last error=${libopenppp2.get_last_error_text()}")
+                    abnormalExit = true
+                    exitMessage = libopenppp2.get_last_error_text()
+                    Logs.w("libopenppp2 last error=$exitMessage")
                 }
             } catch (e: Throwable) {
+                abnormalExit = true
+                exitMessage = e.message
                 Logs.w(e)
             } finally {
                 isRunning = false
@@ -595,6 +621,7 @@ class VpnService : BaseVpnService(),
                 activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
                 activeGatewayLoopback = null
                 stopLinkStatePoller()
+                LogCollector.stop()
                 releaseWakeLock()
                 try {
                     vpnInterface?.close()
@@ -602,7 +629,13 @@ class VpnService : BaseVpnService(),
                 }
                 vpnInterface = null
                 if (data.state != BaseService.State.Stopped && data.state != BaseService.State.Stopping) {
-                    data.changeState(BaseService.State.Stopped)
+                    // The VPN session ended without a user-initiated stop.
+                    // Surface the reason and shut the foreground service down
+                    // instead of silently leaving it in a ghost Connected state.
+                    val message = exitMessage?.takeIf { it.isNotBlank() }
+                        ?: if (abnormalExit) "VPN 意外退出" else "VPN 连接已断开"
+                    data.changeState(BaseService.State.Stopped, message)
+                    stopSelf()
                 }
             }
         }, "openppp2-vpn-thread", VPN_THREAD_STACK).also { it.start() }
@@ -934,13 +967,11 @@ class VpnService : BaseVpnService(),
                 val enabledRules = allRules.filter { it.enabled }
                 if (allRules.isEmpty()) {
                     // No rules at all in the database — first launch fallback:
-                    // private ranges + the configured country.
-                    appendLine("  - ip-cidr,10.0.0.0/8,direct")
-                    appendLine("  - ip-cidr,100.64.0.0/10,direct")
-                    appendLine("  - ip-cidr,127.0.0.0/8,direct")
-                    appendLine("  - ip-cidr,169.254.0.0/16,direct")
-                    appendLine("  - ip-cidr,172.16.0.0/12,direct")
-                    appendLine("  - ip-cidr,192.168.0.0/16,direct")
+                    // private ranges (gated by the global LAN bypass switch)
+                    // + the configured country.
+                    if (DataStore.bypassLan) {
+                        for (cidr in PRIVATE_LAN_CIDRS) appendLine("  - ip-cidr,$cidr,direct")
+                    }
                     appendLine("  - domain-suffix,$country,direct")
                     appendLine("  - geosite,$country,direct")
                     appendLine("  - geoip,$country,direct")
@@ -958,6 +989,15 @@ class VpnService : BaseVpnService(),
                         for (raw in rule.ip.split('\n')) {
                             val i = raw.trim()
                             if (i.isEmpty()) continue
+                            // "geoip:private" has no entry in the stock v2fly
+                            // GeoIP.dat and would fail the whole geo rule load;
+                            // expand it to concrete private CIDRs instead.
+                            if (i == "geoip:private") {
+                                if (DataStore.bypassLan) {
+                                    for (cidr in PRIVATE_LAN_CIDRS) appendLine("  - ip-cidr,$cidr,$action")
+                                }
+                                continue
+                            }
                             appendLine("  - ${toGeoRule(i)},$action")
                         }
                     }

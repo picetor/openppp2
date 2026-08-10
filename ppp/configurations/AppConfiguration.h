@@ -242,6 +242,7 @@ namespace ppp {
             struct {
                 ppp::string                                                 guid;           ///< Client GUID string used for authentication and session tracking.
                 ppp::string                                                 server;         ///< Primary VPN server address in "host:port" format.
+                ppp::vector<ppp::string>                                    servers;        ///< Backup server entries ("IP:port" / "[IPv6]:port"); scheme, path and websocket host/sni are inherited from server.
                 ppp::string                                                 server_proxy;   ///< HTTP/SOCKS proxy address used to reach the VPN server; empty = direct.
                 int64_t                                                     bandwidth;      ///< Client-side bandwidth cap in bits per second; 0 = unlimited.
                 struct {
@@ -252,6 +253,14 @@ namespace ppp {
                     ppp::string                                             sni;            ///< TLS SNI (Server Name Indication) value for the WebSocket connection.
                 }                                                           websocket;      ///< WebSocket Host/SNI override for CDN-optimized routing.
                 ppp::string                                                 log;            ///< Client-side event log file path; empty disables client logging.
+                struct {
+                    bool                                                    enabled         = true;         ///< Master switch; false = no probing, legacy single-entry behavior.
+                    int                                                     timeout_ms      = 800;          ///< Per-entry probe timeout in milliseconds.
+                    int                                                     ttl_seconds     = 30;           ///< Probe result validity in seconds before a background refresh.
+                    bool                                                    parallel        = true;         ///< Probe all entries concurrently; false probes serially.
+                    int                                                     stage           = 3;            ///< Probe depth: 1 = TCP connect, 3 = TLS/WebSocket upgrade (max, L4/L5 never probed).
+                    ppp::unordered_set<ppp::string>                         categories;     ///< Probe categories: tcp, ws, wss; empty = all.
+                }                                                           probe;          ///< Connectivity probe configuration.
 #if defined(_WIN32)
                 struct {
                     bool                                                    tcp;            ///< Enable Paper Airplane TCP acceleration driver on Windows when true.
@@ -464,3 +473,5 @@ namespace ppp {
         }
     }
 }
+
+

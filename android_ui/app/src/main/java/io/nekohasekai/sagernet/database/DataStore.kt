@@ -107,6 +107,8 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var tunnelDns2 by configurationStore.string(Key.DNS2) { "8.8.4.4" }
     var directDns1 by configurationStore.string(Key.DNS_DIRECT1) { "223.5.5.5" }
     var directDns2 by configurationStore.string(Key.DNS_DIRECT2) { "119.29.29.29" }
+    var tunIp by configurationStore.string(Key.TUN_IP) { "10.0.0.2" }
+    var tunPrefix by configurationStore.stringToInt(Key.TUN_PREFIX) { 24 }
     var tunMux by configurationStore.stringToInt(Key.TUN_MUX) { 0 }
     var tunMuxAcceleration by configurationStore.stringToInt(Key.TUN_MUX_ACCELERATION) { -1 }
     var tunVnet by configurationStore.boolean(Key.TUN_VNET) { false }
@@ -118,10 +120,8 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var logLevel by configurationStore.stringToInt(Key.LOG_LEVEL) { 2 }
     var logLevelDebugWarningDisable by configurationStore.boolean(Key.LOG_LEVEL_DEBUG_WARNING_DISABLE)
     var enableDebug by configurationStore.boolean(Key.ENABLE_DEBUG) { BuildConfig.DEBUG }
-    var pprofServer by configurationStore.string(Key.PPROF_SERVER)
     var allowAppsBypassVpn by configurationStore.boolean(Key.ALLOW_APPS_BYPASS_VPN)
     var acquireWakeLock by configurationStore.boolean(Key.ACQUIRE_WAKE_LOCK)
-    var stunServers by configurationStore.string(Key.STUN_SERVERS)
     var fabStyle by configurationStore.stringToInt(Key.FAB_STYLE) { 1 }
     var useIECUnit by configurationStore.boolean(Key.USE_IEC_UNIT)
     var queryAllPackagesAlternativeMethod by configurationStore.boolean(Key.QUERY_ALL_PACKAGES_ALTERNATIVE_METHOD)

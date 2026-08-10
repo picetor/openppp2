@@ -192,7 +192,9 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <Profile>true</Profile>
+      <Profile>false</Profile>
+      <OptimizeReferences>false</OptimizeReferences>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
       <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -323,6 +325,7 @@
     <ClCompile Include="ppp\net\http\HttpClient.cpp" />
     <ClCompile Include="ppp\net\native\dnsx.cpp" />
     <ClCompile Include="ppp\net\rinetd\RinetdConnection.cpp" />
+<ClCompile Include="ppp\app\client\ConnectivityProbe.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetDatagramPort.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetExchanger.cpp" />
     <ClCompile Include="ppp\app\client\VEthernetNetworkSwitcher.cpp" />
@@ -631,6 +634,7 @@
     <ClInclude Include="ppp\net\http\HttpClient.h" />
     <ClInclude Include="ppp\net\http\httplib.h" />
     <ClInclude Include="ppp\net\rinetd\RinetdConnection.h" />
+<ClInclude Include="ppp\app\client\ConnectivityProbe.h" />
     <ClInclude Include="ppp\app\client\VEthernetDatagramPort.h" />
     <ClInclude Include="ppp\app\client\VEthernetExchanger.h" />
     <ClInclude Include="ppp\app\client\VEthernetNetworkSwitcher.h" />
