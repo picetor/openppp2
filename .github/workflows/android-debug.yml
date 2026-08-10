@@ -1,0 +1,210 @@
+name: Android APK Debug & Release
+
+on:
+  push:
+    branches:
+      - inet6
+    paths:
+      - ".github/workflows/build-openppp2-android-debug.yml"
+      - "android/**"
+      - "android_ui/**"
+      - "common/**"
+      - "ppp/**"
+      - "linux/**"
+      - "CMakeLists.txt"
+  pull_request:
+    branches:
+      - inet6
+    paths:
+      - ".github/workflows/build-openppp2-android-debug.yml"
+      - "android/**"
+      - "android_ui/**"
+      - "common/**"
+      - "ppp/**"
+      - "linux/**"
+      - "CMakeLists.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android-apk:
+    name: Android APK (Debug & Release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      ANDROID_NDK_R20B: "20.1.5948944"
+      ANDROID_THIRD_PARTY: ${{ github.workspace }}/.ci/android-third-party
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Cache Android SDK components
+        id: android-sdk-cache
+        uses: actions/cache@v6
+        with:
+          # Only the exact components this build needs; the runner already
+          # ships other SDK versions we must not bloat the cache with.
+          # v2: rebuilt after a corrupted tar entry failed to restore on the
+          # node24 runner (actions/cache v4 was pinned to node20).
+          # v3: rebuild after another corrupted tar restore failure.
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/platforms/android-36
+            ${{ env.ANDROID_SDK_ROOT }}/build-tools/36.0.0
+            ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_R20B }}
+          key: android-sdk-36-r20b-v3
+
+      - name: Install Android SDK and NDK packages
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${ANDROID_NDK_R20B}"
+
+      - name: Cache Android native dependencies
+        id: android-native-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ANDROID_THIRD_PARTY }}
+          key: android-native-r20b-boost-1.74-openssl-1.1.1i-v1
+
+      - name: Download Android native dependencies
+        if: steps.android-native-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p "${ANDROID_THIRD_PARTY}"
+          git clone --depth 1 \
+            https://github.com/liulilittle/boost-1.74-for-android-r20b-fpic.git \
+            "${ANDROID_THIRD_PARTY}/boost"
+          git clone --depth 1 \
+            https://github.com/liulilittle/openssl-1.1.1i-for-android-r20b.git \
+            "${ANDROID_THIRD_PARTY}/openssl"
+
+      - name: Set up ccache
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+          mkdir -p "${GITHUB_WORKSPACE}/.ci/ccache"
+          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ci/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
+          ccache --version | head -n 1
+
+      - name: Cache ccache
+        uses: actions/cache@v6
+        with:
+          # ccache keys on the compiled content itself, so a stale cache is
+          # still correct; bump the key when the toolchain changes.
+          path: ${{ github.workspace }}/.ci/ccache
+          key: ccache-android-r20b-${{ hashFiles('android/CMakeLists.txt') }}
+
+      - name: Build native Android libraries
+        shell: bash
+        working-directory: android
+        env:
+          NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_R20B }}
+          OTHER_ARGS: -DTHIRD_PARTY_LIBRARY_DIR=${{ env.ANDROID_THIRD_PARTY }}
+        run: |
+          chmod +x build.sh
+          ./build.sh arm64
+          ./build.sh x64
+          test -s ../bin/android/arm64-v8a/libopenppp2.so
+          test -s ../bin/android/x86_64/libopenppp2.so
+
+      # Probe symbol verification now happens inside android/build.sh against
+      # the intermediate object files, which always keep .symtab.  The final
+      # .so is stripped in Release builds, so checking it directly would always
+      # fail for -fvisibility=hidden symbols.
+
+      - name: Copy native libraries into Android app
+        shell: bash
+        working-directory: android_ui
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
+          cp ../bin/android/arm64-v8a/libopenppp2.so app/src/main/jniLibs/arm64-v8a/
+          cp ../bin/android/x86_64/libopenppp2.so app/src/main/jniLibs/x86_64/
+          ls -l app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
+
+      - name: Restore signing keystore
+        shell: bash
+        working-directory: android_ui
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+            echo "KEYSTORE_RESTORED=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Write local.properties
+        shell: bash
+        working-directory: android_ui
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+          if [ "${KEYSTORE_RESTORED:-}" = "1" ]; then
+            echo "KEYSTORE_PASS=${{ secrets.KEYSTORE_PASS }}" >> local.properties
+            echo "ALIAS_NAME=${{ secrets.ALIAS_NAME }}" >> local.properties
+            echo "ALIAS_PASS=${{ secrets.ALIAS_PASS }}" >> local.properties
+          fi
+
+      - name: Download geoip/geosite assets
+        shell: bash
+        working-directory: android_ui
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:downloadAssets
+
+      - name: Build debug and release APKs
+        shell: bash
+        working-directory: android_ui
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleOssDebug :app:assembleOssRelease
+
+      - name: Upload debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-android-debug-apk
+          path: android_ui/app/build/outputs/apk/oss/debug/*.apk
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      - name: Upload release APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-android-release-apk
+          path: android_ui/app/build/outputs/apk/oss/release/*.apk
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      - name: Upload native Android libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: openppp2-android-libs
+          path: |
+            bin/android/arm64-v8a/libopenppp2.so
+            bin/android/x86_64/libopenppp2.so
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
