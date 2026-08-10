@@ -113,7 +113,8 @@ class VpnService : BaseVpnService(),
     override fun killProcesses() {
         data.proxy?.close()
         try {
-            libopenppp2.stop()
+            val stopResult = libopenppp2.stop()
+            if (stopResult != 0) Logs.w("libopenppp2.stop returned $stopResult (timeout or not running)")
         } catch (e: Throwable) {
             Logs.w(e)
         }
@@ -590,14 +591,20 @@ class VpnService : BaseVpnService(),
         startLinkStatePoller()
         LogCollector.start(this)
         vpnThread = Thread(null, Runnable {
+            var abnormalExit = false
+            var exitMessage: String? = null
             try {
                 Log.i(TAG, "vpnThread started, calling run(0)")
                 val result = libopenppp2.run(0)
                 Log.i(TAG, "libopenppp2.run returned=$result")
                 if (result != 0) {
-                    Logs.w("libopenppp2 last error=${libopenppp2.get_last_error_text()}")
+                    abnormalExit = true
+                    exitMessage = libopenppp2.get_last_error_text()
+                    Logs.w("libopenppp2 last error=$exitMessage")
                 }
             } catch (e: Throwable) {
+                abnormalExit = true
+                exitMessage = e.message
                 Logs.w(e)
             } finally {
                 isRunning = false
@@ -612,7 +619,13 @@ class VpnService : BaseVpnService(),
                 }
                 vpnInterface = null
                 if (data.state != BaseService.State.Stopped && data.state != BaseService.State.Stopping) {
-                    data.changeState(BaseService.State.Stopped)
+                    // The VPN session ended without a user-initiated stop.
+                    // Surface the reason and shut the foreground service down
+                    // instead of silently leaving it in a ghost Connected state.
+                    val message = exitMessage?.takeIf { it.isNotBlank() }
+                        ?: if (abnormalExit) "VPN 意外退出" else "VPN 连接已断开"
+                    data.changeState(BaseService.State.Stopped, message)
+                    stopSelf()
                 }
             }
         }, "openppp2-vpn-thread", VPN_THREAD_STACK).also { it.start() }

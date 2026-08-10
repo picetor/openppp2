@@ -114,3 +114,31 @@ VpnService.startVpn()                           android_ui/.../bg/VpnService.kt:
 注意：
 - 手动「清空日志」（`logcat -c`）只清系统环形缓冲，不影响采集文件。
 - 采集文件在应用私有目录：卸载或「清除数据」会删除；崩溃报告与导出经 FileProvider 分享出去。
+
+## 6. 开关 / 配置切换卡死修复（✅ 已实现）
+
+症状：VPN 开关变灰无法开启、切换配置无响应（在原生 SIGSEGV 崩溃循环场景下高频出现）。
+
+根因：
+- 停止链路 `stopRunner → killProcesses → libopenppp2.stop()` 在主线程**同步等待**原生 io_context 执行任务（`libopenppp2_invoke_on_run_context` 与 `Invoke` 里的 `Awaitable::Await()` 无限等待）。
+- 若 VPN worker 线程已退出 / io_context 已 stop（run() 提前返回、崩溃残留等），posted 任务永不执行 → `Await()` 永久阻塞 → 状态卡在 `Stopping` → `ServiceButton` 禁用（Stopping 非 canStop 且非 Stopped）+ `forceLoad` 切换走 `Illegal state` 分支 → 开关与切换全部失效，只能杀进程恢复。
+
+修复：
+1. `Executors::Awaitable` 新增 `Await(int timeout_ms)` 超时重载（`ppp/threading/Executors.h` / `Executors.cpp`）。
+2. `libopenppp2_invoke_on_run_context` 与 `libopenppp2_application::Invoke`：post 前检查 `io_context.stopped()` 直接返回；`Await(5000)` 超时返回错误码并打印 `libopenppp2` 错误日志（`android/libopenppp2.cpp`）。
+3. `VpnService.killProcesses`：记录 `libopenppp2.stop()` 返回码，非 0 时 `Logs.w`，超时/未运行状态可见。
+
+效果：任何 JNI 桥调用最多阻塞 5 秒即返回，停止链路必然走完 → 状态复位 `Stopped` → 开关可再次开启、配置可切换。
+
+### 6.1 莫名其妙自己关闭（✅ 已修复）
+
+症状：VPN 运行中（用户未操作）自己断掉，无任何提示；通知可能还在但网络已断。
+
+根因：`libopenppp2.run(0)` 在 VPN worker 线程返回（start 失败、原生内部异常、连接层错误等）时，`finally` 只是把状态改为 `Stopped`——**无消息、不 stopSelf**：UI 只看到开关自己关掉，前台服务却以幽灵状态继续存活（通知残留、服务空转）。
+
+修复（`VpnService.kt` vpnThread）：
+- `run()` 非零返回 / 抛异常 → 记录 `last_error`，`changeState(Stopped, 具体原因)`（UI snackbar 显示"VPN 意外退出"+ 原因，不再无声无息）。
+- `run()` 返回 0 且非用户主动停止 → `changeState(Stopped, "VPN 连接已断开")` + `stopSelf()`，前台服务与通知一并清理。
+- 用户主动停止（Stopping/Stopped）路径不受影响（不重复提示、不重复 stopSelf）。
+
+注意：SIGSEGV 崩溃导致的进程死亡（`openppp2-vpn-th` 段错误）不经过此路径，属于原生崩溃问题，另行处理。

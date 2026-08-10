@@ -29,6 +29,7 @@ namespace ppp
             public:
                 virtual void                                                                        Processed() noexcept;
                 virtual bool                                                                        Await() noexcept;
+                virtual bool                                                                        Await(int timeout_ms) noexcept;
 
             private:
                 bool                                                                                completed = false;
