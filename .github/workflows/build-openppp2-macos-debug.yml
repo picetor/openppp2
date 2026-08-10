@@ -3,7 +3,7 @@
 # Author     : picetor
 # Date-Time  : 2026/06/26
 
-name: Build openppp2 (macOS Debug)
+name: macOS Debug
 
 on:
   push:

@@ -3,7 +3,7 @@
 # Author     : picetor
 # Date-Time  : 2026/06/26
 
-name: Build openppp2 (Windows Debug)
+name: Windows Debug
 
 on:
   push:

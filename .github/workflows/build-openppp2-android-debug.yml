@@ -1,4 +1,4 @@
-name: Build OpenPPP2 Android APK (Debug & Release)
+name: Android APK Debug & Release
 
 on:
   push:

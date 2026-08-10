@@ -1,4 +1,4 @@
-name: Build openppp2 (Linux aarch64 musl)
+name: Linux aarch64 musl
 
 on:
   push:
