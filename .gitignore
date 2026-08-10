@@ -136,3 +136,7 @@ MISSING*
 .tmp/
 *.tmp
 *.dmp
+
+# Local environment files (never commit)
+.pi-web/
+.tmp/
