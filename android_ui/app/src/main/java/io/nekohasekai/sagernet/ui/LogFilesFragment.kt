@@ -107,7 +107,7 @@ class LogFilesFragment : ToolbarFragment(R.layout.layout_log_files),
 
     private fun preview(file: File) {
         val previewBytes = 128 * 1024L
-        onDefaultDispatcher {
+        runOnDefaultDispatcher {
             val length = file.length()
             val skip = (length - previewBytes).coerceAtLeast(0L)
             val text = try {
@@ -169,7 +169,7 @@ class LogFilesFragment : ToolbarFragment(R.layout.layout_log_files),
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
-        when (item.itemId) {
+        return when (item.itemId) {
             R.id.action_share_all_log_files -> {
                 shareAll()
                 true
