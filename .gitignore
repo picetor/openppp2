@@ -136,3 +136,16 @@ MISSING*
 .tmp/
 *.tmp
 *.dmp
+
+# Visual Studio user settings and resource caches (never commit)
+*.user
+*.aps
+*.suo
+
+# Debug/CI scratch files accidentally committed before
+.ci-artifacts/
+ui_dump.xml
+_screen_test.png
+ci_history.txt
+pktmon.txt
+/query
