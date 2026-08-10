@@ -5,7 +5,7 @@ on:
     branches:
       - inet6
     paths:
-      - ".github/workflows/build-openppp2-android-debug.yml"
+      - ".github/workflows/android-debug.yml"
       - "android/**"
       - "android_ui/**"
       - "common/**"
@@ -16,7 +16,7 @@ on:
     branches:
       - inet6
     paths:
-      - ".github/workflows/build-openppp2-android-debug.yml"
+      - ".github/workflows/android-debug.yml"
       - "android/**"
       - "android_ui/**"
       - "common/**"
