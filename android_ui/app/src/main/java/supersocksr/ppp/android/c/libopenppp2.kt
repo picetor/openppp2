@@ -29,21 +29,24 @@ class libopenppp2 {
          * uid from its 13000 uidrange rules, falling through to `ip rule 31000
          * fwmark 0x0/0xffff iif lo lookup <wlan0>`), skip protect() so the
          * socket stays unmarked and exits over the physical network.
+         *
+         * MUST stay IO/log-free: native code calls this from the boost::context
+         * fiber stack, and on Android 12+ ART CheckJNI aborts with an invalid
+         * JNI transition frame whenever a fiber-triggered call touches a
+         * jstring (android.util.Log is the first victim). The native bridge
+         * (OpenPPP2VpnProtectBridge) already decides ColorOS devices natively;
+         * this method is the non-ColorOS fallback.
          */
         @JvmStatic
         fun protect(sockfd: Int): Boolean {
             val service = VpnService.instance
             if (service == null) {
-                android.util.Log.w("openppp2", "protect failed: service missing fd=$sockfd")
                 return false
             }
             if (protectHijacked) {
-                android.util.Log.i("openppp2", "protect skipped (ColorOS fwmark hijack) fd=$sockfd")
                 return true
             }
-            val ok = service.protect(sockfd)
-            android.util.Log.i("openppp2", "protect fd=$sockfd result=$ok")
-            return ok
+            return service.protect(sockfd)
         }
 
         /**
@@ -56,22 +59,16 @@ class libopenppp2 {
          * is diagnostic only and lives in ensureProtectHijackedChecked(),
          * because Runtime.exec()/ProcessBuilder from a JNI-attached native
          * thread (the VPN thread calling protect()) aborts ART with an invalid
-         * JNI transition frame. This lazy must therefore stay IO-free so it is
-         * safe to evaluate from any thread.
+         * JNI transition frame. This lazy must therefore stay IO/log-free so
+         * it is safe to evaluate from the fiber stack.
          */
         private val protectHijacked: Boolean by lazy {
             val manufacturer = (android.os.Build.MANUFACTURER ?: "").lowercase()
             val brand = (android.os.Build.BRAND ?: "").lowercase()
-            val colorOS = manufacturer.contains("realme") || manufacturer.contains("oppo") ||
+            manufacturer.contains("realme") || manufacturer.contains("oppo") ||
                 manufacturer.contains("oneplus") || manufacturer.contains("oplus") ||
                 brand.contains("realme") || brand.contains("oppo") ||
                 brand.contains("oneplus") || brand.contains("oplus")
-            android.util.Log.i(
-                "openppp2",
-                "protect hijack: ColorOS=$colorOS ($manufacturer/$brand), protect() " +
-                    (if (colorOS) "skipped" else "normal")
-            )
-            colorOS
         }
 
         /**
