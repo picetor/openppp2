@@ -103,9 +103,9 @@ VpnService.startVpn()                           android_ui/.../bg/VpnService.kt:
 
 | 项 | 说明 |
 |---|---|
-| 触发 | VPN 前台服务启动即采集（`VpnService.startVpn` 中 `LogCollector.start`），停止时关闭（`killProcesses` 中 `LogCollector.stop`），静默运行 |
-| 采集范围 | 本 app 进程日志：原生 `ppp`、`Exclave`、`VpnService`、`AndroidRuntime`、`ProxyInstance` 等 tag（与日志页过滤器一致）；非 root 读不到系统/其他 app 日志 |
-| 落盘 | `filesDir/logs/ppp-<时间戳>.log`，`logcat -v threadtime` 格式，UTF-8，**逐行 flush**（崩溃/杀进程不丢已采日志） |
+| 触发 | VPN 前台服务启动即采集（`VpnService.startVpn` 中 `LogCollector.start`），停止时关闭（`killProcesses` 中 `LogCollector.stop`），静默运行；**一次 VPN 会话 = 一个日志文件**：启动写 `===== session started <时间> =====` 并新建文件，手动停止写 `===== session stopped <时间> =====` 收尾，异常中断（崩溃/被杀）在下次启动时补写 `===== session stopped (interrupted) =====` |
+| 采集范围 | 本 app 进程日志：原生 `ppp`、`libopenppp2`（JNI 桥）、`OpenPPP2VpnService`/`VpnService`（Kotlin 服务层）、`AndroidRuntime`（崩溃）、`LogCollector`、`Exclave`、`ProxyInstance` 等 tag；Android 7.0+ 追加 `--pid`（只采本进程）与 `-T 1`（不重复旧缓冲）；非 root 读不到系统/其他 app 日志 |
+| 落盘 | `filesDir/logs/ppp-<时间戳>.log`（每次会话新时间戳即新文件），`logcat -v threadtime` 格式，UTF-8，**逐行 flush**（崩溃/杀进程不丢已采日志） |
 | 滚动 | 单文件 20MB 自动换新文件，最多保留 3 个，最旧自动删除（磁盘占用上限约 60MB） |
 | 导出 | 日志页「发送日志」：报告先附后台采集文件尾部（最近 512KB），再附当前 `logcat -d` |
 | 崩溃保留 | `CrashHandler` 崩溃报告自动附带采集文件内容；即使 logcat 环形缓冲被清空（`logcat -c` / 系统回收），文件历史仍在 |
@@ -114,6 +114,8 @@ VpnService.startVpn()                           android_ui/.../bg/VpnService.kt:
 
 注意：
 - 手动「清空日志」（`logcat -c`）只清系统环形缓冲，不影响采集文件。
+- 日志按会话分文件后，可在日志文件列表按 `session started/stopped` 标记精确对应某一次会话；单文件 20MB 上限仍保留（超长会话自动换文件）。
+- 崩溃/被杀时采集随进程一起停止，文件停笔在最后一行（逐行 flush，内容不丢）；`run()` 错误退出也会立即收尾写 `session stopped`；硬崩溃（无收尾标记）的旧文件在下次启动时自动补写 `session stopped (interrupted)` 收尾标记。
 - 采集文件在应用私有目录：卸载或「清除数据」会删除；崩溃报告与导出经 FileProvider 分享出去。
 
 ## 6. 开关 / 配置切换卡死修复（✅ 已实现）

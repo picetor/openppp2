@@ -612,6 +612,7 @@ class VpnService : BaseVpnService(),
                 activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
                 activeGatewayLoopback = null
                 stopLinkStatePoller()
+                LogCollector.stop()
                 releaseWakeLock()
                 try {
                     vpnInterface?.close()
