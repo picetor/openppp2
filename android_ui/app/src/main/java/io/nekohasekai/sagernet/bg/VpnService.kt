@@ -544,6 +544,15 @@ class VpnService : BaseVpnService(),
 
         // Enable the native protect(fd) bridge.
         try {
+            // Pre-warm the ColorOS hijack decision on this JVM thread before
+            // the native VPN thread starts. The native thread must never run
+            // the `ip rule` exec inside protect() - ART aborts with an invalid
+            // JNI transition frame when a JNI-attached thread spawns a process.
+            libopenppp2.ensureProtectHijackedChecked()
+        } catch (e: Throwable) {
+            Logs.w(e)
+        }
+        try {
             libopenppp2.set_protect_enabled(true)
         } catch (e: Throwable) {
             Logs.w(e)
