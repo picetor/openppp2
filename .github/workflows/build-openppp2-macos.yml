@@ -3,7 +3,7 @@
 # Author     : picetor
 # Date-Time  : 2026/06/24
 
-name: Build openppp2 (macOS)
+name: macOS
 
 on:
   push:

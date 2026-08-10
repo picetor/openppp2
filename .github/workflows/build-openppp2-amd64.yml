@@ -1,4 +1,4 @@
-name: Build openppp2 (Linux amd64 musl)
+name: Linux amd64 musl
 
 on:
   push:
