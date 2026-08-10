@@ -148,6 +148,10 @@ class LogcatFragment : ToolbarFragment(R.layout.layout_logcat),
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.action_log_files -> {
+                (activity as? MainActivity)?.displayFragment(LogFilesFragment())
+                true
+            }
             R.id.action_clear_logcat -> {
                 runOnIoDispatcher {
                     val command = listOf("logcat", "-c")

@@ -378,6 +378,17 @@
     <string name="ssh_private_key_passphrase">Private key passphrase</string>
     <string name="menu_log">Logs</string>
     <string name="clear_logcat">Clear Logcat</string>
+    <string name="log_files">Log Files</string>
+    <string name="log_files_empty">No collected log files yet.\nCollected logs appear here while the VPN is running.</string>
+    <string name="log_files_tail_hint">Showing the last %1$s of this file.</string>
+    <string name="share_log_file">Share</string>
+    <string name="delete_log_file">Delete</string>
+    <string name="delete_log_file_confirm">Delete this log file?</string>
+    <string name="share_all_log_files">Share All</string>
+    <string name="clear_all_log_files">Delete All</string>
+    <string name="clear_all_log_files_confirm">Delete all collected log files?</string>
+    <string name="log_file_deleted">Log file deleted</string>
+    <string name="log_files_cleared">All log files deleted</string>
     <string name="wireguard_local_address">Local address</string>
     <string name="wireguard_public_key">Peer public key</string>
     <string name="wireguard_psk">Peer pre-shared key</string>

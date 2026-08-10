@@ -28,7 +28,7 @@ import java.util.Locale
  */
 object LogCollector {
 
-    private const val MAX_FILE_BYTES = 5L * 1024 * 1024
+    private const val MAX_FILE_BYTES = 20L * 1024 * 1024
     private const val MAX_FILES = 3
 
     private val lock = Any()

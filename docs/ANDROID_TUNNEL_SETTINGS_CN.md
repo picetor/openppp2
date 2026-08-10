@@ -106,10 +106,11 @@ VpnService.startVpn()                           android_ui/.../bg/VpnService.kt:
 | 触发 | VPN 前台服务启动即采集（`VpnService.startVpn` 中 `LogCollector.start`），停止时关闭（`killProcesses` 中 `LogCollector.stop`），静默运行 |
 | 采集范围 | 本 app 进程日志：原生 `ppp`、`Exclave`、`VpnService`、`AndroidRuntime`、`ProxyInstance` 等 tag（与日志页过滤器一致）；非 root 读不到系统/其他 app 日志 |
 | 落盘 | `filesDir/logs/ppp-<时间戳>.log`，`logcat -v threadtime` 格式，UTF-8，**逐行 flush**（崩溃/杀进程不丢已采日志） |
-| 滚动 | 单文件 5MB 自动换新文件，最多保留 3 个，最旧自动删除 |
+| 滚动 | 单文件 20MB 自动换新文件，最多保留 3 个，最旧自动删除（磁盘占用上限约 60MB） |
 | 导出 | 日志页「发送日志」：报告先附后台采集文件尾部（最近 512KB），再附当前 `logcat -d` |
 | 崩溃保留 | `CrashHandler` 崩溃报告自动附带采集文件内容；即使 logcat 环形缓冲被清空（`logcat -c` / 系统回收），文件历史仍在 |
 | 跨进程 | 采集由 `:bg` 进程（VpnService）写入，主进程崩溃时 `LogCollector.snapshot()` 按文件名读取，不依赖内存状态 |
+| 管理界面 | 日志页右上角文件夹按钮 → 日志文件列表（`LogFilesFragment`）：查看尾部、分享单个/全部、删除单个/清空全部，不打印 logcat 控制台 |
 
 注意：
 - 手动「清空日志」（`logcat -c`）只清系统环形缓冲，不影响采集文件。

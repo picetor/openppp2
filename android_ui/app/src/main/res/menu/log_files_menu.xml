@@ -3,20 +3,15 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
-        android:id="@+id/action_send_logcat"
+        android:id="@+id/action_share_all_log_files"
         android:icon="@drawable/baseline_send_24"
-        android:title="@string/logcat"
+        android:title="@string/share_all_log_files"
         app:showAsAction="always"
         tools:ignore="AlwaysShowAction" />
     <item
-        android:id="@+id/action_log_files"
-        android:icon="@drawable/ic_baseline_rule_folder_24"
-        android:title="@string/log_files"
-        app:showAsAction="always"
-        tools:ignore="AlwaysShowAction" />
-    <item
-        android:id="@+id/action_clear_logcat"
+        android:id="@+id/action_clear_all_log_files"
         android:icon="@drawable/baseline_delete_sweep_24"
-        android:title="@string/clear_logcat"
-        app:showAsAction="always" />
+        android:title="@string/clear_all_log_files"
+        app:showAsAction="always"
+        tools:ignore="AlwaysShowAction" />
 </menu>
