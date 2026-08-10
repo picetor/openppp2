@@ -360,7 +360,11 @@ namespace ppp {
 
                     candidate.probe_category = candidate.probe_type == ConnectivityProbe::ProbeType_WebSocket ? "ws" :
                         (candidate.probe_type == ConnectivityProbe::ProbeType_WebSocketSSL ? "wss" : "tcp");
-                    candidate.entry = NormalizeProbeEntry(candidate.address, candidate.port);
+                    // Key the probe cache/stickiness on the logical entry
+                    // (hostname:port) instead of the resolved IP:port, so a
+                    // DNS re-resolution (CDN) never invalidates the sticky
+                    // preference or the cached result.
+                    candidate.entry = NormalizeProbeEntry(candidate.hostname, candidate.port);
                     if (candidate.entry.empty()) {
                         continue;
                     }
@@ -533,26 +537,29 @@ namespace ppp {
                     }
                 }
 
-                // Hysteresis: keep the cached endpoint when its RTT is within 30%
-                // of the best candidate, so jitter does not bounce reconnects
-                // between near-equal entries.  Applies only when the cached
-                // endpoint (server_url_) is still reachable this round.
-                if (best_index >= 0 && server_url_.port > IPEndPoint::MinPort &&
-                    server_url_.port <= IPEndPoint::MaxPort) {
-                    ppp::string current_entry = server_url_.server.find("://") == ppp::string::npos ?
-                        NormalizeProbeEntry(server_url_.hostname, server_url_.port) :
-                        NormalizeProbeEntry(server_url_.address, server_url_.port);
-                    if (!current_entry.empty()) {
+                // Sticky entry: keep the last successfully selected entry
+                // whenever it is still reachable this round, regardless of RTT.
+                // A reconnect must never bounce to a different entry on probe
+                // jitter - on wss/ws/ppp tunnels switching entries mid-session
+                // breaks the stream.  Only a genuinely unreachable or
+                // blacklisted entry loses stickiness and lets the lowest-RTT
+                // candidate win.  probe_server_ persists across reconnects
+                // (server_url_ is cleared by ExchangeToReconnectingState), so
+                // the preference survives reconnect cycles.
+                if (best_index >= 0) {
+                    ppp::string preferred_entry;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        preferred_entry = probe_server_;
+                    }
+                    if (!preferred_entry.empty()) {
                         for (std::size_t i = 0; i < candidates.size(); i++) {
                             const ProbeCandidateEntry& candidate = candidates[i];
-                            if (candidate.entry != current_entry || !candidate.probed ||
-                                !candidate.reachable || candidate.rtt_ms < 0) {
-                                continue;
+                            if (candidate.entry == preferred_entry && candidate.probed &&
+                                candidate.reachable) {
+                                best_index = static_cast<int>(i); // Sticky: keep it.
+                                break;
                             }
-                            if (candidate.rtt_ms * 10 <= best_rtt * 13) {
-                                best_index = static_cast<int>(i); // Within +30%: keep it.
-                            }
-                            break;
                         }
                     }
                 }
@@ -1661,14 +1668,10 @@ namespace ppp {
                 if (NULLPTR != configuration) {
                     if (configuration->client.probe.enabled &&
                         server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
-                        // Backups carry a bare "host:port" entry in server_url_.server
-                        // (no scheme); the primary carries a full URL.  Use the
-                        // hostname for bare entries so the blacklist key matches the
-                        // probe cache key ("host:port" / "[ipv6]:port") even when
-                        // the entry is a hostname that resolved to a different IP.
-                        ppp::string entry = server_url_.server.find("://") == ppp::string::npos ?
-                            NormalizeProbeEntry(server_url_.hostname, server_url_.port) :
-                            NormalizeProbeEntry(server_url_.address, server_url_.port);
+                        // Both backups and the primary are keyed on hostname:port
+                        // (the same key the probe cache and stickiness use), so a
+                        // DNS re-resolution never breaks the blacklist.
+                        ppp::string entry = NormalizeProbeEntry(server_url_.hostname, server_url_.port);
                         if (!entry.empty()) {
                             SynchronizedObjectScope scope(syncobj_);
                             auto it = probe_results_.find(entry);

@@ -565,7 +565,9 @@ namespace ppp {
                                 IPEndPoint ipep(entry_address.data(), entry_port);
                                 if (!IPEndPoint::IsInvalid(ipep)) {
                                     Candidate candidate;
-                                    candidate.entry = NormalizeProbeEntryString(entry_address, entry_port);
+                                    // Keep the display key consistent with the
+                                    // connection-side key (hostname:port).
+                                    candidate.entry = NormalizeProbeEntryString(entry_hostname, entry_port);
                                     candidate.hostname = entry_hostname;
                                     candidate.path = entry_path;
                                     candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
