@@ -1,4 +1,4 @@
-﻿#include <ppp/configurations/AppConfiguration.h>
+#include <ppp/configurations/AppConfiguration.h>
 #include <ppp/cryptography/Ciphertext.h>
 #include <ppp/cryptography/ssea.h>
 #include <ppp/threading/Thread.h>
@@ -293,6 +293,13 @@ namespace ppp {
             config.mux.turbo = false;
             config.mux.flow.reorder.bytes = PPP_MUX_FLOW_REORDER_BYTES;
             config.mux.flow.reorder.timeout = PPP_MUX_FLOW_REORDER_TIMEOUT;
+            config.mux.flow.retransmit.enabled = true;
+            config.mux.flow.retransmit.cache_bytes = PPP_MUX_FLOW_RETX_CACHE_BYTES;
+            config.mux.flow.retransmit.max_frames = PPP_MUX_FLOW_RETX_MAX_FRAMES;
+            config.mux.flow.retransmit.ack_every_frames = PPP_MUX_FLOW_ACK_EVERY_FRAMES;
+            config.mux.flow.retransmit.ack_delay_ms = PPP_MUX_FLOW_ACK_DELAY_MS;
+            config.mux.flow.retransmit.nack_max_retries = PPP_MUX_FLOW_NACK_MAX_RETRIES;
+            config.mux.flow.retransmit.nack_backoff_ms = PPP_MUX_FLOW_NACK_BACKOFF_MS;
             config.mux.tx.queue.max = PPP_MUX_TX_QUEUE_HIGH_WATER;
             config.mux.tx.queue.stall = PPP_MUX_TX_BACKLOG_STALL_TIMEOUT;
             config.mux.debug.key = "";
@@ -368,6 +375,16 @@ namespace ppp {
             config.client.probe.parallel = true;
             config.client.probe.stage = 3;
             config.client.probe.categories.clear();
+            config.client.hot_switch.enabled = false;
+            config.client.hot_switch.threshold_rtt_factor = 2.0;
+            config.client.hot_switch.threshold_rtt_ms = 100;
+            config.client.hot_switch.min_stable_periods = 3;
+            config.client.hot_switch.lock_seconds = 60;
+            config.client.hot_switch.penalty_seconds = 60;
+            config.client.hot_switch.preheat = true;
+            config.client.hot_switch.observe_ms = 2000;
+            config.client.hot_switch.channels_per_entry = 0;
+            config.client.hot_switch.drain_timeout_seconds = 120;
             config.client.bandwidth = 0;
             config.client.reconnections.timeout = PPP_TCP_CONNECT_TIMEOUT;
             config.client.http_proxy.bind = "";
@@ -694,6 +711,41 @@ namespace ppp {
 
             if (config.mux.flow.reorder.timeout <= 0) {
                 config.mux.flow.reorder.timeout = PPP_MUX_FLOW_REORDER_TIMEOUT;
+            }
+
+            if (config.mux.flow.retransmit.cache_bytes <= 0) {
+                config.mux.flow.retransmit.cache_bytes = PPP_MUX_FLOW_RETX_CACHE_BYTES;
+            }
+            // M4: the send-side retransmit cache must cover the receiver reorder window
+            // plus in-flight frames; clamp to at least 2x the reorder buffer.
+            if (config.mux.flow.retransmit.cache_bytes < config.mux.flow.reorder.bytes * 2) {
+                config.mux.flow.retransmit.cache_bytes = config.mux.flow.reorder.bytes * 2;
+            }
+            if (config.mux.flow.retransmit.max_frames <= 0) {
+                config.mux.flow.retransmit.max_frames = PPP_MUX_FLOW_RETX_MAX_FRAMES;
+            }
+            if (config.mux.flow.retransmit.ack_every_frames <= 0) {
+                config.mux.flow.retransmit.ack_every_frames = PPP_MUX_FLOW_ACK_EVERY_FRAMES;
+            }
+            if (config.mux.flow.retransmit.ack_delay_ms <= 0) {
+                config.mux.flow.retransmit.ack_delay_ms = PPP_MUX_FLOW_ACK_DELAY_MS;
+            }
+            if (config.mux.flow.retransmit.nack_max_retries <= 0) {
+                config.mux.flow.retransmit.nack_max_retries = PPP_MUX_FLOW_NACK_MAX_RETRIES;
+            }
+            if (config.mux.flow.retransmit.nack_backoff_ms <= 0) {
+                config.mux.flow.retransmit.nack_backoff_ms = PPP_MUX_FLOW_NACK_BACKOFF_MS;
+            }
+
+            // Hot-switch dependency (M2): the flow-v2 reorder window must cover the
+            // preheat/switch window; refuse to enable hot-switch otherwise.
+            if (config.client.hot_switch.enabled &&
+                (config.mux.flow.reorder.bytes < PPP_MUX_FLOW_REORDER_BYTES ||
+                 config.mux.flow.reorder.timeout < PPP_MUX_FLOW_REORDER_TIMEOUT)) {
+                LOG_ERROR("AppConfiguration: hot-switch requires mux.flow.reorder.bytes >= %d and timeout >= %d ms; current bytes=%d timeout=%d; hot-switch disabled",
+                    (int)PPP_MUX_FLOW_REORDER_BYTES, (int)PPP_MUX_FLOW_REORDER_TIMEOUT,
+                    config.mux.flow.reorder.bytes, config.mux.flow.reorder.timeout);
+                config.client.hot_switch.enabled = false;
             }
 
             if (config.mux.tx.queue.max <= 0) {
@@ -1456,6 +1508,13 @@ namespace ppp {
             config.mux.turbo = JsonAuxiliary::AsValue<bool>(json["mux"]["turbo"]);
             config.mux.flow.reorder.bytes = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["reorder"]["bytes"]);
             config.mux.flow.reorder.timeout = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["reorder"]["timeout"]);
+            config.mux.flow.retransmit.enabled = JsonAuxiliary::AsValue<bool>(json["mux"]["flow"]["retransmit"]["enabled"]);
+            config.mux.flow.retransmit.cache_bytes = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["cache-bytes"]);
+            config.mux.flow.retransmit.max_frames = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["max-frames"]);
+            config.mux.flow.retransmit.ack_every_frames = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["ack-every-frames"]);
+            config.mux.flow.retransmit.ack_delay_ms = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["ack-delay-ms"]);
+            config.mux.flow.retransmit.nack_max_retries = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["nack-max-retries"]);
+            config.mux.flow.retransmit.nack_backoff_ms = JsonAuxiliary::AsValue<int>(json["mux"]["flow"]["retransmit"]["nack-backoff-ms"]);
             config.mux.tx.queue.max = JsonAuxiliary::AsValue<int>(json["mux"]["tx"]["queue"]["max"]);
             config.mux.tx.queue.stall = JsonAuxiliary::AsValue<int>(json["mux"]["tx"]["queue"]["stall"]);
             config.mux.debug.key = JsonAuxiliary::AsValue<ppp::string>(json["mux"]["debug"]["key"]);
@@ -1552,6 +1611,24 @@ namespace ppp {
                     config.client.probe.stage = std::min<int>(3, std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["stage"])));
                     config.client.probe.categories.clear();
                     ReadJsonAllTokensToSet(probe_json["categories"], config.client.probe.categories);
+                }
+            }
+            {
+                const Json::Value& hot_switch_json = json["client"]["hot-switch"];
+                if (hot_switch_json.isObject()) {
+                    AssignBoolIfPresent(config.client.hot_switch.enabled, hot_switch_json["enabled"]);
+                    const double factor = JsonAuxiliary::AsValue<double>(hot_switch_json["threshold-rtt-factor"]);
+                    if (factor >= 1.0) {
+                        config.client.hot_switch.threshold_rtt_factor = factor;
+                    }
+                    config.client.hot_switch.threshold_rtt_ms = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["threshold-rtt-ms"]));
+                    config.client.hot_switch.min_stable_periods = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["min-stable-periods"]));
+                    config.client.hot_switch.lock_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["lock-seconds"]));
+                    config.client.hot_switch.penalty_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["penalty-seconds"]));
+                    AssignBoolIfPresent(config.client.hot_switch.preheat, hot_switch_json["preheat"]);
+                    config.client.hot_switch.observe_ms = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["observe-ms"]));
+                    config.client.hot_switch.channels_per_entry = std::max<int>(0, JsonAuxiliary::AsValue<int>(hot_switch_json["channels-per-entry"]));
+                    config.client.hot_switch.drain_timeout_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["drain-timeout-seconds"]));
                 }
             }
             config.client.bandwidth = JsonAuxiliary::AsValue<int64_t>(json["client"]["bandwidth"]);
@@ -1725,6 +1802,13 @@ namespace ppp {
             mux["turbo"] = config.mux.turbo;
             mux["flow"]["reorder"]["bytes"] = config.mux.flow.reorder.bytes;
             mux["flow"]["reorder"]["timeout"] = config.mux.flow.reorder.timeout;
+            mux["flow"]["retransmit"]["enabled"] = config.mux.flow.retransmit.enabled;
+            mux["flow"]["retransmit"]["cache-bytes"] = config.mux.flow.retransmit.cache_bytes;
+            mux["flow"]["retransmit"]["max-frames"] = config.mux.flow.retransmit.max_frames;
+            mux["flow"]["retransmit"]["ack-every-frames"] = config.mux.flow.retransmit.ack_every_frames;
+            mux["flow"]["retransmit"]["ack-delay-ms"] = config.mux.flow.retransmit.ack_delay_ms;
+            mux["flow"]["retransmit"]["nack-max-retries"] = config.mux.flow.retransmit.nack_max_retries;
+            mux["flow"]["retransmit"]["nack-backoff-ms"] = config.mux.flow.retransmit.nack_backoff_ms;
             mux["tx"]["queue"]["max"] = config.mux.tx.queue.max;
             mux["tx"]["queue"]["stall"] = config.mux.tx.queue.stall;
             if (!config.mux.debug.key.empty()) {

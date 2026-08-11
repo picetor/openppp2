@@ -19,8 +19,14 @@
 ## 📋 目录
 
 - [Geo 分流模式](#-geo-分流模式)
+  - [Geo 策略与可选固定出口](#-geo-策略与可选固定出口)
+  - [服务器热切换](#-服务器热切换)
+  - [匹配语法和顺序](#-匹配语法和顺序)
 - [IPv6 特性总览](#-ipv6-特性总览)
-  - [IPv6 分流 (--bypass6)](#-ipv6-分流---bypass6)
+  - [IPv6 分流 (`--bypass6`)](#-ipv6-分流---bypass6)
+    - [用法](#-用法)
+    - [ipv6.txt 格式](#-ipv6txt-格式)
+    - [平台路由命令](#-平台路由命令)
   - [VPN 服务器 IPv6 连通性保证](#-vpn-服务器-ipv6-连通性保证)
   - [Windows IPv6 DNS 防泄漏](#-windows-ipv6-dns-防泄漏)
   - [Windows TUN DNS 防泄漏](#-windows-tun-dns-防泄漏)
@@ -28,16 +34,57 @@
   - [服务器端 IPv6 模式](#-服务器端-ipv6-模式)
   - [IPv6 DNS 配置与下发](#-ipv6-dns-配置与下发)
 - [WSS 优选 IP 加速](#-wss-优选-ip-加速)
+    - [用法](#-用法-1)
 - [客户端多入口 + 连通性检测（自动优选）](#-客户端多入口--连通性检测自动优选)
+    - [配置](#-配置)
+    - [行为](#-行为)
+    - [示例：ppp 多入口（v4 / v6 / 域名混用）](#-示例ppp-多入口v4--v6--域名混用)
+    - [热切换（可选，本次新增）](#-热切换可选本次新增)
 - [SOCKS5 代理](#-socks5-代理)
+    - [用法](#-用法-2)
+    - [认证与 bug 修复](#-认证与-bug-修复)
 - [改进与修复](#-改进与修复)
 - [CLI 参数对比](#-cli-参数对比)
 - [命令行接口（原版）](#-命令行接口原版)
+  - [通用命令](#-通用命令)
+  - [服务器命令](#-服务器命令)
+  - [客户端命令](#-客户端命令)
+    - [核心设置](#-核心设置)
+    - [虚拟网卡](#-虚拟网卡)
+    - [高级功能](#-高级功能)
+    - [路由设置](#-路由设置)
+    - [平台专用](#-平台专用)
+  - [Windows 命令](#-windows-命令)
+  - [全局参数](#-全局参数)
+    - [MUX 加速模式](#-mux-加速模式)
+    - [MUX 使用说明](#-mux-使用说明)
+    - [MUX 调度模式](#-mux-调度模式)
+    - [各模式完整写法](#-各模式完整写法)
+    - [flow-v2 与重传（本次更新）](#-flow-v2-与重传本次更新)
+    - [虚拟网卡默认值](#-虚拟网卡默认值)
+    - [SSMT 优化模式](#-ssmt-优化模式)
+    - [网络协议栈](#-网络协议栈)
 - [CLI 启动示例](#-cli-启动示例)
+  - [客户端模式](#-客户端模式)
+  - [独立 Proxy 模式](#-独立-proxy-模式)
+  - [服务端模式](#-服务端模式)
+  - [通用参数](#-通用参数)
+- [管理面板直连](#-管理面板直连)
 - [Debug 日志版本](#-debug-日志版本)
+  - [Release vs Debug](#-release-vs-debug)
+  - [获取 Debug 构建](#-获取-debug-构建)
+  - [`--log-file` 使用](#---log-file-使用)
 - [隧道协议配置](#-隧道协议配置)
+  - [PPP（原生 TCP 直连）](#-ppp原生-tcp-直连)
+  - [WS（WebSocket 无加密）](#-wswebsocket-无加密)
+  - [WSS（WebSocket over TLS）](#-wsswebsocket-over-tls)
+  - [协议对比](#-协议对比)
 - [构建系统](#-构建系统)
 - [关联项目](#-关联项目)
+  - [DNS 规则生成 — `dns-rules_geosite_generator`](#-dns-规则生成--dns-rules_geosite_generator)
+  - [一键安装 — `openppp2_install`](#-一键安装--openppp2_install)
+  - [IP 分流数据来源](#-ip-分流数据来源)
+  - [IPv6 参考实现 — `openppp2_Miaocchi`](#-ipv6-参考实现--openppp2_miaocchi)
 
 ---
 
@@ -292,7 +339,7 @@ IPv6 DNS 不使用客户端的 `--dns=` 参数，而是在服务端 `appsettings
 
 ---
 
-### ⚡ WSS 优选 IP 加速
+## ⚡ WSS 优选 IP 加速
 
 在连接 CDN 优选 IP 的同时，通过自定义 Host/SNI 字段让 CDN 正确路由到你的源站。
 
@@ -325,7 +372,7 @@ IPv6 DNS 不使用客户端的 `--dns=` 参数，而是在服务端 `appsettings
 
 `host` 和 `sni` 同时支持 WS (`ws://`) 和 WSS (`wss://`) 隧道。留空时行为与原版完全一致。
 
-### 🌐 客户端多入口 + 连通性检测（自动优选）
+## 🌐 客户端多入口 + 连通性检测（自动优选）
 
 客户端内置入口连通性检测与多入口自动优选（默认开启，`client.probe.enabled` 开关可关闭），桌面端与安卓通用（安卓不做 5 秒后台刷新与页面延迟显示）；
 ppp / ws / wss 隧道通用。
@@ -404,9 +451,45 @@ ppp / ws / wss 隧道通用。
 > IPv6 地址建议一律带方括号（`[2400::1]:port`）；带端口时无括号也能解析（兼容旧配置），
 > 但无端口或压缩格式存在歧义。ppp 入口探测天然为 TCP-only，`stage:1` 最省探测开销。
 
+#### 热切换（可选，本次新增）
+
+在 `client.servers` + 连通性探测基础上启用**预热式渐进热切换**：备用入口在后台预热建链，当前入口 RTT 持续劣化（超过阈值且连续多个观察周期）时才切换，连接不中断，游戏场景目标不掉线。默认关闭。
+
+```json
+"client": {
+    "hot-switch": {
+        "enabled":               true,
+        "threshold-rtt-factor":  2.0,
+        "threshold-rtt-ms":      100,
+        "min-stable-periods":    3,
+        "lock-seconds":          60,
+        "penalty-seconds":       60,
+        "preheat":               true,
+        "observe-ms":            2000,
+        "channels-per-entry":    0,
+        "drain-timeout-seconds": 120
+    }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `enabled` | 总开关，默认 `false` |
+| `threshold-rtt-factor` | 当前入口 RTT 劣化倍数阈值，默认 `2.0` |
+| `threshold-rtt-ms` | 当前入口 RTT 劣化绝对阈值（毫秒），默认 `100` |
+| `min-stable-periods` | 劣化需连续成立的最小探测周期数（防抖），默认 `3` |
+| `lock-seconds` | 切换成功后新入口锁定期（秒），默认 `60` |
+| `penalty-seconds` | 失败入口黑名单时长（秒），默认 `60` |
+| `preheat` | 后台预热备用入口，默认 `true` |
+| `observe-ms` | 预热完成后的观察窗口（毫秒），默认 `2000` |
+| `channels-per-entry` | 每入口通道数分布，`0` = 不分布全走最优，默认 `0` |
+| `drain-timeout-seconds` | 旧入口通道退役超时强杀（秒），默认 `120` |
+
+启用前置条件（不满足时启动自动禁用并告警）：`client.servers` 非空、`client.probe.enabled=true`、`mux.flow.reorder.bytes ≥ 16777216` 且 `mux.flow.reorder.timeout ≥ 2000`。设计文档：[`docs/PREHEAT_HOT_SWITCH_CN.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/PREHEAT_HOT_SWITCH_CN.md)
+
 ---
 
-### 🔌 SOCKS5 代理
+## 🔌 SOCKS5 代理
 
 内置 SOCKS5 代理服务器，作为 TUN 模式的补充。
 
@@ -591,8 +674,17 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
     ],
     "flow": {
         "reorder": {
-            "bytes": 1048576,
-            "timeout": 400
+            "bytes": 16777216,
+            "timeout": 2000
+        },
+        "retransmit": {
+            "enabled":          true,
+            "cache-bytes":      33554432,
+            "max-frames":       4096,
+            "ack-every-frames": 16,
+            "ack-delay-ms":     50,
+            "nack-max-retries": 5,
+            "nack-backoff-ms":  100
         }
     },
     "tx": {
@@ -616,8 +708,15 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
 | `mode` | MUX 调度模式：`compat`、`flow`、`balance` 或 `stripe` | `compat` |
 | `turbo` | flow 模式动态连接池；最多扩展到基础连接数的 3 倍 | `false` |
 | `keep-alived` | 心跳间隔随机范围，单位为秒 | `[5, 20]` |
-| `flow.reorder.bytes` | 每个业务流的最大乱序缓存，单位为字节 | `1048576` |
-| `flow.reorder.timeout` | 等待缺失数据序号的超时，单位为毫秒 | `400` |
+| `flow.reorder.bytes` | 每个业务流的最大乱序缓存，单位为字节 | `16777216` |
+| `flow.reorder.timeout` | 等待缺失数据序号的超时，单位为毫秒 | `2000` |
+| `flow.retransmit.enabled` | 发送端重传总开关；需双方协商 flow-v2 + `ordering_caps_nack` 才实际启用 | `true` |
+| `flow.retransmit.cache-bytes` | 发送端每连接重传缓存字节上限；启动时钳制为 ≥ `reorder.bytes × 2` | `33554432` |
+| `flow.retransmit.max-frames` | 发送端每连接重传缓存帧数上限 | `4096` |
+| `flow.retransmit.ack-every-frames` | 接收端每投递 N 帧发送一次批量 ACK | `16` |
+| `flow.retransmit.ack-delay-ms` | 接收端批量 ACK 的最大时间间隔，单位为毫秒 | `50` |
+| `flow.retransmit.nack-max-retries` | NACK 重试上限，超出后干净重建 MUX | `5` |
+| `flow.retransmit.nack-backoff-ms` | NACK 重发基础退避，指数退避 ×2 至 `1600`，单位为毫秒 | `100` |
 | `tx.queue.max` | 数据发送队列高水位，达到后暂停继续读取 | `4096` |
 | `tx.queue.stall` | 发送队列持续阻塞后重建 MUX 的时间，单位为毫秒 | `8000` |
 | `debug.key` | 远程切换 MUX 模式的共享密钥；空值表示禁用 | 空 |
@@ -639,23 +738,129 @@ ppp --mode=client --config=appsettings.json --tun-mux=4 --tun-mux-acceleration=0
 "turbo": false
 ```
 
-启用 balance：
+#### 各模式完整写法
+
+四种模式共用同一套 `mux` 结构，仅 `mode` / `turbo` 不同。以下为各模式完整写法，可直接替换配置中的 `mux` 段；`flow` 段仅在协商 flow-v2 的模式（`balance`、`stripe`、`flow + turbo`）下生效。
+
+flow 模式（全局序号，无动态连接池）：
 
 ```json
-"mode": "balance",
-"turbo": false
+"mux": {
+    "connect": { "timeout": 20 },
+    "inactive": { "timeout": 60 },
+    "congestions": 134217728,
+    "mode": "flow",
+    "turbo": false,
+    "keep-alived": [5, 20],
+    "flow": {
+        "reorder": { "bytes": 16777216, "timeout": 2000 },
+        "retransmit": {
+            "enabled":          true,
+            "cache-bytes":      33554432,
+            "max-frames":       4096,
+            "ack-every-frames": 16,
+            "ack-delay-ms":     50,
+            "nack-max-retries": 5,
+            "nack-backoff-ms":  100
+        }
+    },
+    "tx": { "queue": { "max": 4096, "stall": 8000 } },
+    "debug": { "key": "", "set-mode": "" }
+}
 ```
 
-启用 flow 动态连接池：
+flow + turbo 模式（协商 flow-v2，动态连接池最多扩展到基础连接数的 3 倍）：
 
 ```json
-"mode": "flow",
-"turbo": true
+"mux": {
+    "connect": { "timeout": 20 },
+    "inactive": { "timeout": 60 },
+    "congestions": 134217728,
+    "mode": "flow",
+    "turbo": true,
+    "keep-alived": [5, 20],
+    "flow": {
+        "reorder": { "bytes": 16777216, "timeout": 2000 },
+        "retransmit": {
+            "enabled":          true,
+            "cache-bytes":      33554432,
+            "max-frames":       4096,
+            "ack-every-frames": 16,
+            "ack-delay-ms":     50,
+            "nack-max-retries": 5,
+            "nack-backoff-ms":  100
+        }
+    },
+    "tx": { "queue": { "max": 4096, "stall": 8000 } },
+    "debug": { "key": "", "set-mode": "" }
+}
+```
+
+balance 模式（多连接并发，空闲链路竞争，推荐优先测试）：
+
+```json
+"mux": {
+    "connect": { "timeout": 20 },
+    "inactive": { "timeout": 60 },
+    "congestions": 134217728,
+    "mode": "balance",
+    "turbo": false,
+    "keep-alived": [5, 20],
+    "flow": {
+        "reorder": { "bytes": 16777216, "timeout": 2000 },
+        "retransmit": {
+            "enabled":          true,
+            "cache-bytes":      33554432,
+            "max-frames":       4096,
+            "ack-every-frames": 16,
+            "ack-delay-ms":     50,
+            "nack-max-retries": 5,
+            "nack-backoff-ms":  100
+        }
+    },
+    "tx": { "queue": { "max": 4096, "stall": 8000 } },
+    "debug": { "key": "", "set-mode": "" }
+}
+```
+
+stripe 模式（同质链路轮询分包）：
+
+```json
+"mux": {
+    "connect": { "timeout": 20 },
+    "inactive": { "timeout": 60 },
+    "congestions": 134217728,
+    "mode": "stripe",
+    "turbo": false,
+    "keep-alived": [5, 20],
+    "flow": {
+        "reorder": { "bytes": 16777216, "timeout": 2000 },
+        "retransmit": {
+            "enabled":          true,
+            "cache-bytes":      33554432,
+            "max-frames":       4096,
+            "ack-every-frames": 16,
+            "ack-delay-ms":     50,
+            "nack-max-retries": 5,
+            "nack-backoff-ms":  100
+        }
+    },
+    "tx": { "queue": { "max": 4096, "stall": 8000 } },
+    "debug": { "key": "", "set-mode": "" }
+}
 ```
 
 > 建议先从 `--tun-mux=2` 或 `--tun-mux=4` 开始测试。连接数越多，连接建立、心跳和服务器资源开销也越大，不一定能继续提高速度。不需要 MUX 时只需设置 `--tun-mux=0`，无需删除配置文件中的 `mux` 段。
 
 > `turbo` 仅在 `flow` 模式生效，会根据发送队列和链路活跃度动态增加或回收载波连接。该功能涉及运行期连接扩缩，建议先在测试环境验证断线重连、长连接和高并发场景。
+
+#### flow-v2 与重传（本次更新）
+
+- **禁止跳帧（M1，无需配置）**：flow-v2 下不再跳过缺失数据帧，缺帧不跳号、在乱序窗口内等待，窗口超时后整体重建（连接可能中断，但数据不会静默损坏）。消除了多通道重排导致的静默数据损坏（表现如 TLS `record layer failure`、下载中断）。
+- **逐流重传（M4）**：`flow.retransmit.*` 默认开启，发送端缓存已发帧，接收端批量 ACK、缺帧发 NACK 直接重传补齐。实际生效需同时满足：协商 flow-v2（`balance` / `stripe` / `flow + turbo`）、`flow.retransmit.enabled=true`、两端均为支持重传的新版本；旧版本对端未声明 `ordering_caps_nack`，自动回退为不重传、缺帧重建的兼容语义（不会发送任何 ACK/NACK 帧）。
+- **默认值调整**：`flow.reorder.bytes` 由 `1048576`（1MB）提升为 `16777216`（16MB），`flow.reorder.timeout` 由 `400` 提升为 `2000`（毫秒），以覆盖热切换与高速下载下的重排窗口。注意：显式写入的旧值会覆盖新默认值，建议删除旧显式值或按新默认更新。
+- **兼容性**：与原版/旧版本端互通时使用 `compat` + `turbo:false`，不协商 flow-v2，行为与旧版一致。
+- 完整设计与实施状态：[`docs/PREHEAT_HOT_SWITCH_CN.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/PREHEAT_HOT_SWITCH_CN.md)
 
 #### 虚拟网卡默认值
 | 平台 | 默认值 |

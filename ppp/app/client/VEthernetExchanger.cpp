@@ -221,6 +221,14 @@ namespace ppp {
                 result.penalty_until = 0;
 
                 SynchronizedObjectScope scope(syncobj_);
+                // Never clear an active blacklist penalty with a fresh result:
+                // the inline probe path calls StoreProbeResult without the
+                // switcher-side blacklist check, so a reachable entry must not
+                // reset penalty_until while the penalty period is still running.
+                ProbeResultTable::iterator it = probe_results_.find(entry);
+                if (it != probe_results_.end() && it->second.penalty_until > now) {
+                    return;
+                }
                 probe_results_[entry] = result;
             }
 
@@ -233,7 +241,8 @@ namespace ppp {
                 int&                                                            port,
                 ProtocolType&                                                   protocol_type,
                 ppp::string&                                                    server,
-                boost::asio::ip::tcp::endpoint&                                 remoteEP) noexcept {
+                boost::asio::ip::tcp::endpoint&                                 remoteEP,
+                const ppp::string*                                              forced_entry) noexcept {
 
                 AppConfigurationPtr configuration = GetConfiguration();
                 if (NULLPTR == configuration) {
@@ -521,6 +530,39 @@ namespace ppp {
                         StoreProbeResult(candidate.entry, candidate.probe_type,
                             candidate.reachable, candidate.rtt_ms, stage, now, ttl_ms);
                     }
+                }
+
+                // Forced entry (hot-switch preheat): select exactly this entry when
+                // reachable; stickiness is intentionally NOT updated so a preheated
+                // backup never steals the primary preference before activation.
+                if (forced_entry != NULLPTR && !forced_entry->empty()) {
+                    int forced_index = -1;
+                    for (std::size_t i = 0; i < candidates.size(); i++) {
+                        const ProbeCandidateEntry& candidate = candidates[i];
+                        if (candidate.probed && candidate.reachable && candidate.entry == *forced_entry) {
+                            forced_index = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    if (forced_index < 0) {
+                        // Do not touch the displayed outbound RTT: a preheat attempt
+                        // against a backup must not look like the primary went dark.
+                        return false; // The forced entry is not reachable this round.
+                    }
+
+                    const ProbeCandidateEntry& best = candidates[forced_index];
+                    hostname = best.hostname;
+                    address = best.address;
+                    path = best.path;
+                    port = best.port;
+                    protocol_type = best.protocol_type;
+                    server = best.server;
+                    remoteEP = best.remoteEP;
+                    // Keep the displayed outbound RTT/reachability untouched: a
+                    // preheat probe against a backup must not look like the
+                    // primary went dark (the state machine reads probe_results_,
+                    // not these display fields).
+                    return true;
                 }
 
                 // Pick the reachable entry with the lowest RTT.
@@ -821,7 +863,7 @@ namespace ppp {
                 return socket;
             }
 
-            bool VEthernetExchanger::GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP) noexcept {
+            bool VEthernetExchanger::GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP, const ppp::string* entry) noexcept {
                 if (disposed_) {
                     return false;
                 }
@@ -861,15 +903,20 @@ namespace ppp {
                     for (const ppp::string& entry : configuration->client.servers) {
                         entries.emplace_back(entry);
                     }
-                    if (ProbeSelectServerEndPoint(*y, entries, hostname, address, path, port, protocol_type, server, remoteEP)) {
-                        server_url_.remoteEP      = remoteEP;
-                        server_url_.hostname      = hostname;
-                        server_url_.address       = address;
-                        server_url_.path          = path;
-                        server_url_.server        = server;
-                        server_url_.port          = port;
-                        server_url_.protocol_type = protocol_type;
+                    if (ProbeSelectServerEndPoint(*y, entries, hostname, address, path, port, protocol_type, server, remoteEP, entry)) {
+                        if (entry == NULLPTR) {
+                            server_url_.remoteEP      = remoteEP;
+                            server_url_.hostname      = hostname;
+                            server_url_.address       = address;
+                            server_url_.path          = path;
+                            server_url_.server        = server;
+                            server_url_.port          = port;
+                            server_url_.protocol_type = protocol_type;
+                        }
                         return true;
+                    }
+                    if (entry != NULLPTR) {
+                        return false; // Forced entry failed; never fall through to the sticky cache.
                     }
                 }
                 if (server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
@@ -931,7 +978,7 @@ namespace ppp {
                 return true;
             }
 
-            VEthernetExchanger::ITransmissionPtr VEthernetExchanger::OpenTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y) noexcept {
+            VEthernetExchanger::ITransmissionPtr VEthernetExchanger::OpenTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y, const ppp::string* entry) noexcept {
                 boost::asio::ip::tcp::endpoint remoteEP;
                 ppp::string hostname;
                 ppp::string address;
@@ -940,7 +987,7 @@ namespace ppp {
                 int port = IPEndPoint::MinPort;
                 ProtocolType protocol_type = ProtocolType::ProtocolType_PPP;
 
-                if (!GetRemoteEndPoint(y.GetPtr(), hostname, address, path, port, protocol_type, server, remoteEP)) {
+                if (!GetRemoteEndPoint(y.GetPtr(), hostname, address, path, port, protocol_type, server, remoteEP, entry)) {
                     LOG_DEBUG("VEthernetExchanger::OpenTransmission: GetRemoteEndPoint failed");
                     return NULLPTR;
                 }
@@ -1104,6 +1151,8 @@ namespace ppp {
                             Dictionary::UpdateAllObjects2(mappings_, now);
                             break;
                         }
+
+                        HotSwitchTick(now);
                     });
                 return true;
             }
@@ -1136,7 +1185,7 @@ namespace ppp {
                 return false;
             }
 
-            VEthernetExchanger::ITransmissionPtr VEthernetExchanger::ConnectTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y) noexcept {
+            VEthernetExchanger::ITransmissionPtr VEthernetExchanger::ConnectTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y, const ppp::string* entry) noexcept {
                 if (NULLPTR == context) {
                     return NULLPTR;
                 }
@@ -1151,7 +1200,7 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                ITransmissionPtr transmission = OpenTransmission(context, strand, y);
+                ITransmissionPtr transmission = OpenTransmission(context, strand, y, entry);
                 if (NULLPTR == transmission) {
                     return NULLPTR;
                 }
@@ -1342,7 +1391,10 @@ namespace ppp {
                             break;
                         }
 
-                        if (mux_mode == vmux::vmux_net::mux_mode_flow && configuration->mux.turbo) {
+                        if (mux_mode == vmux::vmux_net::mux_mode_flow &&
+                            (configuration->mux.turbo || configuration->client.hot_switch.enabled)) {
+                            // Hot-switch needs carrier headroom for preheated backup-entry
+                            // channels even when the turbo pool is off.
                             uint32_t hard = static_cast<uint32_t>(max_connections) * static_cast<uint32_t>(PPP_MUX_TURBO_FACTOR_MAX);
                             mux->set_pool_hard_max(static_cast<uint16_t>(std::min<uint32_t>(hard, UINT16_MAX)));
                         }
@@ -1387,9 +1439,13 @@ namespace ppp {
                                     mux->Vlan, max_connections, (int)((switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0));
                                 bool advertise_flow_v2 = vmux::vmux_net::mode_requires_flow_v2(
                                     mux->get_mode(), configuration->mux.turbo);
-                                Byte ordering_caps = advertise_flow_v2
-                                    ? static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2)
-                                    : static_cast<Byte>(0);
+                                Byte ordering_caps = 0;
+                                if (advertise_flow_v2) {
+                                    ordering_caps = static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2);
+                                    if (configuration->mux.flow.retransmit.enabled) {
+                                        ordering_caps |= static_cast<Byte>(vmux::vmux_net::ordering_caps_nack);
+                                    }
+                                }
                                 ok = DoMux(vnet_transmission, mux->Vlan, max_connections,
                                     (switcher_->mux_acceleration_ & PPP_MUX_ACCELERATION_REMOTE) != 0,
                                     ordering_caps, y);
@@ -1471,6 +1527,23 @@ namespace ppp {
                         auto strand = mux->get_strand();
                         
                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: connecting %d linklayers, vlan=%u", max_connections, mux->Vlan);
+
+                        // M2: resident channel distribution across reachable entries
+                        // (hot-switch.channels-per-entry). Each channel is forced onto
+                        // its assigned entry and tagged; with no plan every channel uses
+                        // the legacy best+sticky selection.
+                        AppConfigurationPtr distribution_configuration = GetConfiguration();
+                        ppp::vector<ppp::string> entry_plan;
+                        if (NULLPTR != distribution_configuration && distribution_configuration->client.probe.enabled &&
+                            distribution_configuration->client.hot_switch.enabled &&
+                            distribution_configuration->client.hot_switch.channels_per_entry > 0 &&
+                            !distribution_configuration->client.servers.empty()) {
+                            entry_plan = HotSwitchRankedEntries(Executors::GetTickCount());
+                            if (entry_plan.size() < 2) {
+                                entry_plan.clear(); // A single reachable entry is not a distribution.
+                            }
+                        }
+
                         for (int i = 0; i < max_connections; i++) {
                             if (disposed_ || mux != mux_) {
                                 bok_connections = -1;
@@ -1482,7 +1555,11 @@ namespace ppp {
                                 return true;
                             }
 
-                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y);
+                            const ppp::string* forced_entry = NULLPTR;
+                            if (!entry_plan.empty()) {
+                                forced_entry = &entry_plan[(i / std::max<int>(1, distribution_configuration->client.hot_switch.channels_per_entry)) % (int)entry_plan.size()];
+                            }
+                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y, forced_entry);
                             if (NULLPTR == transmission) {
                                 LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d", i, max_connections);
                                 break;
@@ -1503,11 +1580,18 @@ namespace ppp {
                                 break;
                             }
 
+                            ppp::string tagged_entry = (forced_entry != NULLPTR) ? *forced_entry : ppp::string();
                             bool bok = mux->do_yield(y,
-                                [self, mux, connection]() noexcept -> bool {
+                                [self, mux, connection, tagged_entry]() noexcept -> bool {
                                     vmux::vmux_net::vmux_linklayer_ptr linklayer;
                                     vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
-                                    return mux->add_linklayer(connection, linklayer, handling);
+                                    if (!mux->add_linklayer(connection, linklayer, handling)) {
+                                        return false;
+                                    }
+                                    if (!tagged_entry.empty()) {
+                                        mux->set_linklayer_entry(linklayer, tagged_entry);
+                                    }
+                                    return true;
                                 });
 
                             if (!bok) {
@@ -1524,13 +1608,18 @@ namespace ppp {
                             return true;
                         }
 
+                        if (bok_connections > 0 && !entry_plan.empty()) {
+                            SynchronizedObjectScope scope(syncobj_);
+                            probe_server_ = entry_plan[0];
+                        }
+
                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only %d/%d connected, closing mux", bok_connections, max_connections);
                         mux->close_exec();
                         return false;
                     });
             }
 
-            bool VEthernetExchanger::MuxGrowLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux, int count) noexcept {
+            bool VEthernetExchanger::MuxGrowLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux, int count, ppp::string entry) noexcept {
                 using ppp::app::protocol::VirtualEthernetTcpipConnection;
 
                 if (NULLPTR == mux || count <= 0) {
@@ -1545,7 +1634,7 @@ namespace ppp {
                 auto self = shared_from_this();
                 auto strand = mux->get_strand();
                 return YieldContext::Spawn(allocator.get(), *context, strand.get(),
-                    [self, this, mux, count, context, strand](YieldContext& y) noexcept -> bool {
+                    [self, this, mux, count, context, strand, entry](YieldContext& y) noexcept -> bool {
                         const uint32_t& tx_seq = mux->get_tx_seq();
                         const uint32_t& rx_ack = mux->get_rx_ack();
 
@@ -1554,7 +1643,8 @@ namespace ppp {
                                 break;
                             }
 
-                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y);
+                            const ppp::string* entry_ptr = entry.empty() ? NULLPTR : &entry;
+                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y, entry_ptr);
                             if (NULLPTR == transmission) {
                                 break;
                             }
@@ -1571,11 +1661,18 @@ namespace ppp {
                                 break;
                             }
 
+                            ppp::string tagged_entry = entry;
                             bool added = mux->do_yield(y,
-                                [self, mux, connection]() noexcept -> bool {
+                                [self, mux, connection, tagged_entry]() noexcept -> bool {
                                     vmux::vmux_net::vmux_linklayer_ptr linklayer;
                                     vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
-                                    return mux->add_linklayer(connection, linklayer, handling);
+                                    if (!mux->add_linklayer(connection, linklayer, handling)) {
+                                        return false;
+                                    }
+                                    if (!tagged_entry.empty()) {
+                                        mux->set_linklayer_entry(linklayer, tagged_entry);
+                                    }
+                                    return true;
                                 });
                             if (!added) {
                                 break;
@@ -1586,6 +1683,452 @@ namespace ppp {
                         // remains usable when an extra carrier cannot be created.
                         return true;
                     });
+            }
+
+            void VEthernetExchanger::ResetHotSwitchState() noexcept {
+                // hot_switch_locked_until_ is intentionally NOT reset here: the
+                // lock period set by HotSwitchActivate survives reconnect cycles
+                // so a freshly activated entry cannot bounce back to the old one
+                // immediately after a reconnect (switch ping-pong).
+                hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
+                hot_switch_preheat_done_.store(false, std::memory_order_release);
+                hot_switch_preheat_added_.store(0, std::memory_order_release);
+                hot_switch_degrade_streak_ = 0;
+                hot_switch_last_eval_ = 0;
+            }
+
+            ppp::vector<ppp::string> VEthernetExchanger::HotSwitchRankedEntries(uint64_t now) noexcept {
+                struct EntryRtt final {
+                    ppp::string entry;
+                    int rtt_ms;
+                };
+                ppp::vector<EntryRtt> entries;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    entries.reserve(probe_results_.size());
+                    for (const auto& kv : probe_results_) {
+                        const ConnectivityProbe::Result& result = kv.second;
+                        if (result.entry.empty() || !result.reachable || result.rtt_ms < 0 ||
+                            result.penalty_until > now ||
+                            now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
+                            continue;
+                        }
+                        entries.emplace_back(EntryRtt{ result.entry, result.rtt_ms });
+                    }
+                }
+
+                std::stable_sort(entries.begin(), entries.end(),
+                    [](const EntryRtt& a, const EntryRtt& b) noexcept {
+                        return a.rtt_ms < b.rtt_ms;
+                    });
+
+                ppp::vector<ppp::string> ranked;
+                ranked.reserve(entries.size());
+                for (const EntryRtt& e : entries) {
+                    ranked.emplace_back(e.entry);
+                }
+                return ranked;
+            }
+
+            bool VEthernetExchanger::HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms) noexcept {
+                SynchronizedObjectScope scope(syncobj_);
+                ProbeResultTable::iterator it = probe_results_.find(entry);
+                if (it == probe_results_.end()) {
+                    return false;
+                }
+                const ConnectivityProbe::Result& result = it->second;
+                if (!result.reachable || result.rtt_ms < 0 || result.penalty_until > now ||
+                    now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
+                    return false;
+                }
+                rtt_ms = result.rtt_ms;
+                return true;
+            }
+
+            bool VEthernetExchanger::HotSwitchPickTarget(uint64_t now, ppp::string& target, ppp::string& from) noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration || !configuration->client.probe.enabled || !configuration->client.hot_switch.enabled) {
+                    return false;
+                }
+                if (configuration->client.servers.empty()) {
+                    return false; // Multi-entry is required for a switch.
+                }
+
+                ppp::string current;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    current = probe_server_;
+                }
+                if (current.empty()) {
+                    return false; // No primary established yet; nothing to degrade from.
+                }
+
+                int current_rtt = 0;
+                if (!HotSwitchEntryProbe(current, now, current_rtt)) {
+                    return false; // No fresh data for the primary; wait for the next probe round.
+                }
+
+                // Best reachable alternative (never the current entry, never blacklisted).
+                ppp::string best;
+                int best_rtt = INT_MAX;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    for (const auto& kv : probe_results_) {
+                        const ConnectivityProbe::Result& result = kv.second;
+                        if (result.entry.empty() || result.entry == current || !result.reachable ||
+                            result.rtt_ms < 0 || result.penalty_until > now ||
+                            now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
+                            continue;
+                        }
+                        if (result.rtt_ms < best_rtt) {
+                            best_rtt = result.rtt_ms;
+                            best = result.entry;
+                        }
+                    }
+                }
+                if (best.empty()) {
+                    return false;
+                }
+
+                const auto& hs = configuration->client.hot_switch;
+                // Trigger (section 7.1): the current entry is significantly worse
+                // than the best alternative in relative or absolute terms.
+                bool degraded =
+                    best_rtt < (int)((double)current_rtt / std::max<double>(1.0, hs.threshold_rtt_factor)) ||
+                    (current_rtt - best_rtt) > hs.threshold_rtt_ms;
+
+                // Debounce core: evaluate once per probe period; only sustained
+                // degradation may accumulate toward min-stable-periods.
+                uint64_t period_ms = static_cast<uint64_t>(std::max<int>(1, configuration->client.probe.ttl_seconds)) * 1000ULL;
+                if (hot_switch_last_eval_ == 0 || now >= hot_switch_last_eval_ + period_ms) {
+                    if (degraded) {
+                        hot_switch_degrade_streak_++;
+                    }
+                    else {
+                        hot_switch_degrade_streak_ = 0;
+                    }
+                    hot_switch_last_eval_ = now;
+                }
+
+                if (hot_switch_degrade_streak_ < hs.min_stable_periods) {
+                    return false;
+                }
+
+                target = best;
+                from = current;
+                return true;
+            }
+
+            int VEthernetExchanger::HotSwitchPreheat(const ppp::string& target, YieldContext& y) noexcept {
+                using ppp::app::protocol::VirtualEthernetTcpipConnection;
+
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (NULLPTR == mux || mux->is_disposed() || disposed_ || target.empty()) {
+                    return 0;
+                }
+
+                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
+                auto strand = mux->get_strand();
+                if (NULLPTR == context) {
+                    return 0;
+                }
+
+                int max_connections = mux->get_max_connections();
+                int live = mux->get_live_linklayer_count();
+                int hard_max = mux->get_pool_hard_max();
+                // Budget: bring the target entry up to the base pool, bounded by the
+                // carrier headroom (pool_hard_max - live). Pool hard max was raised to
+                // base * turbo factor when hot-switch is enabled, so the full base can
+                // normally be preheated before the old entry retires.
+                int budget = std::max<int>(1, std::min<int>(max_connections, std::max<int>(0, hard_max - live)));
+
+                const uint32_t& tx_seq = mux->get_tx_seq();
+                const uint32_t& rx_ack = mux->get_rx_ack();
+
+                int added = 0;
+                for (int i = 0; i < budget; i++) {
+                    if (disposed_ || mux != mux_ || mux->is_disposed()) {
+                        break;
+                    }
+
+                    ITransmissionPtr transmission = ConnectTransmission(context, strand, y, &target);
+                    if (NULLPTR == transmission) {
+                        break;
+                    }
+
+                    std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
+                    std::shared_ptr<VirtualEthernetTcpipConnection> connection =
+                        make_shared_object<VirtualEthernetTcpipConnection>(
+                            mux->AppConfiguration, context, strand, GetId(), default_socket);
+                    if (NULLPTR == connection) {
+                        break;
+                    }
+
+                    if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
+                        break;
+                    }
+
+                    auto self = shared_from_this();
+                    bool added_link = mux->do_yield(y,
+                        [self, mux, connection, target]() noexcept -> bool {
+                            vmux::vmux_net::vmux_linklayer_ptr linklayer;
+                            vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
+                            if (!mux->add_linklayer(connection, linklayer, handling)) {
+                                return false;
+                            }
+                            mux->set_linklayer_entry(linklayer, target);
+                            return true;
+                        });
+                    if (!added_link) {
+                        break;
+                    }
+
+                    added++;
+                    LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: outbound=%s, added channel %d/%d on entry %s",
+                        outbound_tag_.data(), added, budget, target.data());
+                }
+                return added;
+            }
+
+            void VEthernetExchanger::HotSwitchBeginPreheat() noexcept {
+                std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = switcher_->GetBufferAllocator();
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (NULLPTR == allocator || NULLPTR == mux || mux->is_disposed() || disposed_) {
+                    hot_switch_preheat_done_.store(true, std::memory_order_release);
+                    hot_switch_preheat_added_.store(0, std::memory_order_release);
+                    return;
+                }
+
+                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
+                auto strand = mux->get_strand();
+                if (NULLPTR == context || NULLPTR == strand || context->stopped()) {
+                    hot_switch_preheat_done_.store(true, std::memory_order_release);
+                    hot_switch_preheat_added_.store(0, std::memory_order_release);
+                    return;
+                }
+
+                auto self = shared_from_this();
+                ppp::string target = hot_switch_target_entry_;
+                hot_switch_preheat_done_.store(false, std::memory_order_release);
+                hot_switch_preheat_added_.store(0, std::memory_order_release);
+                // Run the preheat coroutine on the mux strand: every mux access
+                // inside HotSwitchPreheat (link counts, pool caps, DSN watermarks,
+                // add_linklayer) is then strand-affine and cannot race the
+                // scheduler thread's lock-free update()/reap_retired_linklayers().
+                bool spawned = YieldContext::Spawn(allocator.get(), *context, strand.get(),
+                    [self, this, target](YieldContext& y) noexcept {
+                        int added = HotSwitchPreheat(target, y);
+                        hot_switch_preheat_added_.store(added, std::memory_order_release);
+                        hot_switch_preheat_done_.store(true, std::memory_order_release);
+                    });
+                if (!spawned) {
+                    hot_switch_preheat_done_.store(true, std::memory_order_release);
+                    hot_switch_preheat_added_.store(0, std::memory_order_release);
+                }
+            }
+
+            void VEthernetExchanger::HotSwitchActivate(uint64_t now) noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return;
+                }
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (NULLPTR == mux || mux->is_disposed()) {
+                    return;
+                }
+
+                const ppp::string target = hot_switch_target_entry_;
+                const ppp::string from = hot_switch_from_entry_;
+
+                // 2) The target becomes the sticky primary for future reconnects.
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    probe_server_ = target;
+                }
+
+                // 3) Lock period: no switch-back even if RTTs reverse.
+                hot_switch_locked_until_ = now + static_cast<uint64_t>(std::max<int>(1, configuration->client.hot_switch.lock_seconds)) * 1000ULL;
+
+                // 1+4) Retire the old entry channels and regrow on the target.
+                // Run on the mux strand: rx_links_/tx_links_ and the pool caps are
+                // touched lock-free by the scheduler thread update(), so any
+                // cross-thread access must execute on the strand itself.
+                auto self = shared_from_this();
+                auto strand = mux->get_strand();
+                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
+                if (NULLPTR == strand || NULLPTR == context || context->stopped()) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchActivate: outbound=%s, mux strand unavailable, skip retire/regrow",
+                        outbound_tag_.data());
+                    return;
+                }
+
+                boost::asio::post(*strand,
+                    [self, this, mux, target, from]() noexcept {
+                        int retired = mux->retire_linklayers_of_entry(from);
+                        LOG_INFO("VEthernetExchanger::HotSwitchActivate: outbound=%s, activated entry %s, retired %d channel(s) of %s",
+                            outbound_tag_.data(), target.data(), retired, from.data());
+
+                        // Rebalance: regrow toward the base pool; if the base is already
+                        // live, the turbo headroom (pool_hard_max - live) still
+                        // allows extra carriers on the new entry.
+                        int max_connections = mux->get_max_connections();
+                        int live = mux->get_live_linklayer_count();
+                        int hard_max = mux->get_pool_hard_max();
+                        int missing = std::min<int>(max_connections, std::max<int>(0, hard_max - live));
+                        if (missing > 0) {
+                            LOG_INFO("VEthernetExchanger::HotSwitchActivate: outbound=%s, regrowing %d channel(s) on entry %s",
+                                outbound_tag_.data(), missing, target.data());
+                            MuxGrowLinklayers(switcher_->GetBufferAllocator(), mux, missing, target);
+                        }
+                    });
+            }
+            void VEthernetExchanger::HotSwitchRollback() noexcept {
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (NULLPTR == mux || mux->is_disposed()) {
+                    return;
+                }
+                const ppp::string target = hot_switch_target_entry_;
+
+                // Retire on the mux strand for the same reason as HotSwitchActivate.
+                auto self = shared_from_this();
+                auto strand = mux->get_strand();
+                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
+                if (NULLPTR == strand || NULLPTR == context || context->stopped()) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchRollback: outbound=%s, mux strand unavailable, skip rollback",
+                        outbound_tag_.data());
+                    return;
+                }
+
+                boost::asio::post(*strand,
+                    [self, this, mux, target]() noexcept {
+                        int retired = mux->retire_linklayers_of_entry(target);
+                        LOG_INFO("VEthernetExchanger::HotSwitchRollback: outbound=%s, rolled back entry %s, retired %d channel(s)",
+                            outbound_tag_.data(), target.data(), retired);
+                    });
+            }
+
+            void VEthernetExchanger::HotSwitchBlacklistEntry(const ppp::string& entry, uint64_t now) noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration || entry.empty()) {
+                    return;
+                }
+                SynchronizedObjectScope scope(syncobj_);
+                ConnectivityProbe::Result& result = probe_results_[entry];
+                result.entry = entry;
+                result.reachable = false;
+                result.penalty_until = now + static_cast<uint64_t>(std::max<int>(1, configuration->client.hot_switch.penalty_seconds)) * 1000ULL;
+            }
+
+            bool VEthernetExchanger::HotSwitchOldEntryRecovered(uint64_t now) noexcept {
+                const ppp::string from = hot_switch_from_entry_;
+                if (from.empty()) {
+                    return false;
+                }
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+
+                int from_rtt = 0;
+                if (!HotSwitchEntryProbe(from, now, from_rtt)) {
+                    return false; // No fresh data; keep observing.
+                }
+                int target_rtt = 0;
+                if (!HotSwitchEntryProbe(hot_switch_target_entry_, now, target_rtt)) {
+                    return false;
+                }
+
+                const auto& hs = configuration->client.hot_switch;
+                // Still degraded when the trigger (section 7.1) still holds.
+                bool still_degraded =
+                    target_rtt < (int)((double)from_rtt / std::max<double>(1.0, hs.threshold_rtt_factor)) ||
+                    (from_rtt - target_rtt) > hs.threshold_rtt_ms;
+                return !still_degraded;
+            }
+
+            void VEthernetExchanger::HotSwitchTick(uint64_t now) noexcept {
+                if (disposed_) {
+                    return;
+                }
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration || !configuration->client.probe.enabled || !configuration->client.hot_switch.enabled) {
+                    return;
+                }
+                if (network_state_.load(std::memory_order_acquire) != NetworkState_Established) {
+                    return;
+                }
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (NULLPTR == mux || mux->is_disposed() || !mux->is_established()) {
+                    return;
+                }
+
+                const auto& hs = configuration->client.hot_switch;
+                const HotSwitchPhase phase = static_cast<HotSwitchPhase>(hot_switch_phase_.load(std::memory_order_acquire));
+                switch (phase) {
+                case HotSwitchPhase::Idle: {
+                    if (now < hot_switch_locked_until_) {
+                        return; // Lock period: hold the current primary.
+                    }
+                    ppp::string target;
+                    ppp::string from;
+                    if (!HotSwitchPickTarget(now, target, from)) {
+                        return;
+                    }
+                    hot_switch_target_entry_ = target;
+                    hot_switch_from_entry_ = from;
+                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Preheating), std::memory_order_release);
+                    LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, switching %s -> %s (preheat=%d)",
+                        outbound_tag_.data(), from.data(), target.data(), (int)hs.preheat);
+                    HotSwitchBeginPreheat();
+                    break;
+                }
+                case HotSwitchPhase::Preheating: {
+                    if (!hot_switch_preheat_done_.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    const int added = hot_switch_preheat_added_.load(std::memory_order_acquire);
+                    if (added <= 0) {
+                        LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, preheat failed on %s, rollback",
+                            outbound_tag_.data(), hot_switch_target_entry_.data());
+                        HotSwitchBlacklistEntry(hot_switch_target_entry_, now);
+                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
+                        return;
+                    }
+                    if (!hs.preheat) {
+                        // Passive mode: skip the observation window and activate now.
+                        HotSwitchActivate(now);
+                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Draining), std::memory_order_release);
+                        return;
+                    }
+                    hot_switch_ready_tick_ = now;
+                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Ready), std::memory_order_release);
+                    LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, preheated %d channel(s) on %s, observing %d ms",
+                        outbound_tag_.data(), added, hot_switch_target_entry_.data(), std::max<int>(1, hs.observe_ms));
+                    break;
+                }
+                case HotSwitchPhase::Ready: {
+                    if (HotSwitchOldEntryRecovered(now)) {
+                        LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, old entry recovered, rollback",
+                            outbound_tag_.data());
+                        HotSwitchRollback();
+                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
+                        return;
+                    }
+                    if (now >= hot_switch_ready_tick_ + static_cast<uint64_t>(std::max<int>(1, hs.observe_ms))) {
+                        HotSwitchActivate(now);
+                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Draining), std::memory_order_release);
+                        return;
+                    }
+                    break;
+                }
+                case HotSwitchPhase::Draining:
+                default: {
+                    // Channel reaping is asynchronous inside the mux (inflight_ drain);
+                    // nothing further to do at the exchanger level.
+                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
+                    break;
+                }
+                }
             }
 
             bool VEthernetExchanger::ReleaseDeadlineTimer(const boost::asio::deadline_timer* deadline_timer) noexcept {
@@ -1653,6 +2196,7 @@ namespace ppp {
                 sekap_last_ = 0;
                 sekap_next_ = 0;
                 network_state_.exchange(NetworkState_Connecting);
+                ResetHotSwitchState();
             }
 
             void VEthernetExchanger::ExchangeToReconnectingState() noexcept {
@@ -1660,6 +2204,7 @@ namespace ppp {
                 sekap_next_ = 0;
                 network_state_.exchange(NetworkState_Reconnecting);
                 reconnection_count_++;
+                ResetHotSwitchState();
 
                 // Probe-driven failover: blacklist the entry that just failed
                 // and drop the cached endpoint so the next connection attempt
@@ -1767,6 +2312,12 @@ namespace ppp {
                             mux->set_ordering_mode(agreed_flow_v2
                                 ? vmux::vmux_net::ordering_flow_v2
                                 : vmux::vmux_net::ordering_compat);
+                            // M4: per-flow retransmit requires flow-v2 on both ends plus
+                            // an explicit NACK capability on the peer and local config.
+                            bool agreed_nack = agreed_flow_v2 &&
+                                configuration->mux.flow.retransmit.enabled &&
+                                ((ordering_caps & vmux::vmux_net::ordering_caps_nack) != 0);
+                            mux->set_retransmit_enabled(agreed_nack);
 
                             successed = MuxConnectAllLinklayers(allocator, mux);
                         }

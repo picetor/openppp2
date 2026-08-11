@@ -690,6 +690,22 @@ namespace ppp {
                             int best_rtt = INT_MAX;
                             ppp::string best_entry;
                             bool reachable = false;
+
+                            // Persist per-entry outcomes into the outbound exchanger so
+                            // the hot-switch state machine sees fresh per-entry RTTs.
+                            std::shared_ptr<VEthernetExchanger> exchanger;
+                            {
+                                auto it = outbound_exchangers_.find(work.tag);
+                                if (it != outbound_exchangers_.end()) {
+                                    exchanger = it->second;
+                                }
+                            }
+                            std::shared_ptr<ppp::configurations::AppConfiguration> probe_configuration =
+                                (NULLPTR != exchanger) ? exchanger->GetConfiguration() : NULLPTR;
+                            const uint64_t probe_now = Executors::GetTickCount();
+                            const uint64_t probe_ttl_ms = (NULLPTR != probe_configuration)
+                                ? static_cast<uint64_t>(std::max<int>(1, probe_configuration->client.probe.ttl_seconds)) * 1000ULL : 0ULL;
+
                             for (const Candidate& candidate : work.candidates) {
                                 int rtt = 0;
                                 bool ok = ProbeOutboundCandidate(candidate.remoteEP, candidate.probe_type,
@@ -699,6 +715,22 @@ namespace ppp {
                                     best_rtt = rtt;
                                     best_entry = candidate.entry;
                                     reachable = true;
+                                }
+
+                                if (NULLPTR != exchanger && NULLPTR != probe_configuration && !candidate.entry.empty()) {
+                                    bool blacklisted = false;
+                                    {
+                                        SynchronizedObjectScope scope(exchanger->syncobj_);
+                                        auto it = exchanger->probe_results_.find(candidate.entry);
+                                        if (it != exchanger->probe_results_.end() && it->second.penalty_until > probe_now) {
+                                            blacklisted = true;
+                                        }
+                                    }
+                                    if (!blacklisted) {
+                                        // Never clear an active blacklist with a fresh result.
+                                        exchanger->StoreProbeResult(candidate.entry, candidate.probe_type,
+                                            ok, rtt, work.stage, probe_now, probe_ttl_ms);
+                                    }
                                 }
                             }
                             {

@@ -142,6 +142,15 @@ namespace ppp {
                         int                                                 bytes;          ///< Per-connection reorder buffer byte cap (flow v2); strictly > 0.
                         int                                                 timeout;        ///< Per-connection gap wait timeout in milliseconds (flow v2); strictly > 0.
                     }                                                       reorder;
+                    struct {
+                        bool                                                enabled;            ///< Master switch for per-flow NACK retransmit (M4); negotiated, requires flow-v2 on both ends.
+                        int                                                 cache_bytes;        ///< Send-side retransmit cache byte cap per connection; clamped >= reorder.bytes x 2.
+                        int                                                 max_frames;         ///< Send-side retransmit cache frame cap per connection.
+                        int                                                 ack_every_frames;   ///< Receiver emits one aggregated ACK every N delivered frames.
+                        int                                                 ack_delay_ms;       ///< Receiver emits an aggregated ACK at most every N ms.
+                        int                                                 nack_max_retries;   ///< NACK resend retries before falling back to a clean mux rebuild.
+                        int                                                 nack_backoff_ms;    ///< Base NACK resend backoff; doubled per retry up to 1600 ms.
+                    }                                                       retransmit;
                 }                                                           flow;           ///< Per-flow (flow v2) receiver ordering parameters.
                 struct {
                     struct {
@@ -261,6 +270,18 @@ namespace ppp {
                     int                                                     stage           = 3;            ///< Probe depth: 1 = TCP connect, 3 = TLS/WebSocket upgrade (max, L4/L5 never probed).
                     ppp::unordered_set<ppp::string>                         categories;     ///< Probe categories: tcp, ws, wss; empty = all.
                 }                                                           probe;          ///< Connectivity probe configuration.
+                struct {
+                    bool                                                    enabled                 = false;    ///< Hot-switch master switch; false keeps legacy failover behavior entirely.
+                    double                                                  threshold_rtt_factor    = 2.0;      ///< Switch when the current entry RTT degrades beyond this multiple of the best entry.
+                    int                                                     threshold_rtt_ms        = 100;      ///< Switch when the absolute RTT gap (ms) exceeds this.
+                    int                                                     min_stable_periods      = 3;        ///< Consecutive probe periods that must satisfy the trigger before switching.
+                    int                                                     lock_seconds            = 60;       ///< Lock period after activation; no switch-back during it.
+                    int                                                     penalty_seconds         = 60;       ///< Blacklist penalty for a failed preheat entry.
+                    bool                                                    preheat                 = true;     ///< Preheat (progressive) switch; false = direct switch (passive mode).
+                    int                                                     observe_ms              = 2000;     ///< Ready observation window before activation; rollback if the old entry recovers.
+                    int                                                     channels_per_entry      = 0;        ///< Resident channel distribution per entry (0 = all channels on the best/sticky entry).
+                    int                                                     drain_timeout_seconds   = 120;      ///< Force-dispose retiring channels that fail to drain.
+                }                                                           hot_switch;             ///< Preheated progressive hot-switch configuration (multi-entry).
 #if defined(_WIN32)
                 struct {
                     bool                                                    tcp;            ///< Enable Paper Airplane TCP acceleration driver on Windows when true.

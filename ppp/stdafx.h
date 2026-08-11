@@ -346,8 +346,14 @@ static constexpr int                                                        PPP_
 static constexpr int                                                        PPP_MUX_INACTIVE_TIMEOUT        = 60;
 static constexpr int                                                        PPP_MUX_MIN_CONGESTIONS         = 1 << 20;
 static constexpr int                                                        PPP_MUX_DEFAULT_CONGESTIONS     = 128 << 20; /* 134217728 */
-static constexpr int                                                        PPP_MUX_FLOW_REORDER_BYTES      = 65536;
-static constexpr int                                                        PPP_MUX_FLOW_REORDER_TIMEOUT    = 1000;
+static constexpr int                                                        PPP_MUX_FLOW_REORDER_BYTES      = 16777216;
+static constexpr int                                                        PPP_MUX_FLOW_REORDER_TIMEOUT    = 2000;
+static constexpr int                                                        PPP_MUX_FLOW_RETX_CACHE_BYTES   = 33554432; /* 32MB, >= reorder bytes x2 */
+static constexpr int                                                        PPP_MUX_FLOW_RETX_MAX_FRAMES    = 4096;
+static constexpr int                                                        PPP_MUX_FLOW_ACK_EVERY_FRAMES   = 16;
+static constexpr int                                                        PPP_MUX_FLOW_ACK_DELAY_MS       = 50;
+static constexpr int                                                        PPP_MUX_FLOW_NACK_MAX_RETRIES   = 5;
+static constexpr int                                                        PPP_MUX_FLOW_NACK_BACKOFF_MS    = 100;
 static constexpr int                                                        PPP_MUX_TX_QUEUE_HIGH_WATER     = 65536;
 static constexpr int                                                        PPP_MUX_TX_BACKLOG_STALL_TIMEOUT = 5000;
 static constexpr int                                                        PPP_MUX_TURBO_FACTOR_MAX        = 3;

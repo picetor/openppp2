@@ -386,10 +386,18 @@ namespace ppp {
                     effective_mux_mode, NULLPTR != configuration && configuration->mux.turbo);
                 bool peer_supports_flow_v2 =
                     (ordering_caps & vmux::vmux_net::ordering_caps_flow_v2) != 0;
+                bool peer_supports_nack =
+                    (ordering_caps & vmux::vmux_net::ordering_caps_nack) != 0;
                 vmux::vmux_net::receiver_ordering_mode agreed =
                     (local_supports_flow_v2 && peer_supports_flow_v2)
                         ? vmux::vmux_net::ordering_flow_v2
                         : vmux::vmux_net::ordering_compat;
+                // M4: per-flow retransmit requires flow-v2 plus an explicit NACK
+                // capability on the peer and local config.
+                bool local_supports_nack = NULLPTR != configuration &&
+                    configuration->mux.flow.retransmit.enabled;
+                bool agreed_nack = agreed == vmux::vmux_net::ordering_flow_v2 &&
+                    local_supports_nack && peer_supports_nack;
                 for (;;) {
                     if (disposed_) {
                         break;
@@ -435,6 +443,7 @@ namespace ppp {
                         }
 
                         mux->set_ordering_mode(agreed);
+                        mux->set_retransmit_enabled(agreed_nack);
 
                         if (mux->update()) {
                             err = false;
@@ -457,9 +466,13 @@ namespace ppp {
                     DoMux(transmission, 0, 0, false, 0, y);
                 }
                 else {
-                    Byte agreed_caps = agreed == vmux::vmux_net::ordering_flow_v2
-                        ? static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2)
-                        : static_cast<Byte>(0);
+                    Byte agreed_caps = 0;
+                    if (agreed == vmux::vmux_net::ordering_flow_v2) {
+                        agreed_caps = static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2);
+                        if (agreed_nack) {
+                            agreed_caps |= static_cast<Byte>(vmux::vmux_net::ordering_caps_nack);
+                        }
+                    }
                     DoMux(transmission, vlan, max_connections, acceleration, agreed_caps, y);
                 }
 

@@ -131,7 +131,30 @@ namespace vmux {
             flow_reorder_cap_bytes_ = (cap_bytes > 0) ? (size_t)cap_bytes : (size_t)PPP_MUX_FLOW_REORDER_BYTES;
             flow_reorder_timeout_   = (timeout_ms > 0) ? (uint64_t)timeout_ms : (uint64_t)PPP_MUX_FLOW_REORDER_TIMEOUT;
         }
+    }
 
+    /**
+     * @brief Enables/disables negotiated per-flow retransmit (M4).
+     * @details Negotiated together with ordering_flow_v2 via the ordering_caps
+     *          byte before the session is established; also latches config
+     *          bounds (send cache caps, ACK/NACK timing) from AppConfiguration.
+     */
+    void vmux_net::set_retransmit_enabled(bool enabled) noexcept {
+        nack_enabled_ = enabled;
+        if (enabled && NULLPTR != AppConfiguration) {
+            int cache_bytes = AppConfiguration->mux.flow.retransmit.cache_bytes;
+            int max_frames = AppConfiguration->mux.flow.retransmit.max_frames;
+            int ack_every = AppConfiguration->mux.flow.retransmit.ack_every_frames;
+            int ack_delay = AppConfiguration->mux.flow.retransmit.ack_delay_ms;
+            int nack_max = AppConfiguration->mux.flow.retransmit.nack_max_retries;
+            int nack_backoff = AppConfiguration->mux.flow.retransmit.nack_backoff_ms;
+            flow_retx_cache_bytes_ = (cache_bytes > 0) ? (size_t)cache_bytes : (size_t)PPP_MUX_FLOW_RETX_CACHE_BYTES;
+            flow_retx_max_frames_ = (max_frames > 0) ? (size_t)max_frames : (size_t)PPP_MUX_FLOW_RETX_MAX_FRAMES;
+            flow_ack_every_frames_ = (ack_every > 0) ? ack_every : PPP_MUX_FLOW_ACK_EVERY_FRAMES;
+            flow_ack_delay_ms_ = (ack_delay > 0) ? (uint64_t)ack_delay : (uint64_t)PPP_MUX_FLOW_ACK_DELAY_MS;
+            flow_nack_max_retries_ = (nack_max > 0) ? nack_max : PPP_MUX_FLOW_NACK_MAX_RETRIES;
+            flow_nack_backoff_ms_ = (nack_backoff > 0) ? (uint64_t)nack_backoff : (uint64_t)PPP_MUX_FLOW_NACK_BACKOFF_MS;
+        }
     }
 
     /**
@@ -842,6 +865,14 @@ namespace vmux {
             packet_input_mux_mode_set(buffer, buffer_size);
             active(now);
         }
+        elif(cmd == cmd_nack) {
+            packet_input_nack(connection_id, buffer, buffer_size);
+            active(now);
+        }
+        elif(cmd == cmd_ack) {
+            packet_input_ack(connection_id, buffer, buffer_size);
+            active(now);
+        }
         else {
             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolPacketActionInvalid);
             return false;
@@ -929,24 +960,35 @@ namespace vmux {
         if (fx.fin_seen_ && fx.flow_reorder_.empty()) {
             flows_.erase(connection_id);
             tx_flow_seq_.erase(connection_id);
+            tx_flow_cache_.erase(connection_id); // M4: peer closed; no retransmit needed.
         }
     }
 
     /**
-     * @brief Skips the current gap of one flow and replays contiguous buffered frames.
-     * @details Advances flow_rx_next_ to the smallest buffered DSN (acknowledging
-     *          the gap data as lost), then replays the contiguous run from there.
-     *          Used both on reorder-buffer overflow and on gap timeout. Each call
-     *          that actually skips increments the mux.rx.flow.evict telemetry once.
+     * @brief Advances the current gap of one flow and replays contiguous buffered frames.
+     * @details M1: only a FIN frame may close a gap. A missing data frame means the
+     *          wire has silently lost a frame; returning false lets the caller rebuild
+     *          the mux cleanly instead of skipping user data.
+     * @return true when the gap was closed (or the reorder buffer was empty); false
+     *         when the gap head is a data frame that must not be skipped.
      */
-    void vmux_net::flow_force_advance(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept {
+    bool vmux_net::flow_force_advance(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept {
         rx_packet_ssqueue::iterator it = fx.flow_reorder_.begin();
         if (it == fx.flow_reorder_.end()) {
             fx.oldest_buffered_tick_ = 0;
-            return;
+            return true;
         }
-
-        fx.flow_rx_next_ = it->first; // jump over the missing gap to the next buffered DSN.
+        // M1: only a FIN frame may close the gap; a data frame means a frame is
+        // permanently missing on the wire - skip nothing, let the caller rebuild.
+        vmux_hdr* gap_hdr = (vmux_hdr*)it->second.buffer.get();
+        if (gap_hdr->cmd != cmd_fin) {
+            return false;
+        }
+        fx.flow_rx_next_ = it->first;
+        // M4: a FIN closed this gap; clear retransmit state.
+        fx.nack_pending_ = false;
+        fx.nack_retries_ = 0;
+        fx.nack_backoff_ms_ = 0;
         for (;;) {
             rx_packet_ssqueue::iterator j = fx.flow_reorder_.begin();
             if (j != fx.flow_reorder_.end() && j->first == fx.flow_rx_next_) {
@@ -960,15 +1002,15 @@ namespace vmux {
                 }
                 deliver_one(pcmd, ph, pk.length, now);
                 fx.flow_rx_next_++;
+                flow_maybe_ack(connection_id, fx, now);
             }
             else {
                 break;
             }
         }
-
         fx.oldest_buffered_tick_ = fx.flow_reorder_.empty() ? 0 : now;
+        return true;
     }
-
     /**
      * @brief Per-flow (flow v2) receive path: independent per-connection DSN delivery.
      * @details Control frames bypass the DSN gate entirely. Per-flow data frames
@@ -1022,6 +1064,10 @@ namespace vmux {
                 return false;
             }
             fx.flow_rx_next_++;
+            fx.nack_pending_ = false; // M4: the awaited frame arrived.
+            fx.nack_retries_ = 0;
+            fx.nack_backoff_ms_ = 0;
+            flow_maybe_ack(cid, fx, now);
 
             for (;;) {
                 rx_packet_ssqueue::iterator it = fx.flow_reorder_.begin();
@@ -1038,6 +1084,7 @@ namespace vmux {
                         return false;
                     }
                     fx.flow_rx_next_++;
+                    flow_maybe_ack(cid, fx, now);
                 }
                 else {
                     break;
@@ -1061,11 +1108,20 @@ namespace vmux {
             }
 
             // A single frame larger than the whole per-connection cap can never be
-            // buffered; treat it as a gap and advance past it to preserve the bound.
+            // buffered; only a FIN may close such a gap (M1). A data frame means the
+            // link has silently lost data - rebuild the mux cleanly.
             if ((size_t)length > flow_reorder_cap_bytes_) {
                 if (packet_less<uint32_t>::after(seq, fx.flow_rx_next_)) {
+                    if (cmd != cmd_fin) {
+                        // M1: never skip data; the caller rebuilds the mux on false.
+                        return false;
+                    }
                     // Skip forward to (seq + 1) so we do not wait forever on a frame we cannot hold.
                     fx.flow_rx_next_ = seq + 1;
+                    // M4: the FIN closed this gap; clear retransmit state.
+                    fx.nack_pending_ = false;
+                    fx.nack_retries_ = 0;
+                    fx.nack_backoff_ms_ = 0;
                     // Replay anything now contiguous.
                     for (;;) {
                         rx_packet_ssqueue::iterator it = fx.flow_reorder_.begin();
@@ -1080,6 +1136,7 @@ namespace vmux {
                             }
                             deliver_one(pcmd, ph, pk.length, now);
                             fx.flow_rx_next_++;
+                            flow_maybe_ack(cid, fx, now);
                         }
                         else {
                             break;
@@ -1096,7 +1153,11 @@ namespace vmux {
 
             // Evict oldest gaps until this frame fits within the per-connection cap.
             while (fx.buffered_bytes_ + (size_t)length > flow_reorder_cap_bytes_ && !fx.flow_reorder_.empty()) {
-                flow_force_advance(cid, fx, now);
+                // M1: never skip a missing data frame; rebuild the mux cleanly.
+                if (!flow_force_advance(cid, fx, now)) {
+                    // M1: never skip data; the caller rebuilds the mux on false.
+                    return false;
+                }
                 // If forcing advance made seq become the next expected, fall through is
                 // not needed; re-check below by comparing again on next loop iteration.
                 if (seq == fx.flow_rx_next_ || packet_less<uint32_t>::before(seq, fx.flow_rx_next_)) {
@@ -1113,6 +1174,10 @@ namespace vmux {
                     return false;
                 }
                 fx.flow_rx_next_++;
+                fx.nack_pending_ = false; // M4: the awaited frame arrived.
+                fx.nack_retries_ = 0;
+                fx.nack_backoff_ms_ = 0;
+                flow_maybe_ack(cid, fx, now);
                 for (;;) {
                     rx_packet_ssqueue::iterator it = fx.flow_reorder_.begin();
                     if (it != fx.flow_reorder_.end() && it->first == fx.flow_rx_next_) {
@@ -1128,6 +1193,7 @@ namespace vmux {
                             return false;
                         }
                         fx.flow_rx_next_++;
+                        flow_maybe_ack(cid, fx, now);
                     }
                     else {
                         break;
@@ -1161,6 +1227,12 @@ namespace vmux {
                 if (fx.oldest_buffered_tick_ == 0) {
                     fx.oldest_buffered_tick_ = now;
                 }
+                if (nack_enabled_ && !fx.nack_pending_) {
+                    // M4: a gap appeared; request retransmission immediately.
+                    fx.nack_retries_ = 0;
+                    fx.nack_backoff_ms_ = flow_nack_backoff_ms_;
+                    flow_send_nack(cid, fx, now);
+                }
             }
             // Duplicate future DSN: keep the original, drop the duplicate, not an error.
 
@@ -1177,9 +1249,12 @@ namespace vmux {
 
     /**
      * @brief Periodically advances per-flow contexts whose gap has timed out.
-     * @details Runs only under flow-v2. For each flow with a non-empty reorder
-     *          buffer whose oldest buffered frame is older than the timeout, skip
-     *          the missing gap so a permanently lost frame cannot stall the flow.
+     * @details Runs only under flow-v2. Under M1 semantics a data-frame gap that
+     *          outlives the reorder window triggers a clean mux rebuild (never
+     *          skip user data). Under M4 (negotiated retransmit) the gap instead
+     *          waits for NACK-driven retransmission with exponential backoff;
+     *          only when retransmit retries are exhausted does the session fall
+     *          back to a clean rebuild.
      */
     void vmux_net::flow_evict_expired(uint64_t now) noexcept {
         if (ordering_mode_ != ordering_flow_v2) {
@@ -1188,9 +1263,246 @@ namespace vmux {
 
         for (vmux_flow_map::iterator it = flows_.begin(); it != flows_.end(); ++it) {
             flow_rx_context& fx = it->second;
-            if (!fx.flow_reorder_.empty() && fx.oldest_buffered_tick_ != 0 &&
-                (now - fx.oldest_buffered_tick_) > flow_reorder_timeout_) {
-                flow_force_advance(it->first, fx, now);
+            if (fx.flow_reorder_.empty()) {
+                continue;
+            }
+
+            if (nack_enabled_ && fx.nack_pending_) {
+                // M4: the gap is being retransmitted; resend the NACK with
+                // exponential backoff until the frames arrive or retries cap out.
+                uint64_t backoff = (fx.nack_backoff_ms_ > 0) ? fx.nack_backoff_ms_ : flow_nack_backoff_ms_;
+                if (now >= fx.nack_last_tick_ + backoff) {
+                    fx.nack_retries_++;
+                    if (fx.nack_retries_ > flow_nack_max_retries_) {
+                        close_exec(); // Retransmit never healed the gap; rebuild cleanly.
+                        return;
+                    }
+                    fx.nack_backoff_ms_ = std::min<uint64_t>(1600, backoff * 2);
+                    flow_send_nack(it->first, fx, now);
+                }
+                continue; // M4: never advance past a data gap while retransmit is active.
+            }
+
+            if (fx.oldest_buffered_tick_ != 0 && (now - fx.oldest_buffered_tick_) > flow_reorder_timeout_) {
+                if (nack_enabled_) {
+                    // M4: the reorder window elapsed without the gap closing; hand
+                    // the gap over to the retransmit path (bounded by retries).
+                    fx.nack_pending_ = true;
+                    fx.nack_retries_ = 0;
+                    fx.nack_backoff_ms_ = flow_nack_backoff_ms_;
+                    if (fx.nack_last_tick_ == 0 || now >= fx.nack_last_tick_ + flow_nack_backoff_ms_) {
+                        fx.nack_retries_++;
+                        if (fx.nack_retries_ > flow_nack_max_retries_) {
+                            close_exec();
+                            return;
+                        }
+                        fx.nack_backoff_ms_ = std::min<uint64_t>(1600, fx.nack_backoff_ms_ * 2);
+                        flow_send_nack(it->first, fx, now);
+                    }
+                }
+                else {
+                    // M1: a data frame gap head means a frame is permanently missing on the
+                    // wire; rebuild the mux cleanly instead of skipping user data.
+                    if (!flow_force_advance(it->first, fx, now)) {
+                        close_exec();
+                        return;
+                    }
+                }
+            }
+            else if (nack_enabled_ && fx.rx_ack_dirty_ &&
+                now >= fx.rx_ack_last_tick_ + flow_ack_delay_ms_) {
+                // M4: time-based aggregated ACK flush (frame-count trigger lives in
+                // flow_maybe_ack).
+                flow_send_ack(it->first, fx, now);
+            }
+        }
+
+        flow_retx_sweep(now);
+    }
+
+    /**
+     * @brief Posts a cmd_nack for the current gap of one flow (M4).
+     * @details Requests [flow_rx_next_, dsn_to] where dsn_to covers the buffered
+     *          gap span (bounded to 64 frames per request). Runs strand-affine.
+     */
+    void vmux_net::flow_send_nack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept {
+        if (!nack_enabled_ || fx.flow_reorder_.empty()) {
+            return;
+        }
+
+        nack_frame nf;
+        nf.nack_seq = htonl(fx.nack_seq_++);
+        nf.dsn_from = htonl(fx.flow_rx_next_);
+
+        uint32_t to = fx.flow_rx_next_;
+        uint32_t first_buffered = fx.flow_reorder_.begin()->first;
+        if (packet_less<uint32_t>::after(first_buffered, fx.flow_rx_next_)) {
+            uint32_t span = first_buffered - fx.flow_rx_next_; // wrapped-safe gap size
+            if (span > 1) {
+                to = fx.flow_rx_next_ + ((span - 1 > 63) ? 63 : (span - 1));
+            }
+        }
+        nf.dsn_to = htonl(to);
+
+        if (post(cmd_nack, &nf, (int)sizeof(nf), connection_id)) {
+            fx.nack_pending_ = true;
+            fx.nack_last_tick_ = now;
+        }
+    }
+
+    /**
+     * @brief Posts an aggregated cmd_ack for one flow (M4).
+     * @details dsn_ack = flow_rx_next_: every per-flow DSN strictly below it has
+     *          been delivered, so the peer may release its send cache up to it.
+     *          Runs strand-affine.
+     */
+    void vmux_net::flow_send_ack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept {
+        if (!nack_enabled_) {
+            return;
+        }
+
+        ack_frame af;
+        af.ack_seq = htonl(fx.rx_ack_seq_++);
+        af.dsn_ack = htonl(fx.flow_rx_next_);
+
+        if (post(cmd_ack, &af, (int)sizeof(af), connection_id)) {
+            fx.rx_ack_dirty_ = false;
+            fx.rx_ack_count_ = 0;
+            fx.rx_ack_last_tick_ = now;
+        }
+    }
+
+    /**
+     * @brief Accounts one delivered frame and emits an aggregated ACK when the
+     *        frame-count trigger is reached (M4). Strand-affine.
+     */
+    void vmux_net::flow_maybe_ack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept {
+        if (!nack_enabled_) {
+            return;
+        }
+
+        fx.rx_ack_dirty_ = true;
+        fx.rx_ack_count_++;
+        if (fx.rx_ack_count_ >= flow_ack_every_frames_) {
+            flow_send_ack(connection_id, fx, now);
+        }
+    }
+
+    /**
+     * @brief Handles a cmd_nack: replays the requested DSN range from the send
+     *        cache (M4). Frames are copied before replay so an in-flight first
+     *        transmission never shares a mutable buffer. Runs strand-affine.
+     */
+    void vmux_net::packet_input_nack(uint32_t connection_id, const Byte* buffer, int buffer_size) noexcept {
+        if (!nack_enabled_ || NULLPTR == buffer || buffer_size < (int)sizeof(nack_frame)) {
+            return;
+        }
+
+        const nack_frame* nf = reinterpret_cast<const nack_frame*>(buffer);
+        uint32_t dsn_from = ntohl(nf->dsn_from);
+        uint32_t dsn_to = ntohl(nf->dsn_to);
+        if (packet_less<uint32_t>::after(dsn_to, dsn_from)) {
+            uint32_t span = dsn_to - dsn_from;
+            if (span > 63) {
+                dsn_to = dsn_from + 63; // defensive bound on the requested range.
+            }
+        }
+
+        vmux::unordered_map<uint32_t, flow_tx_cache>::iterator it = tx_flow_cache_.find(connection_id);
+        if (it == tx_flow_cache_.end()) {
+            // No cache: the connection is gone or its frames were already released.
+            // If we are still sending on this connection we cannot satisfy the NACK;
+            // rebuild cleanly rather than stall the peer's gap forever.
+            if (tx_flow_seq_.find(connection_id) != tx_flow_seq_.end()) {
+                close_exec();
+            }
+            return;
+        }
+
+        flow_tx_cache& cache = it->second;
+        bool any_replayed = false;
+        for (uint32_t dsn = dsn_from; !packet_less<uint32_t>::after(dsn, dsn_to); dsn++) {
+            vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>::iterator found = cache.frames_.find(dsn);
+            if (found == cache.frames_.end()) {
+                // A frame the peer needs is no longer cached (evicted past the
+                // cache bound): the stream cannot be healed; rebuild cleanly.
+                close_exec();
+                return;
+            }
+
+            const tx_packet& cached = found->second;
+            if (NULLPTR == cached.buffer || cached.length < (int)sizeof(vmux_hdr)) {
+                close_exec();
+                return;
+            }
+
+            std::shared_ptr<Byte> replay = make_byte_array(cached.length);
+            if (NULLPTR == replay) {
+                close_exec();
+                return;
+            }
+            memcpy(replay.get(), cached.buffer.get(), cached.length);
+
+            // Highest priority short of the control queue: head of the data queue.
+            tx_queue_.push_front(tx_packet{ replay, cached.length });
+            any_replayed = true;
+        }
+
+        if (any_replayed) {
+            process_tx_all_packets();
+        }
+    }
+
+    /**
+     * @brief Handles a cmd_ack: releases send-cache frames below the acked
+     *        watermark (M4). Runs strand-affine.
+     */
+    void vmux_net::packet_input_ack(uint32_t connection_id, const Byte* buffer, int buffer_size) noexcept {
+        if (!nack_enabled_ || NULLPTR == buffer || buffer_size < (int)sizeof(ack_frame)) {
+            return;
+        }
+
+        const ack_frame* af = reinterpret_cast<const ack_frame*>(buffer);
+        uint32_t dsn_ack = ntohl(af->dsn_ack);
+
+        vmux::unordered_map<uint32_t, flow_tx_cache>::iterator it = tx_flow_cache_.find(connection_id);
+        if (it == tx_flow_cache_.end()) {
+            return;
+        }
+
+        flow_tx_cache& cache = it->second;
+        for (;;) {
+            vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>::iterator oldest = cache.frames_.begin();
+            if (oldest == cache.frames_.end() || !packet_less<uint32_t>::before(oldest->first, dsn_ack)) {
+                break;
+            }
+            cache.bytes_ -= oldest->second.length;
+            cache.frames_.erase(oldest);
+        }
+
+        if (cache.frames_.empty()) {
+            tx_flow_cache_.erase(it);
+        }
+    }
+
+    /**
+     * @brief Sweeps idle send-side retransmit caches (M4).
+     * @details Called from flow_evict_expired. A cache whose frames all drained
+     *          (fully ACKed / FIN completed) is removed immediately; an idle
+     *          connection cache is removed after 2 minutes as a leak guard.
+     */
+    void vmux_net::flow_retx_sweep(uint64_t now) noexcept {
+        if (!nack_enabled_ || tx_flow_cache_.empty()) {
+            return;
+        }
+
+        const uint64_t idle_ms = 120000ULL;
+        for (vmux::unordered_map<uint32_t, flow_tx_cache>::iterator it = tx_flow_cache_.begin(); it != tx_flow_cache_.end();) {
+            if (it->second.frames_.empty() || (now - it->second.last_tick_) > idle_ms) {
+                it = tx_flow_cache_.erase(it);
+            }
+            else {
+                ++it;
             }
         }
     }
@@ -1305,6 +1617,34 @@ namespace vmux {
                     dsn = 1;
                 }
                 h->seq = htonl(dsn++);
+                // M4: keep a bounded send-side copy for NACK-driven retransmit.
+                // The cached frame is an independent deep copy: the encrypt path
+                // can rewrite the source buffer in place (plaintext or no-cipher
+                // mode), so sharing the first transmission buffer would poison
+                // the replay copy. If the copy allocation fails the frame is
+                // still sent once and a later NACK triggers a clean rebuild
+                // instead of corrupted retransmit data.
+                if (nack_enabled_) {
+                    flow_tx_cache& cache = tx_flow_cache_[cid];
+                    uint32_t cached_dsn = ntohl(h->seq);
+                    if (cache.frames_.find(cached_dsn) == cache.frames_.end()) {
+                        std::shared_ptr<Byte> cached_packet = make_byte_array(packet_length);
+                        if (NULLPTR != cached_packet) {
+                            memcpy(cached_packet.get(), packet.get(), packet_length);
+                            cache.frames_.emplace(std::make_pair(cached_dsn, tx_packet{ cached_packet, packet_length }));
+                            cache.bytes_ += (size_t)packet_length;
+                            cache.last_tick_ = now_tick();
+                        }
+                    }
+                    // Bound: evict the oldest frames until both caps hold. At least
+                    // one entry is always kept so the newest frame can be replayed.
+                    while (cache.frames_.size() > 1 &&
+                        (cache.bytes_ > flow_retx_cache_bytes_ || cache.frames_.size() > flow_retx_max_frames_)) {
+                        vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>::iterator oldest = cache.frames_.begin();
+                        cache.bytes_ -= oldest->second.length;
+                        cache.frames_.erase(oldest);
+                    }
+                }
             }
             else {
                 h->seq = htonl(0);
@@ -1978,6 +2318,7 @@ namespace vmux {
         }
 
         victim->retiring_ = true;
+        victim->retiring_since_ = now_tick();
 
         // Stop sending new frames on the victim: remove it from the free-link list.
         // (If it is currently busy it is not in tx_links_; its completion sees
@@ -1998,9 +2339,22 @@ namespace vmux {
      * @brief Disposes carrier links that finished retiring (inflight_ == 0).
      */
     void vmux_net::reap_retired_linklayers() noexcept {
+        // Drain-timeout force-reap (M5): a retiring link that fails to drain its
+        // in-flight writes within the configured window is force-disposed. The
+        // write completion holds its own shared_ptr to the linklayer, so the
+        // object stays alive; it only decrements inflight_ and never re-credits a
+        // retiring link.
+        uint64_t drain_ms = 0;
+        if (NULLPTR != AppConfiguration) {
+            drain_ms = static_cast<uint64_t>(std::max<int>(0, AppConfiguration->client.hot_switch.drain_timeout_seconds)) * 1000ULL;
+        }
+        const uint64_t now = now_tick();
+
         for (vmux_linklayer_vector::iterator it = rx_links_.begin(); it != rx_links_.end();) {
             vmux_linklayer_ptr linklayer = *it;
-            if (NULLPTR != linklayer && linklayer->retiring_ && linklayer->inflight_ <= 0) {
+            const bool force = drain_ms > 0 && linklayer->retiring_since_ != 0 &&
+                (now - linklayer->retiring_since_) > drain_ms;
+            if (NULLPTR != linklayer && linklayer->retiring_ && (linklayer->inflight_ <= 0 || force)) {
                 it = rx_links_.erase(it);
 
                 // Ensure it is not left in the free-link list, then dispose its transport.
@@ -2026,6 +2380,58 @@ namespace vmux {
                 ++it;
             }
         }
+    }
+
+    /** @brief Tag a linklayer with its client-side entry tag. Strand-affine. */
+    void vmux_net::set_linklayer_entry(const vmux_linklayer_ptr& linklayer, const ppp::string& entry) noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        if (NULLPTR != linklayer) {
+            linklayer->entry = entry;
+        }
+    }
+
+    /**
+     * @brief Retire every non-retiring carrier link tagged with @p entry.
+     */
+    int vmux_net::retire_linklayers_of_entry(const ppp::string& entry) noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        if (base_.disposed_.load(std::memory_order_acquire) || !base_.established_ || entry.empty()) {
+            return 0;
+        }
+
+        int retired = 0;
+        for (vmux_linklayer_ptr& l : rx_links_) {
+            if (NULLPTR == l || l->retiring_ || l->entry != entry) {
+                continue;
+            }
+
+            l->retiring_ = true;
+            l->retiring_since_ = now_tick();
+            for (vmux_linklayer_list::iterator it = tx_links_.begin(); it != tx_links_.end(); ++it) {
+                if (*it == l) {
+                    tx_links_.erase(it);
+                    break;
+                }
+            }
+            retired++;
+        }
+
+        if (retired > 0) {
+            reap_retired_linklayers();
+        }
+        return retired;
+    }
+
+    /** @brief Count live (non-retiring) carrier links. Thread-safe via syncobj_. */
+    int vmux_net::get_live_linklayer_count() noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        int live = 0;
+        for (const vmux_linklayer_ptr& l : rx_links_) {
+            if (NULLPTR != l && !l->retiring_) {
+                live++;
+            }
+        }
+        return live;
     }
 
     /**

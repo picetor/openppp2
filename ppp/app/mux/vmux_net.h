@@ -57,6 +57,8 @@ namespace vmux {
             uint64_t                                                                last_active_ = 0; ///< Tick of the most recent inbound frame on this link; turbo's approximate "best link" signal (recency, NOT RTT). Strand-affine.
             int                                                                     inflight_ = 0;    ///< In-flight async writes issued on this link and not yet completed. Strand-affine. Used by runtime link removal (turbo dynamic pool): a link is only retired once inflight_ reaches 0 so a late write completion never touches a retired link's scheduling state.
             bool                                                                    retiring_ = false; ///< Set when this link is being drained for runtime removal; it stops receiving new frames and is removed once inflight_ hits 0. Strand-affine.
+            ppp::string                                                             entry;              ///< Client-side entry tag (normalized host:port) this carrier belongs to; hot-switch pool management uses it to retire/rebalance per entry. Strand-affine.
+            uint64_t                                                                retiring_since_ = 0; ///< Tick when retiring_ was set; drain-timeout force-reap uses it. Strand-affine.
         }                                                                           vmux_linklayer;
 
         typedef std::shared_ptr<vmux_linklayer>                                     vmux_linklayer_ptr;
@@ -143,6 +145,8 @@ namespace vmux {
             cmd_keep_alived,              ///< KEEP-ALIVE 鈥?heartbeat probe frame.
             cmd_acceleration,             ///< ACCELERATION 鈥?enable/disable fast-path flag.
             cmd_mux_mode_set,             ///< MUX-MODE-SET 鈥?debug-only request to switch the peer's scheduler mode.
+            cmd_nack,                      ///< NACK - request retransmit of a missing per-flow DSN range (M4).
+            cmd_ack,                       ///< ACK - aggregated per-flow delivery watermark (M4).
             cmd_max,                      ///< Sentinel 鈥?one past the last valid command.
 
             max_buffers_size = UINT16_MAX - sizeof(vmux_hdr), ///< Maximum payload bytes per vmux frame.
@@ -172,6 +176,28 @@ namespace vmux {
         typedef vmux::list<vmux_linklayer_ptr>                                      vmux_linklayer_list;
         typedef vmux::vector<vmux_linklayer_ptr>                                    vmux_linklayer_vector;
 
+
+        /** @brief Wire payload of a cmd_nack frame (all fields network order). */
+        typedef struct
+#if defined(__GNUC__) || defined(__clang__)
+            __attribute__((packed))
+#endif
+        {
+            uint32_t                                                                nack_seq;   ///< Monotonic NACK identifier (receiver side).
+            uint32_t                                                                dsn_from;   ///< First missing per-flow DSN.
+            uint32_t                                                                dsn_to;     ///< Last missing per-flow DSN (inclusive; <= dsn_from + 63).
+        }                                                                           nack_frame;
+
+        /** @brief Wire payload of a cmd_ack frame (all fields network order). */
+        typedef struct
+#if defined(__GNUC__) || defined(__clang__)
+            __attribute__((packed))
+#endif
+        {
+            uint32_t                                                                ack_seq;    ///< Monotonic ACK identifier (receiver side).
+            uint32_t                                                                dsn_ack;    ///< All per-flow DSNs strictly below this value are delivered.
+        }                                                                           ack_frame;
+
         typedef vmux::list<tx_packet>                                               tx_packet_ssqueue;
         typedef vmux::map_pr<uint32_t, rx_packet, packet_less<uint32_t>>            rx_packet_ssqueue;
 
@@ -191,6 +217,15 @@ namespace vmux {
             size_t                                                                  buffered_bytes_       = 0;     ///< Sum of buffered frame lengths (memory bound).
             bool                                                                    primed_               = false; ///< True once flow_rx_next_ has been initialized from the first frame.
             bool                                                                    fin_seen_             = false; ///< True once a cmd_fin has been delivered for this connection.
+            bool                                                                    nack_pending_         = false;   ///< True while a gap awaits retransmit (M4).
+            int                                                                     nack_retries_         = 0;       ///< NACK resend count for the current gap (M4).
+            uint64_t                                                                nack_backoff_ms_      = 0;       ///< Current NACK resend backoff for the gap (M4).
+            uint64_t                                                                nack_last_tick_       = 0;       ///< Tick of the last NACK posted for this flow (M4).
+            uint32_t                                                                nack_seq_             = 0;       ///< Monotonic NACK identifier (M4).
+            bool                                                                    rx_ack_dirty_         = false;   ///< True when delivery advanced past the last ACKed watermark (M4).
+            int                                                                     rx_ack_count_         = 0;       ///< Frames delivered since the last aggregated ACK (M4).
+            uint64_t                                                                rx_ack_last_tick_     = 0;       ///< Tick of the last aggregated ACK posted (M4).
+            uint32_t                                                                rx_ack_seq_           = 0;       ///< Monotonic ACK identifier (M4).
         };
 
         typedef vmux::unordered_map<uint32_t, vmux_skt_ptr>                         vmux_skt_map;
@@ -221,6 +256,7 @@ namespace vmux {
         /** @brief MUX capability bit advertised in the handshake (bit0 = FLOW_V2). */
         enum {
             ordering_caps_flow_v2 = 0x01,
+            ordering_caps_nack    = 0x02, ///< Retransmit (NACK/ACK) capability; implies flow-v2 (M4).
         };
 
     public:
@@ -271,13 +307,16 @@ namespace vmux {
          *       after establishment is a no-op (no hot compat<->flow-v2 switch).
          */
         void                                                                        set_ordering_mode(receiver_ordering_mode m) noexcept;
+        /** @brief Enable/disable negotiated per-flow retransmit (M4); also latches config bounds. */
+        void                                                                        set_retransmit_enabled(bool enabled) noexcept;
         /** @brief True for session-level control frames (keep-alive / mux-mode-set). */
         static bool                                                                 is_session_control(Byte cmd) noexcept {
             return cmd == cmd_keep_alived || cmd == cmd_mux_mode_set;
         }
         /** @brief True for connection-level control frames (syn / syn-ok / acceleration). */
         static bool                                                                 is_connection_control(Byte cmd) noexcept {
-            return cmd == cmd_syn || cmd == cmd_syn_ok || cmd == cmd_acceleration;
+            return cmd == cmd_syn || cmd == cmd_syn_ok || cmd == cmd_acceleration ||
+                   cmd == cmd_nack || cmd == cmd_ack;
         }
         /** @brief True for per-flow data frames carrying a per-connection DSN (push / fin). */
         static bool                                                                 is_per_flow_data(Byte cmd) noexcept {
@@ -345,6 +384,18 @@ namespace vmux {
         bool                                                                        retire_linklayer_runtime() noexcept;
         /** @brief Dispose links that finished retiring (inflight_ == 0). Strand-affine; called from update(). */
         void                                                                        reap_retired_linklayers() noexcept;
+        /** @brief Tag a linklayer with its client-side entry (host:port). Strand-affine. */
+        void                                                                        set_linklayer_entry(const vmux_linklayer_ptr& linklayer, const ppp::string& entry) noexcept;
+        /**
+         * @brief Retire every non-retiring carrier link tagged with @p entry.
+         * @return Number of links marked retiring (0 when none matched).
+         * @details Hot-switch activation path: marks matching links retiring_ and
+         *          removes them from tx_links_ so they take no new frames; reaps
+         *          immediately those whose in-flight writes already drained.
+         */
+        int                                                                         retire_linklayers_of_entry(const ppp::string& entry) noexcept;
+        /** @brief Count live (non-retiring) carrier links. Thread-safe via syncobj_. */
+        int                                                                         get_live_linklayer_count() noexcept;
         /**
          * @brief Turbo pool controller step (C-B5). Strand-affine; called from update().
          * @param now Current tick.
@@ -438,9 +489,22 @@ namespace vmux {
         /** @brief Periodically advance per-flow contexts whose gap timed out. */
         void                                                                        flow_evict_expired(uint64_t now) noexcept;
         /** @brief Skip the current gap of one flow and replay contiguous buffered frames. */
-        void                                                                        flow_force_advance(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept;
+        bool                                                                        flow_force_advance(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept;
         /** @brief Release a flow context once its FIN was delivered and buffer drained. */
         void                                                                        maybe_release_flow(uint32_t connection_id, flow_rx_context& fx) noexcept;
+
+        /** @brief Post a cmd_nack for the current gap of one flow (M4). */
+        void                                                                        flow_send_nack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept;
+        /** @brief Post an aggregated cmd_ack for one flow (M4). */
+        void                                                                        flow_send_ack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept;
+        /** @brief Account one delivered frame and emit an aggregated ACK when due (M4). */
+        void                                                                        flow_maybe_ack(uint32_t connection_id, flow_rx_context& fx, uint64_t now) noexcept;
+        /** @brief Handle a cmd_nack: replay the requested DSN range from the send cache (M4). */
+        void                                                                        packet_input_nack(uint32_t connection_id, const Byte* buffer, int buffer_size) noexcept;
+        /** @brief Handle a cmd_ack: release send-cache frames below the acked watermark (M4). */
+        void                                                                        packet_input_ack(uint32_t connection_id, const Byte* buffer, int buffer_size) noexcept;
+        /** @brief Sweep idle send caches (M4); called from flow_evict_expired. */
+        void                                                                        flow_retx_sweep(uint64_t now) noexcept;
 
         /** @brief Process SYN request and create connecting vmux socket state. */
         bool                                                                        process_rx_connecting(std::shared_ptr<vmux_skt>& skt, uint32_t connection_id, const char* host, int host_size) noexcept;
@@ -614,6 +678,19 @@ namespace vmux {
         receiver_ordering_mode                                                      ordering_mode_ = ordering_compat; ///< Negotiated receiver ordering mode (flow v2).
         vmux_flow_map                                                               flows_;             ///< connection_id -> per-flow receive context (flow v2 only).
         vmux::unordered_map<uint32_t, uint32_t>                                     tx_flow_seq_;       ///< connection_id -> next per-flow DSN to send (flow v2 only).
+        struct flow_tx_cache {
+            vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>            frames_;            ///< DSN -> framed packet awaiting delivery ACK (M4).
+            size_t                                                                  bytes_ = 0;         ///< Sum of cached frame lengths (memory bound).
+            uint64_t                                                                last_tick_ = 0;     ///< Tick of the last frame cached (idle sweep).
+        };
+        vmux::unordered_map<uint32_t, flow_tx_cache>                             tx_flow_cache_;     ///< connection_id -> bounded send-side retransmit cache (M4, flow v2 only).
+        bool                                                                    nack_enabled_ = false; ///< Negotiated: both peers support retransmit (M4).
+        size_t                                                                  flow_retx_cache_bytes_ = (size_t)PPP_MUX_FLOW_RETX_CACHE_BYTES; ///< Per-connection cache byte cap (M4).
+        size_t                                                                  flow_retx_max_frames_  = (size_t)PPP_MUX_FLOW_RETX_MAX_FRAMES;  ///< Per-connection cache frame cap (M4).
+        int                                                                     flow_ack_every_frames_ = PPP_MUX_FLOW_ACK_EVERY_FRAMES; ///< Aggregated ACK every N delivered frames (M4).
+        uint64_t                                                                flow_ack_delay_ms_     = (uint64_t)PPP_MUX_FLOW_ACK_DELAY_MS; ///< Aggregated ACK at most every N ms (M4).
+        int                                                                     flow_nack_max_retries_ = PPP_MUX_FLOW_NACK_MAX_RETRIES; ///< NACK retries before clean rebuild (M4).
+        uint64_t                                                                flow_nack_backoff_ms_  = (uint64_t)PPP_MUX_FLOW_NACK_BACKOFF_MS; ///< Base NACK resend backoff (M4).
         size_t                                                                      flow_reorder_cap_bytes_ = 0; ///< Per-connection reorder buffer byte cap (from config).
         uint64_t                                                                    flow_reorder_timeout_   = 0; ///< Per-connection gap wait timeout in ms (from config).
         uint64_t                                                                    tx_backlog_since_       = 0; ///< Tick the data tx queue first stayed at/over high-water (0 = not backlogged); drives the D11 stall watchdog.

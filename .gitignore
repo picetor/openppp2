@@ -45,6 +45,9 @@
 /sln/client/client/Debug/
 /sln/client/client/Release/
 /sln/client/client/x64/
+/sln/server/server/Debug/
+/sln/server/server/Release/
+/sln/server/server/x64/
 
 /sln/PaperAirplane/Debug
 /sln/PaperAirplane/Release
