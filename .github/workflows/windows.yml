@@ -28,6 +28,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -45,6 +49,23 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
     steps:
+      - name: Purge old runs (keep latest 2)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Keep only the 2 most recent runs of THIS workflow (plus the
+          # current in-progress run). Deletes all older completed/cancelled
+          # runs via the Actions API so the page never accumulates.
+          gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.path == "${{ github.workflow_path }}") | [.id, .status, .created_at] | @tsv' \
+            | sort -k3 -r \
+            | awk 'NR > 2 && $2 != "in_progress" { print $1 }' \
+            | while read -r run_id; do
+                gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id"
+                echo "Deleted run $run_id"
+              done
+
       - name: Checkout repository
         uses: actions/checkout@v5
 

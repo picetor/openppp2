@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: android-apk-${{ github.workflow }}-${{ github.ref }}
@@ -37,6 +38,20 @@ jobs:
       ANDROID_THIRD_PARTY: ${{ github.workspace }}/.ci/android-third-party
 
     steps:
+      - name: Purge old runs (keep latest 2)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.path == "${{ github.workflow_path }}") | [.id, .status, .created_at] | @tsv' \
+            | sort -k3 -r \
+            | awk 'NR > 2 && $2 != "in_progress" { print $1 }' \
+            | while read -r run_id; do
+                gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id"
+                echo "Deleted run $run_id"
+              done
+
       - name: Checkout repository
         uses: actions/checkout@v5
 
