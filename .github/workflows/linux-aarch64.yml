@@ -2,6 +2,26 @@ name: Linux aarch64 musl
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - master
+      - inet6
+    paths:
+      - 'ppp/**'
+      - 'common/**'
+      - 'appsettings.json'
+      - 'CMakeLists.txt'
+      - 'tools/ci/**'
+      - 'linux/**'
+      - 'darwin/**'
+      - 'windows/**'
+      - 'android/**'
+      - 'go/**'
+      - '.github/workflows/**'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-aarch64:
