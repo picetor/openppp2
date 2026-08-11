@@ -1413,6 +1413,7 @@ namespace ppp {
                     std::shared_ptr<ppp::threading::BufferswapAllocator> buffer_allocator = switcher_->GetBufferAllocator();
                     mux->AppConfiguration = configuration;
                     mux->BufferAllocator  = buffer_allocator;
+                    mux->Logger           = switcher_->GetLogger();
 #if defined(_LINUX)
                     mux->ProtectorNetwork = switcher_->GetProtectorNetwork();
 #endif

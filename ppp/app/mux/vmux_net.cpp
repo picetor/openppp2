@@ -1114,6 +1114,8 @@ namespace vmux {
                 if (packet_less<uint32_t>::after(seq, fx.flow_rx_next_)) {
                     if (cmd != cmd_fin) {
                         // M1: never skip data; the caller rebuilds the mux on false.
+                        log_warn("M1 UNBUFFERABLE GAP flow=" + stl::to_string<ppp::string>(cid) +
+                            " seq=" + stl::to_string<ppp::string>(seq) + " -> mux rebuild");
                         return false;
                     }
                     // Skip forward to (seq + 1) so we do not wait forever on a frame we cannot hold.
@@ -1156,6 +1158,8 @@ namespace vmux {
                 // M1: never skip a missing data frame; rebuild the mux cleanly.
                 if (!flow_force_advance(cid, fx, now)) {
                     // M1: never skip data; the caller rebuilds the mux on false.
+                    log_warn("M1 UNBUFFERABLE GAP flow=" + stl::to_string<ppp::string>(cid) +
+                        " seq=" + stl::to_string<ppp::string>(seq) + " -> mux rebuild");
                     return false;
                 }
                 // If forcing advance made seq become the next expected, fall through is
@@ -1274,6 +1278,10 @@ namespace vmux {
                 if (now >= fx.nack_last_tick_ + backoff) {
                     fx.nack_retries_++;
                     if (fx.nack_retries_ > flow_nack_max_retries_) {
+                        log_warn("M4 RETRANSMIT EXHAUSTED flow=" +
+                            stl::to_string<ppp::string>(it->first) +
+                            " retries=" + stl::to_string<ppp::string>(fx.nack_retries_) +
+                            " -> mux rebuild");
                         close_exec(); // Retransmit never healed the gap; rebuild cleanly.
                         return;
                     }
@@ -1290,9 +1298,15 @@ namespace vmux {
                     fx.nack_pending_ = true;
                     fx.nack_retries_ = 0;
                     fx.nack_backoff_ms_ = flow_nack_backoff_ms_;
+                    log_info("M4 GAP HANDOVER flow=" + stl::to_string<ppp::string>(it->first) +
+                        " -> retransmit");
                     if (fx.nack_last_tick_ == 0 || now >= fx.nack_last_tick_ + flow_nack_backoff_ms_) {
                         fx.nack_retries_++;
                         if (fx.nack_retries_ > flow_nack_max_retries_) {
+                            log_warn("M4 RETRANSMIT EXHAUSTED flow=" +
+                                stl::to_string<ppp::string>(it->first) +
+                                " retries=" + stl::to_string<ppp::string>(fx.nack_retries_) +
+                                " -> mux rebuild");
                             close_exec();
                             return;
                         }
@@ -1304,6 +1318,8 @@ namespace vmux {
                     // M1: a data frame gap head means a frame is permanently missing on the
                     // wire; rebuild the mux cleanly instead of skipping user data.
                     if (!flow_force_advance(it->first, fx, now)) {
+                        log_warn("M1 GAP TIMEOUT flow=" + stl::to_string<ppp::string>(it->first) +
+                            " -> mux rebuild");
                         close_exec();
                         return;
                     }
@@ -1318,6 +1334,18 @@ namespace vmux {
         }
 
         flow_retx_sweep(now);
+    }
+
+    void vmux_net::log_info(const ppp::string& message) noexcept {
+        if (NULLPTR != Logger) {
+            Logger->Info(message);
+        }
+    }
+
+    void vmux_net::log_warn(const ppp::string& message) noexcept {
+        if (NULLPTR != Logger) {
+            Logger->Warn(message);
+        }
     }
 
     /**
@@ -1343,6 +1371,13 @@ namespace vmux {
             }
         }
         nf.dsn_to = htonl(to);
+
+        if (!fx.nack_pending_) {
+            // One line per new gap; retries are not logged here to avoid spam.
+            log_info("M4 NACK flow=" + stl::to_string<ppp::string>(connection_id) +
+                " gap=[" + stl::to_string<ppp::string>(fx.flow_rx_next_) + ".." +
+                stl::to_string<ppp::string>(to) + "]");
+        }
 
         if (post(cmd_nack, &nf, (int)sizeof(nf), connection_id)) {
             fx.nack_pending_ = true;
@@ -1414,6 +1449,8 @@ namespace vmux {
             // If we are still sending on this connection we cannot satisfy the NACK;
             // rebuild cleanly rather than stall the peer's gap forever.
             if (tx_flow_seq_.find(connection_id) != tx_flow_seq_.end()) {
+                log_warn("M4 NACK NO TX CACHE flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " -> mux rebuild");
                 close_exec();
             }
             return;
@@ -1421,23 +1458,30 @@ namespace vmux {
 
         flow_tx_cache& cache = it->second;
         bool any_replayed = false;
+        int replayed = 0;
         for (uint32_t dsn = dsn_from; !packet_less<uint32_t>::after(dsn, dsn_to); dsn++) {
             vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>::iterator found = cache.frames_.find(dsn);
             if (found == cache.frames_.end()) {
                 // A frame the peer needs is no longer cached (evicted past the
                 // cache bound): the stream cannot be healed; rebuild cleanly.
+                log_warn("M4 NACK FRAME EVICTED flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " dsn=" + stl::to_string<ppp::string>(dsn) + " -> mux rebuild");
                 close_exec();
                 return;
             }
 
             const tx_packet& cached = found->second;
             if (NULLPTR == cached.buffer || cached.length < (int)sizeof(vmux_hdr)) {
+                log_warn("M4 NACK BAD CACHE flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " -> mux rebuild");
                 close_exec();
                 return;
             }
 
             std::shared_ptr<Byte> replay = make_byte_array(cached.length);
             if (NULLPTR == replay) {
+                log_warn("M4 NACK ALLOC FAIL flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " -> mux rebuild");
                 close_exec();
                 return;
             }
@@ -1446,9 +1490,12 @@ namespace vmux {
             // Highest priority short of the control queue: head of the data queue.
             tx_queue_.push_front(tx_packet{ replay, cached.length });
             any_replayed = true;
+            replayed++;
         }
 
         if (any_replayed) {
+            log_info("M4 RETRANSMIT REPLAY flow=" + stl::to_string<ppp::string>(connection_id) +
+                " frames=" + stl::to_string<ppp::string>(replayed));
             process_tx_all_packets();
         }
     }

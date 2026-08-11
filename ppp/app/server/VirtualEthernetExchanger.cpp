@@ -398,6 +398,16 @@ namespace ppp {
                     configuration->mux.flow.retransmit.enabled;
                 bool agreed_nack = agreed == vmux::vmux_net::ordering_flow_v2 &&
                     local_supports_nack && peer_supports_nack;
+
+                // M4: the agreed capability mask is reported back to the peer.
+                Byte agreed_caps = 0;
+                if (agreed == vmux::vmux_net::ordering_flow_v2) {
+                    agreed_caps = static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2);
+                    if (agreed_nack) {
+                        agreed_caps |= static_cast<Byte>(vmux::vmux_net::ordering_caps_nack);
+                    }
+                }
+
                 for (;;) {
                     if (disposed_) {
                         break;
@@ -466,12 +476,34 @@ namespace ppp {
                     DoMux(transmission, 0, 0, false, 0, y);
                 }
                 else {
-                    Byte agreed_caps = 0;
-                    if (agreed == vmux::vmux_net::ordering_flow_v2) {
-                        agreed_caps = static_cast<Byte>(vmux::vmux_net::ordering_caps_flow_v2);
-                        if (agreed_nack) {
-                            agreed_caps |= static_cast<Byte>(vmux::vmux_net::ordering_caps_nack);
-                        }
+                    VirtualEthernetLoggerPtr logger = switcher_->GetLogger();
+                    if (NULLPTR != logger) {
+                        static const char* hex_chars = "0123456789ABCDEF";
+                        ppp::string caps_hex = "0x";
+                        caps_hex += hex_chars[(agreed_caps >> 4) & 0x0F];
+                        caps_hex += hex_chars[agreed_caps & 0x0F];
+
+                        ppp::string m = "MUX NEGOTIATE vlan=";
+                        m += stl::to_string<ppp::string>(vlan);
+                        m += " max_connections=";
+                        m += stl::to_string<ppp::string>(max_connections);
+                        m += " acceleration=";
+                        m += stl::to_string<ppp::string>(acceleration ? 1 : 0);
+                        m += " mode=";
+                        m += vmux::vmux_net::mode_name(effective_mux_mode);
+                        m += " local={flow_v2=";
+                        m += stl::to_string<ppp::string>(local_supports_flow_v2 ? 1 : 0);
+                        m += ",nack=";
+                        m += stl::to_string<ppp::string>(local_supports_nack ? 1 : 0);
+                        m += "} peer={flow_v2=";
+                        m += stl::to_string<ppp::string>(peer_supports_flow_v2 ? 1 : 0);
+                        m += ",nack=";
+                        m += stl::to_string<ppp::string>(peer_supports_nack ? 1 : 0);
+                        m += "} agreed=";
+                        m += agreed == vmux::vmux_net::ordering_flow_v2 ? "flow-v2" : "compat";
+                        m += " caps=";
+                        m += caps_hex;
+                        logger->Info(m);
                     }
                     DoMux(transmission, vlan, max_connections, acceleration, agreed_caps, y);
                 }

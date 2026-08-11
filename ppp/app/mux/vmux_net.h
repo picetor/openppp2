@@ -506,6 +506,11 @@ namespace vmux {
         /** @brief Sweep idle send caches (M4); called from flow_evict_expired. */
         void                                                                        flow_retx_sweep(uint64_t now) noexcept;
 
+        /** @brief Emit an INFO event through the session logger when present (M4 debug). */
+        void                                                                        log_info(const ppp::string& message) noexcept;
+        /** @brief Emit a WARN event through the session logger when present (M4 debug). */
+        void                                                                        log_warn(const ppp::string& message) noexcept;
+
         /** @brief Process SYN request and create connecting vmux socket state. */
         bool                                                                        process_rx_connecting(std::shared_ptr<vmux_skt>& skt, uint32_t connection_id, const char* host, int host_size) noexcept;
 
