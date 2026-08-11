@@ -596,7 +596,16 @@ namespace vmux {
                 uint64_t max_mux_inactive_timeout = ((uint64_t)AppConfiguration->mux.inactive.timeout) * 1000ULL;
                 uint64_t max_mux_connect_timeout = ((uint64_t)AppConfiguration->mux.connect.timeout) * 1000ULL;
 
-                if ((now - status_.last_) >= (base_.established_ ? max_mux_inactive_timeout : max_mux_connect_timeout)) {
+                // While a mux is still being assembled (some carrier links already
+                // open), grant a grace period beyond the plain connect timeout: the
+                // timeout's job is to catch a peer that never answers MUXON at all
+                // (opened_connections == 0), not to abort a build that is progressing
+                // one slow sequential link at a time.
+                uint64_t mux_idle_deadline = base_.established_
+                    ? max_mux_inactive_timeout
+                    : ((status_.opened_connections > 0) ? (max_mux_connect_timeout * 2ULL) : max_mux_connect_timeout);
+
+                if ((now - status_.last_) >= mux_idle_deadline) {
                     close_exec();
                 }
                 elif(base_.established_ && (now - status_.last_heartbeat_) >= status_.heartbeat_timeout_) {
@@ -1446,13 +1455,11 @@ namespace vmux {
         vmux::unordered_map<uint32_t, flow_tx_cache>::iterator it = tx_flow_cache_.find(connection_id);
         if (it == tx_flow_cache_.end()) {
             // No cache: the connection is gone or its frames were already released.
-            // If we are still sending on this connection we cannot satisfy the NACK;
-            // rebuild cleanly rather than stall the peer's gap forever.
-            if (tx_flow_seq_.find(connection_id) != tx_flow_seq_.end()) {
-                log_warn("M4 NACK NO TX CACHE flow=" + stl::to_string<ppp::string>(connection_id) +
-                    " -> mux rebuild");
-                close_exec();
-            }
+            // The NACK is stale (the peer already advanced past it, or its frames
+            // were released by a later ACK). Ignoring it is safe: a peer that
+            // really still waits on the gap keeps re-sending the NACK until its
+            // own retry budget forces a clean rebuild. Rebuilding here on every
+            // stale NACK was the main cause of mid-speedtest mux churn.
             return;
         }
 
@@ -1463,27 +1470,28 @@ namespace vmux {
             vmux::map_pr<uint32_t, tx_packet, packet_less<uint32_t>>::iterator found = cache.frames_.find(dsn);
             if (found == cache.frames_.end()) {
                 // A frame the peer needs is no longer cached (evicted past the
-                // cache bound): the stream cannot be healed; rebuild cleanly.
-                log_warn("M4 NACK FRAME EVICTED flow=" + stl::to_string<ppp::string>(connection_id) +
-                    " dsn=" + stl::to_string<ppp::string>(dsn) + " -> mux rebuild");
-                close_exec();
-                return;
+                // cache bound). Do NOT tear the mux down: either the NACK is
+                // stale (the peer already advanced and will never wait on this
+                // DSN), or the gap is genuinely lost and the peer's own NACK
+                // retry budget will rebuild the session as a last resort. Skip
+                // the missing DSN and keep replaying the rest of the range.
+                log_info("M4 NACK FRAME EVICTED flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " dsn=" + stl::to_string<ppp::string>(dsn) + " skip");
+                continue;
             }
 
             const tx_packet& cached = found->second;
             if (NULLPTR == cached.buffer || cached.length < (int)sizeof(vmux_hdr)) {
-                log_warn("M4 NACK BAD CACHE flow=" + stl::to_string<ppp::string>(connection_id) +
-                    " -> mux rebuild");
-                close_exec();
-                return;
+                log_info("M4 NACK BAD CACHE flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " dsn=" + stl::to_string<ppp::string>(dsn) + " skip");
+                continue;
             }
 
             std::shared_ptr<Byte> replay = make_byte_array(cached.length);
             if (NULLPTR == replay) {
-                log_warn("M4 NACK ALLOC FAIL flow=" + stl::to_string<ppp::string>(connection_id) +
-                    " -> mux rebuild");
-                close_exec();
-                return;
+                log_info("M4 NACK ALLOC FAIL flow=" + stl::to_string<ppp::string>(connection_id) +
+                    " dsn=" + stl::to_string<ppp::string>(dsn) + " skip");
+                continue;
             }
             memcpy(replay.get(), cached.buffer.get(), cached.length);
 

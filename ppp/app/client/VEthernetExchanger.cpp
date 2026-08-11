@@ -1560,43 +1560,81 @@ namespace ppp {
                             if (!entry_plan.empty()) {
                                 forced_entry = &entry_plan[(i / std::max<int>(1, distribution_configuration->client.hot_switch.channels_per_entry)) % (int)entry_plan.size()];
                             }
-                            ITransmissionPtr transmission = ConnectTransmission(context, strand, y, forced_entry);
-                            if (NULLPTR == transmission) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d", i, max_connections);
-                                break;
-                            }
 
-                            std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
-                            std::shared_ptr<VirtualEthernetTcpipConnection> connection =
-                                make_shared_object<VirtualEthernetTcpipConnection>(
-                                    mux->AppConfiguration, context, strand, GetId(), default_socket);
-                            if (NULLPTR == connection) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: failed to create connection at %d/%d", i, max_connections);
-                                break;
-                            }
+                            // A single transient failure (slow linlayer-add ack, or a
+                            // distribution entry that does not own the session) must not
+                            // tear the whole mux down. Retry each slot: the first attempt
+                            // honours the distribution plan, later attempts fall back to
+                            // the legacy best+sticky selection so the channel lands on the
+                            // entry that actually owns the session.
+                            constexpr int LINKLAYER_MAX_ATTEMPTS = 3;
+                            bool slot_ok = false;
+                            for (int attempt = 0; attempt < LINKLAYER_MAX_ATTEMPTS; attempt++) {
+                                if (disposed_ || mux != mux_) {
+                                    bok_connections = -1;
+                                    break;
+                                }
 
-                            // In this lightweight and simple vmux circuit switch, seq and ack are delivered by the client, and the server and client are opposite.
-                            if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectMux failed at %d/%d", i, max_connections);
-                                break;
-                            }
-
-                            ppp::string tagged_entry = (forced_entry != NULLPTR) ? *forced_entry : ppp::string();
-                            bool bok = mux->do_yield(y,
-                                [self, mux, connection, tagged_entry]() noexcept -> bool {
-                                    vmux::vmux_net::vmux_linklayer_ptr linklayer;
-                                    vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
-                                    if (!mux->add_linklayer(connection, linklayer, handling)) {
-                                        return false;
-                                    }
-                                    if (!tagged_entry.empty()) {
-                                        mux->set_linklayer_entry(linklayer, tagged_entry);
-                                    }
+                                if (mux->is_established()) {
+                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux already established at connection %d/%d", i, max_connections);
                                     return true;
-                                });
+                                }
 
-                            if (!bok) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: add_linklayer failed at %d/%d", i, max_connections);
+                                const ppp::string* attempt_entry = (attempt == 0) ? forced_entry : NULLPTR;
+                                ITransmissionPtr transmission = ConnectTransmission(context, strand, y, attempt_entry);
+                                if (NULLPTR == transmission) {
+                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                    continue;
+                                }
+
+                                std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
+                                std::shared_ptr<VirtualEthernetTcpipConnection> connection =
+                                    make_shared_object<VirtualEthernetTcpipConnection>(
+                                        mux->AppConfiguration, context, strand, GetId(), default_socket);
+                                if (NULLPTR == connection) {
+                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: failed to create connection at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                    transmission->Dispose();
+                                    continue;
+                                }
+
+                                // In this lightweight and simple vmux circuit switch, seq and ack are delivered by the client, and the server and client are opposite.
+                                if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
+                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectMux failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                    connection->Dispose();
+                                    continue;
+                                }
+
+                                ppp::string tagged_entry = (attempt_entry != NULLPTR) ? *attempt_entry : ppp::string();
+                                bool bok = mux->do_yield(y,
+                                    [self, mux, connection, tagged_entry]() noexcept -> bool {
+                                        vmux::vmux_net::vmux_linklayer_ptr linklayer;
+                                        vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
+                                        if (!mux->add_linklayer(connection, linklayer, handling)) {
+                                            return false;
+                                        }
+                                        if (!tagged_entry.empty()) {
+                                            mux->set_linklayer_entry(linklayer, tagged_entry);
+                                        }
+                                        return true;
+                                    });
+
+                                if (!bok) {
+                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: add_linklayer failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                    connection->Dispose();
+                                    continue;
+                                }
+
+                                slot_ok = true;
+                                break;
+                            }
+
+                            if (disposed_ || mux != mux_) {
+                                bok_connections = -1;
+                                break;
+                            }
+
+                            if (!slot_ok) {
+                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d failed after %d attempts, closing mux", i, max_connections, LINKLAYER_MAX_ATTEMPTS);
                                 break;
                             }
 
