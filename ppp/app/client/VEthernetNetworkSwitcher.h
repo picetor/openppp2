@@ -106,7 +106,7 @@ namespace ppp {
                     bool                                                            probe_reachable = false;
                     bool                                                            probe_enabled  = true;
                     int                                                             probe_rtt_ms = -1;
-                    ppp::string                                                     probe_server;
+                    ppp::string                                                     probe_server; ///< Current live connection/MUX entry (host:port).
                 };
                 typedef ppp::vector<OutboundConfiguration>                         OutboundConfigurationList;
                 typedef ppp::vector<OutboundStatus>                                OutboundStatusList;

@@ -1713,18 +1713,21 @@ namespace ppp {
                         status.probe_checked = current->second->GetProbeChecked();
                         status.probe_reachable = current->second->GetProbeReachable();
                         status.probe_rtt_ms = current->second->GetProbeRtt();
-                        status.probe_server = current->second->GetProbeServer();
+                        status.probe_server = current->second->GetCurrentEntry();
                     }
 #if !defined(_ANDROID) && !defined(_IPHONE)
-                    // Background probe refresh covers every menu entry every 5s;
-                    // prefer its fresher result when available.
+                    // Background probe refresh covers every menu entry every 5s.
+                    // It may refresh the displayed health metrics, but must not
+                    // replace probe_server: that field is the sticky entry
+                    // currently selected by the exchanger/MUX.  Replacing it
+                    // with the best probe result makes the UI look as if a
+                    // healthy connection switched entries when it did not.
                     {
                         auto probe = outbound_probe_statuses_.find(tag);
                         if (probe != outbound_probe_statuses_.end() && probe->second.checked) {
                             status.probe_checked = true;
                             status.probe_reachable = probe->second.reachable;
                             status.probe_rtt_ms = probe->second.rtt_ms;
-                            status.probe_server = probe->second.server;
                         }
                     }
 #endif
@@ -1742,7 +1745,7 @@ namespace ppp {
                     status.probe_checked = exchanger_->GetProbeChecked();
                     status.probe_reachable = exchanger_->GetProbeReachable();
                     status.probe_rtt_ms = exchanger_->GetProbeRtt();
-                    status.probe_server = exchanger_->GetProbeServer();
+                    status.probe_server = exchanger_->GetCurrentEntry();
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     {
                         auto probe = outbound_probe_statuses_.find("main");
@@ -1750,7 +1753,6 @@ namespace ppp {
                             status.probe_checked = true;
                             status.probe_reachable = probe->second.reachable;
                             status.probe_rtt_ms = probe->second.rtt_ms;
-                            status.probe_server = probe->second.server;
                         }
                     }
 #endif

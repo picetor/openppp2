@@ -218,6 +218,31 @@ namespace ppp {
                 return probe_server_;
             }
 
+            ppp::string VEthernetExchanger::GetCurrentEntry() noexcept {
+                SynchronizedObjectScope scope(syncobj_);
+                if (network_state_.load() != NetworkState_Established) {
+                    return ppp::string();
+                }
+
+                // A MUX generation has its own pinned entry.  It is the
+                // effective data path while that MUX is established; probe
+                // ranking and the next-generation preference are not the
+                // same thing as the current path.
+                std::shared_ptr<vmux::vmux_net> mux = mux_;
+                if (mux != NULLPTR && mux->is_established() && !mux_entry_.empty()) {
+                    return mux_entry_;
+                }
+
+                // Without an established MUX, report the transport endpoint
+                // that currently owns the live connection.
+                if (!server_url_.hostname.empty() &&
+                    server_url_.port > IPEndPoint::MinPort &&
+                    server_url_.port <= IPEndPoint::MaxPort) {
+                    return NormalizeProbeEntry(server_url_.hostname, server_url_.port);
+                }
+                return ppp::string();
+            }
+
             bool VEthernetExchanger::ProbeCandidateEndpoint(
                 ConnectivityProbe::ProbeType                                    probe_type,
                 const boost::asio::ip::tcp::endpoint&                           remoteEP,

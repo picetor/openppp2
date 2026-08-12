@@ -88,6 +88,7 @@ namespace ppp {
                 bool                                                                    GetProbeReachable()     noexcept;
                 bool                                                                    GetProbeChecked()       noexcept;
                 ppp::string                                                             GetProbeServer()        noexcept;
+                ppp::string                                                             GetCurrentEntry()       noexcept;
                 NetworkState                                                            GetMuxNetworkState()    noexcept;
                 virtual bool                                                            Open()                  noexcept;
                 virtual void                                                            Dispose()               noexcept;
