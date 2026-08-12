@@ -55,14 +55,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
-            --jq '.workflow_runs[] | select(.path == "${{ github.workflow_path }}") | [.id, .status, .created_at] | @tsv' \
-            | sort -k3 -r \
+          # Keep only the 2 most recent runs of THIS workflow (plus the
+          # current in-progress run). Tolerates transient API/TLS errors so
+          # the purge step can never fail the build.
+          set +e
+          for i in 1 2 3; do
+            gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/linux-amd64.yml") | [.id, .status, .created_at] | @tsv' \
+              > /tmp/ppp-runs.tsv && break
+            sleep 5
+          done
+          sort -k3 -r /tmp/ppp-runs.tsv \
             | awk 'NR > 2 && $2 != "in_progress" { print $1 }' \
             | while read -r run_id; do
-                gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id"
-                echo "Deleted run $run_id"
+                gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id" \
+                  || echo "warn: delete run $run_id failed"
               done
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v5
