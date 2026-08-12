@@ -228,6 +228,7 @@ namespace vmux {
    
         m->base_.server_or_client_    = server_mode;
         m->base_.disposed_.store(false, std::memory_order_release);
+        m->close_reason_.store(close_reason_none, std::memory_order_release);
         m->base_.ftt_                 = false;
         m->base_.established_         = false;
         m->base_.acceleration_        = acceleration;
@@ -405,13 +406,43 @@ namespace vmux {
         }
     }
 
+    void vmux_net::latch_close_reason(close_reason reason) noexcept {
+        if (reason == close_reason_none) {
+            return;
+        }
+
+        int expected = close_reason_none;
+        close_reason_.compare_exchange_strong(expected, static_cast<int>(reason),
+            std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
     /** @brief Posts deferred close/finalize work onto the vmux strand. */
-    void vmux_net::close_exec() noexcept {
+    void vmux_net::close_exec(close_reason reason) noexcept {
+        latch_close_reason(reason);
         std::shared_ptr<vmux_net> self = shared_from_this();
         vmux_post_exec(context_, strand_,
             [self, this]() noexcept {
                 finalize();
             });
+    }
+
+    void vmux_net::close_with_notice(close_reason reason) noexcept {
+        latch_close_reason(reason);
+        if (reason == close_reason_none || base_.disposed_.load(std::memory_order_acquire)) {
+            close_exec(reason);
+            return;
+        }
+
+        const Byte payload = static_cast<Byte>(reason);
+        std::shared_ptr<vmux_net> self = shared_from_this();
+        if (!post(cmd_mux_rebuild, &payload, sizeof(payload), 0, false,
+            [self](bool) noexcept {
+                self->close_exec();
+            })) {
+            // post() already requests a generic close on failure; the reason was
+            // latched first, so the exchanger can still attribute this rebuild.
+            close_exec(reason);
+        }
     }
 
     /**
@@ -882,6 +913,18 @@ namespace vmux {
             packet_input_ack(connection_id, buffer, buffer_size);
             active(now);
         }
+        elif(cmd == cmd_mux_rebuild) {
+            if (NULLPTR == buffer || buffer_size != 1) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolFrameInvalid);
+                return false;
+            }
+            const close_reason reason = static_cast<close_reason>(*buffer);
+            if (reason != close_reason_m1_gap && reason != close_reason_m4_retransmit_exhausted) {
+                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolFrameInvalid);
+                return false;
+            }
+            close_exec(reason); // The peer already notified us; never echo the notice.
+        }
         else {
             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::ProtocolPacketActionInvalid);
             return false;
@@ -1125,6 +1168,7 @@ namespace vmux {
                         // M1: never skip data; the caller rebuilds the mux on false.
                         log_warn("M1 UNBUFFERABLE GAP flow=" + stl::to_string<ppp::string>(cid) +
                             " seq=" + stl::to_string<ppp::string>(seq) + " -> mux rebuild");
+                        latch_close_reason(close_reason_m1_gap);
                         return false;
                     }
                     // Skip forward to (seq + 1) so we do not wait forever on a frame we cannot hold.
@@ -1169,6 +1213,7 @@ namespace vmux {
                     // M1: never skip data; the caller rebuilds the mux on false.
                     log_warn("M1 UNBUFFERABLE GAP flow=" + stl::to_string<ppp::string>(cid) +
                         " seq=" + stl::to_string<ppp::string>(seq) + " -> mux rebuild");
+                    latch_close_reason(close_reason_m1_gap);
                     return false;
                 }
                 // If forcing advance made seq become the next expected, fall through is
@@ -1291,7 +1336,7 @@ namespace vmux {
                             stl::to_string<ppp::string>(it->first) +
                             " retries=" + stl::to_string<ppp::string>(fx.nack_retries_) +
                             " -> mux rebuild");
-                        close_exec(); // Retransmit never healed the gap; rebuild cleanly.
+                        close_with_notice(close_reason_m4_retransmit_exhausted); // Retransmit never healed the gap; rebuild cleanly.
                         return;
                     }
                     fx.nack_backoff_ms_ = std::min<uint64_t>(1600, backoff * 2);
@@ -1316,7 +1361,7 @@ namespace vmux {
                                 stl::to_string<ppp::string>(it->first) +
                                 " retries=" + stl::to_string<ppp::string>(fx.nack_retries_) +
                                 " -> mux rebuild");
-                            close_exec();
+                            close_with_notice(close_reason_m4_retransmit_exhausted);
                             return;
                         }
                         fx.nack_backoff_ms_ = std::min<uint64_t>(1600, fx.nack_backoff_ms_ * 2);
@@ -1329,7 +1374,7 @@ namespace vmux {
                     if (!flow_force_advance(it->first, fx, now)) {
                         log_warn("M1 GAP TIMEOUT flow=" + stl::to_string<ppp::string>(it->first) +
                             " -> mux rebuild");
-                        close_exec();
+                        close_with_notice(close_reason_m1_gap);
                         return;
                     }
                 }
@@ -2726,7 +2771,13 @@ namespace vmux {
                         return true;
                     }
                     else {
-                        close_exec();
+                        const close_reason reason = get_close_reason();
+                        if (reason == close_reason_m1_gap || reason == close_reason_m4_retransmit_exhausted) {
+                            close_with_notice(reason);
+                        }
+                        else {
+                            close_exec();
+                        }
                         return false;
                     }
                 });

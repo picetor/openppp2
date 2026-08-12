@@ -735,20 +735,9 @@ namespace ppp {
                 config.mux.flow.retransmit.nack_backoff_ms = PPP_MUX_FLOW_NACK_BACKOFF_MS;
             }
 
-            // Hot-switch is auto-enabled for multi-entry configurations
-            // (client.servers non-empty); an explicit "enabled": false keeps the
-            // legacy sticky-failover behavior.  The flow-v2 reorder window must
-            // cover the preheat/switch window; refuse to enable hot-switch
-            // otherwise.
+            // Failure-driven MUX entry failover is meaningful only with backup
+            // entries.  Quality-triggered live migration is intentionally disabled.
             if (config.client.hot_switch.enabled && config.client.servers.empty()) {
-                config.client.hot_switch.enabled = false;
-            }
-            if (config.client.hot_switch.enabled &&
-                (config.mux.flow.reorder.bytes < PPP_MUX_FLOW_REORDER_BYTES ||
-                 config.mux.flow.reorder.timeout < PPP_MUX_FLOW_REORDER_TIMEOUT)) {
-                LOG_ERROR("AppConfiguration: hot-switch requires mux.flow.reorder.bytes >= %d and timeout >= %d ms; current bytes=%d timeout=%d; hot-switch disabled",
-                    (int)PPP_MUX_FLOW_REORDER_BYTES, (int)PPP_MUX_FLOW_REORDER_TIMEOUT,
-                    config.mux.flow.reorder.bytes, config.mux.flow.reorder.timeout);
                 config.client.hot_switch.enabled = false;
             }
 
@@ -1633,10 +1622,9 @@ namespace ppp {
                     config.client.hot_switch.switch_margin = std::max<double>(0.0, config.client.hot_switch.switch_margin);
                     AssignIfPresent(config.client.hot_switch.channels_per_entry, hot_switch_json["channels-per-entry"]);
                     config.client.hot_switch.channels_per_entry = std::max<int>(0, config.client.hot_switch.channels_per_entry);
-                    // Legacy hot-switch keys (threshold-rtt-factor/-ms, min-stable-periods,
-                    // preheat, observe-ms, lock-seconds, penalty-seconds,
-                    // drain-timeout-seconds) remain accepted but are ignored: the trigger
-                    // is jitter-gated and the state-machine timings are built-in fixed.
+                    // All quality/preheat keys remain accepted for configuration
+                    // compatibility but no longer trigger a live healthy-session
+                    // migration.  `enabled` controls only repeated M1/M4 failover.
                 }
             }
             config.client.bandwidth = JsonAuxiliary::AsValue<int64_t>(json["client"]["bandwidth"]);

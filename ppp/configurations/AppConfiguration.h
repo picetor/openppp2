@@ -268,19 +268,19 @@ namespace ppp {
                     int                                                     ttl_seconds     = 30;           ///< Probe result validity in seconds before a background refresh.
                 }                                                           probe;          ///< Connectivity probe configuration.
                 struct {
-                    bool                                                    enabled                 = true;     ///< Master switch; auto-enabled when client.servers is non-empty, explicit false keeps legacy failover.
-                    int                                                     jitter_threshold_ms     = 50;       ///< Fluctuation gate (ms): switch only when the window fluctuation reaches this.
-                    int                                                     jitter_window           = 3;        ///< Fluctuation sample window AND the consecutive periods required to switch.
-                    double                                                  weight_rtt              = 0.6;      ///< Score weight of RTT; jitter weight = 1 - weight_rtt.
-                    double                                                  switch_margin           = 0.15;     ///< Minimum score gap (current - best) required to switch.
-                    int                                                     channels_per_entry      = 0;        ///< Resident channel distribution per entry (0 = all channels on the best/sticky entry).
+                    bool                                                    enabled                 = true;     ///< Enables failure-driven MUX entry failover; healthy sessions never switch on quality.
+                    int                                                     jitter_threshold_ms     = 50;       ///< Legacy JSON compatibility; no longer triggers a live switch.
+                    int                                                     jitter_window           = 3;        ///< Legacy JSON compatibility; ranking uses a fixed rolling history.
+                    double                                                  weight_rtt              = 0.6;      ///< Legacy JSON compatibility; ranking uses fixed reliability/risk weights.
+                    double                                                  switch_margin           = 0.15;     ///< Legacy JSON compatibility; healthy quality changes never switch.
+                    int                                                     channels_per_entry      = 0;        ///< Legacy JSON compatibility; one MUX generation is always pinned to one entry.
                     // Built-in fixed parameters (not configurable through JSON).
                     int                                                     lock_seconds            = 60;       ///< Lock period after activation; no switch-back during it.
                     int                                                     penalty_seconds         = 60;       ///< Blacklist penalty for a failed preheat entry.
                     bool                                                    preheat                 = true;     ///< Preheat (progressive) switch; false = direct switch (passive mode).
                     int                                                     observe_ms              = 2000;     ///< Ready observation window before activation; rollback if the old entry recovers.
                     int                                                     drain_timeout_seconds   = 120;      ///< Force-dispose retiring channels that fail to drain.
-                }                                                           hot_switch;             ///< Preheated progressive hot-switch configuration (multi-entry).
+                }                                                           hot_switch;             ///< Multi-entry failure failover compatibility block.
 #if defined(_WIN32)
                 struct {
                     bool                                                    tcp;            ///< Enable Paper Airplane TCP acceleration driver on Windows when true.

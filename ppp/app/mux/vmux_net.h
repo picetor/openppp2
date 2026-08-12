@@ -147,6 +147,7 @@ namespace vmux {
             cmd_mux_mode_set,             ///< MUX-MODE-SET 鈥?debug-only request to switch the peer's scheduler mode.
             cmd_nack,                      ///< NACK - request retransmit of a missing per-flow DSN range (M4).
             cmd_ack,                       ///< ACK - aggregated per-flow delivery watermark (M4).
+            cmd_mux_rebuild,               ///< Best-effort peer notification of a terminal M1/M4 rebuild reason.
             cmd_max,                      ///< Sentinel 鈥?one past the last valid command.
 
             max_buffers_size = UINT16_MAX - sizeof(vmux_hdr), ///< Maximum payload bytes per vmux frame.
@@ -253,6 +254,18 @@ namespace vmux {
             ordering_flow_v2 = 1,
         };
 
+        /**
+         * @brief Locally observed terminal MUX reason used by sticky failover.
+         * @details Only data-integrity rebuilds are distinguished.  All ordinary
+         *          transport, timeout and externally requested closes remain none
+         *          and must never trigger an entry-quality switch.
+         */
+        enum close_reason {
+            close_reason_none = 0,
+            close_reason_m1_gap,
+            close_reason_m4_retransmit_exhausted,
+        };
+
         /** @brief MUX capability bit advertised in the handshake (bit0 = FLOW_V2). */
         enum {
             ordering_caps_flow_v2 = 0x01,
@@ -311,7 +324,7 @@ namespace vmux {
         void                                                                        set_retransmit_enabled(bool enabled) noexcept;
         /** @brief True for session-level control frames (keep-alive / mux-mode-set). */
         static bool                                                                 is_session_control(Byte cmd) noexcept {
-            return cmd == cmd_keep_alived || cmd == cmd_mux_mode_set;
+            return cmd == cmd_keep_alived || cmd == cmd_mux_mode_set || cmd == cmd_mux_rebuild;
         }
         /** @brief True for connection-level control frames (syn / syn-ok / acceleration). */
         static bool                                                                 is_connection_control(Byte cmd) noexcept {
@@ -350,6 +363,9 @@ namespace vmux {
         const uint32_t&                                                             get_rx_ack()          noexcept { return status_.rx_ack_; }
         bool                                                                        is_disposed()         noexcept { return base_.disposed_.load(std::memory_order_acquire); }
         bool                                                                        is_established()      noexcept { return !base_.disposed_.load(std::memory_order_acquire) && base_.established_; }
+        close_reason                                                                get_close_reason()    const noexcept {
+            return static_cast<close_reason>(close_reason_.load(std::memory_order_acquire));
+        }
 
         /** @brief Handle fast transport training/control frame. */
         bool                                                                        ftt(uint32_t seq, uint32_t ack) noexcept;
@@ -357,7 +373,7 @@ namespace vmux {
         static uint32_t                                                             ftt_random_aid(int min, int max) noexcept;
 
         /** @brief Close the session in executor context. */
-        void                                                                        close_exec() noexcept;
+        void                                                                        close_exec(close_reason reason = close_reason_none) noexcept;
         /** @brief Drive periodic maintenance and heartbeat updates. */
         bool                                                                        update() noexcept;
         /**
@@ -510,6 +526,10 @@ namespace vmux {
         void                                                                        log_info(const ppp::string& message) noexcept;
         /** @brief Emit a WARN event through the session logger when present (M4 debug). */
         void                                                                        log_warn(const ppp::string& message) noexcept;
+        /** @brief Latch the first locally observed data-integrity close reason. */
+        void                                                                        latch_close_reason(close_reason reason) noexcept;
+        /** @brief Best-effort peer reason notification, then close this MUX. */
+        void                                                                        close_with_notice(close_reason reason) noexcept;
 
         /** @brief Process SYN request and create connecting vmux socket state. */
         bool                                                                        process_rx_connecting(std::shared_ptr<vmux_skt>& skt, uint32_t connection_id, const char* host, int host_size) noexcept;
@@ -681,6 +701,7 @@ namespace vmux {
         size_t                                                                      stripe_cursor_ = 0; ///< Round-robin cursor over rx_links_ (stripe mode).
 
         receiver_ordering_mode                                                      ordering_mode_ = ordering_compat; ///< Negotiated receiver ordering mode (flow v2).
+        std::atomic<int>                                                            close_reason_ = close_reason_none; ///< First M1/M4 terminal reason; generic closes leave it as none.
         vmux_flow_map                                                               flows_;             ///< connection_id -> per-flow receive context (flow v2 only).
         vmux::unordered_map<uint32_t, uint32_t>                                     tx_flow_seq_;       ///< connection_id -> next per-flow DSN to send (flow v2 only).
         struct flow_tx_cache {

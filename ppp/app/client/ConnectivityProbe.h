@@ -47,8 +47,9 @@ namespace ppp {
                     uint64_t                            timestamp = 0;  ///< Probe time (Executors::GetTickCount).
                     int                                 ttl_ms = 0;     ///< Result validity before refresh.
                     uint64_t                            penalty_until = 0;  ///< Tick-count deadline while the entry is temporarily blacklisted.
-                    ppp::vector<int>                    rtt_samples;    ///< Recent RTT samples (ring, capped at hot-switch.jitter-window).
-                    bool                                samples_full = false;  ///< True once the sample window has been filled.
+                    ppp::vector<int>                    rtt_samples;    ///< Recent successful RTT samples (rolling entry-quality history).
+                    ppp::vector<uint8_t>                reachability_samples; ///< Recent probe outcomes (1=success, 0=failure).
+                    bool                                samples_full = false;  ///< True once enough samples exist for confident ranking.
                     int                                 jitter_ms = 0;  ///< Fluctuation over rtt_samples: max(peak-to-peak, MAD).
                 };
 

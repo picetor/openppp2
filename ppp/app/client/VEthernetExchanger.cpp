@@ -105,16 +105,55 @@ namespace ppp {
                     return (n % 2 == 1) ? sorted_values[n / 2] : (sorted_values[n / 2 - 1] + sorted_values[n / 2]) / 2;
                 }
 
-                /**
-                 * @brief Weighted quality score of one entry: weight-rtt * rtt_norm + (1 - weight-rtt) * jitter_norm.
-                 * @details RTT is normalized against the reachable-set median; jitter is normalized
-                 *          against the jitter median and defaults to 1.0 when the sample window is not
-                 *          full yet (data-insufficient), so such entries never win the comparison.
-                 */
-                double HotSwitchQualityScore(int rtt_ms, int jitter_ms, bool samples_full, double weight_rtt, double rtt_ref, double jitter_ref) noexcept {
-                    const double rtt_norm = rtt_ref > 0.0 ? (double)rtt_ms / rtt_ref : 1.0;
-                    const double jitter_norm = (!samples_full || jitter_ref <= 0.0) ? 1.0 : (double)jitter_ms / jitter_ref;
-                    return weight_rtt * rtt_norm + (1.0 - weight_rtt) * jitter_norm;
+                static constexpr std::size_t ENTRY_QUALITY_HISTORY_CAP = 60;
+                static constexpr std::size_t ENTRY_QUALITY_MIN_SAMPLES = 6;
+
+                int EntryReliabilityTier(const ConnectivityProbe::Result& result) noexcept {
+                    const std::size_t samples = result.reachability_samples.size();
+                    if (samples < ENTRY_QUALITY_MIN_SAMPLES) {
+                        return 2; // Bootstrap: usable, but never outrank proven A/B entries.
+                    }
+
+                    std::size_t successes = 0;
+                    for (uint8_t sample : result.reachability_samples) {
+                        successes += sample != 0 ? 1 : 0;
+                    }
+                    const double success_rate = static_cast<double>(successes) / static_cast<double>(samples);
+                    if (success_rate >= 0.98) {
+                        return 0;
+                    }
+                    if (success_rate >= 0.90) {
+                        return 1;
+                    }
+                    return 3; // Last probe succeeded, but recent reliability is poor.
+                }
+
+                double EntryLatencyRisk(const ConnectivityProbe::Result& result) noexcept {
+                    if (result.rtt_samples.empty()) {
+                        return std::numeric_limits<double>::max();
+                    }
+
+                    ppp::vector<int> sorted = result.rtt_samples;
+                    std::stable_sort(sorted.begin(), sorted.end());
+                    const std::size_t n = sorted.size();
+                    const int p50 = MedianOfSortedValues(sorted);
+                    const int p95 = sorted[((n - 1) * 95) / 100];
+
+                    ppp::vector<int> deviations;
+                    deviations.reserve(n);
+                    for (int sample : sorted) {
+                        deviations.emplace_back(sample >= p50 ? sample - p50 : p50 - sample);
+                    }
+                    std::stable_sort(deviations.begin(), deviations.end());
+                    const int mad = MedianOfSortedValues(deviations);
+
+                    double risk = static_cast<double>(p50) +
+                        1.5 * static_cast<double>(std::max<int>(0, p95 - p50)) +
+                        0.5 * static_cast<double>(mad);
+                    if (result.reachability_samples.size() < ENTRY_QUALITY_MIN_SAMPLES) {
+                        risk += 100.0; // Confidence penalty for a newly discovered entry.
+                    }
+                    return risk;
                 }
             }
 
@@ -253,31 +292,27 @@ namespace ppp {
                     return;
                 }
 
-                // Jitter window: each successful probe pushes one RTT sample and the
-                // fluctuation is recomputed; a failed probe keeps the previous window
-                // so the fluctuation memory survives a single dead round.  The window
-                // width comes from hot-switch.jitter-window (default 3).
+                // Keep roughly five minutes of outcomes at the normal 5-second refresh
+                // cadence.  Healthy operation only updates this ranking history; it
+                // never causes a live entry switch.
+                if (it != probe_results_.end()) {
+                    result.rtt_samples = it->second.rtt_samples;
+                    result.reachability_samples = it->second.reachability_samples;
+                }
+                result.reachability_samples.emplace_back(reachable ? 1 : 0);
+                if (result.reachability_samples.size() > ENTRY_QUALITY_HISTORY_CAP) {
+                    result.reachability_samples.erase(result.reachability_samples.begin());
+                }
+
                 if (reachable && rtt_ms >= 0) {
-                    int window = 3;
-                    AppConfigurationPtr configuration = GetConfiguration();
-                    if (NULLPTR != configuration) {
-                        window = std::max<int>(2, std::min<int>(10, configuration->client.hot_switch.jitter_window));
-                    }
-                    if (it != probe_results_.end() && !it->second.rtt_samples.empty()) {
-                        result.rtt_samples = it->second.rtt_samples;
-                    }
                     result.rtt_samples.push_back(rtt_ms);
-                    if ((int)result.rtt_samples.size() > window) {
+                    if (result.rtt_samples.size() > ENTRY_QUALITY_HISTORY_CAP) {
                         result.rtt_samples.erase(result.rtt_samples.begin());
                     }
-                    result.samples_full = (int)result.rtt_samples.size() >= window;
-                    result.jitter_ms = ConnectivityProbe::ComputeJitter(result.rtt_samples);
                 }
-                elif(it != probe_results_.end()) {
-                    result.rtt_samples = it->second.rtt_samples;
-                    result.samples_full = it->second.samples_full;
-                    result.jitter_ms = it->second.jitter_ms;
-                }
+                result.samples_full = result.rtt_samples.size() >= ENTRY_QUALITY_MIN_SAMPLES &&
+                    result.reachability_samples.size() >= ENTRY_QUALITY_MIN_SAMPLES;
+                result.jitter_ms = ConnectivityProbe::ComputeJitter(result.rtt_samples);
 
                 probe_results_[entry] = std::move(result);
             }
@@ -616,50 +651,30 @@ namespace ppp {
                     return true;
                 }
 
-                // Pick the reachable entry with the best weighted quality
-                // (RTT + jitter).  The score combines this round RTTs with the
-                // cached jitter windows; when no entry has a full window yet the
-                // ranking degenerates to lowest RTT, matching the legacy behavior.
+                // Use the continuously maintained reliability/risk ordering.  This
+                // list is consulted only while establishing/re-establishing a
+                // transport; ranking changes never move a healthy live session.
                 int best_index = -1;
-                double best_score = std::numeric_limits<double>::max();
-                const double weight_rtt = std::max<double>(0.0, std::min<double>(1.0, configuration->client.hot_switch.weight_rtt));
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-                    ppp::vector<int> rtt_values;
-                    ppp::vector<int> jitter_values;
-                    rtt_values.reserve(candidates.size());
-                    jitter_values.reserve(candidates.size());
-                    for (const ProbeCandidateEntry& candidate : candidates) {
-                        if (!candidate.probed || !candidate.reachable || candidate.rtt_ms < 0) {
-                            continue;
-                        }
-                        rtt_values.push_back(candidate.rtt_ms);
-                        ProbeResultTable::const_iterator it = probe_results_.find(candidate.entry);
-                        if (it != probe_results_.end() && it->second.samples_full) {
-                            jitter_values.push_back(it->second.jitter_ms);
-                        }
-                    }
-                    std::stable_sort(rtt_values.begin(), rtt_values.end());
-                    std::stable_sort(jitter_values.begin(), jitter_values.end());
-                    const double rtt_ref = std::max<double>(1.0, (double)MedianOfSortedValues(rtt_values));
-                    const double jitter_ref = std::max<double>(1.0, (double)MedianOfSortedValues(jitter_values));
-
+                const ppp::vector<ppp::string> ranked_entries = HotSwitchRankedEntries(now);
+                for (const ppp::string& ranked_entry : ranked_entries) {
                     for (std::size_t i = 0; i < candidates.size(); i++) {
                         const ProbeCandidateEntry& candidate = candidates[i];
-                        if (!candidate.probed || !candidate.reachable || candidate.rtt_ms < 0) {
-                            continue;
+                        if (candidate.entry == ranked_entry && candidate.probed &&
+                            candidate.reachable && candidate.rtt_ms >= 0) {
+                            best_index = static_cast<int>(i);
+                            break;
                         }
-                        int jitter_ms = 0;
-                        bool samples_full = false;
-                        ProbeResultTable::const_iterator it = probe_results_.find(candidate.entry);
-                        if (it != probe_results_.end()) {
-                            jitter_ms = it->second.jitter_ms;
-                            samples_full = it->second.samples_full;
-                        }
-                        const double score = HotSwitchQualityScore(candidate.rtt_ms, jitter_ms, samples_full,
-                            weight_rtt, rtt_ref, jitter_ref);
-                        if (score < best_score) {
-                            best_score = score;
+                    }
+                    if (best_index >= 0) {
+                        break;
+                    }
+                }
+                // Defensive fallback for a just-probed candidate that could not be
+                // represented in the cache ordering.
+                if (best_index < 0) {
+                    for (std::size_t i = 0; i < candidates.size(); i++) {
+                        if (candidates[i].probed && candidates[i].reachable && candidates[i].rtt_ms >= 0 &&
+                            (best_index < 0 || candidates[i].rtt_ms < candidates[best_index].rtt_ms)) {
                             best_index = static_cast<int>(i);
                         }
                     }
@@ -1247,7 +1262,8 @@ namespace ppp {
                             break;
                         }
 
-                        HotSwitchTick(now);
+                        // Entry scores are refreshed continuously by the probe path,
+                        // but healthy sessions are deliberately never migrated.
                     });
                 return true;
             }
@@ -1411,7 +1427,11 @@ namespace ppp {
                         break;
                     }
 
-                    int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
+                    const int64_t reconnection_timeout = GetReconnectDelayMilliseconds();
+                    if (reconnection_timeout <= 0) {
+                        LOG_INFO("VEthernetExchanger::Loopback: starting immediate failover attempt #%d", (int)reconnection_count_);
+                        continue;
+                    }
                     LOG_DEBUG("VEthernetExchanger::Loopback: waiting %lld ms before reconnection attempt #%d", reconnection_timeout, (int)reconnection_count_);
                     if (!Sleep(reconnection_timeout, context, y)) {
                         break;
@@ -1450,16 +1470,80 @@ namespace ppp {
                             mux->close_exec();
                         }
                         elif(!mux->update()) {
-                            int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
-                            uint64_t mux_last = mux->get_last();
-
                             uint64_t now = mux->now_tick();
-                            LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux update failed, last=%llu, now=%llu, timeout=%lld",
-                                (unsigned long long)mux_last, (unsigned long long)now, (long long)reconnection_timeout);
-                            if (now >= (mux_last + (uint64_t)reconnection_timeout)) {
-                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux reconnection timeout reached, resetting mux");
+                            const vmux::vmux_net::close_reason reason = mux->get_close_reason();
+                            const bool integrity_rebuild = reason == vmux::vmux_net::close_reason_m1_gap ||
+                                reason == vmux::vmux_net::close_reason_m4_retransmit_exhausted;
+
+                            if (integrity_rebuild) {
+                                static constexpr uint64_t MUX_FAILURE_WINDOW_MS = 60 * 1000ULL;
+                                ppp::string failed_entry;
+                                int streak = 0;
+                                {
+                                    SynchronizedObjectScope scope(syncobj_);
+                                    failed_entry = mux_entry_.empty() ? probe_server_ : mux_entry_;
+                                    if (failed_entry == mux_failure_entry_ && mux_failure_last_ != 0 &&
+                                        now <= mux_failure_last_ + MUX_FAILURE_WINDOW_MS) {
+                                        mux_failure_streak_++;
+                                    }
+                                    else {
+                                        mux_failure_entry_ = failed_entry;
+                                        mux_failure_streak_ = 1;
+                                    }
+                                    mux_failure_last_ = now;
+                                    streak = mux_failure_streak_;
+                                }
+
+                                ppp::string target_entry;
+                                if (configuration->client.hot_switch.enabled && streak >= 2) {
+                                    const ppp::vector<ppp::string> ranked = HotSwitchRankedEntries(now);
+                                    for (const ppp::string& entry : ranked) {
+                                        if (!entry.empty() && entry != failed_entry) {
+                                            target_entry = entry;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!target_entry.empty()) {
+                                    {
+                                        SynchronizedObjectScope scope(syncobj_);
+                                        mux_entry_ = target_entry;
+                                        probe_server_ = target_entry;
+                                        mux_failure_entry_.clear();
+                                        mux_failure_last_ = 0;
+                                        mux_failure_streak_ = 0;
+                                    }
+                                    LOG_WARN("VEthernetExchanger::DoMuxEvents: consecutive M%d on entry %s (streak=%d), rebuilding immediately on ranked backup %s",
+                                        reason == vmux::vmux_net::close_reason_m1_gap ? 1 : 4,
+                                        failed_entry.empty() ? "<unknown>" : failed_entry.data(), streak, target_entry.data());
+                                }
+                                else {
+                                    LOG_WARN("VEthernetExchanger::DoMuxEvents: M%d on entry %s (streak=%d), rebuilding immediately on the same entry",
+                                        reason == vmux::vmux_net::close_reason_m1_gap ? 1 : 4,
+                                        failed_entry.empty() ? "<unknown>" : failed_entry.data(), streak);
+                                }
+
                                 mux_.reset();
                                 breaking = false;
+                            }
+                            else {
+                                {
+                                    SynchronizedObjectScope scope(syncobj_);
+                                    mux_failure_entry_.clear();
+                                    mux_failure_last_ = 0;
+                                    mux_failure_streak_ = 0;
+                                }
+
+                                int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
+                                uint64_t mux_last = mux->get_last();
+                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux update failed, last=%llu, now=%llu, timeout=%lld",
+                                    (unsigned long long)mux_last, (unsigned long long)now, (long long)reconnection_timeout);
+                                if (now >= (mux_last + (uint64_t)reconnection_timeout)) {
+                                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux reconnection timeout reached, resetting mux");
+                                    mux_.reset();
+                                    breaking = false;
+                                }
                             }
 
                             mux->close_exec();
@@ -1491,10 +1575,7 @@ namespace ppp {
                             break;
                         }
 
-                        if (mux_mode == vmux::vmux_net::mux_mode_flow &&
-                            (configuration->mux.turbo || configuration->client.hot_switch.enabled)) {
-                            // Hot-switch needs carrier headroom for preheated backup-entry
-                            // channels even when the turbo pool is off.
+                        if (mux_mode == vmux::vmux_net::mux_mode_flow && configuration->mux.turbo) {
                             uint32_t hard = static_cast<uint32_t>(max_connections) * static_cast<uint32_t>(PPP_MUX_TURBO_FACTOR_MAX);
                             mux->set_pool_hard_max(static_cast<uint16_t>(std::min<uint32_t>(hard, UINT16_MAX)));
                         }
@@ -1527,7 +1608,16 @@ namespace ppp {
                         }
                     }
 
-                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: creating new mux, vlan=%u, max_connections=%u", mux->Vlan, max_connections);
+                    ppp::string mux_entry;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        if (mux_entry_.empty()) {
+                            mux_entry_ = probe_server_;
+                        }
+                        mux_entry = mux_entry_;
+                    }
+                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: creating new mux, vlan=%u, max_connections=%u, entry=%s",
+                        mux->Vlan, max_connections, mux_entry.empty() ? "<auto>" : mux_entry.data());
                     std::shared_ptr<VirtualEthernetLinklayer> self = shared_from_this();
                     mux_ = mux;
 
@@ -1626,25 +1716,22 @@ namespace ppp {
                         
                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: connecting %d linklayers, vlan=%u", max_connections, mux->Vlan);
 
-                        // M2: resident channel distribution across reachable entries
-                        // (hot-switch.channels-per-entry). Each channel is forced onto
-                        // its assigned entry and tagged; with no plan every channel uses
-                        // the legacy best+sticky selection.
-                        AppConfigurationPtr distribution_configuration = GetConfiguration();
-                        ppp::vector<ppp::string> entry_plan;
-                        if (NULLPTR != distribution_configuration && distribution_configuration->client.probe.enabled &&
-                            distribution_configuration->client.hot_switch.enabled &&
-                            distribution_configuration->client.hot_switch.channels_per_entry > 0 &&
-                            !distribution_configuration->client.servers.empty()) {
-                            entry_plan = HotSwitchRankedEntries(Executors::GetTickCount());
-                            if (entry_plan.size() < 2) {
-                                entry_plan.clear(); // A single reachable entry is not a distribution.
+                        // One MUX generation is pinned to exactly one entry.  Ranking
+                        // changes are intentionally ignored until a permitted failure
+                        // event creates the next generation, preventing cross-entry
+                        // packet timing differences from creating additional reordering.
+                        ppp::string mux_entry;
+                        {
+                            SynchronizedObjectScope scope(syncobj_);
+                            if (mux_entry_.empty()) {
+                                mux_entry_ = probe_server_;
+                                if (mux_entry_.empty() &&
+                                    server_url_.port > IPEndPoint::MinPort && server_url_.port <= IPEndPoint::MaxPort) {
+                                    mux_entry_ = NormalizeProbeEntry(server_url_.hostname, server_url_.port);
+                                }
                             }
+                            mux_entry = mux_entry_;
                         }
-                        // Snapshot the plan primary before spawning: the aggregation
-                        // below may run inside a child coroutine, which outlives this
-                        // lambda's stack frame.
-                        const ppp::string plan_primary = entry_plan.empty() ? ppp::string() : entry_plan[0];
 
                         // Parallel assembly: every slot is spawned as its own coroutine
                         // on the same mux strand, so the TCP/WS handshakes of different
@@ -1658,13 +1745,10 @@ namespace ppp {
                         std::shared_ptr<std::atomic<int>> ok_slots = make_shared_object<std::atomic<int>>(0);
 
                         for (int i = 0; i < max_connections; i++) {
-                            ppp::string forced_entry;
-                            if (!entry_plan.empty()) {
-                                forced_entry = entry_plan[(i / std::max<int>(1, distribution_configuration->client.hot_switch.channels_per_entry)) % (int)entry_plan.size()];
-                            }
+                            const ppp::string forced_entry = mux_entry;
 
                             YieldContext::Spawn(allocator.get(), *context, strand.get(),
-                                [self, this, mux, context, strand, allocator, i, max_connections, forced_entry, plan_primary, done_slots, ok_slots](YieldContext& y) noexcept {
+                                [self, this, mux, context, strand, allocator, i, max_connections, forced_entry, done_slots, ok_slots](YieldContext& y) noexcept {
                                     bool slot_ok = false;
                                     for (int attempt = 0; attempt < LINKLAYER_MAX_ATTEMPTS; attempt++) {
                                         if (disposed_ || mux != mux_) {
@@ -1677,7 +1761,7 @@ namespace ppp {
                                             break;
                                         }
 
-                                        const ppp::string* attempt_entry = (attempt == 0 && !forced_entry.empty()) ? &forced_entry : NULLPTR;
+                                        const ppp::string* attempt_entry = forced_entry.empty() ? NULLPTR : &forced_entry;
                                         ITransmissionPtr transmission = ConnectTransmission(context, strand, y, attempt_entry);
                                         if (NULLPTR == transmission) {
                                             LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
@@ -1759,9 +1843,24 @@ namespace ppp {
                                             return;
                                         }
 
-                                        if (bok > 0 && !plan_primary.empty()) {
-                                            SynchronizedObjectScope scope(syncobj_);
-                                            probe_server_ = plan_primary;
+                                        if (!forced_entry.empty()) {
+                                            const uint64_t now = Executors::GetTickCount();
+                                            HotSwitchBlacklistEntry(forced_entry, now);
+                                            ppp::string replacement;
+                                            const ppp::vector<ppp::string> ranked = HotSwitchRankedEntries(now);
+                                            for (const ppp::string& candidate : ranked) {
+                                                if (!candidate.empty() && candidate != forced_entry) {
+                                                    replacement = candidate;
+                                                    break;
+                                                }
+                                            }
+                                            if (!replacement.empty()) {
+                                                SynchronizedObjectScope scope(syncobj_);
+                                                mux_entry_ = replacement;
+                                                probe_server_ = replacement;
+                                                LOG_WARN("VEthernetExchanger::MuxConnectAllLinklayers: entry %s failed to build %d/%d carriers; next MUX generation uses ranked backup %s",
+                                                    forced_entry.data(), bok, max_connections, replacement.data());
+                                            }
                                         }
 
                                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only %d/%d connected, closing mux", bok, max_connections);
@@ -1784,6 +1883,11 @@ namespace ppp {
                 std::shared_ptr<boost::asio::io_context> context = mux->get_context();
                 if (NULLPTR == context) {
                     return false;
+                }
+
+                if (entry.empty()) {
+                    SynchronizedObjectScope scope(syncobj_);
+                    entry = mux_entry_;
                 }
 
                 auto self = shared_from_this();
@@ -1840,24 +1944,14 @@ namespace ppp {
                     });
             }
 
-            void VEthernetExchanger::ResetHotSwitchState() noexcept {
-                // hot_switch_locked_until_ is intentionally NOT reset here: the
-                // lock period set by HotSwitchActivate survives reconnect cycles
-                // so a freshly activated entry cannot bounce back to the old one
-                // immediately after a reconnect (switch ping-pong).
-                hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
-                hot_switch_preheat_done_.store(false, std::memory_order_release);
-                hot_switch_preheat_added_.store(0, std::memory_order_release);
-                hot_switch_degrade_streak_ = 0;
-                hot_switch_last_eval_ = 0;
-            }
-
             ppp::vector<ppp::string> VEthernetExchanger::HotSwitchRankedEntries(uint64_t now) noexcept {
-                struct EntryRtt final {
+                struct EntryQuality final {
                     ppp::string entry;
+                    int tier;
+                    double risk;
                     int rtt_ms;
                 };
-                ppp::vector<EntryRtt> entries;
+                ppp::vector<EntryQuality> entries;
                 {
                     SynchronizedObjectScope scope(syncobj_);
                     entries.reserve(probe_results_.size());
@@ -1868,380 +1962,34 @@ namespace ppp {
                             now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
                             continue;
                         }
-                        entries.emplace_back(EntryRtt{ result.entry, result.rtt_ms });
+                        entries.emplace_back(EntryQuality{
+                            result.entry,
+                            EntryReliabilityTier(result),
+                            EntryLatencyRisk(result),
+                            result.rtt_ms });
                     }
                 }
 
                 std::stable_sort(entries.begin(), entries.end(),
-                    [](const EntryRtt& a, const EntryRtt& b) noexcept {
-                        return a.rtt_ms < b.rtt_ms;
+                    [](const EntryQuality& a, const EntryQuality& b) noexcept {
+                        if (a.tier != b.tier) {
+                            return a.tier < b.tier;
+                        }
+                        if (a.risk != b.risk) {
+                            return a.risk < b.risk;
+                        }
+                        if (a.rtt_ms != b.rtt_ms) {
+                            return a.rtt_ms < b.rtt_ms;
+                        }
+                        return a.entry < b.entry;
                     });
 
                 ppp::vector<ppp::string> ranked;
                 ranked.reserve(entries.size());
-                for (const EntryRtt& e : entries) {
+                for (const EntryQuality& e : entries) {
                     ranked.emplace_back(e.entry);
                 }
                 return ranked;
-            }
-
-            bool VEthernetExchanger::HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms, int& jitter_ms, bool& samples_full) noexcept {
-                SynchronizedObjectScope scope(syncobj_);
-                ProbeResultTable::iterator it = probe_results_.find(entry);
-                if (it == probe_results_.end()) {
-                    return false;
-                }
-                const ConnectivityProbe::Result& result = it->second;
-                if (!result.reachable || result.rtt_ms < 0 || result.penalty_until > now ||
-                    now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
-                    return false;
-                }
-                rtt_ms = result.rtt_ms;
-                jitter_ms = result.jitter_ms;
-                samples_full = result.samples_full;
-                return true;
-            }
-
-            bool VEthernetExchanger::HotSwitchPickTarget(uint64_t now, ppp::string& target, ppp::string& from) noexcept {
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration || !configuration->client.probe.enabled || !configuration->client.hot_switch.enabled) {
-                    return false;
-                }
-                if (configuration->client.servers.empty()) {
-                    return false; // Multi-entry is required for a switch.
-                }
-
-                ppp::string current;
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-                    current = probe_server_;
-                }
-                if (current.empty()) {
-                    return false; // No primary established yet; nothing to degrade from.
-                }
-
-                const auto& hs = configuration->client.hot_switch;
-                const int window = std::max<int>(2, std::min<int>(10, hs.jitter_window));
-
-                int current_rtt = 0;
-                int current_jitter = 0;
-                bool current_full = false;
-                if (!HotSwitchEntryProbe(current, now, current_rtt, current_jitter, current_full)) {
-                    return false; // No fresh data for the primary; wait for the next probe round.
-                }
-                if (!current_full) {
-                    return false; // B1 data guard: the fluctuation window is not full yet.
-                }
-
-                // Reachable, non-blacklisted, fresh pool (the current entry included).
-                struct EntryQuality final {
-                    ppp::string entry;
-                    int rtt_ms;
-                    int jitter_ms;
-                    bool samples_full;
-                };
-                ppp::vector<EntryQuality> pool;
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-                    pool.reserve(probe_results_.size());
-                    for (const auto& kv : probe_results_) {
-                        const ConnectivityProbe::Result& result = kv.second;
-                        if (result.entry.empty() || !result.reachable || result.rtt_ms < 0 ||
-                            result.penalty_until > now ||
-                            now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
-                            continue;
-                        }
-                        pool.emplace_back(EntryQuality{ result.entry, result.rtt_ms, result.jitter_ms, result.samples_full });
-                    }
-                }
-                if (pool.size() < 2) {
-                    return false;
-                }
-
-                // Normalization references: medians over the reachable pool (robust
-                // against a single outlier); a zero jitter median is floored to 1.
-                ppp::vector<int> rtt_values;
-                ppp::vector<int> jitter_values;
-                rtt_values.reserve(pool.size());
-                jitter_values.reserve(pool.size());
-                for (const EntryQuality& q : pool) {
-                    rtt_values.push_back(q.rtt_ms);
-                    if (q.samples_full) {
-                        jitter_values.push_back(q.jitter_ms);
-                    }
-                }
-                std::stable_sort(rtt_values.begin(), rtt_values.end());
-                std::stable_sort(jitter_values.begin(), jitter_values.end());
-                const double rtt_ref = std::max<double>(1.0, (double)MedianOfSortedValues(rtt_values));
-                const double jitter_ref = std::max<double>(1.0, (double)MedianOfSortedValues(jitter_values));
-
-                // Weighted quality score; entries without a full window get
-                // jitter_norm = 1.0 (data-insufficient) and never win as best.
-                const double weight_rtt = std::max<double>(0.0, std::min<double>(1.0, hs.weight_rtt));
-                auto quality_score = [weight_rtt, rtt_ref, jitter_ref](const EntryQuality& q) noexcept -> double {
-                    return HotSwitchQualityScore(q.rtt_ms, q.jitter_ms, q.samples_full, weight_rtt, rtt_ref, jitter_ref);
-                };
-
-                // Best alternative: minimum score among full-window entries, never current.
-                ppp::string best;
-                double best_score = std::numeric_limits<double>::max();
-                for (const EntryQuality& q : pool) {
-                    if (q.entry == current || !q.samples_full) {
-                        continue;
-                    }
-                    const double score = quality_score(q);
-                    if (score < best_score) {
-                        best_score = score;
-                        best = q.entry;
-                    }
-                }
-                if (best.empty()) {
-                    return false; // No alternative with sufficient jitter data.
-                }
-
-                // B1 fluctuation gate: a stable current entry never switches, no
-                // matter how much slower it is than the best alternative.
-                const bool jitter_gated = current_jitter >= hs.jitter_threshold_ms;
-                // B2 quality gap: only switch when the best alternative scores
-                // meaningfully better than the current entry.
-                const double current_score = quality_score(EntryQuality{ current, current_rtt, current_jitter, current_full });
-                const bool score_gap = (current_score - best_score) >= std::max<double>(0.0, hs.switch_margin);
-
-                // B3 consecutive-period debounce: evaluated once per probe period;
-                // every period must satisfy B1 and B2, otherwise the streak resets.
-                uint64_t period_ms = static_cast<uint64_t>(std::max<int>(1, configuration->client.probe.ttl_seconds)) * 1000ULL;
-                if (hot_switch_last_eval_ == 0 || now >= hot_switch_last_eval_ + period_ms) {
-                    if (jitter_gated && score_gap) {
-                        hot_switch_degrade_streak_++;
-                    }
-                    else {
-                        hot_switch_degrade_streak_ = 0;
-                    }
-                    hot_switch_last_eval_ = now;
-                }
-
-                if (hot_switch_degrade_streak_ < window) {
-                    return false;
-                }
-
-                target = best;
-                from = current;
-                return true;
-            }
-
-            int VEthernetExchanger::HotSwitchPreheat(const ppp::string& target, YieldContext& y) noexcept {
-                using ppp::app::protocol::VirtualEthernetTcpipConnection;
-
-                std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == mux || mux->is_disposed() || disposed_ || target.empty()) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: precondition failed, target=%s, mux=%d, mux_disposed=%d, disposed=%d",
-                        target.empty() ? "<empty>" : target.data(),
-                        (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
-                    return 0;
-                }
-
-                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
-                auto strand = mux->get_strand();
-                if (NULLPTR == context) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: mux context unavailable, target=%s", target.data());
-                    return 0;
-                }
-
-                int max_connections = mux->get_max_connections();
-                int live = mux->get_live_linklayer_count();
-                int hard_max = mux->get_pool_hard_max();
-                // Budget: bring the target entry up to the base pool, bounded by the
-                // carrier headroom (pool_hard_max - live). Pool hard max was raised to
-                // base * turbo factor when hot-switch is enabled, so the full base can
-                // normally be preheated before the old entry retires.
-                int budget = std::max<int>(1, std::min<int>(max_connections, std::max<int>(0, hard_max - live)));
-
-                const uint32_t& tx_seq = mux->get_tx_seq();
-                const uint32_t& rx_ack = mux->get_rx_ack();
-
-                int added = 0;
-                for (int i = 0; i < budget; i++) {
-                    if (disposed_ || mux != mux_ || mux->is_disposed()) {
-                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: aborted at %d/%d, target=%s, disposed=%d, mux_changed=%d, mux_disposed=%d",
-                            i + 1, budget, target.data(), (int)disposed_, (int)(mux != mux_), (int)mux->is_disposed());
-                        break;
-                    }
-
-                    ITransmissionPtr transmission = ConnectTransmission(context, strand, y, &target);
-                    if (NULLPTR == transmission) {
-                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: ConnectTransmission failed at %d/%d, target=%s", i + 1, budget, target.data());
-                        break;
-                    }
-
-                    std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
-                    std::shared_ptr<VirtualEthernetTcpipConnection> connection =
-                        make_shared_object<VirtualEthernetTcpipConnection>(
-                            mux->AppConfiguration, context, strand, GetId(), default_socket);
-                    if (NULLPTR == connection) {
-                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: failed to create connection at %d/%d, target=%s", i + 1, budget, target.data());
-                        break;
-                    }
-
-                    if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
-                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: ConnectMux failed at %d/%d, target=%s", i + 1, budget, target.data());
-                        break;
-                    }
-
-                    auto self = shared_from_this();
-                    bool added_link = mux->do_yield(y,
-                        [self, mux, connection, target]() noexcept -> bool {
-                            vmux::vmux_net::vmux_linklayer_ptr linklayer;
-                            vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
-                            if (!mux->add_linklayer(connection, linklayer, handling)) {
-                                return false;
-                            }
-                            mux->set_linklayer_entry(linklayer, target);
-                            return true;
-                        });
-                    if (!added_link) {
-                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: add_linklayer failed at %d/%d, target=%s", i + 1, budget, target.data());
-                        break;
-                    }
-
-                    added++;
-                    LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: outbound=%s, added channel %d/%d on entry %s",
-                        outbound_tag_.data(), added, budget, target.data());
-                }
-                if (added == 0) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: no channel added, target=%s, budget=%d", target.data(), budget);
-                }
-                return added;
-            }
-
-            void VEthernetExchanger::HotSwitchBeginPreheat() noexcept {
-                std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = switcher_->GetBufferAllocator();
-                std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == mux || mux->is_disposed() || disposed_) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: precondition failed, mux=%d, mux_disposed=%d, disposed=%d",
-                        (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
-                    hot_switch_preheat_done_.store(true, std::memory_order_release);
-                    hot_switch_preheat_added_.store(0, std::memory_order_release);
-                    return;
-                }
-                if (NULLPTR == allocator) {
-                    // No vmem-backed pool configured (vmem.size == 0). YieldContext::Spawn
-                    // and the mux pipeline both fall back to heap allocation for a NULL
-                    // allocator, so the missing pool must not block hot-switch preheat:
-                    // previously it made every preheat fail ("precondition failed,
-                    // allocator=0") and the state machine rolled back forever.
-                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: buffer allocator unavailable (vmem.size=0), falling back to heap, target=%s",
-                        hot_switch_target_entry_.empty() ? "<empty>" : hot_switch_target_entry_.data());
-                }
-
-                // Run the preheat coroutine on the shared scheduler instead of the
-                // mux strand: every mux access inside HotSwitchPreheat is already
-                // serialized through mux->do_yield on the mux strand, so the
-                // coroutine needs no strand affinity and cannot be stalled by a
-                // missing or busy mux strand.
-                ppp::threading::Executors::StrandPtr vmux_strand;
-                ppp::threading::Executors::ContextPtr vmux_context = ppp::threading::Executors::SelectScheduler(vmux_strand);
-                if (NULLPTR == vmux_context) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: no scheduler context");
-                    hot_switch_preheat_done_.store(true, std::memory_order_release);
-                    hot_switch_preheat_added_.store(0, std::memory_order_release);
-                    return;
-                }
-
-                auto self = shared_from_this();
-                ppp::string target = hot_switch_target_entry_;
-                hot_switch_preheat_done_.store(false, std::memory_order_release);
-                hot_switch_preheat_added_.store(0, std::memory_order_release);
-                bool spawned = YieldContext::Spawn(allocator.get(), *vmux_context,
-                    [self, this, target](YieldContext& y) noexcept {
-                        int added = HotSwitchPreheat(target, y);
-                        hot_switch_preheat_added_.store(added, std::memory_order_release);
-                        hot_switch_preheat_done_.store(true, std::memory_order_release);
-                    });
-                if (!spawned) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: spawn failed, target=%s", target.data());
-                    hot_switch_preheat_done_.store(true, std::memory_order_release);
-                    hot_switch_preheat_added_.store(0, std::memory_order_release);
-                }
-            }
-
-            void VEthernetExchanger::HotSwitchActivate(uint64_t now) noexcept {
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration) {
-                    return;
-                }
-                std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == mux || mux->is_disposed()) {
-                    return;
-                }
-
-                const ppp::string target = hot_switch_target_entry_;
-                const ppp::string from = hot_switch_from_entry_;
-
-                // 2) The target becomes the sticky primary for future reconnects.
-                {
-                    SynchronizedObjectScope scope(syncobj_);
-                    probe_server_ = target;
-                }
-
-                // 3) Lock period: no switch-back even if RTTs reverse.
-                hot_switch_locked_until_ = now + static_cast<uint64_t>(std::max<int>(1, configuration->client.hot_switch.lock_seconds)) * 1000ULL;
-
-                // 1+4) Retire the old entry channels and regrow on the target.
-                // Run on the mux strand: rx_links_/tx_links_ and the pool caps are
-                // touched lock-free by the scheduler thread update(), so any
-                // cross-thread access must execute on the strand itself.
-                auto self = shared_from_this();
-                auto strand = mux->get_strand();
-                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
-                if (NULLPTR == strand || NULLPTR == context || context->stopped()) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchActivate: outbound=%s, mux strand unavailable, skip retire/regrow",
-                        outbound_tag_.data());
-                    return;
-                }
-
-                boost::asio::post(*strand,
-                    [self, this, mux, target, from]() noexcept {
-                        int retired = mux->retire_linklayers_of_entry(from);
-                        LOG_INFO("VEthernetExchanger::HotSwitchActivate: outbound=%s, activated entry %s, retired %d channel(s) of %s",
-                            outbound_tag_.data(), target.data(), retired, from.data());
-
-                        // Rebalance: regrow toward the base pool; if the base is already
-                        // live, the turbo headroom (pool_hard_max - live) still
-                        // allows extra carriers on the new entry.
-                        int max_connections = mux->get_max_connections();
-                        int live = mux->get_live_linklayer_count();
-                        int hard_max = mux->get_pool_hard_max();
-                        int missing = std::min<int>(max_connections, std::max<int>(0, hard_max - live));
-                        if (missing > 0) {
-                            LOG_INFO("VEthernetExchanger::HotSwitchActivate: outbound=%s, regrowing %d channel(s) on entry %s",
-                                outbound_tag_.data(), missing, target.data());
-                            MuxGrowLinklayers(switcher_->GetBufferAllocator(), mux, missing, target);
-                        }
-                    });
-            }
-            void VEthernetExchanger::HotSwitchRollback() noexcept {
-                std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == mux || mux->is_disposed()) {
-                    return;
-                }
-                const ppp::string target = hot_switch_target_entry_;
-
-                // Retire on the mux strand for the same reason as HotSwitchActivate.
-                auto self = shared_from_this();
-                auto strand = mux->get_strand();
-                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
-                if (NULLPTR == strand || NULLPTR == context || context->stopped()) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchRollback: outbound=%s, mux strand unavailable, skip rollback",
-                        outbound_tag_.data());
-                    return;
-                }
-
-                boost::asio::post(*strand,
-                    [self, this, mux, target]() noexcept {
-                        int retired = mux->retire_linklayers_of_entry(target);
-                        LOG_INFO("VEthernetExchanger::HotSwitchRollback: outbound=%s, rolled back entry %s, retired %d channel(s)",
-                            outbound_tag_.data(), target.data(), retired);
-                    });
             }
 
             void VEthernetExchanger::HotSwitchBlacklistEntry(const ppp::string& entry, uint64_t now) noexcept {
@@ -2254,117 +2002,6 @@ namespace ppp {
                 result.entry = entry;
                 result.reachable = false;
                 result.penalty_until = now + static_cast<uint64_t>(std::max<int>(1, configuration->client.hot_switch.penalty_seconds)) * 1000ULL;
-            }
-
-            bool VEthernetExchanger::HotSwitchOldEntryRecovered(uint64_t now) noexcept {
-                const ppp::string from = hot_switch_from_entry_;
-                if (from.empty()) {
-                    return false;
-                }
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration) {
-                    return false;
-                }
-
-                int from_rtt = 0;
-                int from_jitter = 0;
-                bool from_full = false;
-                if (!HotSwitchEntryProbe(from, now, from_rtt, from_jitter, from_full)) {
-                    return false; // No fresh data; keep observing.
-                }
-                if (!from_full) {
-                    return false; // Window insufficient; keep observing.
-                }
-
-                const auto& hs = configuration->client.hot_switch;
-                // Recovered when the old entry fluctuation dropped back below the
-                // jitter gate; RTT alone no longer triggers a rollback.
-                return from_jitter < hs.jitter_threshold_ms;
-            }
-
-            void VEthernetExchanger::HotSwitchTick(uint64_t now) noexcept {
-                if (disposed_) {
-                    return;
-                }
-                AppConfigurationPtr configuration = GetConfiguration();
-                if (NULLPTR == configuration || !configuration->client.probe.enabled || !configuration->client.hot_switch.enabled) {
-                    return;
-                }
-                if (network_state_.load(std::memory_order_acquire) != NetworkState_Established) {
-                    return;
-                }
-                std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == mux || mux->is_disposed() || !mux->is_established()) {
-                    return;
-                }
-
-                const auto& hs = configuration->client.hot_switch;
-                const HotSwitchPhase phase = static_cast<HotSwitchPhase>(hot_switch_phase_.load(std::memory_order_acquire));
-                switch (phase) {
-                case HotSwitchPhase::Idle: {
-                    if (now < hot_switch_locked_until_) {
-                        return; // Lock period: hold the current primary.
-                    }
-                    ppp::string target;
-                    ppp::string from;
-                    if (!HotSwitchPickTarget(now, target, from)) {
-                        return;
-                    }
-                    hot_switch_target_entry_ = target;
-                    hot_switch_from_entry_ = from;
-                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Preheating), std::memory_order_release);
-                    LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, switching %s -> %s (preheat=%d)",
-                        outbound_tag_.data(), from.data(), target.data(), (int)hs.preheat);
-                    HotSwitchBeginPreheat();
-                    break;
-                }
-                case HotSwitchPhase::Preheating: {
-                    if (!hot_switch_preheat_done_.load(std::memory_order_acquire)) {
-                        return;
-                    }
-                    const int added = hot_switch_preheat_added_.load(std::memory_order_acquire);
-                    if (added <= 0) {
-                        LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, preheat failed on %s, rollback",
-                            outbound_tag_.data(), hot_switch_target_entry_.data());
-                        HotSwitchBlacklistEntry(hot_switch_target_entry_, now);
-                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
-                        return;
-                    }
-                    if (!hs.preheat) {
-                        // Passive mode: skip the observation window and activate now.
-                        HotSwitchActivate(now);
-                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Draining), std::memory_order_release);
-                        return;
-                    }
-                    hot_switch_ready_tick_ = now;
-                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Ready), std::memory_order_release);
-                    LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, preheated %d channel(s) on %s, observing %d ms",
-                        outbound_tag_.data(), added, hot_switch_target_entry_.data(), std::max<int>(1, hs.observe_ms));
-                    break;
-                }
-                case HotSwitchPhase::Ready: {
-                    if (HotSwitchOldEntryRecovered(now)) {
-                        LOG_INFO("VEthernetExchanger::HotSwitchTick: outbound=%s, old entry recovered, rollback",
-                            outbound_tag_.data());
-                        HotSwitchRollback();
-                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
-                        return;
-                    }
-                    if (now >= hot_switch_ready_tick_ + static_cast<uint64_t>(std::max<int>(1, hs.observe_ms))) {
-                        HotSwitchActivate(now);
-                        hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Draining), std::memory_order_release);
-                        return;
-                    }
-                    break;
-                }
-                case HotSwitchPhase::Draining:
-                default: {
-                    // Channel reaping is asynchronous inside the mux (inflight_ drain);
-                    // nothing further to do at the exchanger level.
-                    hot_switch_phase_.store(static_cast<int>(HotSwitchPhase::Idle), std::memory_order_release);
-                    break;
-                }
-                }
             }
 
             bool VEthernetExchanger::ReleaseDeadlineTimer(const boost::asio::deadline_timer* deadline_timer) noexcept {
@@ -2428,11 +2065,31 @@ namespace ppp {
                 reconnection_count_ = 0;
             }
 
+            int64_t VEthernetExchanger::GetReconnectDelayMilliseconds() noexcept {
+                switch (reconnection_count_) {
+                case 0:
+                case 1:
+                    return 0;
+                case 2:
+                    return 250;
+                case 3:
+                    return 1000;
+                case 4:
+                    return 2000;
+                default: {
+                    AppConfigurationPtr configuration = GetConfiguration();
+                    const int timeout_seconds = NULLPTR != configuration
+                        ? std::max<int>(1, configuration->client.reconnections.timeout)
+                        : PPP_TCP_CONNECT_TIMEOUT;
+                    return static_cast<int64_t>(std::min<int>(5, timeout_seconds)) * 1000;
+                }
+                }
+            }
+
             void VEthernetExchanger::ExchangeToConnectingState() noexcept {
                 sekap_last_ = 0;
                 sekap_next_ = 0;
                 network_state_.exchange(NetworkState_Connecting);
-                ResetHotSwitchState();
             }
 
             void VEthernetExchanger::ExchangeToReconnectingState() noexcept {
@@ -2440,7 +2097,14 @@ namespace ppp {
                 sekap_next_ = 0;
                 network_state_.exchange(NetworkState_Reconnecting);
                 reconnection_count_++;
-                ResetHotSwitchState();
+
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    mux_entry_.clear();
+                    mux_failure_entry_.clear();
+                    mux_failure_last_ = 0;
+                    mux_failure_streak_ = 0;
+                }
 
                 // Probe-driven failover: blacklist the entry that just failed
                 // and drop the cached endpoint so the next connection attempt
@@ -2455,11 +2119,20 @@ namespace ppp {
                         ppp::string entry = NormalizeProbeEntry(server_url_.hostname, server_url_.port);
                         if (!entry.empty()) {
                             SynchronizedObjectScope scope(syncobj_);
-                            auto it = probe_results_.find(entry);
-                            if (it != probe_results_.end()) {
-                                it->second.reachable = false;
-                                it->second.penalty_until = Executors::GetTickCount() + static_cast<uint64_t>(it->second.ttl_ms);
+                            ConnectivityProbe::Result& result = probe_results_[entry];
+                            result.entry = entry;
+                            result.reachable = false;
+                            const uint64_t penalty_ms = static_cast<uint64_t>(
+                                std::max<int>(1, configuration->client.probe.ttl_seconds)) * 1000ULL;
+                            result.ttl_ms = static_cast<int>(penalty_ms);
+                            result.timestamp = Executors::GetTickCount();
+                            result.penalty_until = result.timestamp + penalty_ms;
+                            result.reachability_samples.emplace_back(0);
+                            if (result.reachability_samples.size() > ENTRY_QUALITY_HISTORY_CAP) {
+                                result.reachability_samples.erase(result.reachability_samples.begin());
                             }
+                            LOG_INFO("VEthernetExchanger::ExchangeToReconnectingState: entry %s failed, penalized for %llu ms; next attempt uses ranked backup",
+                                entry.data(), (unsigned long long)penalty_ms);
                         }
                     }
                     server_url_.port = 0;

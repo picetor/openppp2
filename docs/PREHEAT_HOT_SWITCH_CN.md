@@ -1,6 +1,6 @@
-# 预热式渐进热切换设计（单配置多入口 · 游戏无感）
+# 预热式渐进热切换设计（历史方案，已停用）
 
-> 状态：M1 / M2 / M3 / M4 已实施，M5 部分实施（drain 强制回收 + 被动直切；双传输过渡暂缓）——2026-08-11 完成终审修复
+> 状态：历史设计。2026-08-13 起不再执行健康状态质量触发预热切换；当前行为以 [HOT_SWITCH_JITTER_REDESIGN_CN.md](./HOT_SWITCH_JITTER_REDESIGN_CN.md) 为准。
 > 实施记录见文末「实施状态」与「审查收尾（2026-08-11）」；全部改动已通过 cl.exe 语法编译验证（Windows x64 Debug，9 个 TU 0 错误）
 > 关联文档：[MULTI_ENTRY_CN.md](./MULTI_ENTRY_CN.md)（多入口 + 故障切换）、[CONNECTIVITY_TEST_CN.md](./CONNECTIVITY_TEST_CN.md)（连通性探测）、[MULTI_ENTRY_PPP_CN.md](./MULTI_ENTRY_PPP_CN.md)（PPP 多入口）
 > **触发判据已被 [HOT_SWITCH_JITTER_REDESIGN_CN.md](./HOT_SWITCH_JITTER_REDESIGN_CN.md) 替换（2026-08-12）**：本文件的 RTT 阈值方案（threshold-rtt-factor/-ms + min-stable-periods）不再生效；新方案为波动门控（3 周期波动 ≥50ms）+ 加权评分 + 连续周期防抖，预热状态机与链路恢复机制保持不变。

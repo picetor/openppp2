@@ -177,6 +177,7 @@ namespace ppp {
                 void                                                                    ExchangeToEstablishState() noexcept;
                 void                                                                    ExchangeToConnectingState() noexcept;
                 void                                                                    ExchangeToReconnectingState() noexcept;
+                int64_t                                                                 GetReconnectDelayMilliseconds() noexcept;
                 bool                                                                    ProbeSelectServerEndPoint(
                     YieldContext&                                                       y,
                     const ppp::vector<ppp::string>&                                     entries,
@@ -250,28 +251,10 @@ namespace ppp {
                 bool                                                                    DoMuxEvents() noexcept;
                 bool                                                                    MuxConnectAllLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux) noexcept;
                 bool                                                                    MuxGrowLinklayers(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<vmux::vmux_net>& mux, int count, ppp::string entry = ppp::string()) noexcept;
-                /** @brief Rank reachable entries by RTT (fresh cache only); empty when no data. */
+                /** @brief Rank fresh reachable entries by reliability tier and latency risk. */
                 ppp::vector<ppp::string>                                                HotSwitchRankedEntries(uint64_t now) noexcept;
-                /** @brief Periodic hot-switch state machine step; called from Update(). */
-                void                                                                    HotSwitchTick(uint64_t now) noexcept;
-                /** @brief Pick the degradation switch target (debounced); false = no switch. */
-                bool                                                                    HotSwitchPickTarget(uint64_t now, ppp::string& target, ppp::string& from) noexcept;
-                /** @brief Spawn the preheat coroutine that opens @p entry channels on the mux. */
-                void                                                                    HotSwitchBeginPreheat() noexcept;
-                /** @brief Coroutine body: connect and attach up to the budget of @p entry channels. */
-                int                                                                     HotSwitchPreheat(const ppp::string& target, YieldContext& y) noexcept;
-                /** @brief Activate the switch: retire the old entry's channels, lock, regrow. */
-                void                                                                    HotSwitchActivate(uint64_t now) noexcept;
-                /** @brief Abort the in-flight switch: retire the target entry's channels. */
-                void                                                                    HotSwitchRollback() noexcept;
                 /** @brief Blacklist an entry for the configured penalty window. */
                 void                                                                    HotSwitchBlacklistEntry(const ppp::string& entry, uint64_t now) noexcept;
-                /** @brief True when the old entry fluctuation dropped below the jitter gate. */
-                bool                                                                    HotSwitchOldEntryRecovered(uint64_t now) noexcept;
-                /** @brief Read one entry cached probe outcome (RTT + jitter window); false when stale/unreachable. */
-                bool                                                                    HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms, int& jitter_ms, bool& samples_full) noexcept;
-                /** @brief Reset the hot-switch state machine (called on connect/reconnect transitions). */
-                void                                                                    ResetHotSwitchState() noexcept;
 
             private:
                 class StaticEchoDatagarmSocket final : public boost::asio::ip::udp::socket {
@@ -343,6 +326,10 @@ namespace ppp {
 
                 std::shared_ptr<vmux::vmux_net>                                         mux_;
                 uint16_t                                                                mux_vlan_           = 0;
+                ppp::string                                                             mux_entry_;          ///< One immutable entry per active MUX generation.
+                ppp::string                                                             mux_failure_entry_;  ///< Entry associated with the current consecutive M1/M4 streak.
+                uint64_t                                                                mux_failure_last_   = 0;
+                int                                                                     mux_failure_streak_ = 0;
                 
                 int                                                                     reconnection_count_ = 0;
 
@@ -352,23 +339,6 @@ namespace ppp {
                 std::atomic<bool>                                                       probe_reachable_    = false;
                 std::atomic<bool>                                                       probe_checked_      = false;
                 ppp::string                                                             probe_server_;
-
-                /** @brief Hot-switch state machine (Idle/Preheating/Ready/Draining). */
-                enum class HotSwitchPhase : int {
-                    Idle = 0,
-                    Preheating = 1,
-                    Ready = 2,
-                    Draining = 3
-                };
-                std::atomic<int>                                                        hot_switch_phase_       = static_cast<int>(HotSwitchPhase::Idle);
-                ppp::string                                                             hot_switch_target_entry_;
-                ppp::string                                                             hot_switch_from_entry_;
-                std::atomic<bool>                                                       hot_switch_preheat_done_ = false;
-                std::atomic<int>                                                        hot_switch_preheat_added_ = 0;
-                uint64_t                                                                hot_switch_ready_tick_  = 0;
-                uint64_t                                                                hot_switch_locked_until_ = 0;
-                uint64_t                                                                hot_switch_last_eval_   = 0;
-                int                                                                     hot_switch_degrade_streak_ = 0;
 
                 struct {
                     boost::asio::ip::tcp::endpoint                                      remoteEP;
