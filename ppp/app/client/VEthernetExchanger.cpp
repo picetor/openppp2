@@ -1607,17 +1607,14 @@ namespace ppp {
                 auto strand = mux->get_strand();
 
                 return YieldContext::Spawn(allocator.get(), *context, strand.get(),
-                    [self, this, mux, context, strand](YieldContext& y) noexcept -> bool {
+                    [self, this, mux, context, strand, allocator](YieldContext& y) noexcept -> bool {
                         if (disposed_ || mux != mux_) {
                             mux->close_exec();
                             return false;
                         }
 
                         int max_connections = mux->get_max_connections();
-                        int bok_connections = 0;
 
-                        const uint32_t& tx_seq = mux->get_tx_seq();
-                        const uint32_t& rx_ack = mux->get_rx_ack();
                         if (!mux->ftt(vmux::vmux_net::ftt_random_aid(1, INT32_MAX), vmux::vmux_net::ftt_random_aid(1, INT32_MAX))) {
                             LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ftt failed");
                             mux->close_exec();
@@ -1644,117 +1641,136 @@ namespace ppp {
                                 entry_plan.clear(); // A single reachable entry is not a distribution.
                             }
                         }
+                        // Snapshot the plan primary before spawning: the aggregation
+                        // below may run inside a child coroutine, which outlives this
+                        // lambda's stack frame.
+                        const ppp::string plan_primary = entry_plan.empty() ? ppp::string() : entry_plan[0];
+
+                        // Parallel assembly: every slot is spawned as its own coroutine
+                        // on the same mux strand, so the TCP/WS handshakes of different
+                        // slots overlap instead of serializing connect timeouts back to
+                        // back (4 links x up to 5 s each used to stall mux establishment
+                        // for ~40 s). The strand still serializes shared mux access
+                        // (add_linklayer etc.), and the last slot to finish performs the
+                        // aggregation that the serial loop used to do at its tail.
+                        constexpr int LINKLAYER_MAX_ATTEMPTS = 3;
+                        std::shared_ptr<std::atomic<int>> done_slots = make_shared_object<std::atomic<int>>(0);
+                        std::shared_ptr<std::atomic<int>> ok_slots = make_shared_object<std::atomic<int>>(0);
 
                         for (int i = 0; i < max_connections; i++) {
-                            if (disposed_ || mux != mux_) {
-                                bok_connections = -1;
-                                break;
-                            }
-
-                            if (mux->is_established()) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux already established at connection %d/%d", i, max_connections);
-                                return true;
-                            }
-
-                            const ppp::string* forced_entry = NULLPTR;
+                            ppp::string forced_entry;
                             if (!entry_plan.empty()) {
-                                forced_entry = &entry_plan[(i / std::max<int>(1, distribution_configuration->client.hot_switch.channels_per_entry)) % (int)entry_plan.size()];
+                                forced_entry = entry_plan[(i / std::max<int>(1, distribution_configuration->client.hot_switch.channels_per_entry)) % (int)entry_plan.size()];
                             }
 
-                            // A single transient failure (slow linlayer-add ack, or a
-                            // distribution entry that does not own the session) must not
-                            // tear the whole mux down. Retry each slot: the first attempt
-                            // honours the distribution plan, later attempts fall back to
-                            // the legacy best+sticky selection so the channel lands on the
-                            // entry that actually owns the session.
-                            constexpr int LINKLAYER_MAX_ATTEMPTS = 3;
-                            bool slot_ok = false;
-                            for (int attempt = 0; attempt < LINKLAYER_MAX_ATTEMPTS; attempt++) {
-                                if (disposed_ || mux != mux_) {
-                                    bok_connections = -1;
-                                    break;
-                                }
-
-                                if (mux->is_established()) {
-                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux already established at connection %d/%d", i, max_connections);
-                                    return true;
-                                }
-
-                                const ppp::string* attempt_entry = (attempt == 0) ? forced_entry : NULLPTR;
-                                ITransmissionPtr transmission = ConnectTransmission(context, strand, y, attempt_entry);
-                                if (NULLPTR == transmission) {
-                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
-                                    continue;
-                                }
-
-                                std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
-                                std::shared_ptr<VirtualEthernetTcpipConnection> connection =
-                                    make_shared_object<VirtualEthernetTcpipConnection>(
-                                        mux->AppConfiguration, context, strand, GetId(), default_socket);
-                                if (NULLPTR == connection) {
-                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: failed to create connection at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
-                                    transmission->Dispose();
-                                    continue;
-                                }
-
-                                // In this lightweight and simple vmux circuit switch, seq and ack are delivered by the client, and the server and client are opposite.
-                                if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
-                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectMux failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
-                                    connection->Dispose();
-                                    continue;
-                                }
-
-                                ppp::string tagged_entry = (attempt_entry != NULLPTR) ? *attempt_entry : ppp::string();
-                                bool bok = mux->do_yield(y,
-                                    [self, mux, connection, tagged_entry]() noexcept -> bool {
-                                        vmux::vmux_net::vmux_linklayer_ptr linklayer;
-                                        vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
-                                        if (!mux->add_linklayer(connection, linklayer, handling)) {
-                                            return false;
+                            YieldContext::Spawn(allocator.get(), *context, strand.get(),
+                                [self, this, mux, context, strand, allocator, i, max_connections, forced_entry, plan_primary, done_slots, ok_slots](YieldContext& y) noexcept {
+                                    bool slot_ok = false;
+                                    for (int attempt = 0; attempt < LINKLAYER_MAX_ATTEMPTS; attempt++) {
+                                        if (disposed_ || mux != mux_) {
+                                            break;
                                         }
-                                        if (!tagged_entry.empty()) {
-                                            mux->set_linklayer_entry(linklayer, tagged_entry);
+
+                                        if (mux->is_established()) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux already established at connection %d/%d", i, max_connections);
+                                            slot_ok = true;
+                                            break;
                                         }
-                                        return true;
-                                    });
 
-                                if (!bok) {
-                                    LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: add_linklayer failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
-                                    connection->Dispose();
-                                    continue;
-                                }
+                                        const ppp::string* attempt_entry = (attempt == 0 && !forced_entry.empty()) ? &forced_entry : NULLPTR;
+                                        ITransmissionPtr transmission = ConnectTransmission(context, strand, y, attempt_entry);
+                                        if (NULLPTR == transmission) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectTransmission failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                            continue;
+                                        }
 
-                                slot_ok = true;
-                                break;
-                            }
+                                        std::shared_ptr<boost::asio::ip::tcp::socket> default_socket;
+                                        std::shared_ptr<VirtualEthernetTcpipConnection> connection =
+                                            make_shared_object<VirtualEthernetTcpipConnection>(
+                                                mux->AppConfiguration, context, strand, GetId(), default_socket);
+                                        if (NULLPTR == connection) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: failed to create connection at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                            transmission->Dispose();
+                                            continue;
+                                        }
 
-                            if (disposed_ || mux != mux_) {
-                                bok_connections = -1;
-                                break;
-                            }
+                                        // In this lightweight and simple vmux circuit switch, seq and ack are delivered by the client, and the server and client are opposite.
+                                        if (!connection->ConnectMux(y, transmission, mux->Vlan, mux->get_rx_ack(), mux->get_tx_seq())) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: ConnectMux failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                            connection->Dispose();
+                                            continue;
+                                        }
 
-                            if (!slot_ok) {
-                                LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d failed after %d attempts, closing mux", i, max_connections, LINKLAYER_MAX_ATTEMPTS);
-                                break;
-                            }
+                                        ppp::string tagged_entry = (attempt_entry != NULLPTR) ? *attempt_entry : ppp::string();
+                                        bool bok = mux->do_yield(y,
+                                            [self, mux, connection, tagged_entry]() noexcept -> bool {
+                                                vmux::vmux_net::vmux_linklayer_ptr linklayer;
+                                                vmux::vmux_net::vmux_native_add_linklayer_after_success_before_callback handling;
+                                                if (!mux->add_linklayer(connection, linklayer, handling)) {
+                                                    return false;
+                                                }
+                                                if (!tagged_entry.empty()) {
+                                                    mux->set_linklayer_entry(linklayer, tagged_entry);
+                                                }
+                                                return true;
+                                            });
 
-                            bok_connections++;
-                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d connected", bok_connections, max_connections);
+                                        if (!bok) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: add_linklayer failed at %d/%d, attempt %d/%d", i, max_connections, attempt + 1, LINKLAYER_MAX_ATTEMPTS);
+                                            connection->Dispose();
+                                            continue;
+                                        }
+
+                                        slot_ok = true;
+                                        break;
+                                    }
+
+                                    if (disposed_ || mux != mux_) {
+                                        done_slots->fetch_add(1, std::memory_order_release);
+                                        return;
+                                    }
+
+                                    if (slot_ok) {
+                                        ok_slots->fetch_add(1, std::memory_order_release);
+                                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d connected", i + 1, max_connections);
+                                    }
+                                    else {
+                                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d failed after %d attempts, closing mux", i + 1, max_connections, LINKLAYER_MAX_ATTEMPTS);
+                                    }
+
+                                    // Aggregation: the last slot to finish (all slots run
+                                    // on the mux strand, so this is race-free) applies the
+                                    // outcome of the serial loop tail.
+                                    if (done_slots->fetch_add(1, std::memory_order_release) + 1 >= max_connections) {
+                                        if (disposed_ || mux != mux_) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only -1/%d connected, closing mux", max_connections);
+                                            mux->close_exec();
+                                            return;
+                                        }
+                                        if (mux->is_established()) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: mux established with %d/%d linklayers connected",
+                                                ok_slots->load(std::memory_order_acquire), max_connections);
+                                            return;
+                                        }
+
+                                        int bok = ok_slots->load(std::memory_order_acquire);
+                                        if (bok >= max_connections) {
+                                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: all %d linklayers connected successfully", max_connections);
+                                            return;
+                                        }
+
+                                        if (bok > 0 && !plan_primary.empty()) {
+                                            SynchronizedObjectScope scope(syncobj_);
+                                            probe_server_ = plan_primary;
+                                        }
+
+                                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only %d/%d connected, closing mux", bok, max_connections);
+                                        mux->close_exec();
+                                    }
+                                });
                         }
 
-                        if (bok_connections >= max_connections) {
-                            LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: all %d linklayers connected successfully", max_connections);
-                            return true;
-                        }
-
-                        if (bok_connections > 0 && !entry_plan.empty()) {
-                            SynchronizedObjectScope scope(syncobj_);
-                            probe_server_ = entry_plan[0];
-                        }
-
-                        LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: only %d/%d connected, closing mux", bok_connections, max_connections);
-                        mux->close_exec();
-                        return false;
+                        return true;
                     });
             }
 
