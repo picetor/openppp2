@@ -2100,12 +2100,21 @@ namespace ppp {
             void VEthernetExchanger::HotSwitchBeginPreheat() noexcept {
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = switcher_->GetBufferAllocator();
                 std::shared_ptr<vmux::vmux_net> mux = mux_;
-                if (NULLPTR == allocator || NULLPTR == mux || mux->is_disposed() || disposed_) {
-                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: precondition failed, allocator=%d, mux=%d, mux_disposed=%d, disposed=%d",
-                        (int)(NULLPTR != allocator), (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
+                if (NULLPTR == mux || mux->is_disposed() || disposed_) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: precondition failed, mux=%d, mux_disposed=%d, disposed=%d",
+                        (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
                     hot_switch_preheat_done_.store(true, std::memory_order_release);
                     hot_switch_preheat_added_.store(0, std::memory_order_release);
                     return;
+                }
+                if (NULLPTR == allocator) {
+                    // No vmem-backed pool configured (vmem.size == 0). YieldContext::Spawn
+                    // and the mux pipeline both fall back to heap allocation for a NULL
+                    // allocator, so the missing pool must not block hot-switch preheat:
+                    // previously it made every preheat fail ("precondition failed,
+                    // allocator=0") and the state machine rolled back forever.
+                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: buffer allocator unavailable (vmem.size=0), falling back to heap, target=%s",
+                        hot_switch_target_entry_.empty() ? "<empty>" : hot_switch_target_entry_.data());
                 }
 
                 // Run the preheat coroutine on the shared scheduler instead of the
