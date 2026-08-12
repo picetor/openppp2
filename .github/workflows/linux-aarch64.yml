@@ -9,6 +9,10 @@ on:
     paths:
       - 'ppp/**'
       - 'common/**'
+      - 'main.cpp'
+      - 'resource.h'
+      - 'resource.rc'
+      - 'glibc_compat.h'
       - 'appsettings.json'
       - 'CMakeLists.txt'
       - 'tools/ci/**'

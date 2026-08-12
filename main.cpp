@@ -1000,11 +1000,15 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         console_window_size.tty = false;
     }
 
-    // Move cursor to top-left for refresh
+#if defined(_WIN32)
+    // Windows uses the native console API for cursor positioning.  Keep the
+    // operation outside the frame buffer because WriteConsole handles it
+    // independently from the ANSI sequences used by Unix terminals.
     if (console_window_size.tty && !ppp::SetConsoleCursorPosition(0, 0))
     {
         return false;
     }
+#endif
     
     // Determine hosting environment
     ppp::string hosting_environment;
@@ -1017,12 +1021,15 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
     hosting_environment = (NULLPTR != client ? "client:" : "server:") + hosting_environment;
 
-    // Clear the previous frame before every TTY refresh so stale trailing rows
-    // cannot remain when the next frame contains fewer lines.
+#if defined(_WIN32)
+    // The Windows console needs the native buffer clear when the next frame
+    // becomes shorter.  Unix terminals can clear the old tail after the new
+    // frame has been written, which avoids displaying an empty frame.
     if (console_window_size.tty)
     {
         ppp::ClearConsoleOutputCharacter();
     }
+#endif
 
     // Build console output
     ppp::string console_window_content;
@@ -1801,7 +1808,19 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         console_window_buff_size_ = ppp::Malign(console_window_content_size, 1 << 6);
     }
 
-    // Output to console
+    // Output to console.  Compose the cursor move, frame, and tail clear into
+    // one write on Unix.  The old implementation called `clear` before
+    // building the frame, which exposed a blank terminal for every refresh.
+#if !defined(_WIN32)
+    if (console_window_size.tty)
+    {
+        console_window_content.insert(0, "\033[H");
+        // Every rendered row is padded to the terminal width.  Clear only
+        // below the new frame so pages with fewer rows do not leave stale
+        // content behind, without clearing the visible frame first.
+        console_window_content.append("\033[0J");
+    }
+#endif
     fprintf(stdout, "%s", console_window_content.data());
     fflush(stdout);
     return true;

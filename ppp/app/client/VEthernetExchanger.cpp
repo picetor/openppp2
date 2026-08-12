@@ -431,6 +431,7 @@ namespace ppp {
                     candidates.emplace_back(std::move(candidate));
                 }
                 if (candidates.empty()) {
+                    LOG_DEBUG("VEthernetExchanger::ProbeSelectServerEndPoint: no parseable candidates, forced=%s", forced_entry ? forced_entry->data() : "<null>");
                     return false;
                 }
 
@@ -594,6 +595,7 @@ namespace ppp {
                         }
                     }
                     if (forced_index < 0) {
+                        LOG_DEBUG("VEthernetExchanger::ProbeSelectServerEndPoint: forced entry not reachable this round, forced=%s", forced_entry->data());
                         // Do not touch the displayed outbound RTT: a preheat attempt
                         // against a backup must not look like the primary went dark.
                         return false; // The forced entry is not reachable this round.
@@ -949,16 +951,19 @@ namespace ppp {
 
             bool VEthernetExchanger::GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP, const ppp::string* entry) noexcept {
                 if (disposed_) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: exchanger disposed, entry=%s", entry ? entry->data() : "<null>");
                     return false;
                 }
 
                 std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
                 if (!configuration) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: configuration missing, entry=%s", entry ? entry->data() : "<null>");
                     return false;
                 }
 
                 ppp::string& client_server_string = configuration->client.server;
                 if (client_server_string.empty()) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: client.server empty, entry=%s", entry ? entry->data() : "<null>");
                     return false;
                 }
 
@@ -1000,6 +1005,7 @@ namespace ppp {
                         return true;
                     }
                     if (entry != NULLPTR) {
+                        LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: forced entry unreachable, entry=%s", entry->data());
                         return false; // Forced entry failed; never fall through to the sticky cache.
                     }
                 }
@@ -1022,10 +1028,12 @@ namespace ppp {
                 }
 
                 if (server.empty()) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: UriAuxiliary::Parse failed, entry=%s, client.server=%s", entry ? entry->data() : "<null>", client_server_string.data());
                     return false;
                 }
 
                 if (hostname.empty()) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: hostname empty after parse, entry=%s", entry ? entry->data() : "<null>");
                     return false;
                 }
 
@@ -1039,15 +1047,18 @@ namespace ppp {
                 }
 
                 if (address.empty()) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: address empty after parse, entry=%s", entry ? entry->data() : "<null>");
                     return false;
                 }
 
                 if (port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: invalid port=%d, entry=%s", port, entry ? entry->data() : "<null>");
                     return false;
                 }
 
                 IPEndPoint ipep(address.data(), port);
                 if (IPEndPoint::IsInvalid(ipep)) {
+                    LOG_DEBUG("VEthernetExchanger::GetRemoteEndPoint: invalid IP=%s, entry=%s", address.data(), entry ? entry->data() : "<null>");
                     return false;
                 }
 
@@ -1271,21 +1282,25 @@ namespace ppp {
 
             VEthernetExchanger::ITransmissionPtr VEthernetExchanger::ConnectTransmission(const ContextPtr& context, const StrandPtr& strand, YieldContext& y, const ppp::string* entry) noexcept {
                 if (NULLPTR == context) {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: context is null, entry=%s", entry ? entry->data() : "<null>");
                     return NULLPTR;
                 }
 
                 if (disposed_) {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: exchanger disposed, entry=%s", entry ? entry->data() : "<null>");
                     return NULLPTR;
                 }
 
                 // VPN client A link can be created only after a link is established between the local switch and the remote VPN server.
                 ITransmissionPtr owner_link = transmission_; 
                 if (NULLPTR == owner_link) {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: no owner link, entry=%s", entry ? entry->data() : "<null>");
                     return NULLPTR;
                 }
 
                 ITransmissionPtr transmission = OpenTransmission(context, strand, y, entry);
                 if (NULLPTR == transmission) {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: OpenTransmission failed, entry=%s", entry ? entry->data() : "<null>");
                     return NULLPTR;
                 }
 
@@ -1300,6 +1315,7 @@ namespace ppp {
                     return transmission;
                 }
                 else {
+                    LOG_DEBUG("VEthernetExchanger::ConnectTransmission: handshake failed, entry=%s", entry ? entry->data() : "<null>");
                     transmission->Dispose();
                     return NULLPTR;
                 }
@@ -2002,12 +2018,16 @@ namespace ppp {
 
                 std::shared_ptr<vmux::vmux_net> mux = mux_;
                 if (NULLPTR == mux || mux->is_disposed() || disposed_ || target.empty()) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: precondition failed, target=%s, mux=%d, mux_disposed=%d, disposed=%d",
+                        target.empty() ? "<empty>" : target.data(),
+                        (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
                     return 0;
                 }
 
                 std::shared_ptr<boost::asio::io_context> context = mux->get_context();
                 auto strand = mux->get_strand();
                 if (NULLPTR == context) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: mux context unavailable, target=%s", target.data());
                     return 0;
                 }
 
@@ -2026,11 +2046,14 @@ namespace ppp {
                 int added = 0;
                 for (int i = 0; i < budget; i++) {
                     if (disposed_ || mux != mux_ || mux->is_disposed()) {
+                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: aborted at %d/%d, target=%s, disposed=%d, mux_changed=%d, mux_disposed=%d",
+                            i + 1, budget, target.data(), (int)disposed_, (int)(mux != mux_), (int)mux->is_disposed());
                         break;
                     }
 
                     ITransmissionPtr transmission = ConnectTransmission(context, strand, y, &target);
                     if (NULLPTR == transmission) {
+                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: ConnectTransmission failed at %d/%d, target=%s", i + 1, budget, target.data());
                         break;
                     }
 
@@ -2039,10 +2062,12 @@ namespace ppp {
                         make_shared_object<VirtualEthernetTcpipConnection>(
                             mux->AppConfiguration, context, strand, GetId(), default_socket);
                     if (NULLPTR == connection) {
+                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: failed to create connection at %d/%d, target=%s", i + 1, budget, target.data());
                         break;
                     }
 
                     if (!connection->ConnectMux(y, transmission, mux->Vlan, rx_ack, tx_seq)) {
+                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: ConnectMux failed at %d/%d, target=%s", i + 1, budget, target.data());
                         break;
                     }
 
@@ -2058,12 +2083,16 @@ namespace ppp {
                             return true;
                         });
                     if (!added_link) {
+                        LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: add_linklayer failed at %d/%d, target=%s", i + 1, budget, target.data());
                         break;
                     }
 
                     added++;
                     LOG_DEBUG("VEthernetExchanger::HotSwitchPreheat: outbound=%s, added channel %d/%d on entry %s",
                         outbound_tag_.data(), added, budget, target.data());
+                }
+                if (added == 0) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchPreheat: no channel added, target=%s, budget=%d", target.data(), budget);
                 }
                 return added;
             }
@@ -2072,14 +2101,22 @@ namespace ppp {
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = switcher_->GetBufferAllocator();
                 std::shared_ptr<vmux::vmux_net> mux = mux_;
                 if (NULLPTR == allocator || NULLPTR == mux || mux->is_disposed() || disposed_) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: precondition failed, allocator=%d, mux=%d, mux_disposed=%d, disposed=%d",
+                        (int)(NULLPTR != allocator), (int)(NULLPTR != mux), (int)(NULLPTR != mux && mux->is_disposed()), (int)disposed_);
                     hot_switch_preheat_done_.store(true, std::memory_order_release);
                     hot_switch_preheat_added_.store(0, std::memory_order_release);
                     return;
                 }
 
-                std::shared_ptr<boost::asio::io_context> context = mux->get_context();
-                auto strand = mux->get_strand();
-                if (NULLPTR == context || NULLPTR == strand || context->stopped()) {
+                // Run the preheat coroutine on the shared scheduler instead of the
+                // mux strand: every mux access inside HotSwitchPreheat is already
+                // serialized through mux->do_yield on the mux strand, so the
+                // coroutine needs no strand affinity and cannot be stalled by a
+                // missing or busy mux strand.
+                ppp::threading::Executors::StrandPtr vmux_strand;
+                ppp::threading::Executors::ContextPtr vmux_context = ppp::threading::Executors::SelectScheduler(vmux_strand);
+                if (NULLPTR == vmux_context) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: no scheduler context");
                     hot_switch_preheat_done_.store(true, std::memory_order_release);
                     hot_switch_preheat_added_.store(0, std::memory_order_release);
                     return;
@@ -2089,17 +2126,14 @@ namespace ppp {
                 ppp::string target = hot_switch_target_entry_;
                 hot_switch_preheat_done_.store(false, std::memory_order_release);
                 hot_switch_preheat_added_.store(0, std::memory_order_release);
-                // Run the preheat coroutine on the mux strand: every mux access
-                // inside HotSwitchPreheat (link counts, pool caps, DSN watermarks,
-                // add_linklayer) is then strand-affine and cannot race the
-                // scheduler thread's lock-free update()/reap_retired_linklayers().
-                bool spawned = YieldContext::Spawn(allocator.get(), *context, strand.get(),
+                bool spawned = YieldContext::Spawn(allocator.get(), *vmux_context,
                     [self, this, target](YieldContext& y) noexcept {
                         int added = HotSwitchPreheat(target, y);
                         hot_switch_preheat_added_.store(added, std::memory_order_release);
                         hot_switch_preheat_done_.store(true, std::memory_order_release);
                     });
                 if (!spawned) {
+                    LOG_WARN("VEthernetExchanger::HotSwitchBeginPreheat: spawn failed, target=%s", target.data());
                     hot_switch_preheat_done_.store(true, std::memory_order_release);
                     hot_switch_preheat_added_.store(0, std::memory_order_release);
                 }
