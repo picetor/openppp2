@@ -266,20 +266,19 @@ namespace ppp {
                     bool                                                    enabled         = true;         ///< Master switch; false = no probing, legacy single-entry behavior.
                     int                                                     timeout_ms      = 800;          ///< Per-entry probe timeout in milliseconds.
                     int                                                     ttl_seconds     = 30;           ///< Probe result validity in seconds before a background refresh.
-                    bool                                                    parallel        = true;         ///< Probe all entries concurrently; false probes serially.
-                    int                                                     stage           = 3;            ///< Probe depth: 1 = TCP connect, 3 = TLS/WebSocket upgrade (max, L4/L5 never probed).
-                    ppp::unordered_set<ppp::string>                         categories;     ///< Probe categories: tcp, ws, wss; empty = all.
                 }                                                           probe;          ///< Connectivity probe configuration.
                 struct {
-                    bool                                                    enabled                 = false;    ///< Hot-switch master switch; false keeps legacy failover behavior entirely.
-                    double                                                  threshold_rtt_factor    = 2.0;      ///< Switch when the current entry RTT degrades beyond this multiple of the best entry.
-                    int                                                     threshold_rtt_ms        = 100;      ///< Switch when the absolute RTT gap (ms) exceeds this.
-                    int                                                     min_stable_periods      = 3;        ///< Consecutive probe periods that must satisfy the trigger before switching.
+                    bool                                                    enabled                 = true;     ///< Master switch; auto-enabled when client.servers is non-empty, explicit false keeps legacy failover.
+                    int                                                     jitter_threshold_ms     = 50;       ///< Fluctuation gate (ms): switch only when the window fluctuation reaches this.
+                    int                                                     jitter_window           = 3;        ///< Fluctuation sample window AND the consecutive periods required to switch.
+                    double                                                  weight_rtt              = 0.6;      ///< Score weight of RTT; jitter weight = 1 - weight_rtt.
+                    double                                                  switch_margin           = 0.15;     ///< Minimum score gap (current - best) required to switch.
+                    int                                                     channels_per_entry      = 0;        ///< Resident channel distribution per entry (0 = all channels on the best/sticky entry).
+                    // Built-in fixed parameters (not configurable through JSON).
                     int                                                     lock_seconds            = 60;       ///< Lock period after activation; no switch-back during it.
                     int                                                     penalty_seconds         = 60;       ///< Blacklist penalty for a failed preheat entry.
                     bool                                                    preheat                 = true;     ///< Preheat (progressive) switch; false = direct switch (passive mode).
                     int                                                     observe_ms              = 2000;     ///< Ready observation window before activation; rollback if the old entry recovers.
-                    int                                                     channels_per_entry      = 0;        ///< Resident channel distribution per entry (0 = all channels on the best/sticky entry).
                     int                                                     drain_timeout_seconds   = 120;      ///< Force-dispose retiring channels that fail to drain.
                 }                                                           hot_switch;             ///< Preheated progressive hot-switch configuration (multi-entry).
 #if defined(_WIN32)

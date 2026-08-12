@@ -93,6 +93,29 @@ namespace ppp {
                     entry += stl::to_string<ppp::string>(port);
                     return entry;
                 }
+
+                /**
+                 * @brief Median of a sorted value sequence; 0 for an empty sequence.
+                 */
+                int MedianOfSortedValues(const ppp::vector<int>& sorted_values) noexcept {
+                    if (sorted_values.empty()) {
+                        return 0;
+                    }
+                    const std::size_t n = sorted_values.size();
+                    return (n % 2 == 1) ? sorted_values[n / 2] : (sorted_values[n / 2 - 1] + sorted_values[n / 2]) / 2;
+                }
+
+                /**
+                 * @brief Weighted quality score of one entry: weight-rtt * rtt_norm + (1 - weight-rtt) * jitter_norm.
+                 * @details RTT is normalized against the reachable-set median; jitter is normalized
+                 *          against the jitter median and defaults to 1.0 when the sample window is not
+                 *          full yet (data-insufficient), so such entries never win the comparison.
+                 */
+                double HotSwitchQualityScore(int rtt_ms, int jitter_ms, bool samples_full, double weight_rtt, double rtt_ref, double jitter_ref) noexcept {
+                    const double rtt_norm = rtt_ref > 0.0 ? (double)rtt_ms / rtt_ref : 1.0;
+                    const double jitter_norm = (!samples_full || jitter_ref <= 0.0) ? 1.0 : (double)jitter_ms / jitter_ref;
+                    return weight_rtt * rtt_norm + (1.0 - weight_rtt) * jitter_norm;
+                }
             }
 
             VEthernetExchanger::VEthernetExchanger(
@@ -229,7 +252,34 @@ namespace ppp {
                 if (it != probe_results_.end() && it->second.penalty_until > now) {
                     return;
                 }
-                probe_results_[entry] = result;
+
+                // Jitter window: each successful probe pushes one RTT sample and the
+                // fluctuation is recomputed; a failed probe keeps the previous window
+                // so the fluctuation memory survives a single dead round.  The window
+                // width comes from hot-switch.jitter-window (default 3).
+                if (reachable && rtt_ms >= 0) {
+                    int window = 3;
+                    AppConfigurationPtr configuration = GetConfiguration();
+                    if (NULLPTR != configuration) {
+                        window = std::max<int>(2, std::min<int>(10, configuration->client.hot_switch.jitter_window));
+                    }
+                    if (it != probe_results_.end() && !it->second.rtt_samples.empty()) {
+                        result.rtt_samples = it->second.rtt_samples;
+                    }
+                    result.rtt_samples.push_back(rtt_ms);
+                    if ((int)result.rtt_samples.size() > window) {
+                        result.rtt_samples.erase(result.rtt_samples.begin());
+                    }
+                    result.samples_full = (int)result.rtt_samples.size() >= window;
+                    result.jitter_ms = ConnectivityProbe::ComputeJitter(result.rtt_samples);
+                }
+                elif(it != probe_results_.end()) {
+                    result.rtt_samples = it->second.rtt_samples;
+                    result.samples_full = it->second.samples_full;
+                    result.jitter_ms = it->second.jitter_ms;
+                }
+
+                probe_results_[entry] = std::move(result);
             }
 
             bool VEthernetExchanger::ProbeSelectServerEndPoint(
@@ -413,11 +463,13 @@ namespace ppp {
 #endif
 
                 const auto& probe_cfg = configuration->client.probe;
-                const int stage = probe_cfg.stage;
+                // Probe depth and concurrency are built-in fixed behavior: the
+                // established path always probes to L3 (WebSocket upgrade), all
+                // entries probe in parallel, and the category is derived from the
+                // entry URI protocol.
+                const int stage = 3;
                 const int timeout_ms = std::max<int>(50, probe_cfg.timeout_ms);
                 const uint64_t ttl_ms = static_cast<uint64_t>(std::max<int>(1, probe_cfg.ttl_seconds)) * 1000;
-                const bool parallel = probe_cfg.parallel;
-                const bool categories_empty = probe_cfg.categories.empty();
                 const ppp::string ws_host = configuration->client.websocket.host;
                 const ppp::string ws_sni = configuration->client.websocket.sni;
                 const uint64_t now = Executors::GetTickCount();
@@ -429,9 +481,6 @@ namespace ppp {
                     ProbeCandidateEntry& candidate = candidates[i];
                     if (candidate.probed) {
                         continue; // Already decided (e.g. unresolvable host); no probe needed.
-                    }
-                    if (!categories_empty && probe_cfg.categories.find(candidate.probe_category) == probe_cfg.categories.end()) {
-                        continue; // Category excluded by configuration; never probed.
                     }
 
                     bool cached = false;
@@ -459,9 +508,9 @@ namespace ppp {
                     }
                 }
 
-                // Probe the pending entries (parallel or serial).
+                // Probe the pending entries (always parallel when more than one).
                 if (!job_indices.empty()) {
-                    if (parallel && job_indices.size() > 1) {
+                    if (job_indices.size() > 1) {
                         struct ProbeWaitState final {
                             std::atomic<int> pending = 0;
                             ppp::vector<ProbeCandidateEntry>* candidates = NULLPTR;
@@ -565,29 +614,64 @@ namespace ppp {
                     return true;
                 }
 
-                // Pick the reachable entry with the lowest RTT.
+                // Pick the reachable entry with the best weighted quality
+                // (RTT + jitter).  The score combines this round RTTs with the
+                // cached jitter windows; when no entry has a full window yet the
+                // ranking degenerates to lowest RTT, matching the legacy behavior.
                 int best_index = -1;
-                int best_rtt = INT_MAX;
-                for (std::size_t i = 0; i < candidates.size(); i++) {
-                    const ProbeCandidateEntry& candidate = candidates[i];
-                    if (!candidate.probed || !candidate.reachable) {
-                        continue;
+                double best_score = std::numeric_limits<double>::max();
+                const double weight_rtt = std::max<double>(0.0, std::min<double>(1.0, configuration->client.hot_switch.weight_rtt));
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    ppp::vector<int> rtt_values;
+                    ppp::vector<int> jitter_values;
+                    rtt_values.reserve(candidates.size());
+                    jitter_values.reserve(candidates.size());
+                    for (const ProbeCandidateEntry& candidate : candidates) {
+                        if (!candidate.probed || !candidate.reachable || candidate.rtt_ms < 0) {
+                            continue;
+                        }
+                        rtt_values.push_back(candidate.rtt_ms);
+                        ProbeResultTable::const_iterator it = probe_results_.find(candidate.entry);
+                        if (it != probe_results_.end() && it->second.samples_full) {
+                            jitter_values.push_back(it->second.jitter_ms);
+                        }
                     }
-                    if (candidate.rtt_ms >= 0 && candidate.rtt_ms < best_rtt) {
-                        best_rtt = candidate.rtt_ms;
-                        best_index = static_cast<int>(i);
+                    std::stable_sort(rtt_values.begin(), rtt_values.end());
+                    std::stable_sort(jitter_values.begin(), jitter_values.end());
+                    const double rtt_ref = std::max<double>(1.0, (double)MedianOfSortedValues(rtt_values));
+                    const double jitter_ref = std::max<double>(1.0, (double)MedianOfSortedValues(jitter_values));
+
+                    for (std::size_t i = 0; i < candidates.size(); i++) {
+                        const ProbeCandidateEntry& candidate = candidates[i];
+                        if (!candidate.probed || !candidate.reachable || candidate.rtt_ms < 0) {
+                            continue;
+                        }
+                        int jitter_ms = 0;
+                        bool samples_full = false;
+                        ProbeResultTable::const_iterator it = probe_results_.find(candidate.entry);
+                        if (it != probe_results_.end()) {
+                            jitter_ms = it->second.jitter_ms;
+                            samples_full = it->second.samples_full;
+                        }
+                        const double score = HotSwitchQualityScore(candidate.rtt_ms, jitter_ms, samples_full,
+                            weight_rtt, rtt_ref, jitter_ref);
+                        if (score < best_score) {
+                            best_score = score;
+                            best_index = static_cast<int>(i);
+                        }
                     }
                 }
-
                 // Sticky entry: keep the last successfully selected entry
-                // whenever it is still reachable this round, regardless of RTT.
-                // A reconnect must never bounce to a different entry on probe
-                // jitter - on wss/ws/ppp tunnels switching entries mid-session
-                // breaks the stream.  Only a genuinely unreachable or
-                // blacklisted entry loses stickiness and lets the lowest-RTT
-                // candidate win.  probe_server_ persists across reconnects
-                // (server_url_ is cleared by ExchangeToReconnectingState), so
-                // the preference survives reconnect cycles.
+                // whenever it is still reachable this round, regardless of
+                // quality.  A reconnect must never bounce to a different entry
+                // on probe jitter - on wss/ws/ppp tunnels switching entries
+                // mid-session breaks the stream.  Only a genuinely unreachable
+                // or blacklisted entry loses stickiness and lets the
+                // best-quality candidate win.  probe_server_ persists across
+                // reconnects (server_url_ is cleared by
+                // ExchangeToReconnectingState), so the preference survives
+                // reconnect cycles.
                 if (best_index >= 0) {
                     ppp::string preferred_entry;
                     {
@@ -1769,7 +1853,7 @@ namespace ppp {
                 return ranked;
             }
 
-            bool VEthernetExchanger::HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms) noexcept {
+            bool VEthernetExchanger::HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms, int& jitter_ms, bool& samples_full) noexcept {
                 SynchronizedObjectScope scope(syncobj_);
                 ProbeResultTable::iterator it = probe_results_.find(entry);
                 if (it == probe_results_.end()) {
@@ -1781,6 +1865,8 @@ namespace ppp {
                     return false;
                 }
                 rtt_ms = result.rtt_ms;
+                jitter_ms = result.jitter_ms;
+                samples_full = result.samples_full;
                 return true;
             }
 
@@ -1802,45 +1888,98 @@ namespace ppp {
                     return false; // No primary established yet; nothing to degrade from.
                 }
 
+                const auto& hs = configuration->client.hot_switch;
+                const int window = std::max<int>(2, std::min<int>(10, hs.jitter_window));
+
                 int current_rtt = 0;
-                if (!HotSwitchEntryProbe(current, now, current_rtt)) {
+                int current_jitter = 0;
+                bool current_full = false;
+                if (!HotSwitchEntryProbe(current, now, current_rtt, current_jitter, current_full)) {
                     return false; // No fresh data for the primary; wait for the next probe round.
                 }
+                if (!current_full) {
+                    return false; // B1 data guard: the fluctuation window is not full yet.
+                }
 
-                // Best reachable alternative (never the current entry, never blacklisted).
-                ppp::string best;
-                int best_rtt = INT_MAX;
+                // Reachable, non-blacklisted, fresh pool (the current entry included).
+                struct EntryQuality final {
+                    ppp::string entry;
+                    int rtt_ms;
+                    int jitter_ms;
+                    bool samples_full;
+                };
+                ppp::vector<EntryQuality> pool;
                 {
                     SynchronizedObjectScope scope(syncobj_);
+                    pool.reserve(probe_results_.size());
                     for (const auto& kv : probe_results_) {
                         const ConnectivityProbe::Result& result = kv.second;
-                        if (result.entry.empty() || result.entry == current || !result.reachable ||
-                            result.rtt_ms < 0 || result.penalty_until > now ||
+                        if (result.entry.empty() || !result.reachable || result.rtt_ms < 0 ||
+                            result.penalty_until > now ||
                             now >= result.timestamp + static_cast<uint64_t>(result.ttl_ms)) {
                             continue;
                         }
-                        if (result.rtt_ms < best_rtt) {
-                            best_rtt = result.rtt_ms;
-                            best = result.entry;
-                        }
+                        pool.emplace_back(EntryQuality{ result.entry, result.rtt_ms, result.jitter_ms, result.samples_full });
                     }
                 }
-                if (best.empty()) {
+                if (pool.size() < 2) {
                     return false;
                 }
 
-                const auto& hs = configuration->client.hot_switch;
-                // Trigger (section 7.1): the current entry is significantly worse
-                // than the best alternative in relative or absolute terms.
-                bool degraded =
-                    best_rtt < (int)((double)current_rtt / std::max<double>(1.0, hs.threshold_rtt_factor)) ||
-                    (current_rtt - best_rtt) > hs.threshold_rtt_ms;
+                // Normalization references: medians over the reachable pool (robust
+                // against a single outlier); a zero jitter median is floored to 1.
+                ppp::vector<int> rtt_values;
+                ppp::vector<int> jitter_values;
+                rtt_values.reserve(pool.size());
+                jitter_values.reserve(pool.size());
+                for (const EntryQuality& q : pool) {
+                    rtt_values.push_back(q.rtt_ms);
+                    if (q.samples_full) {
+                        jitter_values.push_back(q.jitter_ms);
+                    }
+                }
+                std::stable_sort(rtt_values.begin(), rtt_values.end());
+                std::stable_sort(jitter_values.begin(), jitter_values.end());
+                const double rtt_ref = std::max<double>(1.0, (double)MedianOfSortedValues(rtt_values));
+                const double jitter_ref = std::max<double>(1.0, (double)MedianOfSortedValues(jitter_values));
 
-                // Debounce core: evaluate once per probe period; only sustained
-                // degradation may accumulate toward min-stable-periods.
+                // Weighted quality score; entries without a full window get
+                // jitter_norm = 1.0 (data-insufficient) and never win as best.
+                const double weight_rtt = std::max<double>(0.0, std::min<double>(1.0, hs.weight_rtt));
+                auto quality_score = [weight_rtt, rtt_ref, jitter_ref](const EntryQuality& q) noexcept -> double {
+                    return HotSwitchQualityScore(q.rtt_ms, q.jitter_ms, q.samples_full, weight_rtt, rtt_ref, jitter_ref);
+                };
+
+                // Best alternative: minimum score among full-window entries, never current.
+                ppp::string best;
+                double best_score = std::numeric_limits<double>::max();
+                for (const EntryQuality& q : pool) {
+                    if (q.entry == current || !q.samples_full) {
+                        continue;
+                    }
+                    const double score = quality_score(q);
+                    if (score < best_score) {
+                        best_score = score;
+                        best = q.entry;
+                    }
+                }
+                if (best.empty()) {
+                    return false; // No alternative with sufficient jitter data.
+                }
+
+                // B1 fluctuation gate: a stable current entry never switches, no
+                // matter how much slower it is than the best alternative.
+                const bool jitter_gated = current_jitter >= hs.jitter_threshold_ms;
+                // B2 quality gap: only switch when the best alternative scores
+                // meaningfully better than the current entry.
+                const double current_score = quality_score(EntryQuality{ current, current_rtt, current_jitter, current_full });
+                const bool score_gap = (current_score - best_score) >= std::max<double>(0.0, hs.switch_margin);
+
+                // B3 consecutive-period debounce: evaluated once per probe period;
+                // every period must satisfy B1 and B2, otherwise the streak resets.
                 uint64_t period_ms = static_cast<uint64_t>(std::max<int>(1, configuration->client.probe.ttl_seconds)) * 1000ULL;
                 if (hot_switch_last_eval_ == 0 || now >= hot_switch_last_eval_ + period_ms) {
-                    if (degraded) {
+                    if (jitter_gated && score_gap) {
                         hot_switch_degrade_streak_++;
                     }
                     else {
@@ -1849,7 +1988,7 @@ namespace ppp {
                     hot_switch_last_eval_ = now;
                 }
 
-                if (hot_switch_degrade_streak_ < hs.min_stable_periods) {
+                if (hot_switch_degrade_streak_ < window) {
                     return false;
                 }
 
@@ -2069,20 +2208,19 @@ namespace ppp {
                 }
 
                 int from_rtt = 0;
-                if (!HotSwitchEntryProbe(from, now, from_rtt)) {
+                int from_jitter = 0;
+                bool from_full = false;
+                if (!HotSwitchEntryProbe(from, now, from_rtt, from_jitter, from_full)) {
                     return false; // No fresh data; keep observing.
                 }
-                int target_rtt = 0;
-                if (!HotSwitchEntryProbe(hot_switch_target_entry_, now, target_rtt)) {
-                    return false;
+                if (!from_full) {
+                    return false; // Window insufficient; keep observing.
                 }
 
                 const auto& hs = configuration->client.hot_switch;
-                // Still degraded when the trigger (section 7.1) still holds.
-                bool still_degraded =
-                    target_rtt < (int)((double)from_rtt / std::max<double>(1.0, hs.threshold_rtt_factor)) ||
-                    (from_rtt - target_rtt) > hs.threshold_rtt_ms;
-                return !still_degraded;
+                // Recovered when the old entry fluctuation dropped back below the
+                // jitter gate; RTT alone no longer triggers a rollback.
+                return from_jitter < hs.jitter_threshold_ms;
             }
 
             void VEthernetExchanger::HotSwitchTick(uint64_t now) noexcept {

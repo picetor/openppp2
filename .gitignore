@@ -125,6 +125,9 @@ MISSING*
 # One-off debug scripts in repo root (moved to tests/tools/)
 /_*.py
 
+# Local scratch/temp workspace
+/.build_tmp/
+
 # Allow libglibc_compat.a to be tracked
 !libglibc_compat.a
 

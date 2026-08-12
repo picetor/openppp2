@@ -266,10 +266,10 @@ namespace ppp {
                 void                                                                    HotSwitchRollback() noexcept;
                 /** @brief Blacklist an entry for the configured penalty window. */
                 void                                                                    HotSwitchBlacklistEntry(const ppp::string& entry, uint64_t now) noexcept;
-                /** @brief True when the old entry's RTT no longer satisfies the trigger. */
+                /** @brief True when the old entry fluctuation dropped below the jitter gate. */
                 bool                                                                    HotSwitchOldEntryRecovered(uint64_t now) noexcept;
-                /** @brief Read one entry's cached probe outcome; false when stale/unreachable. */
-                bool                                                                    HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms) noexcept;
+                /** @brief Read one entry cached probe outcome (RTT + jitter window); false when stale/unreachable. */
+                bool                                                                    HotSwitchEntryProbe(const ppp::string& entry, uint64_t now, int& rtt_ms, int& jitter_ms, bool& samples_full) noexcept;
                 /** @brief Reset the hot-switch state machine (called on connect/reconnect transitions). */
                 void                                                                    ResetHotSwitchState() noexcept;
 

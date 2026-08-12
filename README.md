@@ -439,53 +439,59 @@ ppp / ws / wss 隧道通用。
         "probe": {
             "enabled":     true,
             "timeout-ms":  800,
-            "ttl-seconds": 30,
-            "parallel":    true,
-            "stage":       1,
-            "categories":  ["tcp"]
+            "ttl-seconds": 30
         }
     }
 }
-```
-
 > IPv6 地址建议一律带方括号（`[2400::1]:port`）；带端口时无括号也能解析（兼容旧配置），
-> 但无端口或压缩格式存在歧义。ppp 入口探测天然为 TCP-only，`stage:1` 最省探测开销。
+> 但无端口或压缩格式存在歧义。ppp 入口探测天然为 TCP-only；探测深度由连接状态自动选择（已建立 → L3，未建立 → L1），无需配置。
 
-#### 热切换（可选，本次新增）
+#### 热切换（多入口自动启用，波动门控）
 
-在 `client.servers` + 连通性探测基础上启用**预热式渐进热切换**：备用入口在后台预热建链，当前入口 RTT 持续劣化（超过阈值且连续多个观察周期）时才切换，连接不中断，游戏场景目标不掉线。默认关闭。
+多入口（`client.servers` 非空）时自动启用**波动门控的预热式渐进热切换**：持续探测全部入口，每个入口维护"延迟 + 波动"滑动窗口；仅当**最近 3 个探测周期内波动 ≥ 50ms** 且综合评分显著劣于最佳备选时，才进入预热切换（mux 不重建、TCP 不断）。当前入口只要稳定，即使 RTT 更差也**不切换**（默认粘性）；链路失败则无条件 failover。最简配置：
 
 ```json
 "client": {
+    "server":  "wss://103.73.220.207:16299/tun",
+    "servers": [ "103.73.220.50:20443", "103.135.251.137:51845" ],
     "hot-switch": {
-        "enabled":               true,
-        "threshold-rtt-factor":  2.0,
-        "threshold-rtt-ms":      100,
-        "min-stable-periods":    3,
-        "lock-seconds":          60,
-        "penalty-seconds":       60,
-        "preheat":               true,
-        "observe-ms":            2000,
-        "channels-per-entry":    0,
-        "drain-timeout-seconds": 120
+        "jitter-threshold-ms": 50
     }
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `enabled` | 总开关，默认 `false` |
-| `threshold-rtt-factor` | 当前入口 RTT 劣化倍数阈值，默认 `2.0` |
-| `threshold-rtt-ms` | 当前入口 RTT 劣化绝对阈值（毫秒），默认 `100` |
-| `min-stable-periods` | 劣化需连续成立的最小探测周期数（防抖），默认 `3` |
-| `lock-seconds` | 切换成功后新入口锁定期（秒），默认 `60` |
-| `penalty-seconds` | 失败入口黑名单时长（秒），默认 `60` |
-| `preheat` | 后台预热备用入口，默认 `true` |
-| `observe-ms` | 预热完成后的观察窗口（毫秒），默认 `2000` |
-| `channels-per-entry` | 每入口通道数分布，`0` = 不分布全走最优，默认 `0` |
-| `drain-timeout-seconds` | 旧入口通道退役超时强杀（秒），默认 `120` |
+完整字段：
 
-启用前置条件（不满足时启动自动禁用并告警）：`client.servers` 非空、`client.probe.enabled=true`、`mux.flow.reorder.bytes ≥ 16777216` 且 `mux.flow.reorder.timeout ≥ 2000`。设计文档：[`docs/PREHEAT_HOT_SWITCH_CN.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/PREHEAT_HOT_SWITCH_CN.md)
+```json
+"client": {
+    "probe": {
+        "enabled":     true,
+        "timeout-ms":  800,
+        "ttl-seconds": 30
+    },
+    "hot-switch": {
+        "enabled":             true,
+        "jitter-threshold-ms": 50,
+        "jitter-window":       3,
+        "weight-rtt":          0.6,
+        "switch-margin":       0.15,
+        "channels-per-entry":  0
+    }
+}
+```
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `enabled` | `true` | 总开关；多入口自动启用，显式 `false` 关闭（退回纯 sticky failover） |
+| `jitter-threshold-ms` | `50` | 3 周期内波动门槛（毫秒）；当前入口波动低于它永不主动切换 |
+| `jitter-window` | `3` | 波动统计窗口大小，同时是连续达标周期数（防抖） |
+| `weight-rtt` | `0.6` | 评分中 RTT 的权重（波动权重 = 1 - 该值） |
+| `switch-margin` | `0.15` | 当前与最佳备选的最小评分差，低于此值不切换 |
+| `channels-per-entry` | `0` | 每入口常驻通道分布，`0` = 全部通道粘性当前入口 |
+
+旧字段 `probe.parallel/stage/categories` 与 `hot-switch.threshold-rtt-factor/-ms`、`min-stable-periods`、`preheat`、`observe-ms`、`lock-seconds`、`penalty-seconds`、`drain-timeout-seconds` 可保留但不再生效（内置固定：并行探测、深度自适应、预热式切换、观察 2000ms、锁定 60s、黑名单 60s、排空 120s）。
+
+启用前置条件（不满足时启动自动禁用并告警）：`client.servers` 非空、`client.probe.enabled=true`、`mux.flow.reorder.bytes ≥ 16777216` 且 `mux.flow.reorder.timeout ≥ 2000`。设计文档：[`docs/HOT_SWITCH_JITTER_REDESIGN_CN.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/HOT_SWITCH_JITTER_REDESIGN_CN.md)（触发判据已替换 [`docs/PREHEAT_HOT_SWITCH_CN.md`](https://github.com/Miaocchi/openppp2/blob/main/docs/PREHEAT_HOT_SWITCH_CN.md) 的 RTT 阈值方案）
 
 ---
 

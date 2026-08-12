@@ -374,17 +374,6 @@ namespace ppp {
                     return ConnectivityProbe::ProbeType_Tcp;
                 }
 
-                ppp::string ProbeCategoryFromUriProtocol(UriAuxiliary::ProtocolType protocol_type) noexcept {
-                    if (protocol_type == UriAuxiliary::ProtocolType::ProtocolType_Http ||
-                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocket) {
-                        return ppp::string("ws");
-                    }
-                    elif(protocol_type == UriAuxiliary::ProtocolType::ProtocolType_HttpSSL ||
-                        protocol_type == UriAuxiliary::ProtocolType::ProtocolType_WebSocketSSL) {
-                        return ppp::string("wss");
-                    }
-                    return ppp::string("tcp");
-                }
 
                 ppp::string NormalizeProbeEntryString(const ppp::string& address, int port) noexcept {
                     if (address.empty() || port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
@@ -537,13 +526,11 @@ namespace ppp {
                         work.timeout_ms = std::max<int>(50, configuration->client.probe.timeout_ms);
                         // Background refresh only needs L1 for outbounds without an
                         // established tunnel; probing idle wss endpoints to L3 every
-                        // 5s burns server-side TLS handshakes for no user value.
-                        work.stage = outbound_ref.established ?
-                            std::min<int>(3, std::max<int>(1, configuration->client.probe.stage)) : 1;
+                        // 5s burns server-side TLS handshakes for no user value.  The
+                        // probe depth is built-in fixed (3 established / 1 otherwise).
+                        work.stage = outbound_ref.established ? 3 : 1;
                         work.ws_host = configuration->client.websocket.host;
                         work.ws_sni = configuration->client.websocket.sni;
-                        const ppp::unordered_set<ppp::string>& categories = configuration->client.probe.categories;
-                        const bool categories_empty = categories.empty();
 
                         ppp::string primary_address;
                         ppp::string primary_path;
@@ -572,10 +559,7 @@ namespace ppp {
                                     candidate.path = entry_path;
                                     candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
                                     candidate.probe_type = ProbeTypeFromUriProtocol(entry_protocol);
-                                    const ppp::string category = ProbeCategoryFromUriProtocol(entry_protocol);
-                                    if (categories_empty || categories.find(category) != categories.end()) {
-                                        work.candidates.emplace_back(std::move(candidate));
-                                    }
+                                    work.candidates.emplace_back(std::move(candidate));
                                     primary_address = entry_address;
                                     primary_path = entry_path;
                                     primary_protocol = entry_protocol;
@@ -622,10 +606,7 @@ namespace ppp {
                                 candidate.path = primary_path;
                                 candidate.remoteEP = IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(ipep);
                                 candidate.probe_type = ProbeTypeFromUriProtocol(primary_protocol);
-                                const ppp::string category = ProbeCategoryFromUriProtocol(primary_protocol);
-                                if (categories_empty || categories.find(category) != categories.end()) {
-                                    work.candidates.emplace_back(std::move(candidate));
-                                }
+                                work.candidates.emplace_back(std::move(candidate));
                             }
                         }
 

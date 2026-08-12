@@ -1,4 +1,4 @@
-﻿#include <ppp/app/client/ConnectivityProbe.h>
+#include <ppp/app/client/ConnectivityProbe.h>
 
 #include <ppp/coroutines/asio/asio.h>
 #include <ppp/diagnostics/Stopwatch.h>
@@ -346,6 +346,37 @@ namespace ppp {
 
                 rtt_ms = (int)stopwatch.ElapsedMilliseconds();
                 return true;
+            }
+
+            int ConnectivityProbe::ComputeJitter(const ppp::vector<int>& rtt_samples) noexcept {
+                if (rtt_samples.size() < 2) {
+                    return 0;
+                }
+
+                // Peak-to-peak fluctuation: max(samples) - min(samples).
+                int min_rtt = INT_MAX;
+                int max_rtt = INT_MIN;
+                for (int sample : rtt_samples) {
+                    min_rtt = std::min<int>(min_rtt, sample);
+                    max_rtt = std::max<int>(max_rtt, sample);
+                }
+                const int jitter_pp = max_rtt - min_rtt;
+
+                // Median absolute deviation (MAD): median(|x - median|), robust to spikes.
+                ppp::vector<int> sorted(rtt_samples.begin(), rtt_samples.end());
+                std::stable_sort(sorted.begin(), sorted.end());
+                const std::size_t n = sorted.size();
+                const int median = (n % 2 == 1) ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+                ppp::vector<int> deviation;
+                deviation.reserve(n);
+                for (int sample : sorted) {
+                    deviation.emplace_back(sample > median ? sample - median : median - sample);
+                }
+                std::stable_sort(deviation.begin(), deviation.end());
+                const int jitter_mad = (n % 2 == 1) ? deviation[n / 2] : (deviation[n / 2 - 1] + deviation[n / 2]) / 2;
+
+                // Fixed metric: the larger of the two (sensitive yet stable).
+                return std::max<int>(jitter_pp, jitter_mad);
             }
         }
     }

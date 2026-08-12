@@ -372,18 +372,16 @@ namespace ppp {
             config.client.probe.enabled = true;
             config.client.probe.timeout_ms = 800;
             config.client.probe.ttl_seconds = 30;
-            config.client.probe.parallel = true;
-            config.client.probe.stage = 3;
-            config.client.probe.categories.clear();
-            config.client.hot_switch.enabled = false;
-            config.client.hot_switch.threshold_rtt_factor = 2.0;
-            config.client.hot_switch.threshold_rtt_ms = 100;
-            config.client.hot_switch.min_stable_periods = 3;
+            config.client.hot_switch.enabled = true;
+            config.client.hot_switch.jitter_threshold_ms = 50;
+            config.client.hot_switch.jitter_window = 3;
+            config.client.hot_switch.weight_rtt = 0.6;
+            config.client.hot_switch.switch_margin = 0.15;
+            config.client.hot_switch.channels_per_entry = 0;
             config.client.hot_switch.lock_seconds = 60;
             config.client.hot_switch.penalty_seconds = 60;
             config.client.hot_switch.preheat = true;
             config.client.hot_switch.observe_ms = 2000;
-            config.client.hot_switch.channels_per_entry = 0;
             config.client.hot_switch.drain_timeout_seconds = 120;
             config.client.bandwidth = 0;
             config.client.reconnections.timeout = PPP_TCP_CONNECT_TIMEOUT;
@@ -737,8 +735,14 @@ namespace ppp {
                 config.mux.flow.retransmit.nack_backoff_ms = PPP_MUX_FLOW_NACK_BACKOFF_MS;
             }
 
-            // Hot-switch dependency (M2): the flow-v2 reorder window must cover the
-            // preheat/switch window; refuse to enable hot-switch otherwise.
+            // Hot-switch is auto-enabled for multi-entry configurations
+            // (client.servers non-empty); an explicit "enabled": false keeps the
+            // legacy sticky-failover behavior.  The flow-v2 reorder window must
+            // cover the preheat/switch window; refuse to enable hot-switch
+            // otherwise.
+            if (config.client.hot_switch.enabled && config.client.servers.empty()) {
+                config.client.hot_switch.enabled = false;
+            }
             if (config.client.hot_switch.enabled &&
                 (config.mux.flow.reorder.bytes < PPP_MUX_FLOW_REORDER_BYTES ||
                  config.mux.flow.reorder.timeout < PPP_MUX_FLOW_REORDER_TIMEOUT)) {
@@ -1605,30 +1609,34 @@ namespace ppp {
                 const Json::Value& probe_json = json["client"]["probe"];
                 if (probe_json.isObject()) {
                     AssignBoolIfPresent(config.client.probe.enabled, probe_json["enabled"]);
-                    config.client.probe.timeout_ms = std::max<int>(50, JsonAuxiliary::AsValue<int>(probe_json["timeout-ms"]));
-                    config.client.probe.ttl_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["ttl-seconds"]));
-                    config.client.probe.parallel = JsonAuxiliary::AsValue<bool>(probe_json["parallel"]);
-                    config.client.probe.stage = std::min<int>(3, std::max<int>(1, JsonAuxiliary::AsValue<int>(probe_json["stage"])));
-                    config.client.probe.categories.clear();
-                    ReadJsonAllTokensToSet(probe_json["categories"], config.client.probe.categories);
+                    AssignIfPresent(config.client.probe.timeout_ms, probe_json["timeout-ms"]);
+                    config.client.probe.timeout_ms = std::max<int>(50, config.client.probe.timeout_ms);
+                    AssignIfPresent(config.client.probe.ttl_seconds, probe_json["ttl-seconds"]);
+                    config.client.probe.ttl_seconds = std::max<int>(1, config.client.probe.ttl_seconds);
+                    // probe.parallel / probe.stage / probe.categories were removed from the
+                    // schema: probing is always parallel, the depth is auto-selected by the
+                    // connection state, and the category is derived from the entry URI.
+                    // Legacy keys remain accepted but are ignored.
                 }
             }
             {
                 const Json::Value& hot_switch_json = json["client"]["hot-switch"];
                 if (hot_switch_json.isObject()) {
                     AssignBoolIfPresent(config.client.hot_switch.enabled, hot_switch_json["enabled"]);
-                    const double factor = JsonAuxiliary::AsValue<double>(hot_switch_json["threshold-rtt-factor"]);
-                    if (factor >= 1.0) {
-                        config.client.hot_switch.threshold_rtt_factor = factor;
-                    }
-                    config.client.hot_switch.threshold_rtt_ms = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["threshold-rtt-ms"]));
-                    config.client.hot_switch.min_stable_periods = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["min-stable-periods"]));
-                    config.client.hot_switch.lock_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["lock-seconds"]));
-                    config.client.hot_switch.penalty_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["penalty-seconds"]));
-                    AssignBoolIfPresent(config.client.hot_switch.preheat, hot_switch_json["preheat"]);
-                    config.client.hot_switch.observe_ms = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["observe-ms"]));
-                    config.client.hot_switch.channels_per_entry = std::max<int>(0, JsonAuxiliary::AsValue<int>(hot_switch_json["channels-per-entry"]));
-                    config.client.hot_switch.drain_timeout_seconds = std::max<int>(1, JsonAuxiliary::AsValue<int>(hot_switch_json["drain-timeout-seconds"]));
+                    AssignIfPresent(config.client.hot_switch.jitter_threshold_ms, hot_switch_json["jitter-threshold-ms"]);
+                    config.client.hot_switch.jitter_threshold_ms = std::max<int>(1, config.client.hot_switch.jitter_threshold_ms);
+                    AssignIfPresent(config.client.hot_switch.jitter_window, hot_switch_json["jitter-window"]);
+                    config.client.hot_switch.jitter_window = std::max<int>(2, std::min<int>(10, config.client.hot_switch.jitter_window));
+                    AssignIfPresent(config.client.hot_switch.weight_rtt, hot_switch_json["weight-rtt"]);
+                    config.client.hot_switch.weight_rtt = std::max<double>(0.0, std::min<double>(1.0, config.client.hot_switch.weight_rtt));
+                    AssignIfPresent(config.client.hot_switch.switch_margin, hot_switch_json["switch-margin"]);
+                    config.client.hot_switch.switch_margin = std::max<double>(0.0, config.client.hot_switch.switch_margin);
+                    AssignIfPresent(config.client.hot_switch.channels_per_entry, hot_switch_json["channels-per-entry"]);
+                    config.client.hot_switch.channels_per_entry = std::max<int>(0, config.client.hot_switch.channels_per_entry);
+                    // Legacy hot-switch keys (threshold-rtt-factor/-ms, min-stable-periods,
+                    // preheat, observe-ms, lock-seconds, penalty-seconds,
+                    // drain-timeout-seconds) remain accepted but are ignored: the trigger
+                    // is jitter-gated and the state-machine timings are built-in fixed.
                 }
             }
             config.client.bandwidth = JsonAuxiliary::AsValue<int64_t>(json["client"]["bandwidth"]);

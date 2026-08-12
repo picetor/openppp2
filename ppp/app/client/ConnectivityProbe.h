@@ -47,6 +47,9 @@ namespace ppp {
                     uint64_t                            timestamp = 0;  ///< Probe time (Executors::GetTickCount).
                     int                                 ttl_ms = 0;     ///< Result validity before refresh.
                     uint64_t                            penalty_until = 0;  ///< Tick-count deadline while the entry is temporarily blacklisted.
+                    ppp::vector<int>                    rtt_samples;    ///< Recent RTT samples (ring, capped at hot-switch.jitter-window).
+                    bool                                samples_full = false;  ///< True once the sample window has been filled.
+                    int                                 jitter_ms = 0;  ///< Fluctuation over rtt_samples: max(peak-to-peak, MAD).
                 };
 
             public:
@@ -54,6 +57,7 @@ namespace ppp {
                 static bool                             ProbeWebSocket(const TCPEndPoint& remoteEP, const ppp::string& host, const ppp::string& path, int timeout_ms, YieldContext& y, int& rtt_ms, const ProtectSocketHandler& protect = NULLPTR) noexcept;
                 static bool                             ProbeWebSocketSSL(const TCPEndPoint& remoteEP, const ppp::string& host, const ppp::string& sni, const ppp::string& path, int timeout_ms, YieldContext& y, int& rtt_ms, const ProtectSocketHandler& protect = NULLPTR) noexcept;
                 static bool                             ProbeUdp(const UDPEndPoint& remoteEP, int timeout_ms, YieldContext& y, int& rtt_ms, const ProtectSocketHandler& protect = NULLPTR) noexcept;
+                static int                              ComputeJitter(const ppp::vector<int>& rtt_samples) noexcept;
             };
         }
     }
