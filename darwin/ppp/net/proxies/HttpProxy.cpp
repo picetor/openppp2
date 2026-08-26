@@ -306,7 +306,8 @@ namespace ppp {
                 if (!enable) {
                     return Restore();
                 }
-                return Apply(server, DefaultBypass());
+                const std::string server_std(server.data(), server.size());
+                return Apply(server_std, DefaultBypass());
             }
         }
     }
