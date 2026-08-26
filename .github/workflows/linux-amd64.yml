@@ -7,6 +7,33 @@ on:
         description: Build amd64 variants
         type: boolean
         default: false
+  push:
+    branches:
+      - master
+      - inet6
+    paths:
+      - 'ppp/**'
+      - 'common/**'
+      - 'main.cpp'
+      - 'resource.h'
+      - 'resource.rc'
+      - 'glibc_compat.h'
+      - 'appsettings.json'
+      - 'CMakeLists.txt'
+      - 'tools/ci/**'
+      - 'linux/**'
+      - 'darwin/**'
+      - 'windows/**'
+      - 'android/**'
+      - 'go/**'
+      - '.github/workflows/**'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build-amd64:
