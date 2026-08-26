@@ -128,6 +128,9 @@ MISSING*
 # Rust TUI front-end build artifacts (cargo)
 /tui/target*/
 /tui-panic.err
+# `bin/` above is for native build output; Rust binary sources are tracked.
+!/tui/src/bin/
+!/tui/src/bin/**
 
 # Local scratch/temp workspace
 /.build_tmp/

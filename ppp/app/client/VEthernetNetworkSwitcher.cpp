@@ -4852,8 +4852,10 @@ namespace ppp {
                 if (proxy_only_) {
                     // Proxy-only has no kernel route installation, but the
                     // in-memory RIB is still needed for --bypass-mode=ip.
+#if !defined(_ANDROID) && !defined(_IPHONE)
                     LoadAllIPListWithFilePaths(boost::asio::ip::address_v4::any());
                     LoadAllIPListWithFilePaths6(boost::asio::ip::address_v6::any());
+#endif
                     if (!metadata_only && !UpdateRemoteUri()) {
                         LOG_WARN("VEthernetNetworkSwitcher::Open: cannot determine proxy-only remote URI");
                     }

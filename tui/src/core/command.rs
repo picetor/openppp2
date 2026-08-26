@@ -1,8 +1,6 @@
 //! Core command-line construction/parsing helpers shared by the window and
 //! terminal front-ends.
 
-use std::path::PathBuf;
-
 /// Split a command line into arguments, honouring double quotes.
 pub fn split_command_line(input: &str) -> Vec<String> {
     let mut args = Vec::new();
@@ -65,16 +63,18 @@ pub fn command_bool(args: &[String], name: &str, default: bool) -> bool {
 }
 
 fn is_core_executable_arg(value: &str) -> bool {
-    PathBuf::from(value)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            matches!(
-                name.to_ascii_lowercase().as_str(),
-                "ppp-tui.exe" | "ppp-tui" | "ppp.exe" | "ppp" | "ppp-core.exe" | "ppp-core"
-            )
-        })
-        .unwrap_or(false)
+    // Command strings can be authored on Windows and then parsed by the
+    // Linux/macOS client (for example `start "PPP client" .\\ppp.exe ...`).
+    // PathBuf only treats the host platform's separator as special, so split
+    // both separators explicitly before comparing the executable basename.
+    let name = value
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(value);
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "ppp-tui.exe" | "ppp-tui" | "ppp.exe" | "ppp" | "ppp-core.exe" | "ppp-core"
+    )
 }
 
 /// Strip shell keywords (`start`, `/wait`, window titles, the exe path) from
