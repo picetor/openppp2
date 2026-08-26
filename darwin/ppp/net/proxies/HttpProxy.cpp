@@ -296,7 +296,9 @@ namespace ppp {
                 if (server.empty()) {
                     return Restore();
                 }
-                return Apply(server, Split(bypass));
+                const std::string server_std(server.data(), server.size());
+                const std::string bypass_std(bypass.data(), bypass.size());
+                return Apply(server_std, Split(bypass_std));
             }
 
             bool HttpProxy::SetSystemProxy(const ppp::string& server, const ppp::string& pac, bool enable) noexcept {

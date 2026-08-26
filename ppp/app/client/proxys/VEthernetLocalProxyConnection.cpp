@@ -363,9 +363,9 @@ namespace ppp {
                     }
 
 #if defined(_LINUX)
-                    auto switcher = exchanger_->GetSwitcher(); 
-                    if (NULLPTR != switcher) {
-                        connection->ProtectorNetwork = switcher->GetProtectorNetwork();
+                    auto connection_switcher = exchanger_->GetSwitcher();
+                    if (NULLPTR != connection_switcher) {
+                        connection->ProtectorNetwork = connection_switcher->GetProtectorNetwork();
                     }
 #endif
 
