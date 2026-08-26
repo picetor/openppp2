@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "generation": 42,
+  "monotonic_ms": 42000,
+  "phase": "connected",
+  "role": "client",
+  "server": "104.16.1.1:443",
+  "transport": "wss",
+  "bypass_mode": "geo",
+  "capabilities": ["mux.compat", "mux.flow", "mux.balance", "mux.stripe"],
+  "requested_mux_mode": "flow",
+  "effective_mux_mode": "flow",
+  "mux_receiver_ordering": "flow_v2",
+  "mux_active_links": 2,
+  "mux_fallback_reason": "",
+  "connected_monotonic_ms": 30000,
+  "traffic": { "rx_bytes": 10485760, "tx_bytes": 2097152, "in_bytes": 524288000, "out_bytes": 104857600 },
+  "network": {
+    "tun": { "name": "PPP", "ipv4": "10.0.0.2", "ipv6": "fd42:4242:4242::2", "dns": ["10.0.0.1"] },
+    "nic": { "name": "Ethernet", "ipv4": "192.168.1.5", "ipv6": "", "dns": ["223.5.5.5", "119.29.29.29"] }
+  },
+  "geo": {
+    "direct_dns": ["local", "223.5.5.5"],
+    "rule_count": 128,
+    "static_networks": 4,
+    "split_rules": [
+      { "matcher": "geosite,openai", "outbound": "openai", "display": "OpenAI" },
+      { "matcher": "geoip,cn", "outbound": "main", "display": "main" }
+    ]
+  },
+  "outbounds": [
+    {
+      "tag": "main",
+      "display_name": "main",
+      "server": "ppp://vpn.example.com:20000/",
+      "state": 1,
+      "reconnects": 0,
+      "active": true,
+      "server_menu": true,
+      "route_used": true,
+      "multiple_entries": true,
+      "probe_enabled": true,
+      "probe_checked": true,
+      "probe_reachable": true,
+      "probe_rtt_ms": 42,
+      "current_entry": "104.16.1.1:443",
+      "ranked_first_entry": "104.16.2.2:443"
+    },
+    {
+      "tag": "hk02",
+      "display_name": "HK02",
+      "server": "ppp://hk02.example.com:20000/",
+      "state": 0,
+      "reconnects": 2,
+      "active": false,
+      "server_menu": true,
+      "route_used": false,
+      "multiple_entries": false,
+      "probe_enabled": true,
+      "probe_checked": true,
+      "probe_reachable": false,
+      "probe_rtt_ms": -1,
+      "current_entry": "",
+      "ranked_first_entry": ""
+    }
+  ],
+  "last_error": { "code": 0, "severity": "", "retryable": false, "user_message_key": "", "diagnostic_detail": "" }
+}

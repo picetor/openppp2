@@ -45,7 +45,8 @@ namespace ppp {
                     const std::shared_ptr<boost::asio::ip::tcp::socket>&    socket,
                     const boost::asio::ip::tcp::endpoint&                   remoteEP, 
                     std::shared_ptr<RinetdConnection>&                      out,
-                    ppp::coroutines::YieldContext&                          y) noexcept {
+                    ppp::coroutines::YieldContext&                          y,
+                    bool                                                     force_direct = false) noexcept {
 
                     std::shared_ptr<VEthernetNetworkSwitcher> switcher = exchanger->GetSwitcher();
                     if (NULLPTR == switcher) {
@@ -53,11 +54,11 @@ namespace ppp {
                     }
 
                     boost::asio::ip::address remote_address = remoteEP.address();
-                    bool bypass_ip_address_ok = false;
-                    if (remote_address.is_v4()) {
+                    bool bypass_ip_address_ok = force_direct;
+                    if (!bypass_ip_address_ok && remote_address.is_v4()) {
                         bypass_ip_address_ok = switcher->IsBypassIpAddress(remote_address);
                     }
-                    elif (remote_address.is_v6()) {
+                    elif (!bypass_ip_address_ok && remote_address.is_v6()) {
                         bypass_ip_address_ok = switcher->IsBypassIpAddress6(remote_address);
                     }
                     if (!bypass_ip_address_ok) {

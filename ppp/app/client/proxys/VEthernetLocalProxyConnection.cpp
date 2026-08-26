@@ -81,6 +81,10 @@ namespace ppp {
                 }
 
                 bool VEthernetLocalProxyConnection::Run(YieldContext& y) noexcept {
+                    if (!WaitForExchanger(y)) {
+                        return false;
+                    }
+
                     bool ok = this->Handshake(y);
                     if (!ok) {
                         return false;
@@ -103,6 +107,55 @@ namespace ppp {
                     else {
                         return RunAfterHandshakeWithoutBridge(y);
                     }
+                }
+
+                bool VEthernetLocalProxyConnection::WaitForExchanger(YieldContext& y) noexcept {
+                    const int configured_timeout = configuration_ != NULLPTR
+                        ? std::max<int>(1, configuration_->tcp.connect.timeout) : 10;
+                    const uint64_t deadline = Executors::GetTickCount() +
+                        static_cast<uint64_t>(std::min<int>(30, configured_timeout)) * 1000ULL;
+
+                    while (!disposed_) {
+                        // A new proxy connection may have been accepted while
+                        // the primary exchanger was being hot-switched.  Read
+                        // the listener's current exchanger before waiting so
+                        // this connection does not remain attached to a retired
+                        // object.
+                        std::shared_ptr<VEthernetExchanger> current = proxy_ != NULLPTR
+                            ? proxy_->GetExchanger() : exchanger_;
+                        if (current == NULLPTR) {
+                            return false;
+                        }
+
+                        if (current->GetNetworkState() ==
+                            VEthernetExchanger::NetworkState_Established) {
+                            exchanger_ = current;
+                            // The connection may have been accepted just
+                            // before a primary hot switch.  Once it begins
+                            // its handshake, bind it to the selected
+                            // outbound's complete client configuration as
+                            // well, especially SOCKS5 credentials and the
+                            // per-client timeout/buffer settings.
+                            configuration_ = current->GetConfiguration();
+                            if (configuration_ == NULLPTR) {
+                                return false;
+                            }
+                            allocator_ = configuration_->GetBufferAllocator();
+                            return true;
+                        }
+
+                        const uint64_t now = Executors::GetTickCount();
+                        if (now >= deadline) {
+                            return false;
+                        }
+
+                        const int64_t wait_ms = static_cast<int64_t>(
+                            std::min<uint64_t>(100, deadline - now));
+                        if (!current->Sleep(wait_ms, context_, y)) {
+                            return false;
+                        }
+                    }
+                    return false;
                 }
 
                 bool VEthernetLocalProxyConnection::RunAfterHandshakeWithoutBridge(YieldContext& y) noexcept {
@@ -151,17 +204,102 @@ namespace ppp {
                     LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: source=local-proxy, trace=%p, transport_trace=%p, outbound=%s, destination=%s:%d",
                         this, strand_.get(), exchanger_->GetOutboundTag().data(), destinationEP->Host.data(), destinationEP->Port);
 
-                    auto configuration = exchanger_->GetConfiguration();
-                    if (NULLPTR == configuration) {
-                        return false;
-                    }
-
                     std::shared_ptr<boost::asio::ip::tcp::socket> socket = GetSocket();
                     if (NULLPTR == socket || !socket->is_open()) {
                         return false;
                     }
 
                     auto self = shared_from_this();
+                    std::shared_ptr<VEthernetNetworkSwitcher> switcher = exchanger_->GetSwitcher();
+                    bool force_direct = false;
+                    boost::asio::ip::address direct_address;
+
+                    // System-proxy connections bypass the TUN packet path, so
+                    // apply the same bypass policy before selecting the MUX
+                    // exchanger. This is required in both normal TUN mode
+                    // and proxy-only mode.
+                    if (NULLPTR != switcher) {
+                        std::shared_ptr<VEthernetExchanger> selected;
+                        if (destinationEP->Type == ppp::app::protocol::AddressType::Domain) {
+                            if (switcher->IsDirectProxyHost(destinationEP->Host)) {
+                                direct_address = ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                                    destinationEP->Host.data(), destinationEP->Port, y).address();
+                                if (ppp::net::IPEndPoint::IsInvalid(direct_address)) {
+                                    return false;
+                                }
+                                force_direct = true;
+                            }
+                            elif (switcher->UsesProxyIpRules()) {
+                                // IP-list mode has no domain rule to consult.
+                                // Resolve only to test the bypass CIDR; a
+                                // non-matching domain remains a domain and is
+                                // resolved by the tunnel peer.
+                                direct_address = ppp::coroutines::asio::GetAddressByHostName<boost::asio::ip::tcp>(
+                                    destinationEP->Host.data(), destinationEP->Port, y).address();
+                                if (!ppp::net::IPEndPoint::IsInvalid(direct_address) &&
+                                    switcher->IsDirectProxyAddress(direct_address)) {
+                                    force_direct = true;
+                                }
+                            }
+                            else {
+                                selected = switcher->GetExchanger(destinationEP->Host);
+                            }
+                        }
+                        else {
+                            boost::system::error_code ec;
+                            direct_address = StringToAddress(destinationEP->Host.data(), ec);
+                            if (ec || ppp::net::IPEndPoint::IsInvalid(direct_address)) {
+                                return false;
+                            }
+                            // In --bypass-mode=no, the normal TUN RIB contains
+                            // the tunnel default route. It is not a direct
+                            // proxy rule, so only consult the address bypass
+                            // helper for explicit IP or GEO split modes.
+                            if ((switcher->UsesProxyIpRules() || switcher->GetGeoRules() != NULLPTR) &&
+                                switcher->IsDirectProxyAddress(direct_address)) {
+                                force_direct = true;
+                            }
+                            else {
+                                selected = switcher->GetExchanger(direct_address);
+                            }
+                        }
+
+                        if (NULLPTR != selected) {
+                            exchanger_ = selected;
+                        }
+
+                        const char* bypass_mode = switcher->GetGeoRules() != NULLPTR
+                            ? "geo" : switcher->UsesProxyIpRules() ? "ip" : "no";
+                        LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: source=local-proxy, trace=%p, bypass_mode=%s, policy_outbound=%s, direct=%d, destination=%s:%d",
+                            this, bypass_mode, exchanger_->GetOutboundTag().data(), (int)force_direct,
+                            destinationEP->Host.data(), destinationEP->Port);
+                    }
+
+                    auto configuration = exchanger_->GetConfiguration();
+                    if (NULLPTR == configuration) {
+                        return false;
+                    }
+
+                    if (force_direct) {
+                        int rinetd_status = VEthernetNetworkTcpipConnection::Rinetd(self,
+                            exchanger_,
+                            context_,
+                            strand_,
+                            configuration,
+                            socket,
+                            boost::asio::ip::tcp::endpoint(direct_address, destinationEP->Port),
+                            connection_rinetd_,
+                            y,
+                            true);
+                        if (rinetd_status < 1) {
+                            return rinetd_status == 0;
+                        }
+                        destinationEP->Host = direct_address.to_string();
+                        destinationEP->Type = direct_address.is_v4()
+                            ? ppp::app::protocol::AddressType::IPv4
+                            : ppp::app::protocol::AddressType::IPv6;
+                    }
+
                     if (auto switcher = exchanger_->GetSwitcher(); NULLPTR != switcher) {
                         if (auto tap = switcher->GetTap(); NULLPTR != tap && tap->IsHostedNetwork()) {
                             // Domain targets must keep their hostname so the tunnel server
@@ -198,48 +336,11 @@ namespace ppp {
                         }
                     }
 
-                    // Proxy-only changes only the local traffic ingress.  Keep
-                    // the tunnel side identical to TUN mode, where TCP
-                    // connections always carry a resolved IP endpoint.
-                    if (destinationEP->Type == ppp::app::protocol::AddressType::Domain) {
-                        auto switcher = exchanger_->GetSwitcher();
-                        if (NULLPTR != switcher && switcher->IsProxyOnly()) {
-#if defined(_WIN32)
-                            const boost::asio::ip::address resolvedIP =
-                                switcher->ResolveProxyDomainThroughTunnel(destinationEP->Host, y);
-                            boost::asio::ip::tcp::endpoint resolvedEP(
-                                resolvedIP, destinationEP->Port);
-#else
-                            boost::asio::ip::tcp::endpoint resolvedEP(
-                                boost::asio::ip::address_v4::any(), 0);
-                            try {
-                                boost::asio::io_context resolver_context;
-                                boost::asio::ip::tcp::resolver resolver(resolver_context);
-                                resolvedEP =
-                                    ppp::net::asio::GetAddressByHostName<boost::asio::ip::tcp>(
-                                        resolver, destinationEP->Host.data(), destinationEP->Port);
-                            } catch (...) {
-                            }
-
-                            const boost::asio::ip::address resolvedIP = resolvedEP.address();
-#endif
-                            if (resolvedEP.port() == 0 ||
-                                resolvedIP.is_unspecified() ||
-                                resolvedIP.is_multicast()) {
-                                LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: proxy-only resolve failed, destination=%s:%d",
-                                    destinationEP->Host.data(), destinationEP->Port);
-                                return false;
-                            }
-
-                            LOG_DEBUG("VEthernetLocalProxyConnection::ConnectBridgeToPeer: proxy-only resolved, destination=%s:%d, endpoint=%s",
-                                destinationEP->Host.data(), destinationEP->Port,
-                                ppp::net::Ipep::ToAddressString<ppp::string>(resolvedEP).data());
-                            destinationEP->Host = resolvedIP.to_string();
-                            destinationEP->Type = resolvedIP.is_v4() ?
-                                ppp::app::protocol::AddressType::IPv4 :
-                                ppp::app::protocol::AddressType::IPv6;
-                        }
-                    }
+                    // Keep domain targets as domains.  VirtualEthernetTcpipConnection
+                    // forwards them in PREPARED_CONNECT and the tunnel server resolves
+                    // them in OnConnectHost.  Resolving here would leak DNS to the local
+                    // resolver on Linux and would also make proxy-only behavior differ
+                    // between platforms.
 
                     int mux_status = VEthernetNetworkTcpipConnection::Mux(self, exchanger_, "local-proxy", this,
                         destinationEP->Host, destinationEP->Port, socket, connection_mux_, y);
@@ -301,9 +402,15 @@ namespace ppp {
                         destinationEP->Type = ppp::app::protocol::AddressType::Domain;
                     }
                     elif(address.is_v4()) {
+                        if (address.is_unspecified() || address.is_multicast()) {
+                            return NULLPTR;
+                        }
                         destinationEP->Type = ppp::app::protocol::AddressType::IPv4;
                     }
                     elif(address.is_v6()) {
+                        if (address.is_unspecified() || address.is_multicast()) {
+                            return NULLPTR;
+                        }
                         destinationEP->Type = ppp::app::protocol::AddressType::IPv6;
                     }
                     else {

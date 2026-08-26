@@ -106,26 +106,17 @@ namespace ppp
                 return false;
             }
             
-            bool any = false;
-            boost::asio::ip::address bind_ips[] = { address, boost::asio::ip::address_v4::any(), boost::asio::ip::address_v6::any() };
-            for (boost::asio::ip::address& bind_ip : bind_ips) 
+            // Bind exactly the requested address.  Falling back to an
+            // unspecified address can silently expose a loopback proxy on
+            // every interface when the requested bind fails.
+            if (!Socket::OpenAcceptor(*server_, address, localPort, backlog, false, false, true))
             {
-                any = Socket::OpenAcceptor(*server_, bind_ip, localPort, backlog, false, false);
-                if (any)
-                {
-                    in_ = bind_ip.is_v4();
-                    break;
-                }
-
                 server_->close(ec);
-                if (ec)
-                {
-                    return false;
-                }
+                return false;
             }
 
-            any = any && Next();
-            return any;
+            in_ = address.is_v4();
+            return Next();
         }
 
         void UnixSocketAcceptor::Dispose() noexcept

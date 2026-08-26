@@ -7,6 +7,8 @@ namespace ppp {
     namespace darwin {
         namespace ipv6 {
             namespace auxiliary {
+                bool            PrepareServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept;
+                void            FinalizeServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept;
                 ppp::string     ComputeNetworkAddress(const boost::asio::ip::address_v6& address, int prefix_length) noexcept;
                 void            ReadPrimaryDefaultRoute(ppp::string& interface_name, ppp::string& gateway) noexcept;
                 bool            SetRoute(const ppp::string& ifrName, const ppp::string& addressIP, int prefix_length, const ppp::string& gw) noexcept;

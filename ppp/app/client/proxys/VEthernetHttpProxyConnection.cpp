@@ -18,6 +18,89 @@ namespace ppp {
     namespace app {
         namespace client {
             namespace proxys {
+                namespace {
+                    static constexpr int HTTP_MAX_HEADER_BYTES = 64 * 1024;
+
+                    bool ParseHttpHostPort(const ppp::string& input,
+                        ppp::string& host, int& port, int default_port) noexcept {
+                        host.clear();
+                        port = default_port;
+
+                        ppp::string value = LTrim(RTrim(input));
+                        if (value.empty()) {
+                            return false;
+                        }
+
+                        auto parse_port = [](const ppp::string& text, int& output) noexcept -> bool {
+                            if (text.empty()) {
+                                return false;
+                            }
+                            int parsed = 0;
+                            for (char c : text) {
+                                if (c < '0' || c > '9') {
+                                    return false;
+                                }
+                                parsed = parsed * 10 + (c - '0');
+                                if (parsed > ppp::net::IPEndPoint::MaxPort) {
+                                    return false;
+                                }
+                            }
+                            if (parsed <= ppp::net::IPEndPoint::MinPort) {
+                                return false;
+                            }
+                            output = parsed;
+                            return true;
+                        };
+
+                        if (value[0] == '[') {
+                            std::size_t right = value.find(']');
+                            if (right <= 1) {
+                                return false;
+                            }
+                            host = value.substr(1, right - 1);
+                            if (right + 1 < value.size()) {
+                                if (value[right + 1] != ':') {
+                                    return false;
+                                }
+                                if (!parse_port(value.substr(right + 2), port)) {
+                                    return false;
+                                }
+                            }
+                            return !host.empty();
+                        }
+
+                        std::size_t first_colon = value.find(':');
+                        std::size_t last_colon = value.rfind(':');
+                        if (first_colon == ppp::string::npos) {
+                            host = value;
+                            return !host.empty();
+                        }
+
+                        // An unbracketed value with multiple colons is treated
+                        // as an IPv6 literal without an explicit port.  HTTP
+                        // authorities should use brackets when a port follows.
+                        if (first_colon != last_colon) {
+                            host = value;
+                            return !host.empty();
+                        }
+
+                        host = value.substr(0, first_colon);
+                        if (host.empty() || !parse_port(value.substr(first_colon + 1), port)) {
+                            return false;
+                        }
+                        return true;
+                    }
+
+                    ppp::string FormatHttpHostPort(const ppp::string& host, int port) noexcept {
+                        boost::system::error_code ec;
+                        boost::asio::ip::address address = StringToAddress(host.data(), ec);
+                        ppp::string formatted = address.is_v6() ? "[" + host + "]" : host;
+                        formatted += ":";
+                        formatted += stl::to_string<ppp::string>(port);
+                        return formatted;
+                    }
+                }
+
                 class VEthernetHttpProxyConnectionStaticVariable final {
                 public:
                     typedef ppp::unordered_set<ppp::string>                         StringSet;
@@ -132,6 +215,10 @@ namespace ppp {
                         }
 
                         if (!protocol_array.Write(buffers, 0, bytes_transferred)) {
+                            return false;
+                        }
+
+                        if (protocol_array.GetPosition() > HTTP_MAX_HEADER_BYTES) {
                             return false;
                         }
 
@@ -283,16 +370,13 @@ namespace ppp {
                         return NULLPTR;
                     }
 
-                    int port = PPP_HTTP_SYS_PORT; 
-                    if (char* p = (char*)::strchr(host.data(), ':'); NULLPTR != p) {
-                        port = atoi(p + 1);
-                        if (port <= ppp::net::IPEndPoint::MinPort || port > ppp::net::IPEndPoint::MaxPort) {
-                            port = PPP_HTTP_SYS_PORT;
-                        }
-
-                        *p = '\x0';
-                        host = host.data();
+                    int port = protocolRoot->TunnelMode ? PPP_HTTPS_SYS_PORT : PPP_HTTP_SYS_PORT;
+                    ppp::string parsed_host;
+                    if (!ParseHttpHostPort(host, parsed_host, port,
+                        protocolRoot->TunnelMode ? PPP_HTTPS_SYS_PORT : PPP_HTTP_SYS_PORT)) {
+                        return NULLPTR;
                     }
+                    host = std::move(parsed_host);
 
                     return VEthernetLocalProxyConnection::GetAddressEndPointByProtocol(host, port);
                 }
@@ -433,9 +517,13 @@ namespace ppp {
                     }
 
                     const ppp::string& host = protocolRoot->Host;
-                    if (host.rfind(':') == ppp::string::npos) {
-                        protocolRoot->Host = host + ":80";
+                    ppp::string parsed_host;
+                    int parsed_port = protocolRoot->TunnelMode ? PPP_HTTPS_SYS_PORT : PPP_HTTP_SYS_PORT;
+                    if (!ParseHttpHostPort(host, parsed_host, parsed_port,
+                        protocolRoot->TunnelMode ? PPP_HTTPS_SYS_PORT : PPP_HTTP_SYS_PORT)) {
+                        return false;
                     }
+                    protocolRoot->Host = FormatHttpHostPort(parsed_host, parsed_port);
 
                     return true;
                 }
@@ -448,12 +536,8 @@ namespace ppp {
                             continue;
                         }
 
-                        size_t n = j + 2;
-                        if (n >= str.size()) {
-                            continue;
-                        }
-
-                        ppp::string left = str.substr(0, j); 
+                        ppp::string left = LTrim(RTrim(str.substr(0, j)));
+                        ppp::string value = LTrim(str.substr(j + 1));
                         for (;;) {
                             auto tail = gStaticVariable->proxyHeaderToAgentHeader.find(ToUpper(left));
                             auto endl = gStaticVariable->proxyHeaderToAgentHeader.end();
@@ -468,7 +552,7 @@ namespace ppp {
                             continue;
                         }
                         else {
-                            s[left] = str.substr(n);
+                            s[left] = value;
                         }
                     }
                     

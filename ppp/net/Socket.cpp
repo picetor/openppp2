@@ -829,7 +829,8 @@ namespace ppp {
             int                                                     listenPort,
             int                                                     backlog,
             bool                                                    fastOpen,
-            bool                                                    noDelay) noexcept {
+            bool                                                    noDelay,
+            bool                                                    dualStack) noexcept {
             typedef ppp::net::IPEndPoint IPEndPoint;
 
             if (listenPort < IPEndPoint::MinPort || listenPort > IPEndPoint::MaxPort) {
@@ -854,6 +855,11 @@ namespace ppp {
             }
             else {
                 acceptor_.open(boost::asio::ip::tcp::v6(), ec);
+                if (!ec && dualStack) {
+                    // The local proxy deliberately uses one IPv6 loopback
+                    // listener for both IPv6 and IPv4 localhost clients.
+                    acceptor_.set_option(boost::asio::ip::v6_only(false), ec);
+                }
             }
 
             if (ec) {

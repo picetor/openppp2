@@ -38,6 +38,14 @@
 #include <cmath>
 #include <memory>
 #include <cstdlib>
+#include <cstdarg>
+#include <atomic>
+#include <cctype>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
 
 #include <boost/stacktrace.hpp>
 #include <ppp/text/Encoding.h>
@@ -1178,26 +1186,228 @@ namespace ppp {
     }
 }
 
+namespace ppp { namespace diagnostics {
+    namespace {
+        std::atomic<int> g_log_level{ static_cast<int>(LogLevel::Error) };
+
+        bool EqualsIgnoreCase(const char* value, const char* expected) noexcept {
+            if (NULLPTR == value || NULLPTR == expected) return false;
+            while (*value != '\0' && *expected != '\0') {
+                const unsigned char lhs = static_cast<unsigned char>(*value++);
+                const unsigned char rhs = static_cast<unsigned char>(*expected++);
+                if (std::tolower(lhs) != std::tolower(rhs)) return false;
+            }
+            return *value == '\0' && *expected == '\0';
+        }
+
+        LogLevel LevelFromTag(const char* tag) noexcept {
+            if (EqualsIgnoreCase(tag, "DEBUG")) return LogLevel::Debug;
+            if (EqualsIgnoreCase(tag, "INFO"))  return LogLevel::Info;
+            if (EqualsIgnoreCase(tag, "WARN") || EqualsIgnoreCase(tag, "WARNING")) return LogLevel::Warn;
+            if (EqualsIgnoreCase(tag, "NONE"))  return LogLevel::None;
+            return LogLevel::Error;
+        }
+    }
+
+    LogLevel ParseLogLevel(const char* value) noexcept {
+        if (EqualsIgnoreCase(value, "none") || EqualsIgnoreCase(value, "off")) return LogLevel::None;
+        if (EqualsIgnoreCase(value, "error") || EqualsIgnoreCase(value, "err")) return LogLevel::Error;
+        if (EqualsIgnoreCase(value, "warn") || EqualsIgnoreCase(value, "warning")) return LogLevel::Warn;
+        if (EqualsIgnoreCase(value, "info")) return LogLevel::Info;
+        if (EqualsIgnoreCase(value, "debug")) return LogLevel::Debug;
+        return LogLevel::Error;
+    }
+
+    const char* LogLevelName(LogLevel level) noexcept {
+        switch (level) {
+            case LogLevel::None:  return "none";
+            case LogLevel::Error: return "error";
+            case LogLevel::Warn:  return "warn";
+            case LogLevel::Info:  return "info";
+            case LogLevel::Debug: return "debug";
+        }
+        return "error";
+    }
+
+    bool IsLogLevelEnabled(LogLevel level) noexcept {
+        const int configured = g_log_level.load(std::memory_order_relaxed);
+        const int requested = static_cast<int>(level);
+        return requested > static_cast<int>(LogLevel::None) && requested <= configured;
+    }
+
+    void SetLogLevel(int level) noexcept {
+        if (level < static_cast<int>(LogLevel::None)) level = static_cast<int>(LogLevel::None);
+        if (level > static_cast<int>(LogLevel::Debug)) level = static_cast<int>(LogLevel::Debug);
+        g_log_level.store(level, std::memory_order_relaxed);
+    }
+
+    int GetLogLevel() noexcept {
+        return g_log_level.load(std::memory_order_relaxed);
+    }
+}}
+
 #if defined(_ANDROID)
 namespace ppp { namespace diagnostics {
-    // DEBUG default: preserve the previous always-on behaviour until the App
-    // applies its own logLevel via libopenppp2.set_log_level().
-    int g_log_level = 4;
-
     int LogPrint(int level, const char* tag, const char* fmt, ...) noexcept {
-        // Map Android log priorities (VERBOSE=2, DEBUG=3, INFO=4, WARN=5,
-        // ERROR=6, FATAL=7) to the App LogLevel thresholds (0=NONE, 1=ERROR,
-        // 2=WARNING, 3=INFO, 4=DEBUG).
-        static constexpr int threshold[8] = { 0, 0, 5, 4, 3, 2, 1, 1 };
-        const int index = level >= 2 && level <= 7 ? level : 4;
-        if (g_log_level < threshold[index]) {
-            return 0;
-        }
+        // Android priorities: VERBOSE/DEBUG are debug, INFO is info, WARN is
+        // warn and ERROR/FATAL are error.  Keep the check here as a second
+        // line of defence for callers that do not use the LOG_* macros.
+        const LogLevel log_level = level >= ANDROID_LOG_ERROR ? LogLevel::Error :
+            (level == ANDROID_LOG_WARN ? LogLevel::Warn :
+                (level == ANDROID_LOG_INFO ? LogLevel::Info : LogLevel::Debug));
+        if (!IsLogLevelEnabled(log_level) || NULLPTR == fmt) return 0;
+
         va_list args;
         va_start(args, fmt);
         const int rc = __android_log_vprint(level, tag, fmt, args);
         va_end(args);
         return rc;
+    }
+}}
+#else
+namespace ppp { namespace diagnostics {
+    LogSinkHandler g_log_sink = NULLPTR;
+    namespace {
+        struct DesktopLogRecord final {
+            std::string tag;
+            std::string file;
+            std::string text;
+            int line = 0;
+        };
+
+        constexpr size_t LOG_QUEUE_CAPACITY = 8192;
+        std::mutex g_log_queue_mutex;
+        std::mutex g_log_output_mutex;
+        std::condition_variable g_log_not_empty;
+        std::condition_variable g_log_not_full;
+        std::condition_variable g_log_drained;
+        std::deque<DesktopLogRecord> g_log_queue;
+        bool g_log_worker_started = false;
+        bool g_log_processing = false;
+
+        void WriteDesktopLog(const char* tag, const char* file, int line, const char* text) noexcept {
+            std::lock_guard<std::mutex> lock(g_log_output_mutex);
+            const char* safe_tag = NULLPTR != tag ? tag : "ERROR";
+
+            // Feed the optional RPC log sink (Rust TUI log page) first.
+            if (NULLPTR != g_log_sink)
+            {
+                g_log_sink(safe_tag, NULLPTR != text ? text : "");
+            }
+
+            if (NULLPTR != ppp::g_log_stream)
+            {
+                fprintf(ppp::g_log_stream, "[%s][%s](%s:%d): %s\r\n",
+                    ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()),
+                    safe_tag,
+                    NULLPTR != file ? file : "?",
+                    line,
+                    NULLPTR != text ? text : "");
+            }
+        }
+
+        void LogWorker() noexcept {
+            for (;;) {
+                DesktopLogRecord record;
+                {
+                    std::unique_lock<std::mutex> lock(g_log_queue_mutex);
+                    g_log_not_empty.wait(lock, []() noexcept { return !g_log_queue.empty(); });
+                    record = std::move(g_log_queue.front());
+                    g_log_queue.pop_front();
+                    g_log_processing = true;
+                    g_log_not_full.notify_one();
+                }
+
+                WriteDesktopLog(record.tag.c_str(), record.file.c_str(), record.line, record.text.c_str());
+
+                {
+                    std::lock_guard<std::mutex> lock(g_log_queue_mutex);
+                    g_log_processing = false;
+                    if (g_log_queue.empty()) {
+                        g_log_drained.notify_all();
+                    }
+                }
+            }
+        }
+
+        bool StartLogWorkerLocked() noexcept {
+            if (g_log_worker_started) return true;
+            try {
+                std::thread(LogWorker).detach();
+                g_log_worker_started = true;
+                return true;
+            }
+            catch (...) {
+                return false;
+            }
+        }
+
+        void EnqueueDesktopLog(const char* tag, const char* file, int line, const char* text) noexcept {
+            DesktopLogRecord record;
+            try {
+                record.tag = NULLPTR != tag ? tag : "ERROR";
+                record.file = NULLPTR != file ? file : "?";
+                record.text = NULLPTR != text ? text : "";
+                record.line = line;
+            }
+            catch (...) {
+                // Preserve the line if the queue record cannot be allocated.
+                WriteDesktopLog(tag, file, line, text);
+                return;
+            }
+
+            std::unique_lock<std::mutex> lock(g_log_queue_mutex);
+            if (!StartLogWorkerLocked()) {
+                lock.unlock();
+                // A thread creation failure must not silently discard an
+                // enabled core log; fall back to the synchronous sink.
+                WriteDesktopLog(tag, file, line, text);
+                return;
+            }
+
+            while (g_log_queue.size() >= LOG_QUEUE_CAPACITY) {
+                g_log_not_full.wait(lock);
+            }
+            g_log_queue.emplace_back(std::move(record));
+            lock.unlock();
+            g_log_not_empty.notify_one();
+        }
+    }
+
+    void SetLogSink(LogSinkHandler sink) noexcept {
+        std::lock_guard<std::mutex> lock(g_log_output_mutex);
+        g_log_sink = sink;
+    }
+
+    void SetLogStream(FILE* stream) noexcept {
+        std::lock_guard<std::mutex> lock(g_log_output_mutex);
+        ppp::g_log_stream = stream;
+    }
+
+    void LogPrintDesktop(const char* tag, const char* file, int line, const char* format, ...) noexcept {
+        if (NULLPTR == format || !IsLogLevelEnabled(LevelFromTag(tag))) return;
+
+        char text[2048];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(text, sizeof(text), format, args);
+        va_end(args);
+        text[sizeof(text) - 1] = '\x0';
+        EnqueueDesktopLog(tag, file, line, text);
+    }
+
+    void FlushLogs() noexcept {
+        {
+            std::unique_lock<std::mutex> lock(g_log_queue_mutex);
+            g_log_drained.wait(lock, []() noexcept {
+                return g_log_queue.empty() && !g_log_processing;
+            });
+        }
+
+        std::lock_guard<std::mutex> lock(g_log_output_mutex);
+        if (NULLPTR != ppp::g_log_stream) {
+            fflush(ppp::g_log_stream);
+        }
     }
 }}
 #endif

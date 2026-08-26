@@ -29,6 +29,11 @@
 #if defined(_LINUX)
 #include <common/unix/UnixAfx.h>
 #include <linux/ppp/tap/TapLinux.h>
+#elif defined(_WIN32)
+#include <windows/ppp/ipv6/IPv6Auxiliary.h>
+#include <windows/ppp/win32/network/NetworkInterface.h>
+#elif defined(_MACOS)
+#include <darwin/ppp/ipv6/IPv6Auxiliary.h>
 #endif
 
 #include <ppp/collections/Dictionary.h>
@@ -283,8 +288,20 @@ namespace ppp {
              * @return true on supported platforms; otherwise false.
              */
             bool VirtualEthernetSwitcher::SupportsIPv6DataPlane() noexcept {
-#if defined(_LINUX)
+#if defined(_LINUX) && !defined(_ANDROID)
                 return true;
+#elif defined(_WIN32) && !defined(_ANDROID)
+                // Windows uses the existing user-mode transit path for NAT66,
+                // matching the IPv4 server behavior.  Routed GUA still uses
+                // the platform forwarding path; no custom WFP driver is
+                // required for the default NAT66 mode.
+                return configuration_->server.ipv6.mode == AppConfiguration::IPv6Mode_Gua ||
+                    configuration_->server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66;
+#elif defined(_MACOS) && !defined(_ANDROID)
+                // macOS uses its dedicated pf anchor for NAT66 and the shared
+                // forwarding/route path for routed GUA.
+                return configuration_->server.ipv6.mode == AppConfiguration::IPv6Mode_Gua ||
+                    configuration_->server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66;
 #else
                 return false;
 #endif
@@ -1205,6 +1222,27 @@ namespace ppp {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteAddFailed);
                 }
                 return ok;
+#elif defined(_WIN32) || defined(_MACOS)
+                if (!ip.is_v6() || !IsIPv6ServerEnabled() || NULLPTR == ipv6_transit_tap_) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteAddFailed);
+                    return false;
+                }
+
+                std::string ip_std = ip.to_v6().to_string();
+                ppp::string ip_str(ip_std.data(), ip_std.size());
+                prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH,
+                    std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
+#if defined(_WIN32)
+                bool ok = ppp::win32::network::AddIPv6Route(
+                    ipv6_transit_tap_->GetInterfaceIndex(), ip_str, prefix_length, ppp::string(), 0);
+#else
+                bool ok = ppp::darwin::ipv6::auxiliary::SetRoute(
+                    ipv6_transit_tap_->GetId(), ip_str, prefix_length, ppp::string());
+#endif
+                if (!ok) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteAddFailed);
+                }
+                return ok;
 #else
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteAddFailed);
                 return false;
@@ -1246,6 +1284,27 @@ namespace ppp {
                 ppp::string ip_str(ip_std.data(), ip_std.size());
                 prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH, std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
                 bool ok = ppp::tap::TapLinux::DeleteRoute6(tap->GetId(), ip_str, prefix_length, ppp::string());
+                if (!ok) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteDeleteFailed);
+                }
+                return ok;
+#elif defined(_WIN32) || defined(_MACOS)
+                if (!ip.is_v6() || !IsIPv6ServerEnabled() || NULLPTR == ipv6_transit_tap_) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteDeleteFailed);
+                    return false;
+                }
+
+                std::string ip_std = ip.to_v6().to_string();
+                ppp::string ip_str(ip_std.data(), ip_std.size());
+                prefix_length = std::max<int>(ppp::ipv6::IPv6_MIN_PREFIX_LENGTH,
+                    std::min<int>(ppp::ipv6::IPv6_MAX_PREFIX_LENGTH, prefix_length));
+#if defined(_WIN32)
+                bool ok = ppp::win32::network::DeleteIPv6Route(
+                    ipv6_transit_tap_->GetInterfaceIndex(), ip_str, prefix_length, ppp::string());
+#else
+                bool ok = ppp::darwin::ipv6::auxiliary::DeleteRoute(
+                    ipv6_transit_tap_->GetId(), ip_str, prefix_length, ppp::string());
+#endif
                 if (!ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitRouteDeleteFailed);
                 }
@@ -1300,6 +1359,12 @@ namespace ppp {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyAddFailed);
                 }
                 return ok;
+#elif defined(_WIN32) || defined(_MACOS)
+                // Routed GUA mode does not require on-link neighbor proxying:
+                // the upstream router must route the delegated prefix to this
+                // host.  On-link GUA remains an explicit unsupported capability.
+                (void)ip;
+                return true;
 #else
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyAddFailed);
                 return false;
@@ -1325,6 +1390,9 @@ namespace ppp {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyDeleteFailed);
                 }
                 return ok;
+#elif defined(_WIN32) || defined(_MACOS)
+                (void)ip;
+                return true;
 #else
                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6NeighborProxyDeleteFailed);
                 return false;
@@ -2030,6 +2098,19 @@ namespace ppp {
              *       handlers for hundreds of milliseconds during startup.
              */
             bool VirtualEthernetSwitcher::Open(const ppp::string& firewall_rules) noexcept {
+                const AppConfiguration::IPv6Mode configured_ipv6_mode = configuration_->server.ipv6.mode;
+                const bool ipv6_configured = configured_ipv6_mode == AppConfiguration::IPv6Mode_Nat66 ||
+                    configured_ipv6_mode == AppConfiguration::IPv6Mode_Gua;
+                if (ipv6_configured && !SupportsIPv6DataPlane()) {
+                    const ppp::diagnostics::ErrorCode error = configured_ipv6_mode == AppConfiguration::IPv6Mode_Nat66
+                        ? ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable
+                        : ppp::diagnostics::ErrorCode::PlatformNotSupportGUAMode;
+                    ppp::diagnostics::SetLastErrorCode(error);
+                    ipv6_runtime_state_.store(3, std::memory_order_release);
+                    ipv6_runtime_cause_.store(static_cast<uint32_t>(error), std::memory_order_release);
+                    return false;
+                }
+
                 // Narrow critical section: guard check + collection reset only.
                 {
                     SynchronizedObjectScope scope(syncobj_);
@@ -2055,12 +2136,18 @@ namespace ppp {
                     OpenDatagramSocket() &&
                     OpenIPv6NeighborProxyIfNeed();
 
-                // When the IPv6 transit TAP is up, configure kernel-level IPv6 forwarding
-                // and ip6tables NAT66 MASQUERADE / FORWARD rules so client ULA traffic
-                // can reach the public IPv6 internet.
+                // When the IPv6 transit interface is up, let the platform helper
+                // prepare forwarding and any supported egress backend.  Linux
+                // installs its ip6tables/NAT66 rules here; Windows NAT66 keeps
+                // the user-mode transit path aligned with the IPv4 backend.
                 if (ok && IsIPv6ServerEnabled()) {
                     ppp::string transit_ifname = NULLPTR != ipv6_transit_tap_ ? ipv6_transit_tap_->GetId() : tun_name_;
-                    ppp::ipv6::auxiliary::PrepareServerEnvironment(configuration_, preferred_nic_, transit_ifname);
+#if defined(_WIN32)
+                    if (NULLPTR != ipv6_transit_tap_ && ipv6_transit_tap_->GetInterfaceIndex() >= 0) {
+                        transit_ifname = stl::to_string<ppp::string>(ipv6_transit_tap_->GetInterfaceIndex());
+                    }
+#endif
+                    ok = ppp::ipv6::auxiliary::PrepareServerEnvironment(configuration_, preferred_nic_, transit_ifname);
                 }
 
                 // Configure the IPv4 lease pool from configuration.
@@ -2312,13 +2399,20 @@ namespace ppp {
             }
 
             /**
-             * @brief Opens and configures Linux TAP used for IPv6 transit dataplane.
-             * @return true when transit TAP is ready or not required.
+             * @brief Opens and configures the platform IPv6 transit interface.
+             * @return true when transit is ready or not required.
              */
             bool VirtualEthernetSwitcher::OpenIPv6TransitIfNeed() noexcept {
-#if defined(_LINUX)
+#if (defined(_LINUX) || defined(_WIN32) || defined(_MACOS)) && !defined(_ANDROID)
                 const auto& ipv6 = configuration_->server.ipv6;
                 AppConfiguration::IPv6Mode mode = ipv6.mode;
+                const bool configured_ipv6 = mode == AppConfiguration::IPv6Mode_Nat66 || mode == AppConfiguration::IPv6Mode_Gua;
+                if (configured_ipv6 && !SupportsIPv6DataPlane()) {
+                    ppp::diagnostics::SetLastErrorCode(mode == AppConfiguration::IPv6Mode_Nat66
+                        ? ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable
+                        : ppp::diagnostics::ErrorCode::PlatformNotSupportGUAMode);
+                    return false;
+                }
                 bool enable_transit = IsIPv6ServerEnabled() && (mode == AppConfiguration::IPv6Mode_Nat66 || mode == AppConfiguration::IPv6Mode_Gua);
                 if (!enable_transit) {
                     return true;
@@ -2383,12 +2477,37 @@ namespace ppp {
                     return false;
                 }
 
-                bool address_ok = ppp::tap::TapLinux::SetIPv6Address(tap->GetId(), transit_ip, prefix_length);
+                bool address_ok = false;
+#if defined(_LINUX)
+                address_ok = ppp::tap::TapLinux::SetIPv6Address(tap->GetId(), transit_ip, prefix_length);
+#else
+                // Reuse the platform IPv6 address helper.  On Windows this uses
+                // IP Helper/netsh; on macOS it uses the utun interface name and
+                // the platform route/address helper.  A local state object is
+                // sufficient because the server owns cleanup through its route
+                // and interface lifecycle.
+                ppp::ipv6::auxiliary::ClientContext address_context;
+                address_context.Tap = tap.get();
+                address_context.InterfaceIndex = tap->GetInterfaceIndex();
+                address_context.InterfaceName = tap->GetId();
+                ppp::ipv6::auxiliary::ClientState address_state;
+                address_ok = ppp::ipv6::auxiliary::ApplyClientAddress(
+                    address_context,
+                    boost::asio::ip::address(transit),
+                    prefix_length,
+                    mode == AppConfiguration::IPv6Mode_Gua,
+                    address_state);
+#endif
                 if (!address_ok) {
                     ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitTapOpenFailed);
                     tap->Dispose();
                     return false;
                 }
+
+                tap->IPv6Address = boost::asio::ip::address(transit);
+                tap->IPv6GatewayServer = transit_gateway;
+                tap->IPv6SubmaskAddress = boost::asio::ip::address(
+                    ppp::ipv6::ComputeNetworkAddress(transit, ipv6.prefix_length));
 
 
                 tap->PacketInput =
@@ -2414,6 +2533,8 @@ namespace ppp {
                 ipv6_transit_tap_ = tap;
 #else
                 if (IsIPv6ServerEnabled()) {
+                    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6TransitTapOpenFailed);
+                    return false;
                 }
 #endif
                 return true;
@@ -3509,6 +3630,9 @@ namespace ppp {
                 TickAllConnections(now);
                 TickIPv6Leases(now);
                 RefreshIPv6NeighborProxyIfNeed();
+                // Platform helpers are re-entered only for desktop NAT/GUA
+                // state recovery; Linux neighbor-proxy refresh remains the
+                // specialized path above.
 
                 VirtualEthernetNamespaceCachePtr cache = namespace_cache_;
                 if (NULLPTR != cache) {

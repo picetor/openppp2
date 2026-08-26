@@ -1,0 +1,53 @@
+; OpenPPP2 WFP NAT66 callout driver
+; The package must be signed with an EV/attestation-capable certificate before
+; installation on production Windows systems.  Do not ship this INF unsigned.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = NetService
+ClassGuid   = {4d36e974-e325-11ce-bfc1-08002be10318}
+Provider    = %OpenPPP2%
+CatalogFile = OpenPpp2WfpNat66.cat
+DriverVer   = 08/14/2026,1.0.0.0
+
+[DefaultInstall.NTamd64]
+CopyFiles = DriverCopyFiles
+AddReg    = DriverAddReg
+
+[DefaultInstall.NTarm64]
+CopyFiles = DriverCopyFiles
+AddReg    = DriverAddReg
+
+[DefaultInstall.NTamd64.Services]
+AddService = OpenPpp2WfpNat66,0x00000002,ServiceInstall
+
+[DefaultInstall.NTarm64.Services]
+AddService = OpenPpp2WfpNat66,0x00000002,ServiceInstall
+
+[DriverCopyFiles]
+OpenPpp2WfpNat66.sys
+
+[SourceDisksFiles]
+OpenPpp2WfpNat66.sys = 1
+
+[SourceDisksNames]
+1 = %DiskName%,,
+
+[DriverAddReg]
+HKR,,"DisplayName",0x00000000,%ServiceName%
+HKR,,"Description",0x00000000,%ServiceDescription%
+
+[ServiceInstall]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\OpenPpp2WfpNat66.sys
+LoadOrderGroup = PNP Filter
+
+[Strings]
+OpenPPP2          = "OpenPPP2"
+DiskName          = "OpenPPP2 WFP NAT66 Driver Disk"
+ServiceName       = "OpenPPP2 IPv6 NAT66 WFP Callout"
+ServiceDescription= "Signed OpenPPP2 stateful IPv6 NAT66 WFP callout"

@@ -673,6 +673,7 @@ namespace ppp {
                     error.clear();
                     rules_.clear();
                     static_networks_.clear();
+                    rule_summaries_.clear();
                     direct_dns_.clear();
                     direct_dns_local_ = false;
                     outbound_configurations_.clear();
@@ -819,6 +820,20 @@ namespace ppp {
                             error = "unsupported geo rule type at line " + stl::to_string<ppp::string>(line_number + 1) + ": " + type;
                             return false;
                         }
+
+                        RuleSummary summary;
+                        summary.type = type;
+                        summary.value = rule.value;
+                        if (rule.type == RuleType::Geosite) {
+                            for (const ppp::string& attribute : rule.attributes) {
+                                summary.value += "@";
+                                summary.value += attribute;
+                            }
+                        }
+                        summary.action = rule.action;
+                        summary.priority = rule.priority;
+                        summary.outbound = rule.outbound;
+                        rule_summaries_.emplace_back(std::move(summary));
                         rules_.emplace_back(std::move(rule));
                     }
 

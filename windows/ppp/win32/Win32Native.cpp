@@ -49,28 +49,60 @@ namespace ppp
     {
         static Win32Native::ShutdownApplicationEventHandler SHUTDOWN_APPLICATION_EVENT;
 
-        static ppp::string Seh_NewDumpFileName() noexcept
+        // Writes "<exe-without-ext>-YYYYMMDD-HHMMSS.dmp" as an absolute path
+        // into `out`.  Pure stack/Win32 implementation: the crash handler may
+        // run with a corrupted heap or an exhausted stack, so no ppp::string,
+        // no heap allocation, no CRT file I/O here.
+        static void Seh_NewDumpFileName(char* out, size_t out_size) noexcept
         {
-            ppp::string path = ppp::GetExecutionFileName();
-            std::size_t index = path.rfind(".");
-            if (index != ppp::string::npos)
+            if (out_size < 8)
             {
-                path = path.substr(0, index);
+                return;
+            }
+
+            char module[MAX_PATH];
+            DWORD n = GetModuleFileNameA(NULLPTR, module, sizeof(module));
+            if (n == 0 || n >= sizeof(module))
+            {
+                strcpy_s(module, "ppp");
+            }
+            else
+            {
+                char* dot = strrchr(module, '.');
+                if (dot != NULLPTR)
+                {
+                    *dot = '\0';
+                }
             }
 
             struct tm tm_;
             time_t datetime = time(NULLPTR);
             localtime_s(&tm_, &datetime);
 
-            char sz[1000];
+            char sz[64];
             sprintf_s(sz, sizeof(sz), "%04d%02d%02d-%02d%02d%02d", 1900 + tm_.tm_year, 1 + tm_.tm_mon, tm_.tm_mday, tm_.tm_hour, tm_.tm_min, tm_.tm_sec);
 
-            path = path + "-" + sz + ".dmp";
-            path = "./" + path;
-            path = ppp::io::File::RewritePath(path.data());
-            path = ppp::io::File::GetFullPath(path.data());
+            char file_name[MAX_PATH + 128];
+            sprintf_s(file_name, sizeof(file_name), "%s-%s.dmp", module, sz);
 
-            return path;
+            DWORD full_len = GetFullPathNameA(file_name, (DWORD)out_size, out, NULLPTR);
+            if (full_len == 0 || full_len >= out_size)
+            {
+                strcpy_s(out, out_size, file_name);
+            }
+        }
+
+        struct Seh_DumpContext
+        {
+            HANDLE hFile;
+            MINIDUMP_EXCEPTION_INFORMATION* exceptionParam;
+        };
+
+        static DWORD WINAPI Seh_WriteMinidumpThread(LPVOID param) noexcept
+        {
+            const Seh_DumpContext* ctx = (const Seh_DumpContext*)param;
+            return MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+                ctx->hFile, MiniDumpNormal, ctx->exceptionParam, NULLPTR, NULLPTR) ? 1 : GetLastError();
         }
 
         static LONG WINAPI Seh_UnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) noexcept
@@ -81,7 +113,52 @@ namespace ppp
             // HandleException to call any previous handler or return
             // EXCEPTION_CONTINUE_SEARCH on the exception thread, allowing it to appear
             // as though this handler were not present at all.
-            HANDLE hFile = CreateFileA(Seh_NewDumpFileName().data(), GENERIC_WRITE, 0, NULLPTR, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULLPTR);
+            //
+            // Crash facts are written to a <name>.dmp.txt file *before* the dump is
+            // attempted: MiniDumpWriteDump with MiniDumpWithFullMemory can fail on its
+            // own (heap corruption, stack exhaustion, low memory) and previously left
+            // a 0-byte .dmp with no diagnostics at all.  The facts file uses only the
+            // stack (no heap allocation) so it survives exactly those crashes.
+            char dump_path[MAX_PATH + 128];
+            char info_path[MAX_PATH + 160];
+            Seh_NewDumpFileName(dump_path, sizeof(dump_path));
+            sprintf_s(info_path, sizeof(info_path), "%s.txt", dump_path);
+
+            char facts[1024];
+            int facts_len = 0;
+            {
+                EXCEPTION_RECORD* record = exceptionInfo != NULLPTR ? exceptionInfo->ExceptionRecord : NULLPTR;
+                facts_len = sprintf_s(facts, sizeof(facts),
+                    "exception_code=0x%08lX\r\n"
+                    "exception_flags=0x%08lX\r\n"
+                    "exception_address=0x%p\r\n",
+                    record != NULLPTR ? record->ExceptionCode : 0UL,
+                    record != NULLPTR ? record->ExceptionFlags : 0UL,
+                    record != NULLPTR ? record->ExceptionAddress : NULLPTR);
+                if (record != NULLPTR && record->NumberParameters > 0 && facts_len > 0)
+                {
+                    int n = sprintf_s(facts + facts_len, sizeof(facts) - (size_t)facts_len,
+                        "exception_param0=0x%p\r\n",
+                        (void*)record->ExceptionInformation[0]);
+                    if (n > 0)
+                    {
+                        facts_len += n;
+                    }
+                }
+                if (facts_len < 0)
+                {
+                    facts_len = 0;
+                }
+            }
+
+            HANDLE hInfo = CreateFileA(info_path, GENERIC_WRITE, 0, NULLPTR, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULLPTR);
+            if (hInfo != INVALID_HANDLE_VALUE)
+            {
+                DWORD written = 0;
+                WriteFile(hInfo, facts, (DWORD)facts_len, &written, NULLPTR);
+            }
+
+            HANDLE hFile = CreateFileA(dump_path, GENERIC_WRITE, 0, NULLPTR, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULLPTR);
             if (hFile != INVALID_HANDLE_VALUE)
             {
                 MINIDUMP_EXCEPTION_INFORMATION exceptionParam;
@@ -89,8 +166,57 @@ namespace ppp
                 exceptionParam.ExceptionPointers = exceptionInfo;
                 exceptionParam.ClientPointers = TRUE;
 
-                MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpWithFullMemory, &exceptionParam, NULLPTR, NULLPTR);
+                BOOL bOK = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpWithFullMemory, &exceptionParam, NULLPTR, NULLPTR);
+                DWORD full_error = bOK ? 0 : GetLastError();
+                if (!bOK)
+                {
+                    // Full-memory dumps commonly fail when the crash is heap
+                    // corruption or stack exhaustion (the dump routine needs
+                    // both).  Retry with a minimal dump on a fresh thread with
+                    // its own large stack so the faulting thread is captured.
+                    SetFilePointer(hFile, 0, NULLPTR, FILE_BEGIN);
+                    SetEndOfFile(hFile);
+
+                    Seh_DumpContext ctx;
+                    ctx.hFile = hFile;
+                    ctx.exceptionParam = &exceptionParam;
+
+                    DWORD thread_id = 0;
+                    HANDLE hThread = CreateThread(NULLPTR, 1u << 21, Seh_WriteMinidumpThread, &ctx, 0, &thread_id);
+
+                    DWORD retry_result = 0;
+                    if (hThread != NULLPTR)
+                    {
+                        WaitForSingleObject(hThread, 15000);
+                        GetExitCodeThread(hThread, &retry_result);
+                        CloseHandle(hThread);
+                    }
+
+                    char note[256];
+                    int note_len = sprintf_s(note, sizeof(note),
+                        "minidump_full_memory=failed error=0x%08lX\r\n"
+                        "minidump_normal=%s\r\n",
+                        full_error,
+                        retry_result == 1 ? "ok" : "failed");
+                    if (note_len > 0 && hInfo != INVALID_HANDLE_VALUE)
+                    {
+                        DWORD written = 0;
+                        WriteFile(hInfo, note, (DWORD)note_len, &written, NULLPTR);
+                    }
+                }
+                else if (hInfo != INVALID_HANDLE_VALUE)
+                {
+                    static const char ok[] = "minidump_full_memory=ok\r\n";
+                    DWORD written = 0;
+                    WriteFile(hInfo, ok, (DWORD)(sizeof(ok) - 1), &written, NULLPTR);
+                }
+
                 CloseHandle(hFile);
+            }
+
+            if (hInfo != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(hInfo);
             }
 
             // The handler either took care of the invalid parameter problem itself,

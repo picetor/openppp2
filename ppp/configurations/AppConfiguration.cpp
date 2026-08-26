@@ -34,18 +34,6 @@ using ppp::threading::Executors;
 
 namespace {
     /**
-     * @brief Indicates whether server-side IPv6 data-plane support is available on this platform.
-     * @return True on Linux builds, otherwise false.
-     */
-    static bool                                             SupportsServerIPv6DataPlane() noexcept {
-#if defined(_LINUX) && !defined(_ANDROID)
-        return true;
-#else
-        return false;
-#endif
-    }
-
-    /**
      * @brief Parses textual IPv6 mode into enum value.
      * @param mode Text mode value.
      * @return Parsed IPv6 mode; defaults to none.
@@ -825,20 +813,14 @@ namespace ppp {
             config.server.ipv6.mode = NormalizeIPv6Mode(config.server.ipv6.mode);
             bool ipv6_server_enabled = config.server.ipv6.mode == AppConfiguration::IPv6Mode_Nat66 ||
                 config.server.ipv6.mode == AppConfiguration::IPv6Mode_Gua;
-            // A client profile (client.server configured) must keep the server.ipv6
-            // section intact: it is the authoritative signal that the remote server
-            // carries an IPv6 data plane. Disabling it on Windows/macOS/Android
-            // clients made the client believe the server has no IPv6 and caused all
-            // tunnel IPv6 traffic to be dropped. The platform capability check below
-            // only gates server-side hosting on THIS host (no client.server set).
-            const bool is_client_profile = !config.client.server.empty();
-            if (ipv6_server_enabled && !is_client_profile && !SupportsServerIPv6DataPlane()) {
-                // Platform does not support server-side IPv6 data plane (Linux-only feature).
-                // Silently disable IPv6 mode instead of failing config load, so that the same
-                // config file can be shared between Linux servers and Windows/macOS clients.
-                DisableServerIPv6(config);
-                ipv6_server_enabled = false;
-            }
+            // Keep the configured mode intact on every platform.  This field is
+            // authoritative only when this process is running as the server;
+            // a client learns the remote capability from the server's runtime
+            // Information extension.  A server profile is rejected explicitly
+            // by VirtualEthernetSwitcher::Open when the local provider cannot
+            // implement the requested mode.  Silently rewriting nat66/gua to
+            // none makes a shared configuration appear healthy while dropping
+            // IPv6 traffic without an actionable error.
 
             ppp::string ipv6_prefix;
             ParseIPv6Cidr(config.server.ipv6.cidr, ipv6_prefix, config.server.ipv6.prefix_length);

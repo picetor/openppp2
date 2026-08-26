@@ -299,7 +299,7 @@ namespace ppp {
                         return false;
                     }
 
-                    if (address_string.empty()) {
+                    if (address_string.empty() || address_string.size() > 255) {
                         return false;
                     }
 
@@ -1008,6 +1008,11 @@ namespace ppp {
             // ---------------------------------------------------------------------
             bool VirtualEthernetLinklayer::DoSendTo(const ITransmissionPtr& transmission, const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length, YieldContext& y) noexcept 
             {
+                return DoSendTo(transmission, sourceEP, ppp::string(), destinationEP, packet, packet_length, y);
+            }
+
+            bool VirtualEthernetLinklayer::DoSendTo(const ITransmissionPtr& transmission, const boost::asio::ip::udp::endpoint& sourceEP, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length, YieldContext& y) noexcept
+            {
                 if (NULLPTR == packet && packet_length != 0) {
                     return false;
                 }
@@ -1018,7 +1023,10 @@ namespace ppp {
 
                 MemoryStream ms;
                 if (ms.WriteByte(static_cast<Byte>(PacketAction_SENDTO))) {
-                    if (global::PACKET_IPEndPoint(ms, destinationEP)) {
+                    bool destination_ok = destinationHost.empty()
+                        ? global::PACKET_IPEndPoint(ms, destinationEP)
+                        : global::PACKET_IPEndPoint(ms, destinationHost, destinationEP.port());
+                    if (destination_ok) {
                         if (global::PACKET_IPEndPoint(ms, sourceEP)) {
                             if (ms.Write(packet, 0, packet_length)) {
                                 std::shared_ptr<Byte> buffer = ms.GetBuffer();

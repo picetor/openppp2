@@ -177,6 +177,7 @@ namespace ppp {
 #else
             bool ok = ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(packet.get(), length), y);
             if (!ok) {
+                LOG_DEBUG("ITcpipTransmission::ReadBytes: async_read failed, length=%d", length);
                 Dispose();
                 return NULLPTR;
             }

@@ -30,9 +30,13 @@ namespace ppp {
 
                 public:
                     std::shared_ptr<boost::asio::io_context>&                           GetContext()         noexcept { return context_; }
-                    std::shared_ptr<ppp::configurations::AppConfiguration>&             GetConfiguration()   noexcept { return configuration_; }
+                    std::shared_ptr<ppp::configurations::AppConfiguration>              GetConfiguration()   noexcept;
                     std::shared_ptr<VEthernetExchanger>                                 GetExchanger()       noexcept;
                     void                                                                SetExchanger(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
+                    // Apply the promoted main exchanger and, when its
+                    // client proxy endpoint changed, move the listener to
+                    // the new bind address/port as part of the same switch.
+                    bool                                                                ReconfigureExchanger(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
                     std::shared_ptr<ppp::threading::BufferswapAllocator>                GetBufferAllocator() noexcept;
                     boost::asio::ip::tcp::endpoint                                      GetLocalEndPoint()   noexcept;
                     virtual bool                                                        Open()               noexcept;

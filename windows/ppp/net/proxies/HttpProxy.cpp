@@ -23,6 +23,55 @@ namespace ppp
         {
             static constexpr const wchar_t* EXPERIMENTALQUICPROTOCOL_POLICIES_CHROME = L"Software\\Policies\\Google\\Chrome";
             static constexpr const wchar_t* EXPERIMENTALQUICPROTOCOL_POLICIES_EDGE = L"Software\\Policies\\Microsoft\\Edge";
+            static constexpr const wchar_t* INTERNET_SETTINGS_PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+            struct SystemProxyState final {
+                bool captured = false;
+                bool proxy_enable = false;
+                std::wstring proxy_server;
+                std::wstring proxy_override;
+                std::wstring auto_config_url;
+            };
+
+            static SystemProxyState g_system_proxy_state;
+
+            static void CaptureSystemProxyState() noexcept {
+                if (g_system_proxy_state.captured) {
+                    return;
+                }
+                bool ok = false;
+                g_system_proxy_state.proxy_enable =
+                    ppp::win32::GetRegistryValueDword(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyEnable", &ok) != 0;
+                g_system_proxy_state.proxy_server =
+                    ppp::win32::GetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyServer", &ok);
+                g_system_proxy_state.proxy_override =
+                    ppp::win32::GetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyOverride", &ok);
+                g_system_proxy_state.auto_config_url =
+                    ppp::win32::GetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"AutoConfigURL", &ok);
+                g_system_proxy_state.captured = true;
+            }
+
+            static bool RestoreSystemProxyState() noexcept {
+                if (!g_system_proxy_state.captured) {
+                    return true;
+                }
+                bool ok =
+                    ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyServer", g_system_proxy_state.proxy_server) &&
+                    ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyOverride", g_system_proxy_state.proxy_override) &&
+                    ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"AutoConfigURL", g_system_proxy_state.auto_config_url) &&
+                    ppp::win32::SetRegistryValueDword(HKEY_CURRENT_USER, INTERNET_SETTINGS_PATH,
+                        L"ProxyEnable", g_system_proxy_state.proxy_enable ? 1 : 0);
+                HttpProxy::RefreshSystemProxy();
+                g_system_proxy_state = SystemProxyState();
+                return ok;
+            }
 
             static bool STATIC_IsSupportExperimentalQuicProtocol(LPCWSTR path) noexcept
             {
@@ -65,7 +114,7 @@ namespace ppp
                 _bstr_t server_bstr(server.data());
 
                 ipi.dwAccessType = INTERNET_OPEN_TYPE_PROXY;
-                ipi.lpszProxy = bypass_bstr;
+                ipi.lpszProxy = server_bstr;
                 ipi.lpszProxyBypass = bypass_bstr;
 
                 bool b = InternetSetOption(NULLPTR, INTERNET_OPTION_PROXY, &ipi, sizeof(INTERNET_PROXY_INFO));
@@ -74,13 +123,15 @@ namespace ppp
 
             bool HttpProxy::SetSystemProxy(const ppp::string& server) noexcept
             {
-                return SetSystemProxy(server, "local");
+                // Do not bypass private networks here. The local proxy must
+                // see them so --bypass-mode=geo/ip/no controls the split.
+                return SetSystemProxy(server, "localhost;127.*;[::1]");
             }
 
             bool HttpProxy::SetSystemProxy(const ppp::string& server, const ppp::string& pac, bool enable) noexcept
             {
                 _bstr_t server_bstr(server.data());
-                _bstr_t pac_bstr(server.data());
+                _bstr_t pac_bstr(pac.data());
 
                 std::wstring server_wcs = server_bstr.GetBSTR();
                 std::wstring pac_wcs = pac_bstr.GetBSTR();
@@ -89,23 +140,31 @@ namespace ppp
 
             bool HttpProxy::SetSystemProxy(const std::wstring& server, const std::wstring& pac, bool enable) noexcept
             {
-                LPCWSTR PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+                if (!enable) {
+                    return RestoreSystemProxyState();
+                }
+
+                CaptureSystemProxyState();
+                LPCWSTR PATH = INTERNET_SETTINGS_PATH;
                 ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyServer", server);
-                ppp::win32::SetRegistryValueDword(HKEY_CURRENT_USER, PATH, L"ProxyEnable", enable ? 1 : 0);
+                ppp::win32::SetRegistryValueDword(HKEY_CURRENT_USER, PATH, L"ProxyEnable", 1);
                 ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"AutoConfigURL", pac);
 
                 RefreshSystemProxy();
-                ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyOverride", L"localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;172.32.*;192.168.*;<local>");
+                ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyOverride", L"localhost;127.*;[::1]");
                 RefreshSystemProxy();
 
-                if (!std::regex_match(ppp::win32::GetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyServer"), std::wregex(server)))
+                // Compare literally.  Treating an IPv6 proxy such as
+                // [::1]:8080 as a regular expression can throw or produce a
+                // false mismatch because of the brackets and colons.
+                if (ppp::win32::GetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyServer") != server)
                 {
                     ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyServer", server);
-                    ppp::win32::SetRegistryValueDword(HKEY_CURRENT_USER, PATH, L"ProxyEnable", enable ? 1 : 0);
+                    ppp::win32::SetRegistryValueDword(HKEY_CURRENT_USER, PATH, L"ProxyEnable", 1);
                     ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"AutoConfigURL", pac);
 
                     RefreshSystemProxy();
-                    ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyOverride", L"localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;172.32.*;192.168.*;<local>");
+                    ppp::win32::SetRegistryValueString(HKEY_CURRENT_USER, PATH, L"ProxyOverride", L"localhost;127.*;[::1]");
                     RefreshSystemProxy();
                 }
                 return true;

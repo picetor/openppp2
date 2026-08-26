@@ -30,10 +30,19 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address VEthernetSocksProxySwitcher::MyLocalEndPoint(int& bind_port) noexcept {
-                    std::shared_ptr<ppp::configurations::AppConfiguration>& configuration_ = GetConfiguration();
+                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration_ = GetConfiguration();
                     bind_port = configuration_->client.socks_proxy.port;
+                    if (configuration_->client.socks_proxy.bind.empty()) {
+                        // Keep the default listener loopback-only but dual-stack.
+                        return boost::asio::ip::address_v6::loopback();
+                    }
 
-                    return ppp::net::Ipep::ToAddress(configuration_->client.socks_proxy.bind, true);
+                    boost::system::error_code ec;
+                    boost::asio::ip::address address = StringToAddress(configuration_->client.socks_proxy.bind.data(), ec);
+                    if (ec) {
+                        bind_port = ppp::net::IPEndPoint::MinPort;
+                    }
+                    return address;
                 }
             }
         }

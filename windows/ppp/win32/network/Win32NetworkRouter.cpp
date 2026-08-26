@@ -502,6 +502,51 @@ namespace ppp
                 }
                 return true;
             }
+
+            bool Router::GetIPv6Forwarding(int interface_index, bool& value) noexcept
+            {
+                value = false;
+                if (interface_index < 0) {
+                    return false;
+                }
+
+                MIB_IPINTERFACE_ROW row;
+                ::InitializeIpInterfaceEntry(&row);
+                row.Family = AF_INET6;
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                DWORD result = ::GetIpInterfaceEntry(&row);
+                if (result != NO_ERROR) {
+                    return false;
+                }
+
+                value = row.ForwardingEnabled != FALSE;
+                return true;
+            }
+
+            bool Router::SetIPv6Forwarding(int interface_index, bool value) noexcept
+            {
+                if (interface_index < 0) {
+                    return false;
+                }
+
+                MIB_IPINTERFACE_ROW row;
+                ::InitializeIpInterfaceEntry(&row);
+                row.Family = AF_INET6;
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                DWORD result = ::GetIpInterfaceEntry(&row);
+                if (result != NO_ERROR) {
+                    return false;
+                }
+
+                row.ForwardingEnabled = value ? TRUE : FALSE;
+                result = ::SetIpInterfaceEntry(&row);
+                if (result != NO_ERROR) {
+                    LOG_ERROR("Router::SetIPv6Forwarding: failed, result=%lu, ifindex=%d, value=%d",
+                        result, interface_index, static_cast<int>(value));
+                    return false;
+                }
+                return true;
+            }
         }
     }
 }

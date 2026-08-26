@@ -60,6 +60,7 @@ namespace ppp {
                 bool                                                    IsPortAging(UInt64 now) noexcept { return disposed_ || now >= timeout_; }
                 virtual void                                            Dispose() noexcept;
                 virtual bool                                            SendTo(const void* packet, int packet_length, const boost::asio::ip::udp::endpoint& destinationEP) noexcept;
+                virtual bool                                            SendTo(const void* packet, int packet_length, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP) noexcept;
 
 #if defined(_ANDROID)
             public:  

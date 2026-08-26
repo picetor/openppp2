@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
+#include <atomic>
 
 #if !defined(NULL)
 #define NULL 0
@@ -24,8 +25,13 @@
 #endif
 #endif
 
-// Debug builds automatically enable verbose logging for LOG_DEBUG output.
-#if defined(_DEBUG) && !defined(PPP_LOG_VERBOSE)
+// Keep the existing extra diagnostic watchdogs/statistics Debug-only.  The
+// LOG_* macros below are deliberately independent from this switch and are
+// compiled in every build, then filtered at runtime by LogLevel.
+#if defined(_DEBUG) && !defined(PPP_DEBUG_DIAGNOSTICS)
+#define PPP_DEBUG_DIAGNOSTICS 1
+#endif
+#if defined(PPP_DEBUG_DIAGNOSTICS) && !defined(PPP_LOG_VERBOSE)
 #define PPP_LOG_VERBOSE 1
 #endif
 
@@ -880,28 +886,52 @@ extern "C" {
 #include <curl/easy.h>
 #endif
 
+namespace ppp { namespace diagnostics {
+    enum class LogLevel : int {
+        None  = 0,
+        Error = 1,
+        Warn  = 2,
+        Info  = 3,
+        Debug = 4,
+    };
+
+    LogLevel    ParseLogLevel(const char* value) noexcept;
+    const char* LogLevelName(LogLevel level) noexcept;
+    bool        IsLogLevelEnabled(LogLevel level) noexcept;
+    void        SetLogLevel(int level) noexcept;
+    int         GetLogLevel() noexcept;
+}}
+
 #if defined(_ANDROID)
 #include <android/log.h>
 #include <cstdarg>
 
 namespace ppp { namespace diagnostics {
-    // App-configured log verbosity mirroring io.nekohasekai.sagernet.LogLevel:
-    // 0=NONE, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG. Defaults to DEBUG so
-    // existing behaviour (all levels printed) is preserved until the App
-    // applies its own setting via libopenppp2.set_log_level().
-    extern int g_log_level;
-    inline void SetLogLevel(int level) noexcept { g_log_level = level < 0 ? 0 : (level > 4 ? 4 : level); }
-    inline int GetLogLevel() noexcept { return g_log_level; }
     int LogPrint(int level, const char* tag, const char* fmt, ...) noexcept;
 }}
 
-// 定义日志输出函数。所有级别经 ppp::diagnostics::LogPrint 统一路由，
-// 使抽屉日志视图遵循 App 内设置的日志级别。
+// A few Android bridge files still use the platform logger directly. Route
+// those calls through the same runtime filter so they cannot bypass the
+// native core log-level setting. LogPrint keeps the original printf ABI.
+#define __android_log_print ppp::diagnostics::LogPrint
+
 #define LOG_TAG (BOOST_BEAST_VERSION_STRING)
-#define LOG_INFO(...)               ppp::diagnostics::LogPrint(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOG_ERROR(...)              ppp::diagnostics::LogPrint(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOG_WARN(...)               ppp::diagnostics::LogPrint(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOG_DEBUG(...)              ppp::diagnostics::LogPrint(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOG_INFO(...) do { \
+    if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Info)) \
+        ppp::diagnostics::LogPrint(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); \
+} while (0)
+#define LOG_ERROR(...) do { \
+    if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Error)) \
+        ppp::diagnostics::LogPrint(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); \
+} while (0)
+#define LOG_WARN(...) do { \
+    if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Warn)) \
+        ppp::diagnostics::LogPrint(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); \
+} while (0)
+#define LOG_DEBUG(...) do { \
+    if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) \
+        ppp::diagnostics::LogPrint(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); \
+} while (0)
 #define LIBOPENPPP2_CLASSNAME       "supersocksr/ppp/android/c/libopenppp2"
 
 #if defined(_WIN32)
@@ -930,26 +960,38 @@ namespace ppp { namespace diagnostics {
 // Global log output stream – defaults to stdout, can be redirected via --log-file
 namespace ppp {
     extern FILE*                                        g_log_stream;
+
+    namespace diagnostics {
+        // Optional log sink hook: called for every desktop log line (from
+        // whatever thread logged it) BEFORE it is written to g_log_stream.
+        // The RPC server installs this to feed the Rust TUI log page.
+        typedef void (*LogSinkHandler)(const char* tag, const char* text) noexcept;
+        extern LogSinkHandler                           g_log_sink;
+        void                                            SetLogSink(LogSinkHandler sink) noexcept;
+        void                                            SetLogStream(FILE* stream) noexcept;
+        // Format and dispatch one desktop log line (time-prefixed output to
+        // g_log_stream plus the g_log_sink hook).
+        void                                            LogPrintDesktop(const char* tag, const char* file, int line, const char* format, ...) noexcept;
+        void                                            FlushLogs() noexcept;
+    }
 }
-#if defined(_WIN32)
-#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(ppp::g_log_stream, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
-#else   
-#define LOG_TAG(TAG, FORMAT, ...)   ::fprintf(ppp::g_log_stream, "[%s][" TAG "](%s:%d): " FORMAT "\r\n", ((char*)::ppp::GetCurrentTimeText<ppp::string>().data()), __FILE__, __LINE__, ##__VA_ARGS__)
-#endif
 
-#define LOG_ERROR(FORMAT, ...)      LOG_TAG("ERROR", FORMAT, ##__VA_ARGS__)
-
-// Release builds only report errors. Informational, warning, and debug
-// diagnostics are available in builds that explicitly enable verbose logging.
-#if defined(PPP_LOG_VERBOSE)
-#define LOG_INFO(FORMAT, ...)       LOG_TAG("INFO", FORMAT, ##__VA_ARGS__)
-#define LOG_WARN(FORMAT, ...)       LOG_TAG("WARN", FORMAT, ##__VA_ARGS__)
-#define LOG_DEBUG(FORMAT, ...)      LOG_TAG("DEBUG", FORMAT, ##__VA_ARGS__)
-#else
-#define LOG_INFO(...)               ((void)0)
-#define LOG_WARN(...)               ((void)0)
-#define LOG_DEBUG(FORMAT, ...)      ((void)0)
-#endif
+#define LOG_ERROR(FORMAT, ...) do { \
+    if (::ppp::diagnostics::IsLogLevelEnabled(::ppp::diagnostics::LogLevel::Error)) \
+        ::ppp::diagnostics::LogPrintDesktop("ERROR", __FILE__, __LINE__, FORMAT, ##__VA_ARGS__); \
+} while (0)
+#define LOG_WARN(FORMAT, ...) do { \
+    if (::ppp::diagnostics::IsLogLevelEnabled(::ppp::diagnostics::LogLevel::Warn)) \
+        ::ppp::diagnostics::LogPrintDesktop("WARN", __FILE__, __LINE__, FORMAT, ##__VA_ARGS__); \
+} while (0)
+#define LOG_INFO(FORMAT, ...) do { \
+    if (::ppp::diagnostics::IsLogLevelEnabled(::ppp::diagnostics::LogLevel::Info)) \
+        ::ppp::diagnostics::LogPrintDesktop("INFO", __FILE__, __LINE__, FORMAT, ##__VA_ARGS__); \
+} while (0)
+#define LOG_DEBUG(FORMAT, ...) do { \
+    if (::ppp::diagnostics::IsLogLevelEnabled(::ppp::diagnostics::LogLevel::Debug)) \
+        ::ppp::diagnostics::LogPrintDesktop("DEBUG", __FILE__, __LINE__, FORMAT, ##__VA_ARGS__); \
+} while (0)
 #endif
 
 #ifndef strcasecmp

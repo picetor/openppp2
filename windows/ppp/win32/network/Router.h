@@ -42,6 +42,8 @@ namespace ppp
                 static int                                  RestoreIPv6Routes(const ppp::vector<MIB_IPFORWARD_ROW2>& routes) noexcept;
                 static bool                                 GetIPv6IgnoreDefaultRoutes(int interface_index, bool& value) noexcept;
                 static bool                                 SetIPv6IgnoreDefaultRoutes(int interface_index, bool value) noexcept;
+                static bool                                 GetIPv6Forwarding(int interface_index, bool& value) noexcept;
+                static bool                                 SetIPv6Forwarding(int interface_index, bool value) noexcept;
             };
         }
     }

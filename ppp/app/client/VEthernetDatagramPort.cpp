@@ -92,6 +92,10 @@ namespace ppp {
             }
 
             bool VEthernetDatagramPort::SendTo(const void* packet, int packet_length, const boost::asio::ip::udp::endpoint& destinationEP) noexcept {
+                return SendTo(packet, packet_length, ppp::string(), destinationEP);
+            }
+
+            bool VEthernetDatagramPort::SendTo(const void* packet, int packet_length, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP) noexcept {
                 if (NULLPTR == packet || packet_length < 1) {
                     return false;
                 }
@@ -106,7 +110,7 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address address = destinationEP.address();
-                if (address.is_unspecified()) {
+                if (destinationHost.empty() && (address.is_unspecified() || address.is_multicast())) {
                     return false;
                 }
 
@@ -122,8 +126,9 @@ namespace ppp {
 
 #if defined(_ANDROID)
                     // It is sent out through the local physical NIC.
-                    bool bypass = (address.is_v4() && switcher_->IsBypassIpAddress(address)) ||
-                                  (address.is_v6() && switcher_->IsBypassIpAddress6(address));
+                    bool bypass = destinationHost.empty() &&
+                                  ((address.is_v4() && switcher_->IsBypassIpAddress(address)) ||
+                                   (address.is_v6() && switcher_->IsBypassIpAddress6(address)));
                     if (bypass) {
                         // If the socket is currently open, send data directly.
                         SynchronizedObjectScope scope(syncobj_);
@@ -179,7 +184,7 @@ namespace ppp {
                     }
 #endif
                     // Send it to the VPN server for outgoing.
-                    ok = exchanger_->DoSendTo(transmission, sourceEP_, destinationEP, (Byte*)packet, packet_length, nullof<YieldContext>());
+                    ok = exchanger_->DoSendTo(transmission, sourceEP_, destinationHost, destinationEP, (Byte*)packet, packet_length, nullof<YieldContext>());
                     if (!ok) {
                         LOG_DEBUG("VEthernetDatagramPort::SendTo: DoSendTo failed, finalizing datagram port only, this=%p, transmission=%p",
                             (void*)this, (void*)transmission.get());

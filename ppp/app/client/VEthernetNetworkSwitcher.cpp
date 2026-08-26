@@ -59,6 +59,7 @@
 #if defined(_MACOS)
 #include <darwin/ppp/tap/TapDarwin.h>
 #include <darwin/ppp/ipv6/IPv6Auxiliary.h>
+#include <darwin/ppp/net/proxies/HttpProxy.h>
 #else
 #include <linux/ppp/tap/TapLinux.h>
 #endif
@@ -129,6 +130,7 @@ namespace ppp {
             VEthernetNetworkSwitcher::VEthernetNetworkSwitcher(const std::shared_ptr<boost::asio::io_context>& context, bool lwip, bool vnet, bool mta, const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration) noexcept
                 : VEthernet(context, lwip, vnet, mta)
                 , configuration_(configuration)
+                , base_configuration_(configuration)
                 , icmppackets_aid_(0) {
 
 #if !defined(_ANDROID) && !defined(_IPHONE)
@@ -143,17 +145,11 @@ namespace ppp {
 
                 prefer_ipv4_ = (NULLPTR != configuration_ && configuration_->udp.dns.prefer_ipv4);
 
-                // The server.ipv6 section of the primary configuration is the
-                // authoritative statement of whether the server carries IPv6.
-                // Initialized here so RestoreNetworkTakeover / OpenTransmission
-                // can make the right leak-block decision even before the first
-                // Information arrives.
-                if (NULLPTR != configuration_) {
-                    const ppp::configurations::AppConfiguration::IPv6Mode mode = configuration_->server.ipv6.mode;
-                    ipv6_server_has_dataplane_ =
-                        mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
-                        mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
-                }
+                // The remote IPv6 capability is learned from the server's
+                // Information extensions.  The client profile may not contain a
+                // server.ipv6 section (and must not be treated as the remote
+                // server's capability advertisement).
+                ipv6_server_has_dataplane_ = false;
 
 #if defined(PPP_LOG_VERBOSE)
                 std::shared_ptr<boost::asio::io_context> debug_context = context;
@@ -311,8 +307,20 @@ namespace ppp {
                 }
 
                 if (!outbound_exchangers_.empty()) {
+                    ppp::vector<std::shared_ptr<VEthernetExchanger>> updated_exchangers;
                     for (auto& entry : outbound_exchangers_) {
-                        if (entry.second) entry.second->Update();
+                        if (NULLPTR == entry.second) continue;
+                        bool duplicate = false;
+                        for (const auto& updated : updated_exchangers) {
+                            if (updated == entry.second) {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (!duplicate) {
+                            updated_exchangers.emplace_back(entry.second);
+                            entry.second->Update();
+                        }
                     }
                 }
                 else {
@@ -325,7 +333,16 @@ namespace ppp {
                         SynchronizedObjectScope scope(GetSynchronizedObject());
                         pending = pending_outbound_exchanger_;
                     }
-                    if (NULLPTR != pending) pending->Update();
+                    if (NULLPTR != pending) {
+                        bool already_updated = false;
+                        for (const auto& entry : outbound_exchangers_) {
+                            if (entry.second == pending) {
+                                already_updated = true;
+                                break;
+                            }
+                        }
+                        if (!already_updated) pending->Update();
+                    }
                 }
 
                 std::shared_ptr<IForwarding> forwarding = forwarding_; 
@@ -453,6 +470,7 @@ namespace ppp {
                 };
                 struct OutboundWork final {
                     ppp::string                                                     tag;
+                    std::shared_ptr<VEthernetExchanger>                             exchanger;
                     int                                                             timeout_ms = 800;
                     int                                                             stage = 3;
                     ppp::string                                                     ws_host;
@@ -470,6 +488,7 @@ namespace ppp {
                 struct OutboundSnapshot final {
                     ppp::string                                                     tag;
                     std::shared_ptr<ppp::configurations::AppConfiguration>          configuration;
+                    std::shared_ptr<VEthernetExchanger>                             exchanger;
                     bool                                                            established = false;
                 };
                 ppp::vector<OutboundSnapshot> outbounds;
@@ -501,15 +520,24 @@ namespace ppp {
                             continue;
                         }
 
-                        bool established = false;
-                        auto exchanger = outbound_exchangers_.find(tag);
-                        if (exchanger != outbound_exchangers_.end() && NULLPTR != exchanger->second) {
-                            established = exchanger->second->GetNetworkState() ==
-                                VEthernetExchanger::NetworkState_Established;
+                        // The "main" map slot is reused after a primary
+                        // outbound hot switch. Match by configuration rather
+                        // than by tag so probe results cannot leak between
+                        // outbounds (for example, nubeHK into ggvUS).
+                        std::shared_ptr<VEthernetExchanger> exchanger;
+                        for (const auto& item : outbound_exchangers_) {
+                            if (NULLPTR != item.second &&
+                                item.second->GetConfiguration() == configuration) {
+                                exchanger = item.second;
+                                break;
+                            }
                         }
+                        bool established = NULLPTR != exchanger &&
+                            exchanger->GetNetworkState() ==
+                                VEthernetExchanger::NetworkState_Established;
 
                         outbounds.emplace_back(OutboundSnapshot{
-                            std::move(tag), configuration, established });
+                            std::move(tag), configuration, std::move(exchanger), established });
                     }
                 }
 
@@ -523,6 +551,7 @@ namespace ppp {
 
                         OutboundWork work;
                         work.tag = tag;
+                        work.exchanger = outbound_ref.exchanger;
                         work.timeout_ms = std::max<int>(50, configuration->client.probe.timeout_ms);
                         // Background refresh only needs L1 for outbounds without an
                         // established tunnel; probing idle wss endpoints to L3 every
@@ -674,13 +703,11 @@ namespace ppp {
 
                             // Persist per-entry outcomes into the outbound exchanger so
                             // the hot-switch state machine sees fresh per-entry RTTs.
-                            std::shared_ptr<VEthernetExchanger> exchanger;
-                            {
-                                auto it = outbound_exchangers_.find(work.tag);
-                                if (it != outbound_exchangers_.end()) {
-                                    exchanger = it->second;
-                                }
-                            }
+                            // The map slot for "main" can now refer to a
+                            // different outbound after a primary hot switch.
+                            // Use the exchanger captured with this exact
+                            // configuration instead of looking it up by tag.
+                            std::shared_ptr<VEthernetExchanger> exchanger = work.exchanger;
                             std::shared_ptr<ppp::configurations::AppConfiguration> probe_configuration =
                                 (NULLPTR != exchanger) ? exchanger->GetConfiguration() : NULLPTR;
                             const uint64_t probe_now = Executors::GetTickCount();
@@ -1664,7 +1691,7 @@ namespace ppp {
                     }
                     if (tag == "main") {
                         has_main = true;
-                        if (outbound.configuration != configuration_) return false;
+                        if (outbound.configuration != base_configuration_) return false;
                     }
                 }
                 if (!has_main) return false;
@@ -1673,7 +1700,7 @@ namespace ppp {
                 for (const OutboundConfiguration& outbound : configurations) {
                     ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
                     if (tag != "main" && outbound.route_used &&
-                        outbound.configuration == configuration_) {
+                        outbound.configuration == base_configuration_) {
                         primary_outbound_ = tag;
                         break;
                     }
@@ -1708,18 +1735,21 @@ namespace ppp {
                         tag == primary_outbound_ : tag == active_outbound_;
                     status.server_menu = outbound.server_menu;
                     status.route_used = outbound.route_used;
+                    status.multiple_entries = NULLPTR != outbound.configuration &&
+                        !outbound.configuration->client.servers.empty();
                     status.probe_enabled = NULLPTR != outbound.configuration && outbound.configuration->client.probe.enabled;
                     if (current != outbound_exchangers_.end() && NULLPTR != current->second) {
                         status.probe_checked = current->second->GetProbeChecked();
                         status.probe_reachable = current->second->GetProbeReachable();
                         status.probe_rtt_ms = current->second->GetProbeRtt();
-                        status.probe_server = current->second->GetCurrentEntry();
+                        status.current_entry = current->second->GetCurrentEntry();
+                        status.ranked_first_entry = current->second->GetRankedFirstEntry();
                     }
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     // Background probe refresh covers every menu entry every 5s.
                     // It may refresh the displayed health metrics, but must not
-                    // replace probe_server: that field is the sticky entry
-                    // currently selected by the exchanger/MUX.  Replacing it
+                    // replace current_entry: that field is the live entry
+                    // currently used by the exchanger/MUX.  Replacing it
                     // with the best probe result makes the UI look as if a
                     // healthy connection switched entries when it did not.
                     {
@@ -1728,6 +1758,7 @@ namespace ppp {
                             status.probe_checked = true;
                             status.probe_reachable = probe->second.reachable;
                             status.probe_rtt_ms = probe->second.rtt_ms;
+                            status.probe_entry = probe->second.server;
                         }
                     }
 #endif
@@ -1741,11 +1772,14 @@ namespace ppp {
                     status.state = static_cast<int>(exchanger_->GetNetworkState());
                     status.reconnects = exchanger_->GetReconnectionCount();
                     status.active = true;
+                    status.multiple_entries = NULLPTR != configuration_ &&
+                        !configuration_->client.servers.empty();
                     status.probe_enabled = NULLPTR != configuration_ && configuration_->client.probe.enabled;
                     status.probe_checked = exchanger_->GetProbeChecked();
                     status.probe_reachable = exchanger_->GetProbeReachable();
                     status.probe_rtt_ms = exchanger_->GetProbeRtt();
-                    status.probe_server = exchanger_->GetCurrentEntry();
+                    status.current_entry = exchanger_->GetCurrentEntry();
+                    status.ranked_first_entry = exchanger_->GetRankedFirstEntry();
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     {
                         auto probe = outbound_probe_statuses_.find("main");
@@ -1753,6 +1787,7 @@ namespace ppp {
                             status.probe_checked = true;
                             status.probe_reachable = probe->second.reachable;
                             status.probe_rtt_ms = probe->second.rtt_ms;
+                            status.probe_entry = probe->second.server;
                         }
                     }
 #endif
@@ -1821,6 +1856,7 @@ namespace ppp {
                 }
 
                 std::shared_ptr<VEthernetExchanger> abandoned;
+                bool abandoned_referenced = false;
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     abandoned = std::move(pending_outbound_exchanger_);
@@ -1829,8 +1865,16 @@ namespace ppp {
                     pending_primary_switch_ = false;
                     pending_outbound_deadline_ =
                         ppp::threading::Executors::GetTickCount() + 2000;
+                    if (NULLPTR != abandoned) {
+                        for (const auto& item : outbound_exchangers_) {
+                            if (item.second == abandoned) {
+                                abandoned_referenced = true;
+                                break;
+                            }
+                        }
+                    }
                 }
-                if (NULLPTR != abandoned && abandoned != target &&
+                if (NULLPTR != abandoned && !abandoned_referenced && abandoned != target &&
                     abandoned != exchanger_) abandoned->Dispose();
                 LOG_INFO("VEthernetNetworkSwitcher::SwitchOutbound: target=%s, configuration_reloaded=%d, activation_delay_ms=2000, state=%d",
                     tag.data(), tag != "main",
@@ -1855,6 +1899,13 @@ namespace ppp {
                     if (tag == primary_outbound_ && pending_outbound_.empty()) {
                         return true;
                     }
+                    // Treat repeated Enter presses during the two-second warm
+                    // activation window as the same request.  Once activation
+                    // completes, Enter on the active row becomes the explicit
+                    // "switch to Rank #1" action instead.
+                    if (tag == pending_outbound_) {
+                        return true;
+                    }
                 }
 
                 // "main" is the primary outbound itself (the configuration that
@@ -1866,21 +1917,35 @@ namespace ppp {
                 OutboundConfiguration* definition = NULLPTR;
                 for (OutboundConfiguration& outbound : outbound_configurations_) {
                     if (ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag)) == tag &&
-                        (outbound.server_menu || tag == "main")) {
+                        (outbound.server_menu || outbound.route_used || tag == "main")) {
                         definition = &outbound;
                         break;
                     }
                 }
                 if (NULLPTR == definition) return false;
 
+                // Reload the selected definition before looking for an
+                // existing exchanger.  A server-directory tag such as
+                // "server:zgo" and a GEO tag such as "us" can refer to the
+                // same JSON, but their tags and configuration pointers are
+                // different.  Match the session identity as well, otherwise
+                // the hot switch opens a second control/MUX session.
                 std::shared_ptr<ppp::configurations::AppConfiguration> configuration =
                     ReloadOutboundConfiguration(*definition);
                 if (NULLPTR == configuration) return false;
+
+                // A primary configuration switch deliberately creates a new
+                // exchanger/MUX.  The old primary may contain state belonging
+                // to a different server (IPv6 lease, proxy, mappings, DNS,
+                // entry ranking), so promoting a warm split exchanger here can
+                // leave stale state behind.  GEO split outbounds still use the
+                // separate EnsureOutbound() reuse path below.
                 std::shared_ptr<VEthernetExchanger> target =
                     NewExchanger(configuration, "main", true);
                 if (NULLPTR == target || !target->Open()) return false;
 
                 std::shared_ptr<VEthernetExchanger> abandoned;
+                bool abandoned_referenced = false;
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     abandoned = std::move(pending_outbound_exchanger_);
@@ -1889,12 +1954,33 @@ namespace ppp {
                     pending_primary_switch_ = true;
                     pending_outbound_deadline_ =
                         ppp::threading::Executors::GetTickCount() + 2000;
+                    if (NULLPTR != abandoned) {
+                        for (const auto& item : outbound_exchangers_) {
+                            if (item.second == abandoned) {
+                                abandoned_referenced = true;
+                                break;
+                            }
+                        }
+                    }
                 }
-                if (NULLPTR != abandoned && abandoned != target &&
+                if (NULLPTR != abandoned && !abandoned_referenced && abandoned != target &&
                     abandoned != exchanger_) abandoned->Dispose();
                 LOG_INFO("VEthernetNetworkSwitcher::SwitchPrimaryOutbound: target=%s, activation_delay_ms=2000, state=%d",
                     tag.data(), (int)target->GetNetworkState());
                 return true;
+            }
+
+            bool VEthernetNetworkSwitcher::SwitchPrimaryOutboundToRankedFirst(const ppp::string& value) noexcept {
+                const ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(value));
+                std::shared_ptr<VEthernetExchanger> target;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    if (tag.empty() || tag != primary_outbound_ || !pending_outbound_.empty()) {
+                        return false;
+                    }
+                    target = exchanger_;
+                }
+                return NULLPTR != target && target->SwitchToRankedFirstEntry();
             }
 
             std::shared_ptr<ppp::configurations::AppConfiguration>
@@ -1952,6 +2038,71 @@ namespace ppp {
                 return configuration;
             }
 
+            bool VEthernetNetworkSwitcher::ApplyPrimaryClientConfiguration(
+                const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration) noexcept {
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+
+                // The primary transport uses the switcher-owned forwarding
+                // object. Rebuild it from the newly promoted profile so a
+                // server-proxy setting cannot remain inherited from the old
+                // main connection.
+                IForwardingPtr forwarding;
+                if (!configuration->client.server_proxy.empty()) {
+                    forwarding = make_shared_object<IForwarding>(GetContext(), configuration);
+                    if (NULLPTR == forwarding || !forwarding->Open()) {
+                        if (NULLPTR != forwarding) {
+                            forwarding->Dispose();
+                        }
+                        LOG_ERROR("VEthernetNetworkSwitcher::ApplyPrimaryClientConfiguration: cannot open primary server proxy, server=%s",
+                            configuration->client.server.data());
+                        return false;
+                    }
+#if defined(_LINUX)
+                    forwarding->ProtectorNetwork = GetProtectorNetwork();
+#endif
+                }
+
+                IForwardingPtr obsolete_forwarding;
+                std::shared_ptr<ppp::configurations::AppConfiguration> previous_configuration;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    previous_configuration = configuration_;
+                    configuration_ = configuration;
+                    obsolete_forwarding = std::move(forwarding_);
+                    forwarding_ = std::move(forwarding);
+                }
+
+                if (NULLPTR != qos_) {
+                    int64_t bandwidth = std::max<int64_t>(0, configuration->client.bandwidth);
+                    qos_->SetBandwidth(bandwidth);
+                }
+
+                // The client log file is a property of the active profile.
+                // Reopen it only when the path changes; ordinary switches keep
+                // the existing logger without interrupting log writes.
+                const ppp::string previous_log = NULLPTR != previous_configuration
+                    ? previous_configuration->client.log : ppp::string();
+                if (previous_log != configuration->client.log) {
+                    VirtualEthernetLoggerPtr obsolete_logger = std::move(logger_);
+                    OpenLogger();
+                    if (NULLPTR != obsolete_logger) {
+                        IDisposable::Dispose(obsolete_logger);
+                    }
+                }
+
+                if (NULLPTR != obsolete_forwarding) {
+                    obsolete_forwarding->Dispose();
+                }
+
+                LOG_INFO("VEthernetNetworkSwitcher::ApplyPrimaryClientConfiguration: active client profile changed, server=%s, server_proxy=%s, mappings=%llu",
+                    configuration->client.server.data(),
+                    configuration->client.server_proxy.empty() ? "direct" : "configured",
+                    (unsigned long long)configuration->client.mappings.size());
+                return true;
+            }
+
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::EnsureOutbound(
                 const ppp::string& value) noexcept {
                 ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(value));
@@ -1972,6 +2123,37 @@ namespace ppp {
                 std::shared_ptr<ppp::configurations::AppConfiguration> configuration =
                     ReloadOutboundConfiguration(*definition);
                 if (NULLPTR == configuration) return NULLPTR;
+
+                // The same JSON may already be active under the primary
+                // server-menu tag.  Reuse it under the GEO tag instead of
+                // opening a second session when the split rule is first hit.
+                std::shared_ptr<VEthernetExchanger> reused;
+                ppp::string reused_tag;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    for (const auto& item : outbound_exchangers_) {
+                        if (NULLPTR == item.second) continue;
+                        std::shared_ptr<ppp::configurations::AppConfiguration> current_configuration =
+                            item.second->GetConfiguration();
+                        if (NULLPTR == current_configuration ||
+                            current_configuration->client.guid != configuration->client.guid ||
+                            current_configuration->client.server != configuration->client.server) {
+                            continue;
+                        }
+                        reused = item.second;
+                        reused_tag = item.first;
+                        break;
+                    }
+                }
+                if (NULLPTR != reused) {
+                    {
+                        SynchronizedObjectScope scope(GetSynchronizedObject());
+                        outbound_exchangers_[tag] = reused;
+                    }
+                    LOG_INFO("VEthernetNetworkSwitcher::EnsureOutbound: outbound '%s' reused existing tag '%s' by GUID/server identity",
+                        tag.data(), reused_tag.data());
+                    return reused;
+                }
 
                 std::shared_ptr<VEthernetExchanger> candidate =
                     NewExchanger(configuration, tag, tag == "main");
@@ -2011,17 +2193,100 @@ namespace ppp {
                         pending_primary_switch_ = false;
                         return;
                     }
+                    // Proxy-only/TUN is a process-level topology choice. The
+                    // listener and OS route ownership cannot be converted
+                    // safely while traffic is running, so refuse a profile
+                    // whose client.proxy-only value is incompatible with the
+                    // topology selected at startup.
+                    {
+                        const auto target_configuration = target->GetConfiguration();
+                        const bool target_proxy_only = NULLPTR != target_configuration &&
+                            (target_configuration->client.proxy_only || proxy_only_forced_);
+                        if (primary_switch && NULLPTR != target_configuration &&
+                            target_proxy_only != proxy_only_) {
+                            pending_outbound_.clear();
+                            pending_outbound_deadline_ = 0;
+                            pending_primary_switch_ = false;
+                            LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: target=%s has incompatible client.proxy-only=%d (runtime=%d)",
+                                target_tag.data(), (int)target_configuration->client.proxy_only,
+                                (int)proxy_only_);
+                            return;
+                        }
+                    }
                     if (primary_switch) {
-                        previous_tag = "main";
+                        // Keep the old primary available under its original
+                        // split tag when that configuration is also used by
+                        // geo rules.  "main" remains only the current role.
+                        previous_tag = primary_outbound_.empty() ?
+                            ppp::string("main") : primary_outbound_;
                         previous = exchanger_;
+                        // Manual primary switching is a full configuration
+                        // replacement.  Do not keep the old primary under a
+                        // private/base or GEO alias; its MUX and all per-peer
+                        // state must be destroyed below.  Non-primary GEO
+                        // switches retain their existing warm split behavior.
+                        preserve_previous = false;
+                        // Release the old primary's mapping listeners before
+                        // promoting the target.  Otherwise equal mapping
+                        // ports can make the target registration fail while
+                        // the old exchanger is still alive.
+                        if (NULLPTR != previous && previous != target && previous->IsPrimaryOutbound() &&
+                            !previous->SetPrimaryOutbound(false)) {
+                            pending_outbound_.clear();
+                            pending_outbound_deadline_ = 0;
+                            pending_primary_switch_ = false;
+                            LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: previous=%s cannot be demoted",
+                                previous_tag.data());
+                            return;
+                        }
+
+                        // Existing TCP/UDP connections are bound to the old
+                        // exchanger and cannot migrate to the new primary.
+                        // Drop them before the old exchanger is disposed so
+                        // subsequent packets establish on the new target.
+                        if (NULLPTR != previous && previous != target) {
+                            previous->ResetDataChannels();
+                        }
+
+                        // The target is always a newly opened primary
+                        // exchanger for this path; it does not inherit the
+                        // old primary's control/MUX session.
+                        if (!target->SetPrimaryOutbound(true)) {
+                            if (NULLPTR != previous && previous != target && !previous->IsPrimaryOutbound()) {
+                                previous->SetPrimaryOutbound(true);
+                            }
+                            pending_outbound_.clear();
+                            pending_outbound_deadline_ = 0;
+                            pending_primary_switch_ = false;
+                            LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: target=%s cannot be promoted to primary",
+                                target_tag.data());
+                            return;
+                        }
+
                         auto target_old = outbound_exchangers_.find(target_tag);
                         if (target_old != outbound_exchangers_.end()) {
-                            if (target_old->second != previous) replaced = target_old->second;
-                            outbound_exchangers_.erase(target_old);
+                            if (target_old->second != target && target_old->second != previous) {
+                                replaced = target_old->second;
+                            }
+                            target_old->second = target;
+                        }
+                        else if (target_tag != "main") {
+                            // Retain the route alias while the exchanger is
+                            // serving as main so a later switch can promote
+                            // it back without opening a new session.
+                            outbound_exchangers_.emplace(target_tag, target);
                         }
                         auto main = outbound_exchangers_.find("main");
                         if (main != outbound_exchangers_.end()) main->second = target;
                         else outbound_exchangers_.emplace("main", target);
+
+                        if (previous_tag != "main" && previous_tag != target_tag) {
+                            auto old_alias = outbound_exchangers_.find(previous_tag);
+                            if (old_alias != outbound_exchangers_.end() && old_alias->second == previous) {
+                                outbound_exchangers_.erase(old_alias);
+                            }
+                        }
+
                         exchanger_ = target;
                         primary_outbound_ = target_tag;
                         active_outbound_ = "main";
@@ -2061,25 +2326,6 @@ namespace ppp {
                         }
                     }
                     prefer_ipv4_.store(active_prefer_ipv4);
-                    // Reflect the new active outbound's IPv6 capability.  The
-                    // server.ipv6 section of the outbound configuration is the
-                    // authoritative statement of whether the server can carry
-                    // IPv6 (not the AssignedIPv6Mode echo).  A server without
-                    // IPv6 must never disable the host's own direct IPv6, so the
-                    // leak block decision follows this flag.
-                    {
-                        bool active_has_ipv6_dataplane = false;
-                        if (NULLPTR != target) {
-                            std::shared_ptr<ppp::configurations::AppConfiguration> active_configuration = target->GetConfiguration();
-                            if (NULLPTR != active_configuration) {
-                                const ppp::configurations::AppConfiguration::IPv6Mode mode = active_configuration->server.ipv6.mode;
-                                active_has_ipv6_dataplane =
-                                    mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
-                                    mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
-                            }
-                        }
-                        ipv6_server_has_dataplane_ = active_has_ipv6_dataplane;
-                    }
                     // The outbound has just been switched (hot swap). Flush the DNS
                     // cache so answers learned through the previous outbound (e.g. a
                     // Japan exit) cannot be served to the new configuration (e.g. a
@@ -2089,14 +2335,66 @@ namespace ppp {
                 }
 
                 if (primary_switch) {
-                    if (NULLPTR != http_proxy_) http_proxy_->SetExchanger(exchanger_);
-                    if (NULLPTR != socks_proxy_) socks_proxy_->SetExchanger(exchanger_);
+                    if (!ApplyPrimaryClientConfiguration(target->GetConfiguration())) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: primary client configuration was only partially applied, target=%s",
+                            target_tag.data());
+                    }
+                    auto reconfigure_http_proxy = [this]() noexcept {
+                        if (NULLPTR != http_proxy_) {
+                            return http_proxy_->ReconfigureExchanger(exchanger_);
+                        }
+                        const auto configuration = GetConfiguration();
+                        if (NULLPTR == configuration ||
+                            configuration->client.http_proxy.port <= IPEndPoint::MinPort ||
+                            configuration->client.http_proxy.port > IPEndPoint::MaxPort) {
+                            return true;
+                        }
+                        auto proxy = NewHttpProxy(exchanger_);
+                        if (NULLPTR == proxy || !proxy->Open()) {
+                            if (NULLPTR != proxy) proxy->Dispose();
+                            return false;
+                        }
+                        http_proxy_ = std::move(proxy);
+                        return true;
+                    };
+                    auto reconfigure_socks_proxy = [this]() noexcept {
+                        if (NULLPTR != socks_proxy_) {
+                            return socks_proxy_->ReconfigureExchanger(exchanger_);
+                        }
+                        const auto configuration = GetConfiguration();
+                        if (NULLPTR == configuration ||
+                            configuration->client.socks_proxy.port <= IPEndPoint::MinPort ||
+                            configuration->client.socks_proxy.port > IPEndPoint::MaxPort) {
+                            return true;
+                        }
+                        auto proxy = NewSocksProxy(exchanger_);
+                        if (NULLPTR == proxy || !proxy->Open()) {
+                            if (NULLPTR != proxy) proxy->Dispose();
+                            return false;
+                        }
+                        socks_proxy_ = std::move(proxy);
+                        return true;
+                    };
+                    if (!reconfigure_http_proxy()) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: HTTP proxy configuration could not be applied");
+                    }
+                    if (!reconfigure_socks_proxy()) {
+                        LOG_ERROR("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: SOCKS proxy configuration could not be applied");
+                    }
+#if defined(_WIN32) || defined(_MACOS)
+                    // Refresh the OS proxy only when it was enabled by the
+                    // user at startup.  Reconfiguration may have changed the
+                    // HTTP bind address or port, so the old system endpoint
+                    // must not be left behind.
+                    if (system_proxy_applied_) {
+                        SetHttpProxyToSystemEnv();
+                    }
+#endif
                     if (NULLPTR != previous && previous != exchanger_) previous->Dispose();
 #if defined(_WIN32)
-                    // The previous primary exchanger is now disposed, so any tunnel
-                    // DNS upstream that still references it can no longer send.
-                    // Rebind every tunnel DNS upstream to the new primary exchanger
-                    // and re-register its datagram handler on that exchanger.
+                    // Rebind every tunnel DNS upstream to the new primary
+                    // exchanger and re-register its datagram handler on that
+                    // exchanger after the old primary is disposed.
                     RebindTunnelDnsUpstreams();
 #endif
                 }
@@ -2104,7 +2402,7 @@ namespace ppp {
                     if (previous_tag == "main") previous->ResetDataChannels();
                     else if (!preserve_previous) previous->Dispose();
                 }
-                if (NULLPTR != replaced && replaced != exchanger_) replaced->Dispose();
+                if (NULLPTR != replaced && replaced != exchanger_ && replaced != previous) replaced->Dispose();
                 UpdateRemoteUri();
                 if (primary_switch && NULLPTR != target) {
                     // Hot-switch replay: server extensions are normally received by
@@ -2118,7 +2416,7 @@ namespace ppp {
                     // The call is idempotent: identical state is skipped inside.
                     ApplyIPv6Assignment(target->GetInformationExtensions(), target);
                 }
-                LOG_INFO("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: previous=%s, active=%s, forced=1",
+                LOG_INFO("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: previous=%s, active=%s, new_exchanger=1, forced=1",
                     previous_tag.data(), target_tag.data());
             }
 
@@ -2132,10 +2430,6 @@ namespace ppp {
                     return selected != outbound_exchangers_.end() ?
                         selected->second : exchanger_;
                 };
-                if (outbound_exchangers_.empty()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: selected_outbound=main, reason=no_outbound_map");
-                    return exchanger_;
-                }
                 if (!geo_rules_) {
 #if defined(_ANDROID) || defined(_IPHONE)
                     if (IsBypassIpAddress(destination) || IsBypassIpAddress6(destination)) {
@@ -2150,6 +2444,10 @@ namespace ppp {
                         NULLPTR != active ? active->GetOutboundTag().data() : "none");
                     return active;
                 }
+                // A direct Geo rule must also work when there is only a main
+                // exchanger.  The proxy-only path has no TUN route table to
+                // perform this decision for us, so do it before the old
+                // no-outbound fast path.
                 if (ppp::net::IPEndPoint::IsInvalid(destination)) {
                     return get_active();
                 }
@@ -2259,6 +2557,120 @@ namespace ppp {
                         address_key.data(), tag.data(), selected->second->GetOutboundTag().data());
                 }
                 return selected->second;
+            }
+
+            std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::GetExchanger(
+                const ppp::string& hostname) noexcept {
+                auto get_active = [this]() noexcept -> std::shared_ptr<VEthernetExchanger> {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    ppp::string tag = active_outbound_.empty() ?
+                        ppp::string("main") : active_outbound_;
+                    auto selected = outbound_exchangers_.find(tag);
+                    return selected != outbound_exchangers_.end() ?
+                        selected->second : exchanger_;
+                };
+
+                if (hostname.empty() || !geo_rules_) {
+                    return get_active();
+                }
+
+                ppp::string tag;
+                {
+                    SynchronizedObjectScope scope(GetSynchronizedObject());
+                    tag = final_outbound_.empty() ? ppp::string("main") : final_outbound_;
+                }
+                if (tag == "@active") {
+                    auto active = get_active();
+                    if (active) tag = active->GetOutboundTag();
+                }
+
+                const auto decision = geo_rules_->MatchDomain(hostname);
+                if (decision.Matched() &&
+                    decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: hostname=%s, action=direct, selected_outbound=direct, rule_priority=%llu",
+                        hostname.data(), (unsigned long long)decision.priority);
+                    return NULLPTR;
+                }
+
+                if (decision.Matched() && !decision.outbound.empty()) {
+                    tag = decision.outbound;
+                    if (tag == "@active") {
+                        auto active = get_active();
+                        if (active) tag = active->GetOutboundTag();
+                    }
+                }
+
+                if (tag == "direct") {
+                    return NULLPTR;
+                }
+                if (tag == primary_outbound_) tag = "main";
+                if (outbound_exchangers_.empty() && tag == "main") {
+                    return get_active();
+                }
+                EnsureOutbound(tag);
+                auto selected = outbound_exchangers_.find(tag);
+                if (selected != outbound_exchangers_.end()) {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: hostname=%s, action=tunnel, requested_outbound=%s, selected_outbound=%s, rule=%d, rule_priority=%llu",
+                        hostname.data(), tag.data(), selected->second->GetOutboundTag().data(),
+                        (int)decision.Matched(), (unsigned long long)decision.priority);
+                    return selected->second;
+                }
+                return get_active();
+            }
+
+            bool VEthernetNetworkSwitcher::IsDirectProxyHost(const ppp::string& hostname) noexcept {
+                if (hostname.empty() || !geo_rules_) {
+                    return false;
+                }
+                auto decision = geo_rules_->MatchDomain(hostname);
+                if (decision.Matched()) {
+                    return decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                }
+                SynchronizedObjectScope scope(GetSynchronizedObject());
+                return final_outbound_ == "direct";
+            }
+
+            bool VEthernetNetworkSwitcher::IsDirectProxyAddress(
+                const boost::asio::ip::address& address) noexcept {
+                if (ppp::net::IPEndPoint::IsInvalid(address)) {
+                    return false;
+                }
+                if (!geo_rules_) {
+                    if (address.is_v4() && rib_) {
+                        const uint32_t nip = htonl(address.to_v4().to_uint());
+                        return ppp::net::native::ForwardInformationTable::GetNextHop(
+                            nip, rib_->GetAllRoutes()) != ppp::net::IPEndPoint::NoneAddress;
+                    }
+                    if (address.is_v6() && rib6_) {
+                        const auto target = address.to_v6().to_bytes();
+                        for (const auto& route : *rib6_) {
+                            if (route.Prefix < 0 || route.Prefix > 128) {
+                                continue;
+                            }
+                            const auto network = route.Network.to_bytes();
+                            const int whole_bytes = route.Prefix / 8;
+                            const int remaining_bits = route.Prefix % 8;
+                            if (!std::equal(target.begin(), target.begin() + whole_bytes, network.begin())) {
+                                continue;
+                            }
+                            if (remaining_bits > 0) {
+                                const uint8_t mask = static_cast<uint8_t>(0xffu << (8 - remaining_bits));
+                                if ((target[whole_bytes] & mask) != (network[whole_bytes] & mask)) {
+                                    continue;
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                auto decision = geo_rules_->MatchAddress(address,
+                    ppp::threading::Executors::GetTickCount());
+                if (decision.Matched()) {
+                    return decision.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                }
+                SynchronizedObjectScope scope(GetSynchronizedObject());
+                return final_outbound_ == "direct";
             }
 
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::NewExchanger() noexcept {
@@ -2494,44 +2906,12 @@ namespace ppp {
                     return;
                 }
 
-                // The authoritative signal for "does the server carry IPv6" is the
-                // active outbound configuration's server.ipv6 section -- NOT the
-                // AssignedIPv6Mode echoed back by the server, which can read None
-                // during a reconnect, or when the server is slow to provision, or
-                // when an old server build never sends the extension.  If the
-                // configuration declares no IPv6 mode, the server cannot carry
-                // IPv6 at all: the host's own direct IPv6 (SLAAC, domestic IPv6,
-                // ...) must keep working and tunnel IPv6 is simply dropped by
-                // TranslateIPv6Packet.  Only a configuration-declared IPv6 data
-                // plane authorizes fail-closing the physical NIC while the
-                // managed routes are applied.
-                // The authoritative "server carries IPv6" signal must follow the
-                // exchanger that ACTUALLY received the extensions (the caller).
-                // During a hot outbound switch the pending exchanger is already
-                // primary (primary_outbound_=true) and receives server extensions
-                // BEFORE CompletePendingOutboundSwitch promotes it into
-                // exchanger_, so GetExchanger() would still return the OLD
-                // outbound whose configuration (e.g. no server.ipv6 section)
-                // would wrongly reject the new server's IPv6 data plane.
-                std::shared_ptr<ppp::configurations::AppConfiguration> active_configuration;
-                if (NULLPTR != source) {
-                    active_configuration = source->GetConfiguration();
-                }
-                if (NULLPTR == active_configuration) {
-                    if (std::shared_ptr<VEthernetExchanger> active_exchanger = GetExchanger(); NULLPTR != active_exchanger) {
-                        active_configuration = active_exchanger->GetConfiguration();
-                    }
-                }
-                if (NULLPTR == active_configuration) {
-                    active_configuration = configuration_;
-                }
-                const ppp::configurations::AppConfiguration::IPv6Mode server_ipv6_mode =
-                    NULLPTR != active_configuration
-                        ? active_configuration->server.ipv6.mode
-                        : ppp::configurations::AppConfiguration::IPv6Mode_None;
+                // The server's Information extension is the only authoritative
+                // capability signal.  A client profile can omit server.ipv6 even
+                // when the remote server provisions IPv6.
                 const bool has_ipv6_dataplane =
-                    server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
-                    server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
+                    extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Nat66 ||
+                    extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua;
                 ipv6_server_has_dataplane_ = has_ipv6_dataplane;
 
                 if (!has_ipv6_dataplane) {
@@ -2540,15 +2920,12 @@ namespace ppp {
                     // cached TAP gateway in that case lets Windows select the
                     // physical NIC's global IPv6 address again.
                     //
-                    // The server has no IPv6 data plane at all (the client
-                    // configuration declares no server.ipv6 mode).  This must NOT
-                    // disable local IPv6: the host itself needs direct IPv6
-                    // connectivity (SLAAC addresses, domestic IPv6, etc.) while
-                    // tunnel IPv6 is simply rejected/dropped by
-                    // TranslateIPv6Packet.  So remove the TUN /1 sink and restore
-                    // the physical NIC default routes instead of re-installing the
-                    // leak block.
-                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Assignment: server has no IPv6 data plane (config server.ipv6.mode=none), keeping local IPv6 direct, tunnel IPv6 will be dropped");
+                    // No remote IPv6 data plane: remove stale managed state and
+                    // keep the physical IPv6 default fail-closed.  Otherwise the
+                    // host can bypass the tunnel as soon as an AAAA connection is
+                    // opened.  Direct/bypass IPv6 prefixes remain handled by the
+                    // normal geo route policy.
+                    LOG_INFO("VEthernetNetworkSwitcher::ApplyIPv6Assignment: server has no IPv6 data plane, restoring leak block");
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     RestoreIPv6Assignment();
 #endif
@@ -2570,12 +2947,7 @@ namespace ppp {
                     for (const boost::asio::ip::address& address : dynamic_addresses) {
                         DeleteGeoDynamicRoute(address);
                     }
-                    // Restore local IPv6 direct connectivity: remove the TUN
-                    // ::/1+8000::/1 sink and re-enable the physical NIC default
-                    // routes that the leak block suppressed.  Server-side IPv6 is
-                    // absent, so the tunnel cannot carry IPv6 anyway -- dropping
-                    // the /1 sink lets the host's own IPv6 work normally again.
-                    RemoveWindowsIPv6LeakBlock();
+                    ApplyWindowsIPv6LeakBlockRoutes();
 #endif
                     return;
                 }
@@ -3179,7 +3551,17 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::ProxyOnly(bool* value) noexcept {
                 bool previous = proxy_only_;
                 if (NULLPTR != value) {
+                    proxy_only_forced_ = *value !=
+                        (NULLPTR != base_configuration_ && base_configuration_->client.proxy_only);
                     proxy_only_ = *value;
+                }
+                return previous;
+            }
+
+            bool VEthernetNetworkSwitcher::ProxyIpRules(bool* value) noexcept {
+                bool previous = proxy_ip_rules_;
+                if (NULLPTR != value) {
+                    proxy_ip_rules_ = *value;
                 }
                 return previous;
             }
@@ -3277,9 +3659,10 @@ namespace ppp {
                 y.Suspend();
                 return state->address;
             }
+#endif
 
+#if defined(_WIN32) || defined(_MACOS)
             bool VEthernetNetworkSwitcher::SetHttpProxyToSystemEnv() noexcept {
-                // Windows platform uses the system's Internet function library to set the system HTTP proxy environment.
                 auto http_proxy = GetHttpProxy();
                 if (NULLPTR == http_proxy) {
                     return ClearHttpProxyToSystemEnv();
@@ -3292,29 +3675,45 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address localIP = localEP.address();
-                if (IPEndPoint::IsInvalid(localIP)) {
+                if (IPEndPoint::IsInvalid(localIP) || localIP.is_unspecified()) {
                     localIP = boost::asio::ip::address_v4::loopback();
                 }
 
-                ppp::string server = ppp::net::Ipep::ToAddressString<ppp::string>(localIP) + ":" + stl::to_string<ppp::string>(localPort);
+                // Use the actual listener address.  The configured proxy can
+                // legitimately bind to a LAN address (or IPv6 loopback), so a
+                // hard-coded 127.0.0.1 would make the system proxy unusable.
+                ppp::string host = ppp::net::Ipep::ToAddressString<ppp::string>(localIP);
+                ppp::string server = localIP.is_v6() ? "[" + host + "]:" : host + ":";
+                server += stl::to_string<ppp::string>(localPort);
+                if (system_proxy_applied_ && system_proxy_server_ == server) {
+                    return true;
+                }
                 ppp::string pac;
                 bool bok = ppp::net::proxies::HttpProxy::SetSystemProxy(server, pac, true) &&
                     ppp::net::proxies::HttpProxy::SetSystemProxy(server) &&
                     ppp::net::proxies::HttpProxy::RefreshSystemProxy();
                 if (!bok) {
-                    return ClearHttpProxyToSystemEnv();
+                    ClearHttpProxyToSystemEnv();
+                    return false;
                 }
 
+                system_proxy_server_ = server;
+                system_proxy_applied_ = true;
                 return bok;
             }
 
             bool VEthernetNetworkSwitcher::ClearHttpProxyToSystemEnv() noexcept {
-                // Windows platform uses the system's Internet function library to clear the system HTTP proxy environment.
                 ppp::string server;
                 ppp::string pac;
-                return ppp::net::proxies::HttpProxy::SetSystemProxy(server, pac, false);
+                bool result = ppp::net::proxies::HttpProxy::SetSystemProxy(server, pac, false);
+                system_proxy_server_.clear();
+                system_proxy_applied_ = false;
+                return result;
             }
 
+#endif
+
+#if defined(_WIN32)
             ppp::vector<boost::asio::ip::address> VEthernetNetworkSwitcher::SelectLocalDnsServers(const void* packet, int packet_size) noexcept {
                 ppp::vector<boost::asio::ip::address> result;
                 ::dns::Message message;
@@ -4253,7 +4652,16 @@ namespace ppp {
                 }
                 else {
                     LOG_DEBUG("VEthernetNetworkSwitcher::Open: underlying network interface not found");
-                    return false;
+                    // The GUI's no-listener proxy control plane deliberately
+                    // has no TUN takeover.  It still needs the in-memory
+                    // client switcher so the server-directory entries can be
+                    // probed before a real client is selected.  Physical NIC
+                    // metadata is optional for proxy-only probing; retain the
+                    // strict failure for a real TUN client.
+                    if (!proxy_only_) {
+                        return false;
+                    }
+                    LOG_INFO("VEthernetNetworkSwitcher::Open: continuing proxy-only without underlying NIC");
                 }
 
                 if (!proxy_only_) {
@@ -4294,32 +4702,13 @@ namespace ppp {
                 }
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
 #if defined(_WIN32)
-                // Whether the server carries IPv6 is decided by the client
-                // configuration's server.ipv6 section -- the user's authoritative
-                // statement about the server.  Only a configuration-declared IPv6
-                // data plane authorizes fail-closing the physical NIC while the
-                // managed routes are applied.  A server without IPv6 can never
-                // carry it anyway: the host's own direct IPv6 (SLAAC, domestic
-                // IPv6, ...) must keep working and tunnel IPv6 is simply dropped
-                // by TranslateIPv6Packet.
-                {
-                    const ppp::configurations::AppConfiguration::IPv6Mode server_ipv6_mode =
-                        NULLPTR != configuration_
-                            ? configuration_->server.ipv6.mode
-                            : ppp::configurations::AppConfiguration::IPv6Mode_None;
-                    const bool has_ipv6_dataplane =
-                        server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
-                        server_ipv6_mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua;
-                    ipv6_server_has_dataplane_ = has_ipv6_dataplane;
-                    if (has_ipv6_dataplane) {
-                        if (!ApplyWindowsIPv6LeakBlockRoutes()) {
-                            LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
-                            return false;
-                        }
-                    }
-                    else {
-                        RemoveWindowsIPv6LeakBlock();
-                    }
+                // The peer has not advertised an IPv6 data plane yet. Fail
+                // closed until its Information extension is received; a client
+                // profile's server.ipv6 section is not a remote capability signal.
+                ipv6_server_has_dataplane_ = false;
+                if (!ApplyWindowsIPv6LeakBlockRoutes()) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
+                    return false;
                 }
 #endif
                 }
@@ -4371,6 +4760,13 @@ namespace ppp {
                 if (outbound_configurations.empty()) {
                     outbound_configurations.emplace_back(OutboundConfiguration{ "main", configuration_ });
                 }
+                // The GUI control plane has a synthetic empty primary only to
+                // satisfy the outbound table contract.  It must not attempt
+                // a VPN handshake before the user selects a server; the
+                // server-directory entries remain available to the probe
+                // scheduler below.
+                const bool metadata_only = proxy_only_ &&
+                    configuration_ != NULLPTR && configuration_->client.server.empty();
                 if (outbound_configurations.size() > 1 && static_mode_) {
                     // Static UDP echo owns one global server/aggregator set in the
                     // legacy design; sharing it would mix independently keyed
@@ -4386,6 +4782,10 @@ namespace ppp {
                     ppp::string tag = ToLower<ppp::string>(ATrim<ppp::string>(outbound.tag));
                     bool primary = tag == "main";
                     if (!primary) continue;
+                    if (metadata_only) {
+                        LOG_INFO("VEthernetNetworkSwitcher::Open: metadata-only control plane; skipping empty primary outbound");
+                        continue;
+                    }
                     std::shared_ptr<VEthernetExchanger> candidate = NewExchanger(outbound.configuration, tag, primary);
                     if (NULLPTR == candidate || !candidate->Open()) {
                         LOG_ERROR("VEthernetNetworkSwitcher::Open: failed to open outbound '%s'", tag.data());
@@ -4399,7 +4799,7 @@ namespace ppp {
                     opened_outbounds.emplace(tag, std::move(candidate));
                     LOG_INFO("VEthernetNetworkSwitcher::Open: outbound '%s' opened", tag.data());
                 }
-                if (NULLPTR == exchanger) {
+                if (!metadata_only && NULLPTR == exchanger) {
                     LOG_ERROR("VEthernetNetworkSwitcher::Open: main outbound is missing");
                     for (auto& entry : opened_outbounds) {
                         if (entry.second) entry.second->Dispose();
@@ -4408,36 +4808,40 @@ namespace ppp {
                     return false;
                 }
 
-                // Enable the local HTTP PROXY server middleware to provide proxy services directly by the VPN.
-                VEthernetHttpProxySwitcherPtr http_proxy = NewHttpProxy(exchanger);
-                if (NULLPTR == http_proxy) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewHttpProxy failed");
-                    return false;
-                }
-                elif(http_proxy->Open()) {
-                    http_proxy_ = std::move(http_proxy);
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy opened");
-                }
-                else {
-                    http_proxy->Dispose();
-                    http_proxy.reset();
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy not available (non-fatal)");
-                }
+                VEthernetHttpProxySwitcherPtr http_proxy;
+                VEthernetSocksProxySwitcherPtr socks_proxy;
+                if (!metadata_only) {
+                    // Enable the local HTTP PROXY server middleware to provide proxy services directly by the VPN.
+                    http_proxy = NewHttpProxy(exchanger);
+                    if (NULLPTR == http_proxy) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewHttpProxy failed");
+                        return false;
+                    }
+                    elif(http_proxy->Open()) {
+                        http_proxy_ = std::move(http_proxy);
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy opened");
+                    }
+                    else {
+                        http_proxy->Dispose();
+                        http_proxy.reset();
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: HTTP proxy not available (non-fatal)");
+                    }
 
-                // Enable the local SOCKS PROXY server middleware to provide proxy services directly by the VPN.
-                VEthernetSocksProxySwitcherPtr socks_proxy = NewSocksProxy(exchanger);
-                if (NULLPTR == socks_proxy) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewSocksProxy failed");
-                    return false;
-                }
-                elif(socks_proxy->Open()) {
-                    socks_proxy_ = std::move(socks_proxy);
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy opened");
-                }
-                else {
-                    socks_proxy->Dispose();
-                    socks_proxy.reset();
-                    LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy not available (non-fatal)");
+                    // Enable the local SOCKS PROXY server middleware to provide proxy services directly by the VPN.
+                    socks_proxy = NewSocksProxy(exchanger);
+                    if (NULLPTR == socks_proxy) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: NewSocksProxy failed");
+                        return false;
+                    }
+                    elif(socks_proxy->Open()) {
+                        socks_proxy_ = std::move(socks_proxy);
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy opened");
+                    }
+                    else {
+                        socks_proxy->Dispose();
+                        socks_proxy.reset();
+                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: SOCKS proxy not available (non-fatal)");
+                    }
                 }
 
                 // Mounts the various service objects created and opened by the current constructor.
@@ -4446,15 +4850,16 @@ namespace ppp {
                 outbound_exchangers_ = std::move(opened_outbounds);
 
                 if (proxy_only_) {
-                    if (NULLPTR == http_proxy_ && NULLPTR == socks_proxy_) {
-                        LOG_ERROR("VEthernetNetworkSwitcher::Open: proxy-only mode requires at least one local listener");
-                        return false;
-                    }
-                    if (!UpdateRemoteUri()) {
+                    // Proxy-only has no kernel route installation, but the
+                    // in-memory RIB is still needed for --bypass-mode=ip.
+                    LoadAllIPListWithFilePaths(boost::asio::ip::address_v4::any());
+                    LoadAllIPListWithFilePaths6(boost::asio::ip::address_v6::any());
+                    if (!metadata_only && !UpdateRemoteUri()) {
                         LOG_WARN("VEthernetNetworkSwitcher::Open: cannot determine proxy-only remote URI");
                     }
 
-                    LOG_INFO("VEthernetNetworkSwitcher::Open: proxy-only connected; route, DNS and geo policy are disabled");
+                    LOG_INFO("VEthernetNetworkSwitcher::Open: proxy-only connected; kernel routes/DNS disabled, proxy geo policy enabled%s",
+                        NULLPTR == http_proxy_ && NULLPTR == socks_proxy_ ? "; no local listener" : "");
                     return true;
                 }
 
@@ -4492,8 +4897,12 @@ namespace ppp {
 
                     // Add VPN remote server to IPList bypass route table iplist.
                     if (!AddRemoteEndPointToIPList(underlying_ni->GatewayServer)) {
-                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: AddRemoteEndPointToIPList failed");
-                        return false;
+                        // A hostname may be temporarily unresolved while the
+                        // client is opening. The first transport connection
+                        // resolves it again and pins the exact endpoint before
+                        // dialing, so this optional startup route must not
+                        // prevent the core/RPC service from coming up.
+                        LOG_WARN("VEthernetNetworkSwitcher::Open: AddRemoteEndPointToIPList deferred; transport will resolve the server endpoint on connect");
                     }
                 }
 #endif
@@ -4911,23 +5320,13 @@ namespace ppp {
                 // can be stale after reconnect, while a server without IPv6 sends
                 // no IPv6 extension at all.  Only a successfully applied managed
                 // IPv6 default route authorizes IPv6 egress.
-                // When the server has no IPv6 data plane (ipv6_server_has_dataplane_
-                // == false) the tunnel cannot carry IPv6 anyway, so the leak block
-                // must NOT be installed -- the host keeps its own direct IPv6
-                // connectivity and tunnel IPv6 is simply dropped.
-                if (NULLPTR != tap && ipv6_server_has_dataplane_ &&
+                if (NULLPTR != tap &&
                     (!ipv6_client_state_captured_ || !ipv6_client_state_.DefaultRouteApplied)) {
                     // Remove active-store routes left by an older build or an
                     // unclean shutdown. Any prefix longer than /1 would otherwise
                     // override the leak block and expose the physical IPv6 address.
                     DeleteWindowsIPv6BypassRoutes();
                     ApplyWindowsIPv6LeakBlockRoutes();
-                }
-                else if (NULLPTR != tap && !ipv6_server_has_dataplane_) {
-                    // Server cannot carry IPv6: never disable local IPv6.  Drop the
-                    // TUN /1 sink and restore the physical NIC default routes so the
-                    // host's own IPv6 keeps working while the tunnel rejects IPv6.
-                    RemoveWindowsIPv6LeakBlock();
                 }
 #elif defined(_MACOS)
                 // Delete all found default gateway routes.
@@ -5102,14 +5501,12 @@ namespace ppp {
 
             std::size_t VEthernetNetworkSwitcher::GetIPListCount() noexcept {
                 LoadIPListFileVectorPtr ribs = ribs_;
-                if (NULLPTR == ribs) return 0;
-                return ribs->size();
+                return NULLPTR != ribs ? ribs->size() : ip_list_count_;
             }
 
             std::size_t VEthernetNetworkSwitcher::GetIPList6Count() noexcept {
                 LoadIPv6ListFileVectorPtr ribs6 = ribs6_;
-                if (NULLPTR == ribs6) return 0;
-                return ribs6->size();
+                return NULLPTR != ribs6 ? ribs6->size() : ip_list6_count_;
             }
 
             void VEthernetNetworkSwitcher::PreferredNic(const ppp::string& nic) noexcept {
@@ -5187,6 +5584,7 @@ namespace ppp {
 #endif
                 
                 ribs->emplace_back(std::make_pair(fullpath, ngw));
+                ip_list_count_ = ribs->size();
                 return true;
             }
 
@@ -5249,6 +5647,7 @@ namespace ppp {
 #endif
                 
                 ribs6->emplace_back(std::make_pair(fullpath, ngw6));
+                ip_list6_count_ = ribs6->size();
                 return true;
             }
 
@@ -6733,12 +7132,7 @@ namespace ppp {
                         RestoreIPv6Assignment();
                     }
 #if defined(_WIN32)
-                    // If the server has no IPv6 data plane, local IPv6 direct
-                    // connectivity must be preserved (never fail-closed on a
-                    // server that cannot carry IPv6).  Only a server with an
-                    // IPv6 data plane gets the selective leak block while the
-                    // managed routes are re-established.
-                    if (network_takeover_stopping_.load() || !ipv6_server_has_dataplane_) {
+                    if (network_takeover_stopping_.load()) {
                         RemoveWindowsIPv6LeakBlock();
                     }
                     else {
@@ -6771,13 +7165,10 @@ namespace ppp {
                     RestoreIPv6Assignment();
                 }
 #if defined(_WIN32)
-                // A temporary primary-outbound failure must stay fail-closed only
-                // when the server actually carries IPv6.  For a server without an
-                // IPv6 data plane the tunnel cannot carry IPv6 anyway, so keep the
-                // host's direct IPv6 working instead of suppressing it.  Only
+                // A temporary primary-outbound failure stays fail-closed. Only
                 // Dispose() sets network_takeover_stopping_ and permits host IPv6
                 // restoration.
-                if (!network_takeover_stopping_.load() && ipv6_server_has_dataplane_) {
+                if (!network_takeover_stopping_.load()) {
                     ApplyWindowsIPv6LeakBlockRoutes();
                 }
                 else {
@@ -6824,12 +7215,34 @@ namespace ppp {
                     std::move(pending_outbound_exchanger_);
                 pending_outbound_.clear();
                 pending_outbound_deadline_ = 0;
+                pending_primary_switch_ = false;
                 OutboundExchangerTable outbounds = std::move(outbound_exchangers_);
                 outbound_exchangers_.clear();
+                ppp::vector<std::shared_ptr<VEthernetExchanger>> disposed_exchangers;
                 for (auto& entry : outbounds) {
-                    if (entry.second) entry.second->Dispose();
+                    if (NULLPTR == entry.second) continue;
+                    bool duplicate = false;
+                    for (const auto& disposed : disposed_exchangers) {
+                        if (disposed == entry.second) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate) {
+                        disposed_exchangers.emplace_back(entry.second);
+                        entry.second->Dispose();
+                    }
                 }
-                if (NULLPTR != pending) pending->Dispose();
+                if (NULLPTR != pending) {
+                    bool duplicate = false;
+                    for (const auto& disposed : disposed_exchangers) {
+                        if (disposed == pending) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate) pending->Dispose();
+                }
 
                 // Shutdown and release the qos control module.
                 if (std::shared_ptr<ppp::transmissions::ITransmissionQoS> qos = std::move(qos_);  NULLPTR != qos) {
@@ -7180,8 +7593,19 @@ namespace ppp {
                 // Every secondary tunnel endpoint must bypass the TAP as well,
                 // otherwise establishing it after the default route is installed
                 // recursively sends the tunnel connection through the primary.
+                ppp::vector<std::shared_ptr<VEthernetExchanger>> protected_exchangers;
                 for (auto& entry : outbound_exchangers_) {
-                    if (entry.first == "main" || NULLPTR == entry.second) continue;
+                    if (entry.first == "main" || NULLPTR == entry.second ||
+                        entry.second->IsPrimaryOutbound()) continue;
+                    bool duplicate = false;
+                    for (const auto& protected_exchanger : protected_exchangers) {
+                        if (protected_exchanger == entry.second) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) continue;
+                    protected_exchangers.emplace_back(entry.second);
 
                     boost::asio::ip::tcp::endpoint secondary_ep;
                     ppp::string secondary_hostname, secondary_address, secondary_path, secondary_server;
@@ -7528,8 +7952,20 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::OnUpdate(uint64_t now) noexcept {
                 if (VEthernet::OnUpdate(now)) {
                     if (!outbound_exchangers_.empty()) {
+                        ppp::vector<std::shared_ptr<VEthernetExchanger>> updated_exchangers;
                         for (auto& entry : outbound_exchangers_) {
-                            if (entry.second) entry.second->StaticEchoSwapAsynchronousSocket();
+                            if (NULLPTR == entry.second) continue;
+                            bool duplicate = false;
+                            for (const auto& updated : updated_exchangers) {
+                                if (updated == entry.second) {
+                                    duplicate = true;
+                                    break;
+                                }
+                            }
+                            if (!duplicate) {
+                                updated_exchangers.emplace_back(entry.second);
+                                entry.second->StaticEchoSwapAsynchronousSocket();
+                            }
                         }
                     }
                     else {

@@ -76,7 +76,12 @@ namespace ppp {
             public:
                 NetworkState                                                            GetNetworkState()       noexcept { return network_state_.load(); }
                 const ppp::string&                                                      GetOutboundTag()        const noexcept { return outbound_tag_; }
-                bool                                                                    IsPrimaryOutbound()     const noexcept { return primary_outbound_; }
+                bool                                                                    IsPrimaryOutbound()     const noexcept { return primary_outbound_.load(); }
+                // A split outbound can be promoted to the primary role without
+                // opening another control/MUX session.  The role is dynamic:
+                // "main" is an alias owned by the switcher, not a second
+                // exchanger.
+                bool                                                                    SetPrimaryOutbound(bool primary) noexcept;
                 std::shared_ptr<Byte>                                                   GetBuffer()             noexcept { return buffer_; }
                 std::shared_ptr<vmux::vmux_net>                                         GetMux()                noexcept { return mux_; }
                 VEthernetNetworkSwitcherPtr                                             GetSwitcher()           noexcept { return switcher_; }
@@ -89,6 +94,8 @@ namespace ppp {
                 bool                                                                    GetProbeChecked()       noexcept;
                 ppp::string                                                             GetProbeServer()        noexcept;
                 ppp::string                                                             GetCurrentEntry()       noexcept;
+                ppp::string                                                             GetRankedFirstEntry()   noexcept;
+                bool                                                                    SwitchToRankedFirstEntry() noexcept;
                 NetworkState                                                            GetMuxNetworkState()    noexcept;
                 virtual bool                                                            Open()                  noexcept;
                 virtual void                                                            Dispose()               noexcept;
@@ -119,10 +126,12 @@ namespace ppp {
                 virtual bool                                                            Echo(int ack_id) noexcept;
                 virtual bool                                                            Echo(const void* packet, int packet_size) noexcept;
                 virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
+                virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
                 virtual bool                                                            Update() noexcept;
 #if defined(PPP_LOG_VERBOSE)
                 void                                                                    GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept;
 #endif
+                void                                                                    ResetMuxDataPlane() noexcept;
                 void                                                                    ResetDataChannels() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP, const ppp::string* entry = NULLPTR) noexcept;
@@ -313,7 +322,7 @@ namespace ppp {
 
                 VEthernetNetworkSwitcherPtr                                             switcher_;
                 ppp::string                                                             outbound_tag_;
-                bool                                                                    primary_outbound_ = true;
+                std::atomic<bool>                                                       primary_outbound_ = true;
                 boost::asio::ip::address                                                assigned_ipv6_address_;
                 IForwardingPtr                                                          forwarding_;
                 std::shared_ptr<VirtualEthernetInformation>                             information_;
@@ -331,6 +340,8 @@ namespace ppp {
                 ppp::string                                                             mux_failure_entry_;  ///< Entry associated with the current consecutive M1/M4 streak.
                 uint64_t                                                                mux_failure_last_   = 0;
                 int                                                                     mux_failure_streak_ = 0;
+                uint64_t                                                                mux_retry_not_before_ = 0; ///< Do not create another MUX before this tick.
+                uint32_t                                                                mux_retry_backoff_ms_ = 0; ///< Bounded MUX-only retry backoff.
                 
                 int                                                                     reconnection_count_ = 0;
 

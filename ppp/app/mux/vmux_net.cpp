@@ -434,15 +434,18 @@ namespace vmux {
         }
 
         const Byte payload = static_cast<Byte>(reason);
-        std::shared_ptr<vmux_net> self = shared_from_this();
-        if (!post(cmd_mux_rebuild, &payload, sizeof(payload), 0, false,
-            [self](bool) noexcept {
-                self->close_exec();
-            })) {
+        // M1/M4 is a data-integrity failure.  Do not keep the old generation
+        // alive while waiting for the peer notification write to complete: the
+        // affected logical streams would remain blocked behind the missing DSN
+        // and look like a connected-but-frozen tunnel.  The notice is best
+        // effort; closing the generation locally is the recovery boundary.
+        if (!post(cmd_mux_rebuild, &payload, sizeof(payload), 0, false)) {
             // post() already requests a generic close on failure; the reason was
             // latched first, so the exchanger can still attribute this rebuild.
-            close_exec(reason);
+            return;
         }
+
+        close_exec(reason);
     }
 
     /**

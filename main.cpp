@@ -20,6 +20,7 @@
 #include <ppp/app/server/VirtualEthernetManagedServer.h>
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
+#include <ppp/app/rpc/LocalRpcServer.h>
 
 // Platform-specific includes
 #if defined(_WIN32)
@@ -34,6 +35,7 @@
 #include <cerrno>
 #include <sys/resource.h>
 #include <darwin/ppp/tap/TapDarwin.h>
+#include <darwin/ppp/net/proxies/HttpProxy.h>
 #else
 #include <linux/ppp/tap/TapLinux.h>
 #include <linux/ppp/diagnostics/UnixStackTrace.h>
@@ -109,9 +111,12 @@ struct NetworkInterface final
 
 #if defined(_WIN32)
     uint32_t                                            LeaseTimeInSeconds = 0;     // DHCP lease time
-    bool                                                SetHttpProxy       = false; // Enable HTTP proxy
+    bool                                                SetHttpProxy       = false; // Enable system HTTP/HTTPS proxy
     bool                                                LocalDns           = true;  // Listen on loopback for system DNS
 #else   
+#if defined(_MACOS)
+    bool                                                SetHttpProxy       = false; // Enable system HTTP/HTTPS proxy (desktop)
+#endif
     bool                                                Promisc            = false; // Promiscuous mode
     int                                                 Ssmt               = 0;     // SSMT thread count
 #if defined(_LINUX) 
@@ -380,6 +385,14 @@ public:
     // Parse command line arguments
     int                                             PreparedArgumentEnvironment(int argc, const char* argv[]) noexcept;
 
+public:
+    // Headless mode: no dashboard rendering, no keyboard listener.
+    bool                                            IsHeadless() const noexcept { return headless_; }
+    // Build the runtime snapshot JSON consumed by the Rust TUI front-end.
+    bool                                            BuildRuntimeSnapshot(Json::Value& snapshot) noexcept;
+    // Execute one RPC command (methods are dispatched on the io_context thread).
+    bool                                            ExecuteRpcCommand(const ppp::string& method, const Json::Value& params, Json::Value& result, ppp::string& error) noexcept;
+
 protected:
     // Main tick handler - called every second
     virtual bool                                    OnTick(uint64_t now) noexcept;
@@ -435,7 +448,7 @@ private:
     int                                             console_tab_page_           = 0;     // Current TUI tab page (0-3)
     std::size_t                                     server_selection_           = 0;     // Selected row on Servers page
     bool                                            client_mode_                = false; // Current mode flag
-    bool                                            proxy_mode_                 = false; // Local HTTP/SOCKS only; no TUN/routes/DNS
+    bool                                            proxy_mode_                 = false; // Proxy/control mode; no TUN/routes/DNS
     bool                                            quic_                       = false; // Original QUIC setting (Windows)
     std::shared_ptr<AppConfiguration>               configuration_;                      // Application configuration
     ppp::vector<ClientOutboundConfiguration>        outbound_configurations_;             // Geo multi-outbound configurations
@@ -449,12 +462,51 @@ private:
     Stopwatch                                       stopwatch_;                          // Application uptime
     PreventReturn                                   prevent_rerun_;                      // Prevent multiple instances
     ppp::transmissions::ITransmissionStatistics     transmission_statistics_;            // Traffic statistics
+
+    bool                                            headless_                   = false; // Headless mode (no TUI)
+    bool                                            catalog_only_               = false; // Load server directory without starting a VPN link
+    ppp::string                                     rpc_listen_;                         // RPC listen address "ip:port"
+    ppp::string                                     rpc_token_;                          // RPC authentication token
+    int                                             rpc_max_clients_            = 1;     // Max concurrent RPC clients
+    std::shared_ptr<ppp::app::rpc::LocalRpcServer>  rpc_server_;                         // Local RPC server
 };
 
 // Global variables
 static std::shared_ptr<PppApplication>              DEFAULT_;                            // Application instance
 static ppp::string                                   LOG_FILE_PATH_;                      // Log file path from --log-file argument
+static ppp::string                                   LOG_LEVEL_ = "error";                // Runtime log level from --log-level
 FILE*                                                ppp::g_log_stream = stdout;          // Log output stream, redirected by --log-file
+
+// RPC log ring buffer: fed by the desktop log sink hook (any thread),
+// drained by OnTick (io_context thread) and get_logs (RPC requests).
+struct RpcLogEntry {
+    uint64_t                                            seq = 0;
+    ppp::string                                         level;
+    ppp::string                                         line;
+    uint64_t                                            timestamp_ms = 0;
+};
+static ppp::vector<RpcLogEntry>                      g_rpc_logs;
+static std::mutex                                    g_rpc_logs_syncobj;
+static std::atomic<uint64_t>                         g_rpc_log_seq = 0;                   // Next seq to assign
+static std::atomic<uint64_t>                         g_rpc_logs_last_pushed_seq = 0;      // Seq pushed to RPC clients
+static constexpr std::size_t                         RPC_LOG_CAPACITY = 2000;
+
+static void RpcLogSink(const char* tag, const char* text) noexcept {
+    if (NULLPTR == tag || NULLPTR == text || text[0] == '\x0') return;
+
+    RpcLogEntry entry;
+    entry.seq = g_rpc_log_seq.fetch_add(1) + 1;
+    entry.level = tag;
+    entry.line = text;
+    entry.timestamp_ms = ppp::threading::Executors::GetTickCount();
+
+    std::lock_guard<std::mutex> scope(g_rpc_logs_syncobj);
+    if (g_rpc_logs.size() >= RPC_LOG_CAPACITY)
+    {
+        g_rpc_logs.erase(g_rpc_logs.begin());
+    }
+    g_rpc_logs.emplace_back(std::move(entry));
+}
 
 #if defined(_MACOS)
 static void ConfigureOpenFileDescriptorLimit() noexcept
@@ -728,6 +780,67 @@ int NetworkInterface::BypassLoadList6(const ppp::string& s) noexcept
     return events;
 }
 
+// The route summary is about network prefixes, not the number of source
+// files.  Parse the configured files independently of the active split mode so
+// GEO mode reports the same IP-segment counts as IP mode.
+struct RouteSegmentCounts final
+{
+    std::size_t ipv4 = 0;
+    std::size_t ipv6 = 0;
+};
+
+static RouteSegmentCounts CountConfiguredRouteSegments(const NetworkInterface& network_interface) noexcept
+{
+    ppp::unordered_set<ppp::string> ipv4;
+    ppp::unordered_set<ppp::string> ipv6;
+
+    auto load_file = [&ipv4, &ipv6](const ppp::string& path) noexcept {
+        if (path.empty()) {
+            return;
+        }
+
+        ppp::vector<Ipep::AddressRange> ranges;
+        Ipep::ParseAllCidrsFromFileName(path, ranges);
+        for (const Ipep::AddressRange& range : ranges) {
+            ppp::string key = Ipep::ToAddressString<ppp::string>(range.Address) + "/" +
+                stl::to_string<ppp::string>(range.Cidr);
+            if (range.Address.is_v4()) {
+                ipv4.emplace(std::move(key));
+            }
+            elif(range.Address.is_v6()) {
+                ipv6.emplace(std::move(key));
+            }
+        }
+    };
+
+    if (network_interface.Bypass) {
+        for (const ppp::string& path : *network_interface.Bypass) {
+            load_file(path);
+        }
+    }
+    if (network_interface.Bypass6) {
+        for (const ppp::string& path : *network_interface.Bypass6) {
+            load_file(path);
+        }
+    }
+
+    return RouteSegmentCounts{ ipv4.size(), ipv6.size() };
+}
+
+static std::size_t CountConfiguredDnsRules(const ppp::string& path) noexcept
+{
+    if (path.empty()) {
+        return 0;
+    }
+
+    using DnsRule = ppp::app::client::dns::Rule;
+    ppp::unordered_map<ppp::string, DnsRule::Ptr> rules;
+    ppp::unordered_map<ppp::string, DnsRule::Ptr> full_rules;
+    ppp::unordered_map<ppp::string, DnsRule::Ptr> regexp_rules;
+    DnsRule::LoadFile(path, rules, full_rules, regexp_rules);
+    return rules.size() + full_rules.size() + regexp_rules.size();
+}
+
 // Asynchronous IP list download
 bool PppApplication::PullIPList(const ppp::string& url, const ppp::function<void(int, const ppp::set<ppp::string>&)>& cb) noexcept
 {
@@ -882,7 +995,15 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
     }
     if (activate)
     {
-        client->SwitchPrimaryOutbound(servers[server_selection_].tag);
+        const auto& selected = servers[server_selection_];
+        if (selected.active)
+        {
+            client->SwitchPrimaryOutboundToRankedFirst(selected.tag);
+        }
+        else
+        {
+            client->SwitchPrimaryOutbound(selected.tag);
+        }
     }
 }
 
@@ -1215,7 +1336,9 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         // Print client-specific information
         if (NULLPTR != client)
         {
-            ppp::string guid = configuration_->client.guid;
+            std::shared_ptr<AppConfiguration> active_configuration = client->GetConfiguration();
+            ppp::string guid = NULLPTR != active_configuration ?
+                active_configuration->client.guid : configuration_->client.guid;
             if (guid.size() >= 2 && guid.front() == '{' && guid.back() == '}')
             {
                 guid = guid.substr(1, guid.size() - 2);
@@ -1649,11 +1772,81 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
         printfn("Bypass Mode           : %s",
             network_interface->SplitMode == NetworkInterface::BypassMode::Ip ? "ip" :
             network_interface->SplitMode == NetworkInterface::BypassMode::Geo ? "geo" : "no");
+        const RouteSegmentCounts segment_counts = CountConfiguredRouteSegments(*network_interface);
+        printfn("IPv4 List Entries     : %zu", segment_counts.ipv4);
+        printfn("IPv6 List Entries     : %zu", segment_counts.ipv6);
+        printfn("DNS Rules File        : %s", network_interface->DNSRules.data());
+        printfn("DNS Rule Count        : %zu", CountConfiguredDnsRules(network_interface->DNSRules));
         if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo)
         {
             printfn("GEO Policy YAML       : %s", network_interface->GeoRules.data());
             printfn("GeoSite Database      : %s", network_interface->GeoSite.data());
             printfn("GeoIP Database        : %s", network_interface->GeoIP.data());
+            if (NULLPTR != client)
+            {
+                auto geo_rules = client->GetGeoRules();
+                auto statuses = client->GetOutboundStatuses();
+                if (NULLPTR != geo_rules)
+                {
+                    ppp::string direct_dns;
+                    if (geo_rules->UsesLocalDirectDns())
+                    {
+                        direct_dns = "local";
+                    }
+                    for (const auto& address : geo_rules->GetDirectDnsServers())
+                    {
+                        ppp::string value = ppp::net::Ipep::ToAddressString<ppp::string>(address);
+                        if (!direct_dns.empty())
+                        {
+                            direct_dns += ", ";
+                        }
+                        direct_dns += value;
+                    }
+                    printfn("Direct DNS            : %s",
+                        direct_dns.empty() ? "none" : direct_dns.data());
+                    printfn("Rule Count            : %zu", geo_rules->GetRuleCount());
+
+                    auto find_status = [&statuses](const ppp::string& tag) noexcept ->
+                        const VEthernetNetworkSwitcher::OutboundStatus*
+                    {
+                        for (const auto& status : statuses)
+                        {
+                            if (status.tag == tag)
+                            {
+                                return &status;
+                            }
+                        }
+                        return NULLPTR;
+                    };
+
+                    std::size_t split_rule_count = 0;
+                    for (const auto& rule : geo_rules->GetRuleSummaries())
+                    {
+                        if (rule.action != ppp::app::client::geo::GeoRuleEngine::Action::Tunnel ||
+                            rule.outbound.empty())
+                        {
+                            continue;
+                        }
+                        const auto* target = find_status(rule.outbound);
+                        if (NULLPTR == target || !target->route_used)
+                        {
+                            continue;
+                        }
+                        if (split_rule_count == 0)
+                        {
+                            printfn("Split Rules           :");
+                        }
+                        ++split_rule_count;
+                        ppp::string matcher = rule.type + "," + rule.value;
+                        ppp::string display = target->display_name.empty() ? target->tag : target->display_name;
+                        printfn("  %s -> %s (%s)", matcher.data(), rule.outbound.data(), display.data());
+                    }
+                    if (split_rule_count == 0)
+                    {
+                        printfn("Split Rules           : none");
+                    }
+                }
+            }
         }
         elif(network_interface->SplitMode == NetworkInterface::BypassMode::Ip)
         {
@@ -1663,12 +1856,6 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                 network_interface->Bypass6->begin()->data() : "(none)");
             printfn("Bypass Gateway        : %s", network_interface->BypassNgw.to_string().data());
             printfn("Bypass Gateway IPv6   : %s", network_interface->BypassNgw6.to_string().data());
-            printfn("DNS Rules File        : %s", network_interface->DNSRules.data());
-            if (NULLPTR != client)
-            {
-                printfn("IP List Entries       : %zu", client->GetIPListCount());
-                printfn("IPv6 List Entries     : %zu", client->GetIPList6Count());
-            }
         }
         else
         {
@@ -1682,8 +1869,8 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     {
         printfn("%s", "SERVERS");
         printfn("%s", section_separator.data());
-        printfn("%s", "Use Up/Down to select and Enter to switch.");
-        printfn("%s", "Existing sessions keep their current connection.");
+        printfn("%s", "Use Up/Down to select. Enter switches server; press again for Rank #1.");
+        printfn("%s", "Rank #1 rebuilds a complete MUX generation on one entry.");
         if (NULLPTR == client)
         {
             printfn("%s", "No VPN client is running.");
@@ -1718,15 +1905,6 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                 std::size_t last = std::min<std::size_t>(servers.size(), first + page_size);
                 printfn("Servers               : %zu  Page %zu/%zu  (%zu-%zu)",
                     servers.size(), page + 1, page_count, first + 1, last);
-                auto server_endpoint = [](const ppp::string& uri) noexcept -> ppp::string
-                {
-                    ppp::string value = ppp::ATrim<ppp::string>(uri);
-                    std::size_t authority = value.find("://");
-                    std::size_t slash = value.find('/',
-                        authority == ppp::string::npos ? 0 : authority + 3);
-                    if (slash != ppp::string::npos) value.erase(slash);
-                    return value;
-                };
                 auto probe_suffix = [](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
                 {
                     if (!outbound.probe_enabled)
@@ -1749,41 +1927,105 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                     }
                     return suffix;
                 };
-                auto effective_entry = [server_endpoint](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
+                auto server_endpoint = [](const ppp::string& uri) noexcept -> ppp::string
                 {
-                    ppp::string effective;
-                    if (!outbound.probe_server.empty())
+                    ppp::string value = ppp::ATrim<ppp::string>(uri);
+                    const std::size_t scheme = value.find("://");
+                    const std::size_t authority = scheme == ppp::string::npos ? 0 : scheme + 3;
+                    const std::size_t slash = value.find('/', authority);
+                    if (slash != ppp::string::npos)
                     {
-                        ppp::string base = server_endpoint(outbound.server);
-                        std::size_t scheme = base.find("://");
-                        ppp::string base_endpoint = scheme == ppp::string::npos ? base : base.substr(scheme + 3);
-                        if (base_endpoint != outbound.probe_server)
+                        value.erase(slash);
+                    }
+                    if (authority > 0 && authority < value.size())
+                    {
+                        value = value.substr(authority);
+                    }
+                    return value;
+                };
+                auto entry_status = [&server_endpoint](const VEthernetNetworkSwitcher::OutboundStatus& outbound) noexcept -> ppp::string
+                {
+                    ppp::string value;
+                    if (!outbound.multiple_entries)
+                    {
+                        // A single-entry outbound has no ranking state.  Keep
+                        // the display useful by showing its configured endpoint
+                        // when it is not connected, without the multi-entry
+                        // "ranking collecting" placeholder.
+                        value += outbound.current_entry.empty() ?
+                            server_endpoint(outbound.server) : outbound.current_entry;
+                        return value;
+                    }
+
+                    const bool connected = !outbound.current_entry.empty();
+                    ppp::string current = outbound.current_entry;
+                    if (current.empty())
+                    {
+                        // An idle multi-entry outbound still has a useful
+                        // candidate from the latest probe/ranking pass. Show
+                        // it instead of hiding all entry information behind
+                        // "(not connected)".
+                        current = !outbound.ranked_first_entry.empty() ?
+                            outbound.ranked_first_entry : outbound.probe_entry;
+                        if (current.empty())
                         {
-                            effective = "  -> ";
-                            effective += outbound.probe_server;
+                            current = server_endpoint(outbound.server);
                         }
                     }
-                    return effective;
+                    if (!connected)
+                    {
+                        value += current.empty() ? "(not connected)" : current;
+                        return value;
+                    }
+                    value += current;
+                    if (!outbound.ranked_first_entry.empty())
+                    {
+                        if (outbound.ranked_first_entry == outbound.current_entry)
+                        {
+                            value += "  [#1]";
+                        }
+                        else
+                        {
+                            value += "  -> #1 ";
+                            value += outbound.ranked_first_entry;
+                        }
+                    }
+                    else
+                    {
+                        value += "  [ranking collecting]";
+                    }
+                    return value;
                 };
                 for (std::size_t i = first; i < last; ++i)
                 {
                     const auto& outbound = servers[i];
                     bool connected = outbound.state ==
                         VEthernetExchanger::NetworkState_Established;
-                    ppp::string usage = outbound.route_used ? " used" :
-                        (connected ? " connected" : "");
+                    // "main" is the live primary selection.  "split" is a
+                    // static routing-rule membership and must remain visible
+                    // even when another outbound is the current main.
+                    ppp::string usage;
+                    if (outbound.active)
+                    {
+                        usage += " main";
+                    }
+                    if (outbound.route_used)
+                    {
+                        usage += " split";
+                    }
+                    if (connected)
+                    {
+                        usage += " connected";
+                    }
                     usage += probe_suffix(outbound);
-                    ppp::string endpoint = server_endpoint(outbound.server);
-                    ppp::string effective = effective_entry(outbound);
+                    ppp::string entries = entry_status(outbound);
                     if (i == server_selection_ && console_highlight)
                     {
                         printfn.Highlighted(">%-1c %-24s%s",
                             outbound.active ? '*' : ' ',
                             outbound.display_name.data(),
                             usage.data());
-                        printfn.Highlighted("   %s%s",
-                            endpoint.empty() ? "(not configured)" : endpoint.data(),
-                            effective.data());
+                        printfn.Highlighted("   %s", entries.data());
                     }
                     else
                     {
@@ -1792,9 +2034,7 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                             outbound.active ? '*' : ' ',
                             outbound.display_name.data(),
                             usage.data());
-                        printfn("   %s%s",
-                            endpoint.empty() ? "(not configured)" : endpoint.data(),
-                            effective.data());
+                        printfn("   %s", entries.data());
                     }
                 }
             }
@@ -1938,8 +2178,13 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 bool proxy_only = proxy_mode_;
                 ethernet->ProxyOnly(&proxy_only);
             }
+            {
+                bool proxy_ip_rules =
+                    network_interface->SplitMode == NetworkInterface::BypassMode::Ip;
+                ethernet->ProxyIpRules(&proxy_ip_rules);
+            }
 
-            if (!proxy_mode_ && !outbound_configurations_.empty())
+            if (!outbound_configurations_.empty())
             {
                 VEthernetNetworkSwitcher::OutboundConfigurationList outbounds;
                 for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
@@ -1977,7 +2222,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 ethernet->PreferredNic(network_interface->Nic);
             }
             // Load bypass policy selected by --bypass-mode.
-            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
                 if (!ethernet->LoadGeoRules(network_interface->GeoRules, network_interface->GeoSite, network_interface->GeoIP)) {
                     fprintf(stdout, "%s\r\n", "Failed to load geo bypass rules.");
                     break;
@@ -1985,7 +2230,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
 
             // Load bypass IP lists in IP mode.
-            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
 #if defined(_LINUX)
                 for (auto&& bypass_path : *network_interface->Bypass)
                 {
@@ -2012,7 +2257,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
 #endif
             }
 
-            if (!proxy_mode_ && network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
+            if (network_interface->SplitMode == NetworkInterface::BypassMode::Ip) {
                 for (auto&& route : configuration->client.routes)
                 {
                     ppp::string path = File::GetFullPath(File::RewritePath(route.path.data()).data());
@@ -2146,11 +2391,34 @@ std::shared_ptr<BufferswapAllocator> PppApplication::GetBufferAllocator() noexce
 // Parse and prepare command line arguments
 int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) noexcept
 {
+    // Parse runtime logging before any configuration or RPC startup so early
+    // startup failures also obey the selected level.  Release and Debug use
+    // the same log implementation; the default is intentionally error-only.
+    LOG_LEVEL_ = ppp::GetCommandArgument("--log-level", argc, argv, "error");
+    ppp::diagnostics::SetLogLevel(static_cast<int>(
+        ppp::diagnostics::ParseLogLevel(LOG_LEVEL_.data())));
+
     // Parse log file path from command line
     LOG_FILE_PATH_ = ppp::GetCommandArgument("--log-file", argc, argv);
     if (LOG_FILE_PATH_.size() > 0)
     {
         LOG_FILE_PATH_ = File::GetFullPath(File::RewritePath(LOG_FILE_PATH_.data()).data());
+    }
+
+    // Parse headless / RPC options.  The local RPC server powers the Rust
+    // TUI front-end (docs/RUST_TUI_DESIGN_CN.md); --rpc-listen requires
+    // --rpc-token and only loopback bindings are accepted by the server.
+    headless_ = ppp::HasCommandArgument("--headless", argc, argv);
+    catalog_only_ = ppp::ToBoolean(ppp::GetCommandArgument(
+        "--catalog-only", argc, argv, "no").data());
+    rpc_listen_ = ppp::GetCommandArgument("--rpc-listen", argc, argv);
+    rpc_token_ = ppp::GetCommandArgument("--rpc-token", argc, argv);
+    rpc_max_clients_ = std::max<int>(1,
+        atoi(ppp::GetCommandArgument("--rpc-max-clients", argc, argv, "1").data()));
+    if (rpc_listen_.size() > 0 && rpc_token_.empty())
+    {
+        fprintf(stdout, "%s\r\n", "--rpc-listen requires --rpc-token.");
+        return -1;
     }
 
     // Show help if requested
@@ -2180,7 +2448,11 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
             }
         }
         mode = ppp::ToLower<ppp::string>(ppp::ATrim<ppp::string>(mode));
-        proxy_mode_ = mode == "proxy";
+        // `client.proxy-only` is the configuration equivalent of
+        // `--mode=proxy`. It must be decided before the loopback/TAP setup;
+        // changing this structural mode during a hot switch would require
+        // tearing down the operating-system network takeover.
+        proxy_mode_ = mode == "proxy" || configuration->client.proxy_only;
         client_mode_ = proxy_mode_ || IsModeClientOrServer(argc, argv);
 
         if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration))
@@ -2201,10 +2473,14 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
 
                     char* tail = NULLPTR;
                     long value = strtol(text.data(), &tail, 10);
+                    // Port 0 explicitly disables that local listener.  This
+                    // is used by the Rust desktop client for a proxy-like
+                    // control session that loads server profiles without
+                    // opening an HTTP/SOCKS port.
                     if (NULLPTR == tail || tail == text.data() || *tail != '\x0' ||
-                        value <= IPEndPoint::MinPort || value > IPEndPoint::MaxPort)
+                        value < 0 || value > IPEndPoint::MaxPort)
                     {
-                        fprintf(stdout, "Invalid %s value '%s'; expected 1-65535.\r\n",
+                        fprintf(stdout, "Invalid %s value '%s'; expected 0-65535.\r\n",
                             option, text.data());
                         return false;
                     }
@@ -2223,14 +2499,14 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
                 configuration->client.socks_proxy.port <= IPEndPoint::MaxPort;
             if (!http_enabled && !socks_enabled)
             {
-                fprintf(stdout, "%s\r\n",
-                    "Proxy mode requires a valid configured or command-line HTTP/SOCKS port.");
-                return -1;
+                LOG_INFO("Proxy control mode: no HTTP/SOCKS listener; server profiles and transport loaded, TUN/routes/DNS disabled");
             }
-
-            LOG_INFO("Proxy mode: HTTP=%s:%d SOCKS=%s:%d; TUN/routes/DNS/system-proxy disabled",
-                configuration->client.http_proxy.bind.data(), configuration->client.http_proxy.port,
-                configuration->client.socks_proxy.bind.data(), configuration->client.socks_proxy.port);
+            else
+            {
+                LOG_INFO("Proxy mode: HTTP=%s:%d SOCKS=%s:%d; TUN/routes/DNS disabled, system-proxy optional",
+                    configuration->client.http_proxy.bind.data(), configuration->client.http_proxy.port,
+                    configuration->client.socks_proxy.bind.data(), configuration->client.socks_proxy.port);
+            }
         }
     }
     if (!geo_configuration_path_.empty() && !client_mode_)
@@ -2267,6 +2543,35 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     if (proxy_mode_)
     {
         network_interface->SplitMode = NetworkInterface::BypassMode::No;
+        ppp::string proxy_bypass_mode = ToLower(ppp::LTrim(ppp::RTrim(
+            ppp::GetCommandArgument("--bypass-mode", argc, argv, "no"))));
+        if (proxy_bypass_mode == "geo")
+        {
+            network_interface->SplitMode = NetworkInterface::BypassMode::Geo;
+            network_interface->GeoRules = File::GetFullPath(File::RewritePath(
+                ppp::GetCommandArgument("--geo-rules", argc, argv, "./geo-rules.yaml").data()).data());
+            network_interface->GeoSite = File::GetFullPath(File::RewritePath(
+                ppp::GetCommandArgument("--geosite", argc, argv, "./geosite.dat").data()).data());
+            network_interface->GeoIP = File::GetFullPath(File::RewritePath(
+                ppp::GetCommandArgument("--geoip", argc, argv, "./geoip.dat").data()).data());
+        }
+        elif (proxy_bypass_mode == "ip")
+        {
+            network_interface->SplitMode = NetworkInterface::BypassMode::Ip;
+            network_interface->BypassLoadList(File::GetFullPath(File::RewritePath(
+                ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass", argc, argv, "./ip.txt"))).data()).data()));
+            network_interface->BypassLoadList6(File::GetFullPath(File::RewritePath(
+                ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass6", argc, argv, "./ipv6.txt"))).data()).data()));
+        }
+        elif (proxy_bypass_mode == "no")
+        {
+            network_interface->SplitMode = NetworkInterface::BypassMode::No;
+        }
+        else
+        {
+            fprintf(stdout, "Invalid --bypass-mode '%s'; expected ip, geo, or no.\r\n", proxy_bypass_mode.data());
+            return -1;
+        }
         GetDnsAddresses(network_interface->DnsAddresses, argc, argv);
         // Proxy-only does not parse the TUN interface settings, but it still
         // shares the normal client's vmux transport policy.
@@ -2278,6 +2583,10 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         {
             network_interface->MuxAcceleration = 0;
         }
+#if defined(_WIN32) || defined(_MACOS)
+        network_interface->SetHttpProxy = ppp::ToBoolean(
+            ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
+#endif
 #if defined(_WIN32)
         network_interface->LocalDns = false;
 #endif
@@ -2297,7 +2606,7 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         network_interface->GeoRules = geo_configuration_path_;
     }
 
-    if (client_mode_ && !proxy_mode_ &&
+    if (client_mode_ &&
         !LoadGeoOutboundConfigurations(network_interface, configuration))
     {
         return -1;
@@ -2444,6 +2753,13 @@ void PppApplication::PrintHelpInformation() noexcept
         col_description_width, "Override proxy-mode SOCKS5 port",
         col_default_width, "config");
 
+#if defined(_WIN32) || defined(_MACOS)
+    printf("  %-*s  %-*s  %-*s\r\n",
+        col_option_width, "--set-http-proxy=[yes|no]",
+        col_description_width, "Set system HTTP/HTTPS proxy; restore on exit",
+        col_default_width, "no");
+#endif
+
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--config=<path>", 
         col_description_width, "Configuration file path", 
@@ -2460,27 +2776,52 @@ void PppApplication::PrintHelpInformation() noexcept
         col_default_width, "no");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--auto-restart=<seconds>", 
-        col_description_width, "Auto restart interval", 
+        col_option_width, "--auto-restart=<seconds>",
+        col_description_width, "Auto restart interval",
         col_default_width, "0 (disabled)");
-    
-    printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--log-file=<path>", 
-        col_description_width, "LOG_DEBUG output file (Debug builds only)", 
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--log-file=<path>",
+        col_description_width, "Core runtime log file (all builds)",
         col_default_width, "console only");
-    
-    printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--link-restart=<count>", 
-        col_description_width, "Link reconnection attempts", 
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--log-level=[none|error|warn|info|debug]",
+        col_description_width, "Runtime log level",
+        col_default_width, "error");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--link-restart=<count>",
+        col_description_width, "Link reconnection attempts",
         col_default_width, "0");
-    
-    printf("│ %-*s │ %-*s │ %-*s │\n", 
-        col_option_width, "--block-quic=[yes|no]", 
-        col_description_width, "Block QUIC protocol traffic", 
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--block-quic=[yes|no]",
+        col_description_width, "Block QUIC protocol traffic",
         col_default_width, "no");
 
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--headless",
+        col_description_width, "No dashboard rendering / keyboard input",
+        col_default_width, "off");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--rpc-listen=<ip:port>",
+        col_description_width, "Local JSON-RPC server (requires --rpc-token)",
+        col_default_width, "disabled");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--rpc-token=<token>",
+        col_description_width, "RPC authentication token (loopback only)",
+        col_default_width, "required with --rpc-listen");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--rpc-max-clients=<n>",
+        col_description_width, "Max concurrent RPC clients",
+        col_default_width, "1");
+
     printf("└──────────────────────────────────────────┴──────────────────────────────────────────────────┴─────────────────────────┘\n\n");
-    
+
     // SERVER-SPECIFIC OPTIONS table
     printf("SERVER-SPECIFIC OPTIONS:\n");
     printf("┌──────────────────────────────────────────┬──────────────────────────────────────────────────┬─────────────────────────┐\n");
@@ -3002,10 +3343,18 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             ni->MuxAcceleration = 0;
         }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(_MACOS)
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
+#if defined(_WIN32)
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
         ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
+#else
+        ni->ComponentId = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
+#if defined(_MACOS)
+        ni->Ssmt = std::max<int>(0, atoi(ppp::GetCommandArgument("--tun-ssmt", argc, argv).data()));
+        ni->Promisc = ppp::ToBoolean(ppp::GetCommandArgument("--tun-promisc", argc, argv, "y").data());
+#endif
+#endif
 #else
         ni->ComponentId = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
 
@@ -3082,6 +3431,15 @@ bool PppApplication::IsModeClientOrServer(int argc, const char* argv[]) noexcept
 // Clean up resources
 void PppApplication::Dispose() noexcept
 {
+    // Close the local RPC server first so no new commands can arrive while
+    // the client/server objects are being torn down.
+    std::shared_ptr<ppp::app::rpc::LocalRpcServer> rpc_server = std::move(rpc_server_);
+    if (NULLPTR != rpc_server)
+    {
+        rpc_server->Dispose();
+    }
+    ppp::diagnostics::SetLogSink(NULLPTR);
+
     // Clean up server
     std::shared_ptr<VirtualEthernetSwitcher> server = std::move(server_);
     if (NULLPTR != server)
@@ -3096,7 +3454,9 @@ void PppApplication::Dispose() noexcept
 #if defined(_WIN32)
         // Restore original QUIC settings
         ppp::net::proxies::HttpProxy::SetSupportExperimentalQuicProtocol(quic_);
+#endif
 
+#if defined(_WIN32) || defined(_MACOS)
         // Clear system proxy settings
         if (network_interface_->SetHttpProxy)
         {
@@ -3107,6 +3467,9 @@ void PppApplication::Dispose() noexcept
         client->Dispose();
     }
 
+    // The switcher restores DNS/routes/TUN state synchronously in Dispose.
+    // Flush its final diagnostics before the application loop is released.
+    ppp::diagnostics::FlushLogs();
     ClearTickAlwaysTimeout();
 }
 
@@ -3143,6 +3506,538 @@ bool PppApplication::GetTransmissionStatistics(uint64_t& incoming_traffic, uint6
     return false;
 }
 
+// Build the runtime snapshot JSON consumed by the Rust TUI front-end.
+// Field names and semantics follow the Android get_runtime_snapshot contract
+// (tests/contracts/runtime-snapshot/) plus desktop-only extensions.
+bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
+{
+    snapshot = Json::Value(Json::objectValue);
+    snapshot["schema_version"] = 1;
+    snapshot["generation"] = (Json::UInt64)Executors::GetTickCount();
+    snapshot["monotonic_ms"] = (Json::UInt64)Executors::GetTickCount();
+    snapshot["phase"] = "idle";
+    snapshot["role"] = proxy_mode_ ? "proxy" : (client_mode_ ? "client" : "server");
+    snapshot["server"] = "";
+    snapshot["guid"] = "";
+    snapshot["vpn_server"] = "pending";
+    snapshot["transport"] = "ppp";
+    snapshot["bypass_mode"] =
+        NULLPTR != network_interface_ ?
+            (network_interface_->SplitMode == NetworkInterface::BypassMode::Geo ? "geo" :
+             network_interface_->SplitMode == NetworkInterface::BypassMode::No ? "no" : "ip") : "ip";
+    snapshot["http_proxy"] = "off";
+    snapshot["socks_proxy"] = "off";
+    snapshot["connection"] = "unavailable";
+    snapshot["mux_state"] = "unavailable";
+#if defined(_DEBUG)
+    snapshot["hosting_environment"] = client_mode_ ? "client:development" : "server:development";
+#else
+    snapshot["hosting_environment"] = client_mode_ ? "client:production" : "server:production";
+#endif
+    snapshot["duration_ms"] = (Json::UInt64)stopwatch_.ElapsedMilliseconds();
+    snapshot["requested_mux_mode"] = NULLPTR != configuration_ ? configuration_->mux.mode : "compat";
+    snapshot["effective_mux_mode"] = "compat";
+    snapshot["mux_receiver_ordering"] = "compat";
+    snapshot["mux_active_links"] = 0;
+    snapshot["mux_fallback_reason"] = "";
+    snapshot["connected_monotonic_ms"] = 0;
+
+    Json::Value capabilities(Json::arrayValue);
+    capabilities.append("mux.compat");
+    capabilities.append("mux.flow");
+    capabilities.append("mux.balance");
+    capabilities.append("mux.stripe");
+    snapshot["capabilities"] = capabilities;
+
+    // Derive the transport scheme from the configured server URL.
+    if (NULLPTR != configuration_ && configuration_->client.server.size() > 0)
+    {
+        ppp::string server = configuration_->client.server;
+        std::size_t scheme = server.find("://");
+        if (scheme != ppp::string::npos)
+        {
+            ppp::string transport = ppp::ToLower<ppp::string>(server.substr(0, scheme));
+            if (transport == "ppp" || transport == "ws" || transport == "wss")
+            {
+                snapshot["transport"] = transport;
+            }
+            snapshot["server"] = server;
+        }
+    }
+
+    // Client-mode state: phase, live entry, MUX details.
+    std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
+    if (NULLPTR != client)
+    {
+        // Keep the runtime identity fields aligned with the fixed C++ TUI
+        // status area.  These are exported through RPC for the Rust TUI;
+        // the C++ TUI rendering itself remains unchanged.
+        std::shared_ptr<AppConfiguration> active_configuration = client->GetConfiguration();
+        ppp::string guid = NULLPTR != active_configuration ?
+            active_configuration->client.guid : configuration_->client.guid;
+        if (guid.size() >= 2 && guid.front() == '{' && guid.back() == '}')
+        {
+            guid = guid.substr(1, guid.size() - 2);
+        }
+        if (!guid.empty())
+        {
+            snapshot["guid"] = "{" + guid + "}";
+        }
+
+        if (ppp::string remote_uri = client->GetRemoteUri(); remote_uri.size() > 0)
+        {
+            std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
+            ppp::string vpn_server = remote_uri;
+            vpn_server += NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? " [static]" : " [dynamic]";
+            if (client->IsProxyOnly())
+            {
+                vpn_server += " [proxy]";
+            }
+            snapshot["vpn_server"] = vpn_server;
+        }
+
+        auto get_local_proxy = [&client](
+            const std::shared_ptr<VEthernetLocalProxySwitcher>& switcher,
+            const char* scheme) -> ppp::string
+        {
+            if (NULLPTR == switcher)
+            {
+                return "off";
+            }
+
+            boost::asio::ip::tcp::endpoint localEP = switcher->GetLocalEndPoint();
+            boost::asio::ip::address localIP = localEP.address();
+            if (localIP.is_unspecified())
+            {
+                if (auto ni = client->GetUnderlyingNetworkInterface(); NULLPTR != ni)
+                {
+                    localIP = ni->IPAddress;
+                }
+            }
+
+            ppp::string value = IPEndPoint::ToEndPoint(
+                boost::asio::ip::tcp::endpoint(localIP, localEP.port())).ToString();
+            value += "/";
+            value += scheme;
+            return value;
+        };
+        snapshot["http_proxy"] = get_local_proxy(client->GetHttpProxy(), "http");
+        snapshot["socks_proxy"] = get_local_proxy(client->GetSocksProxy(), "socks");
+
+        std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
+        if (NULLPTR != exchanger)
+        {
+            using NetworkState = VEthernetExchanger::NetworkState;
+            NetworkState state = exchanger->GetNetworkState();
+            const char* connection_states[] = { "connecting", "established", "reconnecting" };
+            int connection_state = static_cast<int>(state);
+            if (connection_state >= 0 && connection_state < arraysizeof(connection_states))
+            {
+                snapshot["connection"] = connection_states[connection_state];
+            }
+
+            if (client->IsMuxEnabled())
+            {
+                int mux_network_state = static_cast<int>(exchanger->GetMuxNetworkState());
+                ppp::string mux_state =
+                    mux_network_state >= 0 && mux_network_state < arraysizeof(connection_states) ?
+                        connection_states[mux_network_state] : "unknown";
+                mux_state += ", ";
+                mux_state += stl::to_string<ppp::string>(client->Mux(NULLPTR));
+                mux_state += "-channel";
+                snapshot["mux_state"] = mux_state;
+            }
+            else
+            {
+                snapshot["mux_state"] = "disabled";
+            }
+
+            switch (state)
+            {
+                case NetworkState::NetworkState_Connecting:
+                    snapshot["phase"] = "connecting";
+                    break;
+                case NetworkState::NetworkState_Established:
+                    snapshot["phase"] = "connected";
+                    snapshot["connected_monotonic_ms"] = (Json::UInt64)stopwatch_.ElapsedMilliseconds();
+                    break;
+                case NetworkState::NetworkState_Reconnecting:
+                    snapshot["phase"] = "reconnecting";
+                    break;
+            }
+
+            ppp::string current_entry = exchanger->GetCurrentEntry();
+            if (current_entry.size() > 0)
+            {
+                snapshot["server"] = current_entry;
+            }
+
+            if (NULLPTR != exchanger->GetMux())
+            {
+                std::shared_ptr<vmux::vmux_net> mux = exchanger->GetMux();
+                snapshot["effective_mux_mode"] = vmux::vmux_net::mode_name(mux->get_mode());
+                snapshot["mux_receiver_ordering"] =
+                    mux->get_ordering_mode() == vmux::vmux_net::ordering_flow_v2 ? "flow_v2" : "compat";
+                snapshot["mux_active_links"] = mux->get_live_linklayer_count();
+            }
+        }
+
+        // Traffic statistics: rx/tx are the last OnTick period deltas (they
+        // ARE the current rates, mirroring the built-in TUI's TX/RX rows);
+        // in/out are the cumulative totals (the built-in TUI's IN/OUT rows).
+        uint64_t incoming_traffic = 0;
+        uint64_t outgoing_traffic = 0;
+        std::shared_ptr<ppp::transmissions::ITransmissionStatistics> statistics_snapshot;
+        if (GetTransmissionStatistics(incoming_traffic, outgoing_traffic, statistics_snapshot))
+        {
+            snapshot["traffic"]["rx_bytes"] = (Json::UInt64)incoming_traffic;
+            snapshot["traffic"]["tx_bytes"] = (Json::UInt64)outgoing_traffic;
+            if (NULLPTR != statistics_snapshot)
+            {
+                snapshot["traffic"]["in_bytes"] = (Json::UInt64)statistics_snapshot->IncomingTraffic;
+                snapshot["traffic"]["out_bytes"] = (Json::UInt64)statistics_snapshot->OutgoingTraffic;
+            }
+        }
+
+        // Network interfaces (TUN + physical NIC).
+        Json::Value network(Json::objectValue);
+        network["mode"] = client->IsProxyOnly() ? "proxy-only" : "tun";
+        network["adapter"] = client->IsProxyOnly() ? "none" : "";
+        network["logical_ipv4"] = "";
+        network["logical_ipv6"] = "";
+        network["tunnel_dns"] = "";
+        network["link_state"] = snapshot["connection"];
+        network["mux_state"] = snapshot["mux_state"];
+        network["tcp_ip_transport"] = "PPP tunnel";
+        network["dns_transport"] = "PPP tunnel";
+        network["aggligator"] = "none";
+        network["proxy_interlayer"] = "none";
+#if defined(SYSNAT)
+        network["tcp_ip_cc"] = client->IsLwip() ? "lwip" :
+            (client->IsSysnat() ? "tc" : "ctcp");
+#else
+        network["tcp_ip_cc"] = client->IsLwip() ? "lwip" : "ctcp";
+#endif
+        network["block_quic"] = client->IsBlockQUIC() ? "blocked" : "unblocked";
+        auto write_interface = [](Json::Value& target, const std::shared_ptr<VEthernetNetworkSwitcher::NetworkInterface>& ni) noexcept
+            {
+                if (NULLPTR == ni) return;
+                if (ni->Name.size() > 0) target["name"] = ni->Name;
+#if defined(_WIN32)
+                if (ni->Description.size() > 0) target["description"] = ni->Description;
+#endif
+                target["index"] = ni->Index;
+#if !defined(_MACOS)
+                if (ni->Id.size() > 0) target["id"] = ni->Id;
+#endif
+                if (ni->IPAddress.is_v4() || ni->IPAddress.is_v6())
+                {
+                    target["ipv4"] = ppp::net::Ipep::ToAddressString<ppp::string>(ni->IPAddress);
+                }
+                target["gateway"] = ni->GatewayServer.to_string().data();
+                target["subnet_mask"] = ni->SubmaskAddress.to_string().data();
+                if (ni->IPv6GatewayServer.is_v6() && !ni->IPv6GatewayServer.is_unspecified())
+                {
+                    target["ipv6"] = ppp::net::Ipep::ToAddressString<ppp::string>(ni->IPv6GatewayServer);
+                    target["ipv6_gateway"] = ppp::net::Ipep::ToAddressString<ppp::string>(ni->IPv6GatewayServer);
+                }
+                if (!ni->DnsAddresses.empty())
+                {
+                    Json::Value dns(Json::arrayValue);
+                    for (const boost::asio::ip::address& address : ni->DnsAddresses)
+                    {
+                        dns.append(ppp::net::Ipep::ToAddressString<ppp::string>(address));
+                    }
+                    target["dns"] = dns;
+                }
+            };
+        write_interface(network["tun"], client->GetTapNetworkInterface());
+        write_interface(network["nic"], client->GetUnderlyingNetworkInterface());
+        if (std::shared_ptr<ITap> tap = client->GetTap(); NULLPTR != tap)
+        {
+            if (tap->IPAddress != ppp::net::IPEndPoint::AnyAddress)
+            {
+                network["logical_ipv4"] = ppp::net::IPEndPoint::ToAddressString(tap->IPAddress);
+            }
+            if (tap->IPv6Address.is_v6() && !tap->IPv6Address.is_unspecified())
+            {
+                network["logical_ipv6"] = tap->IPv6Address.to_string().data();
+                network["tun"]["ipv6_address"] = tap->IPv6Address.to_string().data();
+            }
+            if (tap->IPv6GatewayServer.is_v6() && !tap->IPv6GatewayServer.is_unspecified())
+            {
+                network["tun"]["ipv6_gateway"] = tap->IPv6GatewayServer.to_string().data();
+            }
+            if (tap->IPv6SubmaskAddress.is_v6() && !tap->IPv6SubmaskAddress.is_unspecified())
+            {
+                network["tun"]["ipv6_subnet_mask"] = tap->IPv6SubmaskAddress.to_string().data();
+            }
+        }
+        if (network["tun"].isObject() && network["tun"]["name"].isString())
+        {
+            network["adapter"] = network["tun"]["name"];
+        }
+        if (NULLPTR != configuration_ && configuration_->udp.dns.redirect.size() > 0)
+        {
+            network["tunnel_dns"] = configuration_->udp.dns.redirect;
+        }
+        if (std::shared_ptr<aggligator::aggligator> aggligator = client->GetAggligator(); NULLPTR != aggligator)
+        {
+            const char* aggligator_status[] = { "none", "unknown", "connecting", "reconnecting", "established" };
+            int max_channel = 0;
+            int max_servers = 0;
+            aggligator->client_fetch_concurrency(max_servers, max_channel);
+            int status = static_cast<int>(aggligator->status());
+            if (status < 0 || status >= arraysizeof(aggligator_status)) status = 1;
+            network["aggligator"] = ppp::string(aggligator_status[status]) + ", " +
+                stl::to_string<ppp::string>(max_servers) + "-server, " +
+                stl::to_string<ppp::string>(max_channel) + "-channel";
+        }
+        if (std::shared_ptr<ppp::transmissions::proxys::IForwarding> forwarding = client->GetForwarding();
+            NULLPTR != forwarding)
+        {
+            ppp::string proxy_url = forwarding->GetProxyUrl();
+            network["proxy_interlayer"] = proxy_url.empty() ? "none" : proxy_url;
+        }
+        snapshot["network"] = network;
+
+        // Route inputs and counters for the Rust TUI.  Counts are parsed from
+        // the configured prefix files even when GEO is the active engine.
+        Json::Value routes(Json::objectValue);
+        routes["bypass_ipv4_file"] = "(none)";
+        routes["bypass_ipv6_file"] = "(none)";
+        routes["bypass_gateway"] = "0.0.0.0";
+        routes["bypass_gateway_ipv6"] = "::";
+        routes["dns_rules_file"] = "";
+
+        routes["dns_rule_count"] = (Json::UInt64)0;
+        routes["geo_rules_file"] = "";
+        routes["geosite_file"] = "";
+        routes["geoip_file"] = "";
+        if (NULLPTR != network_interface_)
+        {
+            if (NULLPTR != network_interface_->Bypass &&
+                !network_interface_->Bypass->empty())
+            {
+                routes["bypass_ipv4_file"] = network_interface_->Bypass->begin()->data();
+            }
+            if (NULLPTR != network_interface_->Bypass6 &&
+                !network_interface_->Bypass6->empty())
+            {
+                routes["bypass_ipv6_file"] = network_interface_->Bypass6->begin()->data();
+            }
+            routes["bypass_gateway"] = network_interface_->BypassNgw.to_string().data();
+            routes["bypass_gateway_ipv6"] = network_interface_->BypassNgw6.to_string().data();
+            routes["dns_rules_file"] = network_interface_->DNSRules.data();
+            routes["geo_rules_file"] = network_interface_->GeoRules.data();
+            routes["geosite_file"] = network_interface_->GeoSite.data();
+            routes["geoip_file"] = network_interface_->GeoIP.data();
+            const RouteSegmentCounts segment_counts = CountConfiguredRouteSegments(*network_interface_);
+
+            routes["dns_rule_count"] = (Json::UInt64)CountConfiguredDnsRules(network_interface_->DNSRules);
+        }
+        snapshot["routes"] = routes;
+
+        // Geo split summaries.
+        std::shared_ptr<ppp::app::client::geo::GeoRuleEngine> geo_rules = client->GetGeoRules();
+        if (NULLPTR != geo_rules)
+        {
+            Json::Value geo(Json::objectValue);
+            Json::Value direct_dns(Json::arrayValue);
+            if (geo_rules->UsesLocalDirectDns())
+            {
+                direct_dns.append("local");
+            }
+            for (const boost::asio::ip::address& address : geo_rules->GetDirectDnsServers())
+            {
+                direct_dns.append(ppp::net::Ipep::ToAddressString<ppp::string>(address));
+            }
+            geo["direct_dns"] = direct_dns;
+            geo["rule_count"] = (Json::UInt64)geo_rules->GetRuleCount();
+            geo["dns_rule_count"] = routes["dns_rule_count"];
+            geo["static_networks"] = (Json::UInt64)geo_rules->GetStaticNetworks().size();
+
+            Json::Value split_rules(Json::arrayValue);
+            auto outbound_statuses = client->GetOutboundStatuses();
+            auto find_status = [&outbound_statuses](const ppp::string& tag) noexcept ->
+                const VEthernetNetworkSwitcher::OutboundStatus*
+                {
+                    for (const auto& status : outbound_statuses)
+                    {
+                        if (status.tag == tag) return &status;
+                    }
+                    return NULLPTR;
+                };
+            for (const auto& rule : geo_rules->GetRuleSummaries())
+            {
+                if (rule.action != ppp::app::client::geo::GeoRuleEngine::Action::Tunnel ||
+                    rule.outbound.empty())
+                {
+                    continue;
+                }
+                const auto* target = find_status(rule.outbound);
+                if (NULLPTR == target || !target->route_used) continue;
+
+                Json::Value item(Json::objectValue);
+                item["matcher"] = rule.type + "," + rule.value;
+                item["outbound"] = rule.outbound;
+                item["display"] = target->display_name.empty() ? target->tag : target->display_name;
+                split_rules.append(item);
+            }
+            geo["split_rules"] = split_rules;
+            snapshot["geo"] = geo;
+        }
+
+        // Outbound list (= GetOutboundStatuses).
+        Json::Value outbounds(Json::arrayValue);
+        for (const auto& status : client->GetOutboundStatuses())
+        {
+            Json::Value item(Json::objectValue);
+            item["tag"] = status.tag;
+            item["display_name"] = status.display_name;
+            item["server"] = status.server;
+            item["state"] = status.state;
+            item["reconnects"] = status.reconnects;
+            item["active"] = status.active;
+            item["server_menu"] = status.server_menu;
+            item["route_used"] = status.route_used;
+            item["multiple_entries"] = status.multiple_entries;
+            item["probe_enabled"] = status.probe_enabled;
+            item["probe_checked"] = status.probe_checked;
+            item["probe_reachable"] = status.probe_reachable;
+            item["probe_rtt_ms"] = status.probe_rtt_ms;
+            item["current_entry"] = status.current_entry;
+            item["ranked_first_entry"] = status.ranked_first_entry;
+            item["probe_entry"] = status.probe_entry;
+            outbounds.append(item);
+        }
+        snapshot["outbounds"] = outbounds;
+    }
+
+    snapshot["last_error"]["code"] = 0;
+    snapshot["last_error"]["severity"] = "";
+    snapshot["last_error"]["retryable"] = false;
+    snapshot["last_error"]["user_message_key"] = "";
+    snapshot["last_error"]["diagnostic_detail"] = "";
+    snapshot["log_level"] = ppp::diagnostics::LogLevelName(
+        static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
+    return true;
+}
+
+// Execute one RPC command.  Called on the io_context thread through the
+// LocalRpcServer handler; commands map 1:1 onto existing application methods.
+bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Value& params, Json::Value& result, ppp::string& error) noexcept
+{
+    if (method == "ping")
+    {
+        result["pong"] = true;
+        return true;
+    }
+
+    if (method == "get_snapshot")
+    {
+        return BuildRuntimeSnapshot(result);
+    }
+
+    if (method == "get_log_level")
+    {
+        result["level"] = ppp::diagnostics::LogLevelName(
+            static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
+        return true;
+    }
+
+    if (method == "set_log_level")
+    {
+        ppp::string value = ppp::auxiliary::JsonAuxiliary::AsString(
+            params.get("level", Json::Value()));
+        if (value.empty())
+        {
+            error = "missing level";
+            return false;
+        }
+
+        ppp::diagnostics::SetLogLevel(static_cast<int>(
+            ppp::diagnostics::ParseLogLevel(value.data())));
+        result["level"] = ppp::diagnostics::LogLevelName(
+            static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
+        return true;
+    }
+
+    if (method == "get_outbounds")
+    {
+        Json::Value snapshot;
+        if (!BuildRuntimeSnapshot(snapshot)) return false;
+        result = snapshot.get("outbounds", Json::Value(Json::arrayValue));
+        return true;
+    }
+
+    if (method == "get_logs")
+    {
+        uint64_t since_seq = ppp::auxiliary::JsonAuxiliary::AsUInt64(
+            params.get("since_seq", Json::Value((Json::UInt64)0)));
+
+        Json::Value logs(Json::arrayValue);
+        {
+            std::lock_guard<std::mutex> scope(g_rpc_logs_syncobj);
+            for (const RpcLogEntry& entry : g_rpc_logs)
+            {
+                if (entry.seq <= since_seq) continue;
+
+                Json::Value item(Json::objectValue);
+                item["seq"] = (Json::UInt64)entry.seq;
+                item["level"] = entry.level;
+                item["line"] = entry.line;
+                item["timestamp_ms"] = (Json::UInt64)entry.timestamp_ms;
+                logs.append(item);
+            }
+        }
+        result["logs"] = logs;
+        result["latest_seq"] = (Json::UInt64)g_rpc_log_seq.load(std::memory_order_relaxed);
+        return true;
+    }
+
+    if (method == "switch_server" || method == "switch_rank1")
+    {
+        ppp::string tag = ppp::auxiliary::JsonAuxiliary::AsString(params.get("tag", Json::Value()));
+        if (tag.empty())
+        {
+            error = "missing tag";
+            return false;
+        }
+
+        std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
+        if (NULLPTR == client)
+        {
+            error = "no client";
+            return false;
+        }
+
+        bool ok = method == "switch_rank1" ?
+            client->SwitchPrimaryOutboundToRankedFirst(tag) :
+            client->SwitchPrimaryOutbound(tag);
+        result["accepted"] = ok;
+        result["tag"] = tag;
+        return true;
+    }
+
+    if (method == "shutdown")
+    {
+        ppp::string confirm = ppp::auxiliary::JsonAuxiliary::AsString(params.get("confirm", Json::Value()));
+        if (confirm != "shutdown")
+        {
+            error = "confirm required";
+            return false;
+        }
+
+        bool restart = ppp::auxiliary::JsonAuxiliary::AsBoolean(params.get("restart", Json::Value(false)));
+        result["accepted"] = ShutdownApplication(restart);
+        return true;
+    }
+
+    error = "unknown method";
+    return false;
+}
+
 // Main periodic tick handler
 bool PppApplication::OnTick(uint64_t now) noexcept
 {
@@ -3158,12 +4053,50 @@ bool PppApplication::OnTick(uint64_t now) noexcept
 #endif
 
     // Handle console keyboard input for tab switching
-    if (!console_selection_active)
+    if (!headless_ && !console_selection_active)
     {
         HandleConsoleInput();
 
         // Update console display
         PrintEnvironmentInformation();
+    }
+
+    // Push new log lines to RPC clients (drained at most once per tick,
+    // capped so a verbose core cannot flood the RPC pipe).
+    std::shared_ptr<ppp::app::rpc::LocalRpcServer> rpc_server = rpc_server_;
+    if (NULLPTR != rpc_server)
+    {
+        uint64_t last_pushed = g_rpc_logs_last_pushed_seq.load(std::memory_order_relaxed);
+        uint64_t latest = g_rpc_log_seq.load(std::memory_order_relaxed);
+        if (latest > last_pushed)
+        {
+            ppp::vector<Json::Value> frames;
+            uint64_t pushed_until = last_pushed;
+            {
+                std::lock_guard<std::mutex> scope(g_rpc_logs_syncobj);
+                for (const RpcLogEntry& entry : g_rpc_logs)
+                {
+                    if (entry.seq <= last_pushed) continue;
+
+                    Json::Value params(Json::objectValue);
+                    params["seq"] = (Json::UInt64)entry.seq;
+                    params["level"] = entry.level;
+                    params["line"] = entry.line;
+                    params["timestamp_ms"] = (Json::UInt64)entry.timestamp_ms;
+                    Json::Value frame(Json::objectValue);
+                    frame["event"] = "log";
+                    frame["params"] = params;
+                    frames.emplace_back(std::move(frame));
+                    pushed_until = entry.seq;
+                    if (frames.size() >= 16) break; // per-tick cap (verbose builds can be noisy)
+                }
+            }
+            for (const Json::Value& frame : frames)
+            {
+                rpc_server->Broadcast(frame);
+            }
+            g_rpc_logs_last_pushed_seq.store(pushed_until, std::memory_order_relaxed);
+        }
     }
 
     // Check auto-restart timer
@@ -3229,7 +4162,7 @@ bool PppApplication::NextTickAlwaysTimeout(bool next) noexcept
 
     std::shared_ptr<VirtualEthernetSwitcher> server = app->server_;
     std::shared_ptr<VEthernetNetworkSwitcher> client = app->client_;
-    if (NULLPTR == server && NULLPTR == client)
+    if (NULLPTR == server && NULLPTR == client && !app->catalog_only_)
     {
         return false;
     }
@@ -3335,6 +4268,12 @@ bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
 
     ppp::unordered_set<ppp::string> tags;
     std::size_t loaded = 0;
+    auto normalize_configuration_path = [](const ppp::string& value) noexcept -> ppp::string
+    {
+        if (value.empty()) return ppp::string();
+        ppp::string path = File::GetFullPath(File::RewritePath(value.data()).data());
+        return ppp::ToLower<ppp::string>(ppp::ATrim<ppp::string>(path));
+    };
     for (const ppp::string& file : files)
     {
         ppp::string file_name = File::GetFileName(file.data());
@@ -3375,9 +4314,53 @@ bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
                     outbound.display_name = display_name;
                     outbound.server_menu = true;
                     outbound.source_path = file;
+                    // The primary outbound is the default path, not a split
+                    // target.  A GEO manifest also declares it under
+                    // `outbounds.main`, but that must not add the UI `split`
+                    // marker to the main server row.
+                    outbound.route_used = false;
                     break;
                 }
             }
+            ++loaded;
+            continue;
+        }
+
+        // A GEO outbound may already have been loaded from geo-rules.yaml
+        // before --server-dir is processed. Reuse that record so the server
+        // menu row (for example zgo) inherits route_used=true instead of
+        // creating a second, unmarked server:zgo row.
+        std::size_t matched_route_index = outbound_configurations_.size();
+        for (std::size_t index = 0; index < outbound_configurations_.size(); ++index)
+        {
+            ClientOutboundConfiguration& outbound = outbound_configurations_[index];
+            if (!outbound.route_used || outbound.server_menu ||
+                ppp::ToLower<ppp::string>(outbound.tag) == "main")
+            {
+                continue;
+            }
+
+            const bool same_source = !outbound.source_path.empty() &&
+                normalize_configuration_path(outbound.source_path) ==
+                normalize_configuration_path(file);
+            const bool same_identity = NULLPTR != outbound.configuration &&
+                outbound.configuration->client.guid == configuration->client.guid &&
+                outbound.configuration->client.server == configuration->client.server;
+            if (same_source || same_identity)
+            {
+                matched_route_index = index;
+                break;
+            }
+        }
+        if (matched_route_index < outbound_configurations_.size())
+        {
+            ClientOutboundConfiguration& matched_route =
+                outbound_configurations_[matched_route_index];
+            matched_route.display_name = display_name;
+            matched_route.server_menu = true;
+            matched_route.source_path = file;
+            LOG_INFO("PppApplication::LoadServerConfigurations: server=%s merged_geo_tag=%s, route_used=1",
+                display_name.data(), matched_route.tag.data());
             ++loaded;
             continue;
         }
@@ -3404,6 +4387,55 @@ bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
         outbound_configurations_.emplace_back(ClientOutboundConfiguration{
             tag, configuration, display_name, true, file, false });
         ++loaded;
+    }
+
+    // The GEO manifest is loaded before --server-dir, so a split row such as
+    // `us` temporarily appears near `main`. Rebuild only the presentation
+    // order after all files are merged: main first, then exactly the sorted
+    // server-directory order, while preserving any GEO-only rows afterward.
+    if (!outbound_configurations_.empty())
+    {
+        ppp::vector<bool> ordered_flags(outbound_configurations_.size(), false);
+        ppp::vector<ClientOutboundConfiguration> ordered;
+        ordered.reserve(outbound_configurations_.size());
+
+        for (std::size_t index = 0; index < outbound_configurations_.size(); ++index)
+        {
+            if (ppp::ToLower<ppp::string>(outbound_configurations_[index].tag) == "main")
+            {
+                ordered_flags[index] = true;
+                ordered.emplace_back(std::move(outbound_configurations_[index]));
+                break;
+            }
+        }
+        for (const ppp::string& file : files)
+        {
+            const ppp::string normalized_file = normalize_configuration_path(file);
+            for (std::size_t index = 0; index < outbound_configurations_.size(); ++index)
+            {
+                if (ordered_flags[index])
+                {
+                    continue;
+                }
+                const ClientOutboundConfiguration& outbound = outbound_configurations_[index];
+                if (!outbound.server_menu ||
+                    normalize_configuration_path(outbound.source_path) != normalized_file)
+                {
+                    continue;
+                }
+                ordered_flags[index] = true;
+                ordered.emplace_back(std::move(outbound_configurations_[index]));
+                break;
+            }
+        }
+        for (std::size_t index = 0; index < outbound_configurations_.size(); ++index)
+        {
+            if (!ordered_flags[index])
+            {
+                ordered.emplace_back(std::move(outbound_configurations_[index]));
+            }
+        }
+        outbound_configurations_ = std::move(ordered);
     }
 
     if (loaded == 0)
@@ -3456,6 +4488,13 @@ bool PppApplication::LoadGeoOutboundConfigurations(
             ClientOutboundConfiguration{ "main", primary, "main", false, ppp::string(), false });
     }
 
+    auto normalize_configuration_path = [](const ppp::string& value) noexcept -> ppp::string
+    {
+        if (value.empty()) return ppp::string();
+        ppp::string path = File::GetFullPath(File::RewritePath(value.data()).data());
+        return ppp::ToLower<ppp::string>(ppp::ATrim<ppp::string>(path));
+    };
+
     for (const GeoRuleEngine::OutboundConfiguration& declaration : declarations)
     {
         if (declaration.primary)
@@ -3472,20 +4511,38 @@ bool PppApplication::LoadGeoOutboundConfigurations(
             return false;
         }
 
+        const ppp::string declaration_path = normalize_configuration_path(declaration.path);
+
         ClientOutboundConfiguration* matched = NULLPTR;
+        bool matched_same_source = false;
+        bool matched_same_identity = false;
         for (ClientOutboundConfiguration& outbound : outbound_configurations_)
         {
-            if (NULLPTR != outbound.configuration &&
+            const bool same_source = !declaration_path.empty() &&
+                normalize_configuration_path(outbound.source_path) == declaration_path;
+            const bool same_identity = NULLPTR != outbound.configuration &&
                 outbound.configuration->client.guid == configuration->client.guid &&
-                outbound.configuration->client.server == configuration->client.server)
+                outbound.configuration->client.server == configuration->client.server;
+            if (same_source || same_identity)
             {
                 matched = &outbound;
+                matched_same_source = same_source;
+                matched_same_identity = same_identity;
                 break;
             }
         }
 
         if (NULLPTR != matched)
         {
+            // The outbound may already be the same GEO declaration. This is
+            // common when LoadConfiguration parsed geo-rules.yaml before
+            // --server-dir and the latter merely promoted the row to the
+            // server menu. Keep its display/source metadata intact.
+            if (matched->tag == declaration.tag && matched->route_used)
+            {
+                continue;
+            }
+
             bool matched_primary =
                 ppp::ToLower<ppp::string>(matched->tag) == "main" &&
                 matched->configuration == primary;
@@ -3494,6 +4551,7 @@ bool PppApplication::LoadGeoOutboundConfigurations(
                 // Keep the runtime primary under "main" and expose the GEO
                 // tag as an alias. The switcher maps this alias back to main,
                 // so the same GUID/server never opens a second control link.
+                matched->route_used = false;
                 ppp::string display_name = matched->display_name;
                 bool server_menu = matched->server_menu;
                 matched->display_name = "main";
@@ -3508,9 +4566,13 @@ bool PppApplication::LoadGeoOutboundConfigurations(
             // Reuse the server-directory connection under the stable YAML tag.
             // This avoids opening the same GUID/server twice and makes a rule
             // such as "geosite,openai,us" select the visible zgo menu entry.
+            const ppp::string previous_tag = matched->tag;
             matched->tag = declaration.tag;
             matched->source_path = declaration.path;
             matched->route_used = true;
+            LOG_INFO("PppApplication::LoadGeoOutboundConfigurations: outbound=%s matched_existing=%s, route_used=1, same_source=%d, same_identity=%d",
+                declaration.tag.data(), previous_tag.data(),
+                (int)matched_same_source, (int)matched_same_identity);
             continue;
         }
 
@@ -3526,6 +4588,21 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
     static constexpr const char* argument_keys[] = { "-c", "--c", "-config", "--config" };
     outbound_configurations_.clear();
     geo_configuration_path_.clear();
+
+    // The Rust desktop client starts this control-plane phase before the
+    // user chooses a server.  Do not inspect --config or fallback files here:
+    // the only configuration loaded in this phase is the server directory.
+    if (catalog_only_)
+    {
+        std::shared_ptr<AppConfiguration> configuration =
+            ppp::make_shared_object<AppConfiguration>();
+        if (NULLPTR != configuration)
+        {
+            LOG_INFO("Catalog-only mode: no primary configuration loaded; reading server directory");
+            path.clear();
+            return configuration;
+        }
+    }
 
     // Find configuration file from command line
     for (const char* argument_key : argument_keys)
@@ -3617,7 +4694,8 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
             }
 
             outbound_configurations_.emplace_back(ClientOutboundConfiguration{
-                declaration.tag, configuration, declaration.tag, false, declaration.path, true });
+                declaration.tag, configuration, declaration.tag, false,
+                declaration.path, !declaration.primary });
             if (declaration.primary) primary = configuration;
         }
 
@@ -3957,8 +5035,11 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     quic_ = ppp::net::proxies::HttpProxy::IsSupportExperimentalQuicProtocol();
 #endif
 
-    // Initialize network environment
-    if (!PreparedLoopbackEnvironment(network_interface_))
+    // Catalog-only mode starts the process/RPC control plane and reads the
+    // server directory, but deliberately does not create a client, TUN, or
+    // outbound connection.  The Rust UI starts a second, real core after a
+    // server configuration is selected.
+    if (!catalog_only_ && !PreparedLoopbackEnvironment(network_interface_))
     {
         return -1;
     }
@@ -3985,6 +5066,9 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
             client->BlockQUIC(network_interface_->BlockQUIC);
         }
 
+#if defined(_WIN32) || defined(_MACOS)
+        // Configure the optional system proxy on both desktop platforms.  The
+        // local HTTP proxy performs the actual per-destination split.
 #if defined(_WIN32)
         // Linux does not support global Settings of the http proxy server on the operating system.   
         // This is because you can only change the /etc/profile configuration file.   
@@ -3997,7 +5081,8 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
         // However, there is a big flaw here, if the _tty terminal window that has been opened cannot take effect, 
         // And the Windows platform can take effect globally is different, so directly cancel the function support 
         // Of setting http proxy on Linux above the operating system.
-        if (!proxy_mode_ && network_interface_->SetHttpProxy)
+#endif
+        if (network_interface_->SetHttpProxy)
         {
             client->SetHttpProxyToSystemEnv();
         }
@@ -4013,6 +5098,42 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // Parse restart configuration
     GLOBAL_.auto_restart = std::max<int>(0, atoi(ppp::GetCommandArgument("--auto-restart", argc, argv).data()));
     GLOBAL_.link_restart = (uint8_t)std::max<int>(0, atoi(ppp::GetCommandArgument("--link-restart", argc, argv).data()));
+
+    // Start the local RPC server (Rust TUI front-end / headless control).
+    if (rpc_listen_.size() > 0)
+    {
+        std::shared_ptr<PppApplication> self = shared_from_this();
+        std::shared_ptr<ppp::app::rpc::LocalRpcServer> rpc_server =
+            ppp::make_shared_object<ppp::app::rpc::LocalRpcServer>(
+                Executors::GetDefault(), rpc_token_, rpc_max_clients_,
+                [self](const ppp::string& method, const Json::Value& params, Json::Value& result, ppp::string& error) noexcept -> bool
+                {
+                    return NULLPTR != self && self->ExecuteRpcCommand(method, params, result, error);
+                });
+        if (NULLPTR == rpc_server || !rpc_server->Open(rpc_listen_))
+        {
+            fprintf(stdout, "%s\r\n", "Failed to open the local RPC server.");
+            return -1;
+        }
+
+        rpc_server_ = std::move(rpc_server);
+
+        // Feed the RPC log ring buffer from every desktop log line.
+        ppp::diagnostics::SetLogSink(RpcLogSink);
+
+        // Headless mode prints a single machine-readable line so the TUI
+        // front-end can discover the actual port when 0 (random) was used.
+        // stdout may be a pipe (TUI launcher): pipes are fully buffered, so
+        // flush explicitly or the line never reaches the parent.
+        if (headless_)
+        {
+            boost::asio::ip::tcp::endpoint endpoint = rpc_server_->GetLocalEndPoint();
+            boost::asio::ip::address address = endpoint.address();
+            ppp::string address_string = ppp::net::Ipep::ToAddressString<ppp::string>(address);
+            fprintf(stdout, "RPC_LISTEN=%s:%d\r\n", address_string.data(), endpoint.port());
+            fflush(stdout);
+        }
+    }
 
     // Start periodic updates
     return NextTickAlwaysTimeout(false) ? 0 : -1;
@@ -4114,20 +5235,18 @@ int main(int argc, const char* argv[]) noexcept
     }
 #endif
 
-    // When --log-file is specified, redirect LOG_TAG output to file instead of stdout.
-    // The dashboard UI (fprintf to stdout) stays on console; only debug/info logs go to file.
-#if defined(PPP_LOG_VERBOSE)
+    // When --log-file is specified, redirect core LOG_* output to file in all
+    // builds.  The dashboard UI (fprintf to stdout) stays on console.
     if (LOG_FILE_PATH_.size() > 0)
     {
         FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
         if (NULLPTR != log_file)
         {
             setvbuf(log_file, NULLPTR, _IONBF, 0);
-            ppp::g_log_stream = log_file;
+            ppp::diagnostics::SetLogStream(log_file);
             fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
         }
     }
-#endif
 
 #if defined(_MACOS)
     // A full-tunnel client can legitimately own hundreds of TCP sockets even

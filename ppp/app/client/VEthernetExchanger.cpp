@@ -201,6 +201,89 @@ namespace ppp {
                 server_url_.protocol_type = ProtocolType::ProtocolType_PPP;
             }
 
+            bool VEthernetExchanger::SetPrimaryOutbound(bool primary) noexcept {
+                if (disposed_) {
+                    return false;
+                }
+
+                if (primary_outbound_.load() == primary) {
+                    return true;
+                }
+
+                // A secondary may own a forwarding proxy from its own JSON,
+                // while the primary uses the switcher's forwarding path.  On
+                // demotion, prepare the secondary proxy before changing the
+                // role; on promotion, release the secondary-only proxy after
+                // the role has changed.
+                IForwardingPtr secondary_forwarding;
+                if (!primary) {
+                    AppConfigurationPtr configuration = GetConfiguration();
+                    if (NULLPTR == configuration) {
+                        return false;
+                    }
+
+                    if (!configuration->client.server_proxy.empty()) {
+                        ContextPtr context = GetContext();
+                        if (NULLPTR == context) {
+                            return false;
+                        }
+
+                        secondary_forwarding = make_shared_object<IForwarding>(context, configuration);
+                        if (NULLPTR == secondary_forwarding || !secondary_forwarding->Open()) {
+                            if (NULLPTR != secondary_forwarding) {
+                                secondary_forwarding->Dispose();
+                            }
+                            LOG_ERROR("VEthernetExchanger::SetPrimaryOutbound: cannot prepare forwarding proxy, outbound=%s, primary=0",
+                                outbound_tag_.data());
+                            return false;
+                        }
+#if defined(_LINUX)
+                        secondary_forwarding->ProtectorNetwork = switcher_->GetProtectorNetwork();
+#endif
+                    }
+                }
+
+                IForwardingPtr obsolete_forwarding;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    if (primary_outbound_.load() == primary) {
+                        // Another transition won the race while the
+                        // secondary forwarding proxy was being prepared.
+                        // It is not installed in this case.
+                        obsolete_forwarding = std::move(secondary_forwarding);
+                    }
+                    else {
+                        if (primary) {
+                            obsolete_forwarding = std::move(forwarding_);
+                        }
+                        else {
+                            forwarding_ = secondary_forwarding;
+                            assigned_ipv6_address_ = boost::asio::ip::address();
+                        }
+                        primary_outbound_.store(primary);
+                    }
+                }
+
+                if (NULLPTR != obsolete_forwarding) {
+                    obsolete_forwarding->Dispose();
+                }
+
+                // Static mappings belong to the active client configuration,
+                // not to every warm split/backup exchanger.  Remove them
+                // when this exchanger is demoted; when it is promoted below,
+                // register the mappings from its own configuration.
+                if (!primary) {
+                    UnregisterAllMappingPorts();
+                }
+                else {
+                    RegisterAllMappingPorts();
+                }
+
+                LOG_INFO("VEthernetExchanger::SetPrimaryOutbound: outbound=%s, primary=%d",
+                    outbound_tag_.data(), (int)primary);
+                return true;
+            }
+
             int VEthernetExchanger::GetProbeRtt() noexcept {
                 return probe_rtt_ms_.load();
             }
@@ -241,6 +324,73 @@ namespace ppp {
                     return NormalizeProbeEntry(server_url_.hostname, server_url_.port);
                 }
                 return ppp::string();
+            }
+
+            ppp::string VEthernetExchanger::GetRankedFirstEntry() noexcept {
+                const ppp::vector<ppp::string> ranked = HotSwitchRankedEntries(Executors::GetTickCount());
+                return ranked.empty() ? ppp::string() : ranked.front();
+            }
+
+            bool VEthernetExchanger::SwitchToRankedFirstEntry() noexcept {
+                const ppp::string target_entry = GetRankedFirstEntry();
+                if (target_entry.empty()) {
+                    return false;
+                }
+                if (target_entry == GetCurrentEntry()) {
+                    return true;
+                }
+
+                std::shared_ptr<boost::asio::io_context> context = GetContext();
+                if (NULLPTR == context || context->stopped() || disposed_) {
+                    return false;
+                }
+
+                auto self = shared_from_this();
+                boost::asio::post(*context, [self, this, target_entry]() noexcept {
+                    if (disposed_) {
+                        return;
+                    }
+
+                    // The entry was obtained from the same fresh/reachable/
+                    // unpenalized ranking used by automatic failover.  Pin the
+                    // next MUX generation to it; never mix entries inside one
+                    // generation, which would amplify packet reordering.
+                    const bool mux_enabled = NULLPTR != switcher_ && switcher_->mux_ > 0;
+                    std::shared_ptr<vmux::vmux_net> old_mux;
+                    ITransmissionPtr owner_transmission;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        probe_server_ = target_entry;
+                        mux_entry_ = target_entry;
+                        mux_failure_entry_.clear();
+                        mux_failure_last_ = 0;
+                        mux_failure_streak_ = 0;
+                        mux_retry_not_before_ = 0;
+                        mux_retry_backoff_ms_ = 0;
+                        if (mux_enabled) {
+                            old_mux = std::move(mux_);
+                        }
+                        else {
+                            owner_transmission = transmission_;
+                        }
+                    }
+
+                    if (NULLPTR != old_mux) {
+                        LOG_INFO("VEthernetExchanger::SwitchToRankedFirstEntry: rebuilding MUX on ranked #1 entry %s",
+                            target_entry.data());
+                        old_mux->close_exec();
+                    }
+                    elif(NULLPTR != owner_transmission) {
+                        LOG_INFO("VEthernetExchanger::SwitchToRankedFirstEntry: reconnecting owner transport on ranked #1 entry %s",
+                            target_entry.data());
+                        owner_transmission->Dispose();
+                    }
+                    else {
+                        LOG_INFO("VEthernetExchanger::SwitchToRankedFirstEntry: next connection uses ranked #1 entry %s",
+                            target_entry.data());
+                    }
+                });
+                return true;
             }
 
             bool VEthernetExchanger::ProbeCandidateEndpoint(
@@ -786,24 +936,6 @@ namespace ppp {
                 if (NULLPTR == switcher_) return false;
                 auto tap = switcher_->GetTap();
 
-                // Whether THIS outbound's server can carry IPv6 is decided by
-                // THIS outbound's configuration (server.ipv6 section) -- not by
-                // the TUN address, which the primary outbound may have populated
-                // while a secondary server has no IPv6 data plane at all.  Per
-                // the design rule "配置里面有v6才是代表服务器有v6", each outbound
-                // answers for its own server: a config without server.ipv6 means
-                // that server rejects/drops tunnel IPv6, so this outbound must
-                // never relay v6 even if the TUN happens to carry an address.
-                std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
-                const bool outbound_has_ipv6_dataplane = NULLPTR != configuration &&
-                    (configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66 ||
-                     configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Gua);
-                if (!outbound_has_ipv6_dataplane) {
-                    LOG_DEBUG("VEthernetExchanger::TranslateIPv6Packet: outbound=%s config has no IPv6 data plane (server.ipv6.mode=none), tunnel IPv6 dropped",
-                        outbound_tag_.data());
-                    return false;
-                }
-
                 boost::asio::ip::address assigned;
                 {
                     SynchronizedObjectScope scope(syncobj_);
@@ -811,11 +943,12 @@ namespace ppp {
                 }
                 // The TUN address is global (populated by the primary outbound via
                 // ApplyClientAddress) and is the translation anchor this outbound
-                // must rewrite to/from its own per-outbound assigned address.  It
-                // is NOT the capability signal: per-outbound capability was already
-                // decided above by THIS outbound's server.ipv6 config.  If the TUN
-                // has no IPv6 address there is nothing to translate on behalf of
-                // any outbound, so this remains a hard requirement.
+                // must rewrite to/from its own server-assigned address.  The
+                // assigned address is also the per-outbound runtime capability
+                // signal; a client profile does not describe the remote server's
+                // IPv6 support.  If the TUN has no IPv6 address there is nothing
+                // to translate on behalf of any outbound, so this remains a hard
+                // requirement.
                 if (!assigned.is_v6() || NULLPTR == tap || !tap->IPv6Address.is_v6()) {
                     LOG_DEBUG("VEthernetExchanger::TranslateIPv6Packet: outbound=%s has no usable IPv6 assignment",
                         outbound_tag_.data());
@@ -1010,7 +1143,7 @@ namespace ppp {
                 // The primary keeps the traditional switcher-owned proxy. Each
                 // secondary owns a forwarding proxy built from its own JSON.
                 std::shared_ptr<ppp::transmissions::proxys::IForwarding> forwarding;
-                if (primary_outbound_) {
+                if (primary_outbound_.load()) {
                     forwarding = switcher_->GetForwarding();
                 }
                 else {
@@ -1228,7 +1361,7 @@ namespace ppp {
                 // A secondary configuration may use a different upstream proxy.
                 // Failure is fatal for that outbound: silently connecting directly
                 // would violate the selected route.
-                if (!primary_outbound_ && !configuration->client.server_proxy.empty()) {
+                if (!primary_outbound_.load() && !configuration->client.server_proxy.empty()) {
                     IForwardingPtr forwarding = make_shared_object<IForwarding>(context, configuration);
                     if (NULLPTR == forwarding || !forwarding->Open()) {
                         if (NULLPTR != forwarding) forwarding->Dispose();
@@ -1422,7 +1555,14 @@ namespace ppp {
                                 LOG_DEBUG("VEthernetExchanger::Loopback: link established, entering data loop");
                                 ExchangeToEstablishState(); {
                                     transmission_ = transmission; {
-                                        RegisterAllMappingPorts();
+                                        // Static client mappings belong only to
+                                        // the current main role. Split
+                                        // outbounds keep their transport/MUX
+                                        // warm but must not bind the same local
+                                        // ports as main.
+                                        if (IsPrimaryOutbound()) {
+                                            RegisterAllMappingPorts();
+                                        }
                                         if (StaticEchoAllocatedToRemoteExchanger(y) && Run(transmission, y)) {
                                             run_once = true;
                                             StaticEchoClean();
@@ -1485,6 +1625,23 @@ namespace ppp {
                         break;
                     }
 
+                    // MUX construction failures are not entry failover events.
+                    // Keep the current entry pinned and pause the next generation
+                    // for a bounded interval so a single bad entry cannot create a
+                    // tight destroy/recreate loop.  Main transport reconnects and
+                    // consecutive M1/M4 failures are handled below and may change
+                    // the entry when the failover policy allows it.
+                    const uint64_t now = Executors::GetTickCount();
+                    bool mux_retry_blocked = false;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        mux_retry_blocked = NULLPTR == mux_ && mux_retry_not_before_ > now;
+                    }
+                    if (mux_retry_blocked) {
+                        LOG_DEBUG("VEthernetExchanger::DoMuxEvents: MUX retry cooling down");
+                        break;
+                    }
+
                     std::shared_ptr<vmux::vmux_net> mux = mux_;
                     if (NULLPTR != mux) {
                         bool breaking = true;
@@ -1530,55 +1687,88 @@ namespace ppp {
                                     }
                                 }
 
-                                if (!target_entry.empty()) {
-                                    {
-                                        SynchronizedObjectScope scope(syncobj_);
-                                        mux_entry_ = target_entry;
-                                        probe_server_ = target_entry;
-                                        mux_failure_entry_.clear();
-                                        mux_failure_last_ = 0;
-                                        mux_failure_streak_ = 0;
-                                    }
-                                    LOG_WARN("VEthernetExchanger::DoMuxEvents: consecutive M%d on entry %s (streak=%d), rebuilding immediately on ranked backup %s",
+                                 if (!target_entry.empty()) {
+                                     {
+                                         SynchronizedObjectScope scope(syncobj_);
+                                         mux_entry_ = target_entry;
+                                         probe_server_ = target_entry;
+                                         mux_failure_entry_.clear();
+                                         mux_failure_last_ = 0;
+                                         mux_failure_streak_ = 0;
+                                         mux_retry_not_before_ = 0;
+                                         mux_retry_backoff_ms_ = 0;
+                                     }
+                                     LOG_WARN("VEthernetExchanger::DoMuxEvents: consecutive M%d on entry %s (streak=%d), rebuilding immediately on ranked backup %s",
                                         reason == vmux::vmux_net::close_reason_m1_gap ? 1 : 4,
                                         failed_entry.empty() ? "<unknown>" : failed_entry.data(), streak, target_entry.data());
-                                }
-                                else {
-                                    LOG_WARN("VEthernetExchanger::DoMuxEvents: M%d on entry %s (streak=%d), rebuilding immediately on the same entry",
-                                        reason == vmux::vmux_net::close_reason_m1_gap ? 1 : 4,
-                                        failed_entry.empty() ? "<unknown>" : failed_entry.data(), streak);
+                                 }
+                                 else {
+                                     {
+                                         SynchronizedObjectScope scope(syncobj_);
+                                         // M1/M4 means the established data
+                                         // generation is no longer safe to
+                                         // keep serving.  Rebuild immediately
+                                         // on the same entry; retry backoff is
+                                         // reserved for ordinary MUX
+                                         // construction/maintenance failures.
+                                         mux_retry_backoff_ms_ = 0;
+                                         mux_retry_not_before_ = 0;
+                                     }
+                                     LOG_WARN("VEthernetExchanger::DoMuxEvents: M%d on entry %s (streak=%d), rebuilding immediately on the same entry",
+                                         reason == vmux::vmux_net::close_reason_m1_gap ? 1 : 4,
+                                         failed_entry.empty() ? "<unknown>" : failed_entry.data(), streak);
                                 }
 
                                 mux_.reset();
                                 breaking = false;
                             }
                             else {
-                                {
-                                    SynchronizedObjectScope scope(syncobj_);
-                                    mux_failure_entry_.clear();
-                                    mux_failure_last_ = 0;
-                                    mux_failure_streak_ = 0;
-                                }
+                                 {
+                                     SynchronizedObjectScope scope(syncobj_);
+                                     mux_failure_entry_.clear();
+                                     mux_failure_last_ = 0;
+                                     mux_failure_streak_ = 0;
+                                     mux_retry_backoff_ms_ = mux_retry_backoff_ms_ == 0
+                                         ? 1000U
+                                         : std::min<uint32_t>(mux_retry_backoff_ms_ * 2U, 5000U);
+                                     mux_retry_not_before_ = now + mux_retry_backoff_ms_;
+                                 }
 
-                                int64_t reconnection_timeout = static_cast<int64_t>(configuration->client.reconnections.timeout) * 1000;
-                                uint64_t mux_last = mux->get_last();
-                                LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux update failed, last=%llu, now=%llu, timeout=%lld",
-                                    (unsigned long long)mux_last, (unsigned long long)now, (long long)reconnection_timeout);
-                                if (now >= (mux_last + (uint64_t)reconnection_timeout)) {
-                                    LOG_DEBUG("VEthernetExchanger::DoMuxEvents: mux reconnection timeout reached, resetting mux");
+                                // update() returns false when the MUX is already
+                                // disposed or its executor can no longer accept
+                                // maintenance work.  Keeping that object in mux_
+                                // until the reconnection timeout creates a data
+                                // black hole: new traffic keeps selecting a dead
+                                // MUX generation.  Drop it immediately and let
+                                // the loop create a fresh generation.
+                                LOG_WARN("VEthernetExchanger::DoMuxEvents: mux update failed, resetting data plane immediately");
+                                if (mux_ == mux) {
                                     mux_.reset();
-                                    breaking = false;
                                 }
+                                breaking = false;
                             }
 
                             mux->close_exec();
+                            // Do not create another generation in this same
+                            // DoMuxEvents invocation for ordinary failures.  An
+                            // M1/M4 integrity failure is different: the old
+                            // generation has already been invalidated and the
+                            // affected streams must get a fresh generation now.
+                            if (!breaking && !integrity_rebuild) {
+                                break;
+                            }
                         }
 
-                        if (breaking) {
+                         if (breaking) {
                             LOG_DEBUG("VEthernetExchanger::DoMuxEvents: keeping existing mux, state=%d, established=%d, disposed=%d",
                                 (int)GetMuxNetworkState(), (int)mux->is_established(), (int)mux->is_disposed());
-                            if (mux->is_established()) {
-                                int grow = mux->take_turbo_pending_grow();
+                             if (mux->is_established()) {
+                                 {
+                                     SynchronizedObjectScope scope(syncobj_);
+                                     mux_retry_not_before_ = 0;
+                                     mux_retry_backoff_ms_ = 0;
+                                 }
+                                 int grow = mux->take_turbo_pending_grow();
                                 if (grow > 0) {
                                     MuxGrowLinklayers(switcher_->GetBufferAllocator(), mux, grow);
                                 }
@@ -1868,23 +2058,21 @@ namespace ppp {
                                             return;
                                         }
 
-                                        if (!forced_entry.empty()) {
-                                            const uint64_t now = Executors::GetTickCount();
-                                            HotSwitchBlacklistEntry(forced_entry, now);
-                                            ppp::string replacement;
-                                            const ppp::vector<ppp::string> ranked = HotSwitchRankedEntries(now);
-                                            for (const ppp::string& candidate : ranked) {
-                                                if (!candidate.empty() && candidate != forced_entry) {
-                                                    replacement = candidate;
-                                                    break;
-                                                }
-                                            }
-                                            if (!replacement.empty()) {
-                                                SynchronizedObjectScope scope(syncobj_);
-                                                mux_entry_ = replacement;
-                                                probe_server_ = replacement;
-                                                LOG_WARN("VEthernetExchanger::MuxConnectAllLinklayers: entry %s failed to build %d/%d carriers; next MUX generation uses ranked backup %s",
-                                                    forced_entry.data(), bok, max_connections, replacement.data());
+                                        // A carrier/build failure is a MUX failure,
+                                        // not an entry failover event.  Keep the
+                                        // generation pinned to the same entry and
+                                        // let the bounded retry backoff prevent a
+                                        // tight loop.  Entry switching is reserved
+                                        // for the main transport or consecutive M1/M4.
+                                        const uint64_t now = Executors::GetTickCount();
+                                        {
+                                            SynchronizedObjectScope scope(syncobj_);
+                                            mux_retry_backoff_ms_ = mux_retry_backoff_ms_ == 0
+                                                ? 1000U
+                                                : std::min<uint32_t>(mux_retry_backoff_ms_ * 2U, 5000U);
+                                            mux_retry_not_before_ = now + mux_retry_backoff_ms_;
+                                            if (mux_ == mux) {
+                                                mux_.reset();
                                             }
                                         }
 
@@ -2129,6 +2317,8 @@ namespace ppp {
                     mux_failure_entry_.clear();
                     mux_failure_last_ = 0;
                     mux_failure_streak_ = 0;
+                    mux_retry_not_before_ = 0;
+                    mux_retry_backoff_ms_ = 0;
                 }
 
                 // Probe-driven failover: blacklist the entry that just failed
@@ -2166,11 +2356,15 @@ namespace ppp {
 
 
             bool VEthernetExchanger::RegisterAllMappingPorts() noexcept {
-                if (disposed_) {
+                if (disposed_ || !IsPrimaryOutbound()) {
                     return false;
                 }
 
                 AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+
                 for (AppConfiguration::MappingConfiguration& mapping : configuration->client.mappings) {
                     RegisterMappingPort(mapping);
                 }
@@ -2186,6 +2380,27 @@ namespace ppp {
                 }
 
                 ppp::collections::Dictionary::ReleaseAllObjects(mappings);
+            }
+
+            void VEthernetExchanger::ResetMuxDataPlane() noexcept {
+                std::shared_ptr<vmux::vmux_net> mux;
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    mux = std::move(mux_);
+                    mux_entry_.clear();
+                    mux_failure_entry_.clear();
+                    mux_failure_last_ = 0;
+                    mux_failure_streak_ = 0;
+                    mux_retry_not_before_ = 0;
+                    mux_retry_backoff_ms_ = 0;
+                }
+
+                if (NULLPTR != mux) {
+                    mux->close_exec();
+                }
+
+                LOG_INFO("VEthernetExchanger::ResetMuxDataPlane: outbound=%s, reset=1",
+                    outbound_tag_.data());
             }
 
             void VEthernetExchanger::ResetDataChannels() noexcept {
@@ -2286,11 +2501,11 @@ namespace ppp {
                     [self, this, context, ei]() noexcept {
                         information_ = ei;
                         if (!disposed_) {
-                            if (!primary_outbound_) {
+                            if (!primary_outbound_.load()) {
                                 SynchronizedObjectScope scope(syncobj_);
                                 assigned_ipv6_address_ = boost::asio::ip::address();
                             }
-                            if (primary_outbound_) {
+                            if (primary_outbound_.load()) {
                                 switcher_->OnInformation(ei);
                             }
                             elif(!ei->Valid()) {
@@ -2333,7 +2548,7 @@ namespace ppp {
                                     ? information.Extensions.AssignedIPv6Address
                                     : boost::asio::ip::address();
                             }
-                            if (primary_outbound_) {
+                            if (primary_outbound_.load()) {
                                 switcher_->OnInformation(ei);
                             }
                             elif(!ei->Valid()) {
@@ -2344,11 +2559,11 @@ namespace ppp {
 
                             // Apply IPv6 (and optionally IPv4) assignment from ExtendedJson
                             LOG_DEBUG("VEthernetExchanger::OnInformation: outbound=%s, primary=%d, ExtendedJson.empty()=%d, len=%d, AssignedIPv6Mode=%d",
-                                outbound_tag_.data(), (int)primary_outbound_,
+                                outbound_tag_.data(), (int)primary_outbound_.load(),
                                 (int)information.ExtendedJson.empty(),
                                 (int)information.ExtendedJson.size(),
                                 (int)information.Extensions.AssignedIPv6Mode);
-                            if (primary_outbound_) {
+                            if (primary_outbound_.load()) {
                                 if (!information.ExtendedJson.empty()) {
                                     // Pass `self` as the source: during a hot outbound
                                     // switch this exchanger is already primary and
@@ -2456,6 +2671,10 @@ namespace ppp {
             }
 
             bool VEthernetExchanger::SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept {
+                return SendTo(sourceEP, ppp::string(), destinationEP, packet, packet_size);
+            }
+
+            bool VEthernetExchanger::SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept {
                 if (NULLPTR == packet || packet_size < 1) {
                     return false;
                 }
@@ -2474,7 +2693,7 @@ namespace ppp {
                     return false;
                 }
 
-                return datagram->SendTo(packet, packet_size, destinationEP);
+                return datagram->SendTo(packet, packet_size, destinationHost, destinationEP);
             }
 
             bool VEthernetExchanger::RegisterDatagramHandler(const boost::asio::ip::udp::endpoint& sourceEP, const DatagramPacketHandler& handler) noexcept {

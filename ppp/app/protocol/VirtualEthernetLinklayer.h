@@ -164,6 +164,8 @@ namespace ppp {
                 virtual bool                                                DoEcho(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept;
                 /** @brief Sends UDP payload with destination/source endpoint descriptors. */
                 virtual bool                                                DoSendTo(const ITransmissionPtr& transmission, const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length, YieldContext& y) noexcept;
+                /** @brief Sends UDP payload while preserving a domain destination for server-side DNS. */
+                virtual bool                                                DoSendTo(const ITransmissionPtr& transmission, const boost::asio::ip::udp::endpoint& sourceEP, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP, Byte* packet, int packet_length, YieldContext& y) noexcept;
                 /** @brief Requests static mapping information from peer. */
                 virtual bool                                                DoStatic(const ITransmissionPtr& transmission, YieldContext& y) noexcept;
                 /** @brief Sends static mapping acknowledgment payload. */

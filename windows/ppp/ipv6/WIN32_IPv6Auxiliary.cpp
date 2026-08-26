@@ -9,6 +9,7 @@
 
 #include <windows/ppp/tap/TapWindows.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
+#include <windows/ppp/win32/network/Router.h>
 
 namespace ppp {
     namespace win32 {
@@ -129,6 +130,108 @@ namespace ppp {
                         ::FreeMibTable(table);
                         return present;
                     }
+                }
+
+                struct ServerForwardingSnapshot {
+                    int InterfaceIndex = -1;
+                    bool Original = false;
+                    bool Changed = false;
+                };
+
+                static ppp::vector<ServerForwardingSnapshot> server_forwarding_snapshots;
+
+                bool PrepareServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
+                    if (NULLPTR == configuration) {
+                        return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6AuxiliaryPrepareServerEnvironmentNullConfig);
+                    }
+
+                    if (configuration->server.ipv6.mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66) {
+                        // Keep Windows NAT66 aligned with the existing IPv4 path:
+                        // the server-side IPv6 transit TAP and user-mode exchanger
+                        // handle virtual-subnet forwarding.  Do not enable system
+                        // IPv6 forwarding or require a custom WFP driver here;
+                        // transparent uplink NAT66 is intentionally out of scope
+                        // for the default desktop backend.
+                        server_forwarding_snapshots.clear();
+                        return true;
+                    }
+
+                    if (configuration->server.ipv6.mode != ppp::configurations::AppConfiguration::IPv6Mode_Gua) {
+                        return true;
+                    }
+
+                    server_forwarding_snapshots.clear();
+                    ppp::vector<int> interfaces;
+
+                    int transit_index = -1;
+                    char* transit_end = NULLPTR;
+                    long transit_numeric = std::strtol(transit_ifname.c_str(), &transit_end, 10);
+                    if (transit_end != NULLPTR && transit_end != transit_ifname.c_str() && *transit_end == '\0' && transit_numeric >= 0) {
+                        transit_index = static_cast<int>(transit_numeric);
+                    }
+                    else {
+                        transit_index = ppp::tap::TapWindows::GetNetworkInterfaceIndex(transit_ifname);
+                    }
+                    if (transit_index >= 0) {
+                        interfaces.emplace_back(transit_index);
+                    }
+
+                    boost::asio::ip::address default_gateway;
+                    int uplink_index = -1;
+                    if (ppp::win32::network::GetIPv6DefaultGateway(default_gateway, uplink_index) && uplink_index >= 0) {
+                        interfaces.emplace_back(uplink_index);
+                    }
+
+                    std::sort(interfaces.begin(), interfaces.end());
+                    interfaces.erase(std::unique(interfaces.begin(), interfaces.end()), interfaces.end());
+                    auto rollback_forwarding = [&]() noexcept {
+                        for (const ServerForwardingSnapshot& snapshot : server_forwarding_snapshots) {
+                            if (snapshot.Changed) {
+                                ppp::win32::network::Router::SetIPv6Forwarding(snapshot.InterfaceIndex, snapshot.Original);
+                            }
+                        }
+                        server_forwarding_snapshots.clear();
+                    };
+                    for (int interface_index : interfaces) {
+                        bool original = false;
+                        if (!ppp::win32::network::Router::GetIPv6Forwarding(interface_index, original)) {
+                            ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ForwardingEnableFailed);
+                            rollback_forwarding();
+                            return false;
+                        }
+
+                        ServerForwardingSnapshot snapshot;
+                        snapshot.InterfaceIndex = interface_index;
+                        snapshot.Original = original;
+                        if (!original) {
+                            if (!ppp::win32::network::Router::SetIPv6Forwarding(interface_index, true)) {
+                                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::IPv6ForwardingEnableFailed);
+                                rollback_forwarding();
+                                return false;
+                            }
+                            snapshot.Changed = true;
+                        }
+                        server_forwarding_snapshots.emplace_back(snapshot);
+                    }
+
+                    // A missing default IPv6 route is valid for client-to-client
+                    // transit, but routed GUA requires an actual uplink.
+                    if (uplink_index < 0) {
+                        LOG_WARN("PrepareServerEnvironment: no IPv6 default route found; routed GUA egress may be unavailable");
+                    }
+                    return true;
+                }
+
+                void FinalizeServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
+                    (void)configuration;
+                    (void)preferred_nic;
+                    (void)transit_ifname;
+                    for (const ServerForwardingSnapshot& snapshot : server_forwarding_snapshots) {
+                        if (snapshot.Changed) {
+                            ppp::win32::network::Router::SetIPv6Forwarding(snapshot.InterfaceIndex, snapshot.Original);
+                        }
+                    }
+                    server_forwarding_snapshots.clear();
                 }
 
                 bool QueryOriginalDefaultRoute(int& interface_index, ppp::string& gateway, int& metric) noexcept {

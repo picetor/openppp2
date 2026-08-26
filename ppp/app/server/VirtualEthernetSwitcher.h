@@ -293,7 +293,7 @@ namespace ppp {
                  * @details Encoding:
                  *  - 0 = off (IPv6 disabled or not yet opened)
                  *  - 1 = nat66 (NAT66 transit plane active)
-                 *  - 2 = gua  (GUA transit plane with NDP proxy active)
+                 *  - 2 = gua  (routed-GUA transit plane active)
                  *  - 3 = failed (transit plane attempted but could not be established)
                  *
                  * @return Atomic load with acquire semantics for safe cross-thread reads.
@@ -500,7 +500,7 @@ namespace ppp {
                 bool                                                    SupportsIPv6DataPlane() noexcept;
                 /** @brief Returns true if the server-side IPv6 feature is enabled in configuration. */
                 bool                                                    IsIPv6ServerEnabled() noexcept;
-                /** @brief Opens the IPv6 transit TAP device and starts SSMT workers if needed. */
+                /** @brief Opens the platform IPv6 transit interface and starts SSMT workers if needed. */
                 bool                                                    OpenIPv6TransitIfNeed() noexcept;
                 /**
                  * @brief Spawns SSMT io_context workers for the IPv6 transit TAP device.

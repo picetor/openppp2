@@ -69,7 +69,8 @@ namespace ppp {
                 int                                                                                     listenPort,
                 int                                                                                     backlog,
                 bool                                                                                    fastOpen,
-                bool                                                                                    noDelay) noexcept;
+                bool                                                                                    noDelay,
+                bool                                                                                    dualStack = false) noexcept;
             static bool                                                                                 OpenSocket(
                 const boost::asio::ip::udp::socket&                                                     socket,
                 const boost::asio::ip::address&                                                         listenIP,

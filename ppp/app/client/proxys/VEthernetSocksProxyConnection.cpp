@@ -234,14 +234,11 @@ namespace ppp {
                         return SendSocksRequestReply(GetSocket(), SOCKS_ERR_OK, local_endpoint, y);
                     }
 
-                    std::shared_ptr<ppp::app::protocol::AddressEndPoint> address_endpoint = make_shared_object<ppp::app::protocol::AddressEndPoint>();
+                    std::shared_ptr<ppp::app::protocol::AddressEndPoint> address_endpoint =
+                        VEthernetLocalProxyConnection::GetAddressEndPointByProtocol(host, port);
                     if (NULLPTR == address_endpoint) {
                         return false;
                     }
-
-                    address_endpoint->Type = address_type;
-                    address_endpoint->Host = host;
-                    address_endpoint->Port = port;
 
                     if (!ConnectBridgeToPeer(address_endpoint, y)) {
                         return false;
@@ -378,7 +375,7 @@ namespace ppp {
                     }
                     
                     Byte cmd = SOCKS_ERR_CMD;
-                    Byte data[256];
+                    Byte data[512];
 
                     for (;;) {
                         if (!ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(data, 4), y)) {
@@ -434,7 +431,7 @@ namespace ppp {
                             }
 
                             int address_length = data[0];
-                            if (address_length < 1) {
+                            if (address_length < 1 || address_length > 255) {
                                 ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::SocketAddressInvalid);
                                 return SOCKS_ERR_NO;
                             }
@@ -447,6 +444,11 @@ namespace ppp {
                             data[address_length] = '\x0';
                             address = (char*)data;
                             address_type = ppp::app::protocol::AddressType::Domain;
+                            if (port <= ppp::net::IPEndPoint::MinPort ||
+                                port > ppp::net::IPEndPoint::MaxPort) {
+                                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::SocketAddressInvalid);
+                                return SOCKS_ERR_NO;
+                            }
                             return SOCKS_ERR_OK;
                         }
                         else {
@@ -545,15 +547,17 @@ namespace ppp {
                             return false;
                         }
 
-                        if (datagram_length < SOCKS_UDP_MIN_PACKET_SIZE) {
+                        Byte* p = udp_buffer_.get();
+                        if (datagram_length < SOCKS_UDP_MIN_PACKET_SIZE ||
+                            p[0] != 0 || p[1] != 0 || p[2] != 0) {
                             continue;
                         }
 
-                        Byte* p = udp_buffer_.get();
                         // p[0..1] = RSV, p[2] = FRAG
                         Byte atype = p[3];
 
                         boost::asio::ip::udp::endpoint destination_ep;
+                        ppp::string destination_host;
                         int header_length = 4;
 
                         if (atype == SOCKS_ATYPE_IPV4) {
@@ -577,34 +581,50 @@ namespace ppp {
                         elif(atype == SOCKS_ATYPE_DOMAIN) {
                             int domain_length = p[header_length];
                             header_length++;
-                            if (datagram_length < header_length + domain_length + 2) {
+                            if (domain_length < 1 ||
+                                datagram_length < header_length + domain_length + 2) {
                                 continue;
                             }
-                            p[header_length + domain_length] = '\x0';
-                            destination_ep.address(
-                                boost::asio::ip::make_address((char*)(p + header_length), ec));
-                            if (ec) {
-                                continue;
-                            }
+                            ppp::string domain(reinterpret_cast<char*>(p + header_length), domain_length);
+                            destination_host = domain;
                             header_length += domain_length;
+                            int dst_port = (p[header_length] << 8) | p[header_length + 1];
+                            if (dst_port <= ppp::net::IPEndPoint::MinPort ||
+                                dst_port > ppp::net::IPEndPoint::MaxPort) {
+                                continue;
+                            }
+                            destination_ep = boost::asio::ip::udp::endpoint(
+                                boost::asio::ip::address_v4::any(), dst_port);
+                            header_length += 2;
                         }
                         else {
                             continue;
                         }
 
-                        int dst_port = (p[header_length] << 8) | p[header_length + 1];
-                        header_length += 2;
-                        destination_ep.port(dst_port);
+                        if (destination_host.empty()) {
+                            int dst_port = (p[header_length] << 8) | p[header_length + 1];
+                            header_length += 2;
+                            destination_ep.port(dst_port);
+                        }
+
+                        if (destination_ep.port() <= ppp::net::IPEndPoint::MinPort ||
+                            destination_ep.port() > ppp::net::IPEndPoint::MaxPort ||
+                            (destination_host.empty() && (destination_ep.address().is_unspecified() ||
+                                destination_ep.address().is_multicast()))) {
+                            continue;
+                        }
 
                         VEthernetExchangerPtr exchanger = GetExchanger();
                         if (NULLPTR == exchanger) {
                             continue;
                         }
 
-                        exchanger->SendTo(ppp::net::Ipep::V6ToV4(udp_client_ep_),
-                            ppp::net::Ipep::V6ToV4(destination_ep),
+                        if (!exchanger->SendTo(ppp::net::Ipep::V6ToV4(udp_client_ep_),
+                            destination_host, ppp::net::Ipep::V6ToV4(destination_ep),
                             udp_buffer_.get() + header_length,
-                            datagram_length - header_length);
+                            datagram_length - header_length)) {
+                            continue;
+                        }
                     }
 
                     return true;

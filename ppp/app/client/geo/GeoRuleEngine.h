@@ -31,6 +31,18 @@ namespace ppp {
                         bool Matched() const noexcept { return action != Action::None; }
                     };
 
+                    // Compact, display-safe representation of a configured
+                    // rule.  The compiled geosite/geoip data can be very
+                    // large, so the UI should expose the original matcher,
+                    // action and outbound rather than every expanded entry.
+                    struct RuleSummary final {
+                        ppp::string type;
+                        ppp::string value;
+                        Action action = Action::None;
+                        size_t priority = SIZE_MAX;
+                        ppp::string outbound;
+                    };
+
                     struct Network final {
                         boost::asio::ip::address address;
                         int prefix = 0;
@@ -70,6 +82,7 @@ namespace ppp {
                     bool UsesLocalDirectDns() const noexcept { return direct_dns_local_; }
                     const ppp::vector<Network>& GetStaticNetworks() const noexcept { return static_networks_; }
                     const ppp::vector<OutboundConfiguration>& GetOutboundConfigurations() const noexcept { return outbound_configurations_; }
+                    const ppp::vector<RuleSummary>& GetRuleSummaries() const noexcept { return rule_summaries_; }
                     const ppp::string& GetFinalOutbound() const noexcept { return final_outbound_; }
                     size_t GetRuleCount() const noexcept { return rules_.size(); }
 
@@ -128,6 +141,7 @@ namespace ppp {
                 private:
                     ppp::vector<Rule> rules_;
                     ppp::vector<Network> static_networks_;
+                    ppp::vector<RuleSummary> rule_summaries_;
                     ppp::vector<boost::asio::ip::address> direct_dns_;
                     bool direct_dns_local_ = false;
                     ppp::vector<OutboundConfiguration> outbound_configurations_;

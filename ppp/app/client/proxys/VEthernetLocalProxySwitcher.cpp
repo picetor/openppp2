@@ -32,9 +32,79 @@ namespace ppp {
                     return exchanger_;
                 }
 
+                std::shared_ptr<ppp::configurations::AppConfiguration> VEthernetLocalProxySwitcher::GetConfiguration() noexcept {
+                    SynchronizedObjectScope scope(syncobj_);
+                    return configuration_;
+                }
+
                 void VEthernetLocalProxySwitcher::SetExchanger(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept {
                     SynchronizedObjectScope scope(syncobj_);
                     exchanger_ = exchanger;
+                    configuration_ = NULLPTR != exchanger ? exchanger->GetConfiguration() : NULLPTR;
+                }
+
+                bool VEthernetLocalProxySwitcher::ReconfigureExchanger(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept {
+                    if (NULLPTR == exchanger) {
+                        return false;
+                    }
+
+                    std::shared_ptr<ppp::net::SocketAcceptor> old_acceptor;
+                    std::shared_ptr<ppp::threading::Timer> old_timeout;
+                    boost::asio::ip::tcp::endpoint old_endpoint;
+                    bool had_acceptor = false;
+                    bool had_timeout = false;
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        exchanger_ = exchanger;
+                        configuration_ = exchanger->GetConfiguration();
+                        if (NULLPTR != acceptor_) {
+                            old_endpoint = ppp::net::Socket::GetLocalEndPoint(acceptor_->GetHandle());
+                            had_acceptor = true;
+                        }
+                        had_timeout = NULLPTR != timeout_;
+                    }
+
+                    int bind_port = ppp::net::IPEndPoint::MinPort;
+                    boost::asio::ip::address bind_address = MyLocalEndPoint(bind_port);
+                    const bool enabled = bind_port > ppp::net::IPEndPoint::MinPort &&
+                        bind_port <= ppp::net::IPEndPoint::MaxPort &&
+                        (bind_address.is_v4() || bind_address.is_v6()) &&
+                        !bind_address.is_multicast() &&
+                        (bind_address.is_unspecified() ||
+                            !ppp::net::IPEndPoint::IsInvalid(bind_address));
+
+                    if (had_acceptor && enabled && old_endpoint.port() == bind_port &&
+                        old_endpoint.address() == bind_address) {
+                        return true;
+                    }
+
+                    if (had_acceptor || had_timeout) {
+                        {
+                            SynchronizedObjectScope scope(syncobj_);
+                            old_acceptor = std::move(acceptor_);
+                            old_timeout = std::move(timeout_);
+                        }
+                        if (NULLPTR != old_timeout) {
+                            old_timeout->Dispose();
+                        }
+                        if (NULLPTR != old_acceptor) {
+                            old_acceptor->Dispose();
+                        }
+                    }
+
+                    // Port 0/invalid means that this proxy is disabled in
+                    // the newly promoted main profile.  The old listener has
+                    // already been closed, so this is a successful reconfig.
+                    if (!enabled) {
+                        return true;
+                    }
+
+                    if (!Open()) {
+                        LOG_ERROR("VEthernetLocalProxySwitcher::ReconfigureExchanger: cannot reopen listener on %s:%d",
+                            bind_address.to_string().data(), bind_port);
+                        return false;
+                    }
+                    return true;
                 }
 
                 void VEthernetLocalProxySwitcher::Finalize() noexcept {
@@ -75,9 +145,13 @@ namespace ppp {
                 }
 
                 bool VEthernetLocalProxySwitcher::Open() noexcept {
-                    using NetworkState = VEthernetExchanger::NetworkState;
-
                     if (NULLPTR != acceptor_) {
+                        return false;
+                    }
+
+                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                    std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
+                    if (NULLPTR == configuration || NULLPTR == exchanger) {
                         return false;
                     }
 
@@ -86,53 +160,40 @@ namespace ppp {
                         return false;
                     }
                     else {
-                        int bind_port = configuration_->client.http_proxy.port;
-                        boost::asio::ip::address bind_ips[] = {
-                                MyLocalEndPoint(bind_port),
-                                boost::asio::ip::address_v6::any(),
-                                boost::asio::ip::address_v4::any()
-                            };
+                        int bind_port = configuration->client.http_proxy.port;
+                        // MyLocalEndPoint is the complete bind policy for this
+                        // listener.  Do not fall back to an unspecified address:
+                        // a failed loopback bind must not silently expose the
+                        // proxy on every interface.
+                        boost::asio::ip::address interfaceIP = MyLocalEndPoint(bind_port);
                         if (bind_port <= ppp::net::IPEndPoint::MinPort || bind_port > ppp::net::IPEndPoint::MaxPort) {
                             return false;
                         }
 
                         bool proxy_only = false;
-                        if (auto switcher = exchanger_->GetSwitcher(); NULLPTR != switcher) {
+                        if (auto switcher = exchanger->GetSwitcher(); NULLPTR != switcher) {
                             proxy_only = switcher->IsProxyOnly();
                         }
-                        const int bind_ip_count = proxy_only ? 1 : arraysizeof(bind_ips);
-                        for (int bind_ip_index = 0; bind_ip_index < bind_ip_count; ++bind_ip_index) {
-                            boost::asio::ip::address& interfaceIP = bind_ips[bind_ip_index];
-                            if (interfaceIP.is_multicast()) {
-                                continue;
-                            }
+                        if (interfaceIP.is_multicast() ||
+                            !(interfaceIP.is_v4() || interfaceIP.is_v6()) ||
+                            (!interfaceIP.is_unspecified() &&
+                                ppp::net::IPEndPoint::IsInvalid(interfaceIP))) {
+                            return false;
+                        }
 
-                            bool bip = interfaceIP.is_v4() || interfaceIP.is_v6();
-                            if (!bip) {
-                                continue;
-                            }
+                        std::shared_ptr<ppp::net::SocketAcceptor> t = ppp::net::SocketAcceptor::New();
+                        if (NULLPTR == t) {
+                            return false;
+                        }
 
-                            if (!interfaceIP.is_unspecified() && ppp::net::IPEndPoint::IsInvalid(interfaceIP)) {
-                                continue;
-                            }
-
-                            std::shared_ptr<ppp::net::SocketAcceptor> t = ppp::net::SocketAcceptor::New();
-                            if (NULLPTR == t) {
-                                return false;
-                            }
-
-                            ppp::string address_string = ppp::net::Ipep::ToAddressString<ppp::string>(interfaceIP);
-                            if (!t->Open(address_string.data(), bind_port, configuration_->tcp.backlog)) {
-                                continue;
-                            }
-
+                        ppp::string address_string = ppp::net::Ipep::ToAddressString<ppp::string>(interfaceIP);
+                        if (t->Open(address_string.data(), bind_port, configuration->tcp.backlog)) {
                             acceptor = std::move(t);
-                            break;
                         }
 
                         if (NULLPTR == acceptor) {
-                            LOG_ERROR("VEthernetLocalProxySwitcher::Open: cannot bind %s proxy listener on loopback port %d",
-                                proxy_only ? "proxy-only" : "local", bind_port);
+                            LOG_ERROR("VEthernetLocalProxySwitcher::Open: cannot bind %s proxy listener on %s:%d",
+                                proxy_only ? "proxy-only" : "local", address_string.data(), bind_port);
                             return false;
                         }
                     }
@@ -141,7 +202,7 @@ namespace ppp {
                     ppp::net::Socket::AdjustDefaultSocketOptional(sockfd, false);
                     ppp::net::Socket::SetTypeOfService(sockfd);
                     ppp::net::Socket::SetSignalPipeline(sockfd, false);
-                    ppp::net::Socket::SetWindowSizeIfNotZero(sockfd, configuration_->tcp.cwnd, configuration_->tcp.rwnd);
+                    ppp::net::Socket::SetWindowSizeIfNotZero(sockfd, configuration->tcp.cwnd, configuration->tcp.rwnd);
 
                     auto self = shared_from_this();
                     acceptor->AcceptSocket = 
@@ -150,11 +211,6 @@ namespace ppp {
                             while (!disposed_) {
                                 std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger();
                                 if (NULLPTR == exchanger) {
-                                    break;
-                                }
-
-                                NetworkState network_state = exchanger->GetNetworkState();
-                                if (network_state != NetworkState::NetworkState_Established) {
                                     break;
                                 }
 
@@ -230,8 +286,13 @@ namespace ppp {
                         return NULLPTR;
                     }
                     
-                    ppp::net::Socket::AdjustDefaultSocketOptional(*socket, configuration_->tcp.turbo);
-                    ppp::net::Socket::SetWindowSizeIfNotZero(socket->native_handle(), configuration_->tcp.cwnd, configuration_->tcp.rwnd);
+                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
+                    if (NULLPTR == configuration) {
+                        ppp::net::Socket::Closesocket(socket);
+                        return NULLPTR;
+                    }
+                    ppp::net::Socket::AdjustDefaultSocketOptional(*socket, configuration->tcp.turbo);
+                    ppp::net::Socket::SetWindowSizeIfNotZero(socket->native_handle(), configuration->tcp.cwnd, configuration->tcp.rwnd);
                     return socket;
                 }
 
@@ -291,7 +352,7 @@ namespace ppp {
                 }
 
                 std::shared_ptr<ppp::threading::BufferswapAllocator> VEthernetLocalProxySwitcher::GetBufferAllocator() noexcept {
-                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration = configuration_;
+                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration = GetConfiguration();
                     return NULLPTR != configuration ? configuration->GetBufferAllocator() : NULLPTR;
                 }
 

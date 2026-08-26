@@ -125,6 +125,10 @@ MISSING*
 # One-off debug scripts in repo root (moved to tests/tools/)
 /_*.py
 
+# Rust TUI front-end build artifacts (cargo)
+/tui/target*/
+/tui-panic.err
+
 # Local scratch/temp workspace
 /.build_tmp/
 

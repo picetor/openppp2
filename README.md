@@ -578,7 +578,7 @@ Socks Proxy           : 127.0.0.1:1080/socks
 #### 核心设置
 | 命令 | 功能 | 格式 | 默认值 |
 |------|------|------|:------:|
-| `--lwip` | 协议栈选择 | `--lwip=[yes｜no]` | Win: `yes`<br>其他: `no` |
+| `--lwip` | 协议栈选择；`yes` 使用内置 lwIP，`no` 使用 ctcp | `--lwip=[yes｜no]` | Win/TAP: `yes`；Win/Wintun、其他平台: `no` |
 | `--vbgp` | 智能路由分流 | `--vbgp=[yes｜no]` | `yes` |
 | `--nic` | 指定物理网卡 | `--nic <网卡名>` | 自动选择 |
 | `--ngw` | 强制网关地址 | `--ngw <IP>` | 自动获取 |
@@ -884,8 +884,8 @@ stripe 模式（同质链路轮询分包）：
 #### 网络协议栈
 | 类型 | 说明 |
 |:--------:|---------|
-| `lwip` | 适用于 Windows |
-| `ctcp` | 适用于非 Windows |
+| `lwip` | 内置 lwIP 协议栈；Windows/TAP 默认使用，也可显式启用 |
+| `ctcp` | 核心非 lwIP TCP 路径；Windows/Wintun 和 Linux/macOS 默认使用 |
 
 ---
 
@@ -908,7 +908,7 @@ ppp --mode=client
 .\ppp.exe --mode=proxy --config=.\appsettings.json --proxy-http-port=18080 --proxy-socks-port=11080
 ```
 
-该模式的 HTTP/SOCKS5 监听地址和默认端口取自配置文件；`--proxy-http-port`、`--proxy-socks-port` 仅覆盖对应端口。配置为 `0.0.0.0` 时会监听所有 IPv4 接口，但 Proxy 模式不会自动修改防火墙。不创建 TUN/TAP、不安装驱动、不修改路由、DNS、系统代理、防火墙或 LSP，也不加载 openppp2 的 IP/geo 分流规则。HTTP 与 SOCKS5 至少一个端口必须成功监听，否则启动失败。Proxy 模式会忽略其他 `tun-*` 参数；每个代理连接使用独立 PPP transmission，避免不兼容的 vmux 对端在拒绝代理逻辑流时同时关闭主控制链路。
+该模式的 HTTP/SOCKS5 监听地址和默认端口取自配置文件；`--proxy-http-port`、`--proxy-socks-port` 覆盖对应端口，端口 `0` 表示禁用该监听器。配置为 `0.0.0.0` 时会监听所有 IPv4 接口，但 Proxy 模式不会自动修改防火墙。不创建 TUN/TAP、不安装驱动、不修改路由、DNS、系统代理、防火墙或 LSP；分流规则按 `--bypass-mode` 选择，`ip` 读取 IP/DNS 文件，`geo` 读取 GEO 文件。两个端口都为 `0` 时仍可启动为无监听的 proxy 控制模式：核心加载服务器配置并保持传输/RPC，不提供本地代理端口。Proxy 模式会忽略其他 `tun-*` 参数；每个代理连接使用独立 PPP transmission，避免不兼容的 vmux 对端在拒绝代理逻辑流时同时关闭主控制链路。
 
 其他代理软件必须将 `ppp.exe`、VPN 服务端域名及其全部 A/AAAA 地址设为 `DIRECT`，防止 `ppp.exe → 外部代理 → openppp2 本地代理 → ppp.exe` 递归回环。DNS 由外部代理软件唯一负责；转发到 SOCKS5 时应保留域名并使用远端解析。UDP/QUIC 必须单独验证，不支持可靠 SOCKS5 UDP 链时应关闭 QUIC，避免旁路。
 
@@ -987,15 +987,15 @@ ppp --help
 
 ## 🔍 Debug 日志版本
 
-Release 构建（默认）只输出 TUI 仪表盘，不输出调试日志。**Debug 构建**额外启用 `PPP_LOG_VERBOSE` 宏，输出详细的 `LOG_DEBUG` / `LOG_INFO` 日志，用于排查连接、路由、DNS 等问题。
+Release 和 Debug 构建使用同一套日志代码。默认运行时等级都是 `error`；排查连接、路由、DNS 等问题时，通过 `--log-level=warn|info|debug` 临时提高等级，不需要重新编译。
 
 ### Release vs Debug
 
 | | Release | Debug |
 |---|---|---|
-| 编译宏 | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3` |
+| 编译宏 | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3`（仅额外诊断 watchdog/统计） |
 | 优化 | 全量优化 | 无优化 |
-| 日志输出 | 仅仪表盘 TUI | 仪表盘 + 详细调试日志 |
+| 日志输出 | 默认 error，可运行时调整 | 默认 error，可运行时调整 |
 | 文件体积 | 较小 | 较大（含调试符号） |
 | 适用场景 | 生产部署 | 问题排查 |
 
@@ -1013,7 +1013,7 @@ openppp2-linux-amd64-debug.zip    ← Debug
 
 ### `--log-file` 使用
 
-Debug 构建支持 `--log-file` 参数将调试日志写入文件（Release 构建此参数无效果）：
+所有构建都支持 `--log-file` 参数将核心日志写入文件：
 
 ```bash
 # Debug 构建：日志写入文件
@@ -1023,7 +1023,9 @@ Debug 构建支持 `--log-file` 参数将调试日志写入文件（Release 构�
 tail -f ./ppp_debug.log
 ```
 
-> **注意**：仪表盘 TUI 始终输出到控制台，`--log-file` 只重定向 `LOG_DEBUG` / `LOG_INFO` 等调试日志。两者互不干扰。
+> **注意**：仪表盘 TUI 始终输出到控制台；`--log-file` 保存核心 `LOG_*` 日志，实际内容由 `--log-level` 决定。默认只保存 error。
+
+日志等级从低到高为 `none < error < warn < info < debug`，默认是 `error`。TUI/CLI 设置页也可以在核心运行期间通过 RPC 调整等级。
 
 ---
 

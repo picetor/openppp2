@@ -1,0 +1,84 @@
+# Test the Rust TUI front-end (tui/).
+#
+# A publishable TUI embeds a platform-built C++ core.  The platform build
+# workflows produce that core; this lightweight workflow validates the Rust
+# contract and UI code on all three desktop platforms without pretending that
+# a placeholder core is a release artifact.
+
+name: Rust TUI
+
+on:
+  workflow_dispatch:      # 手动触发
+  push:
+    branches:
+      - master
+      - inet6
+    paths:
+      - 'tui/**'
+      - 'main.cpp'
+      - 'ppp/**'
+      - 'common/**'
+      - 'linux/**'
+      - 'darwin/**'
+      - 'windows/**'
+      - '.github/workflows/rust-tui.yml'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The test suite never launches the embedded core.  Keep build.rs
+      # strict by supplying an explicit test-only placeholder instead of
+      # weakening normal/local Release builds.
+      PPP_TUI_CORE_PATH: ${{ github.workspace }}/tui/tests/fixtures/ppp-core-placeholder.bin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tui/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Select a system font for compile-time embedding
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            $font = Get-ChildItem -LiteralPath "$env:WINDIR\Fonts" -File -ErrorAction Stop |
+              Where-Object { $_.Extension -in '.ttf', '.otf', '.ttc' } |
+              Select-Object -First 1 -ExpandProperty FullName
+          } elseif ($IsMacOS) {
+            $font = Get-ChildItem -Path '/System/Library/Fonts', '/Library/Fonts', '/System/Library/Fonts/Supplemental' -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -in '.ttf', '.otf', '.ttc' } |
+              Select-Object -First 1 -ExpandProperty FullName
+          } else {
+            $font = (& fc-match -f '%{file}' sans 2>$null | Select-Object -First 1)
+          }
+          if ([string]::IsNullOrWhiteSpace($font) -or -not (Test-Path -LiteralPath $font)) {
+            throw 'No system font found for PPP_TUI_CJK_FONT_PATH'
+          }
+          "PPP_TUI_CJK_FONT_PATH=$font" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using font: $font"
+
+      - name: Test (golden contract + unit)
+        working-directory: tui
+        run: cargo test --all-targets

@@ -438,11 +438,22 @@ namespace ppp {
                     return false;
                 }
 
+                if (server_.port <= IPEndPoint::MinPort ||
+                    server_.port > IPEndPoint::MaxPort || server_.host.empty()) {
+                    return false;
+                }
+
                 ppp::string param = base64_encode(server_.username + ":" + server_.password);
-                ppp::string host = server_.host + ":" + stl::to_string<ppp::string>(server_.port);
+                boost::system::error_code ec;
+                boost::asio::ip::address server_address = StringToAddress(server_.host, ec);
+                ppp::string authority_host = !ec && server_address.is_v6()
+                    ? "[" + server_.host + "]" : server_.host;
+                ppp::string host = authority_host + ":" + stl::to_string<ppp::string>(server_.port);
                 ppp::string request = "CONNECT " + host +" HTTP/1.1\r\n";
                 request += "Host: " + host + "\r\n";
-                request += "Proxy-Authorization: Basic " + param + "\r\n";
+                if (!server_.username.empty() || !server_.password.empty()) {
+                    request += "Proxy-Authorization: Basic " + param + "\r\n";
+                }
                 request += "\r\n";
 
                 size_t request_size = request.size();
@@ -951,8 +962,13 @@ namespace ppp {
                     return false;
                 }
 
+                if (server_.port <= IPEndPoint::MinPort ||
+                    server_.port > IPEndPoint::MaxPort || server_.host.empty()) {
+                    return false;
+                }
+
                 Byte method = 0;
-                if (!server_.username.empty() && !server_.password.empty()) {
+                if (!server_.username.empty() || !server_.password.empty()) {
                     method = 2;
                 }
 
@@ -1012,6 +1028,9 @@ namespace ppp {
 
                     std::size_t username_size = server_.username.size();
                     std::size_t password_size = server_.password.size();
+                    if (username_size > 255 || password_size > 255) {
+                        return false;
+                    }
 
                     MemoryStream ms;
                     ms.WriteByte(auth);
@@ -1068,6 +1087,9 @@ namespace ppp {
                     boost::asio::ip::address address = StringToAddress(server_.host, ec);
                     if (ec) {
                         std::size_t host_size = server_.host.size();
+                        if (host_size < 1 || host_size > 255) {
+                            return false;
+                        }
                         data[length++] = 3; // DOMAIN
                         data[length++] = static_cast<Byte>(host_size);
 

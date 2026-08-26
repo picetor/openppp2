@@ -68,6 +68,7 @@ namespace ppp {
 
                 private:
                     void                                                                Finalize() noexcept;
+                    bool                                                                WaitForExchanger(YieldContext& y) noexcept;
 
                 protected:
                     virtual bool                                                        Handshake(YieldContext& y) noexcept = 0;

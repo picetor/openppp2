@@ -102,11 +102,14 @@ namespace ppp {
                     bool                                                            active = false;
                     bool                                                            server_menu = false;
                     bool                                                            route_used = false;
+                    bool                                                            multiple_entries = false;
                     bool                                                            probe_checked = false;
                     bool                                                            probe_reachable = false;
                     bool                                                            probe_enabled  = true;
                     int                                                             probe_rtt_ms = -1;
-                    ppp::string                                                     probe_server; ///< Current live connection/MUX entry (host:port).
+                    ppp::string                                                     current_entry;      ///< Current live connection/MUX entry (host:port).
+                    ppp::string                                                     ranked_first_entry; ///< Composite quality ranking winner (host:port).
+                    ppp::string                                                     probe_entry;        ///< Best entry from the latest background probe when not connected.
                 };
                 typedef ppp::vector<OutboundConfiguration>                         OutboundConfigurationList;
                 typedef ppp::vector<OutboundStatus>                                OutboundStatusList;
@@ -161,18 +164,23 @@ namespace ppp {
             public:
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          GetPaperAirplaneController() noexcept { return paper_airplane_ctrl_; }
+#endif
+#if defined(_WIN32) || defined(_MACOS)
                 virtual bool                                                        SetHttpProxyToSystemEnv()    noexcept;
                 virtual bool                                                        ClearHttpProxyToSystemEnv()  noexcept;
+#if defined(_WIN32)
                 bool                                                                LocalDns(bool* value)        noexcept;
                 boost::asio::ip::address                                             ResolveProxyDomainThroughTunnel(
                     const ppp::string& hostname,
                     ppp::coroutines::YieldContext& y) noexcept;
+#endif
 #elif defined(_LINUX)   
                 ProtectorNetworkPtr                                                 GetProtectorNetwork()        noexcept { return protect_network_; }
 #endif  
                 std::shared_ptr<ppp::configurations::AppConfiguration>              GetConfiguration()           noexcept { return configuration_; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger()               noexcept { return exchanger_; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const boost::asio::ip::address& destination) noexcept;
+                std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const ppp::string& hostname) noexcept;
                 VirtualEthernetLoggerPtr                                            GetLogger()                  noexcept { return logger_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               GetQoS()                     noexcept { return qos_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        GetStatistics()              noexcept { return statistics_; }
@@ -187,21 +195,33 @@ namespace ppp {
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
                 bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
+                bool                                                                IsDirectProxyHost(const ppp::string& hostname) noexcept;
+                bool                                                                IsDirectProxyAddress(const boost::asio::ip::address& address) noexcept;
+                bool                                                                UsesProxyIpRules() const noexcept { return proxy_ip_rules_ && !geo_rules_; }
 
             public: 
                 virtual bool                                                        LoadAllDnsRules(const ppp::string& rules, bool load_file_or_string) noexcept;
                 bool                                                                LoadGeoRules(const ppp::string& rules_path, const ppp::string& geosite_path, const ppp::string& geoip_path) noexcept;
                 bool                                                                SetOutboundConfigurations(const OutboundConfigurationList& configurations) noexcept;
                 OutboundStatusList                                                  GetOutboundStatuses() noexcept;
+                std::shared_ptr<ppp::app::client::geo::GeoRuleEngine>               GetGeoRules() noexcept { return geo_rules_; }
                 ppp::string                                                         GetActiveOutbound() noexcept;
                 ppp::string                                                         GetActiveOutboundSourcePath() noexcept;
                 bool                                                                SwitchOutbound(const ppp::string& tag) noexcept;
                 bool                                                                SwitchPrimaryOutbound(const ppp::string& tag) noexcept;
+                bool                                                                SwitchPrimaryOutboundToRankedFirst(const ppp::string& tag) noexcept;
                 bool                                                                StaticMode(bool* static_mode) noexcept;
                 uint16_t                                                            Mux(uint16_t* mux) noexcept;
                 uint8_t                                                             MuxAcceleration(uint8_t* mux_acceleration) noexcept;
                 virtual std::size_t                                                 GetIPListCount() noexcept;
                 virtual std::size_t                                                 GetIPList6Count() noexcept;
+                std::size_t                                                         GetDNSRuleCount() noexcept {
+                    std::size_t count = 0;
+                    for (const auto& rules : dns_ruless_) {
+                        count += rules.size();
+                    }
+                    return count;
+                }
 
 #if defined(_ANDROID) || defined(_IPHONE)   
                 void                                                                SetBypassIpList(ppp::string&& bypass_ip_list) noexcept;
@@ -241,6 +261,9 @@ namespace ppp {
                 virtual bool                                                        BlockQUIC(bool value) noexcept;
                 bool                                                                ProxyOnly(bool* value = NULLPTR) noexcept;
                 bool                                                                IsProxyOnly() const noexcept { return proxy_only_; }
+                // Explicit --bypass-mode=ip state; the normal TUN route table
+                // also contains a default route and is not a proxy bypass table.
+                bool                                                                ProxyIpRules(bool* value = NULLPTR) noexcept;
 #if defined(_WIN32)
                 // Keep the VPN's own IPv4 transport on the physical interface
                 // before the main outbound has established network takeover.
@@ -274,6 +297,8 @@ namespace ppp {
                                                                                         OutboundConfiguration& outbound) noexcept;
                 bool                                                                IsRouteOutbound(const ppp::string& tag) const noexcept;
                 void                                                                CompletePendingOutboundSwitch(uint64_t now) noexcept;
+                bool                                                                ApplyPrimaryClientConfiguration(
+                    const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration) noexcept;
                 virtual std::shared_ptr<ppp::ethernet::VNetstack>                   NewNetstack() noexcept override;
                 virtual VEthernetHttpProxySwitcherPtr                               NewHttpProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
                 virtual VEthernetSocksProxySwitcherPtr                              NewSocksProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept;
@@ -429,7 +454,12 @@ namespace ppp {
                 std::atomic<uint64_t>                                               next_outbound_probe_refresh_ = 0;
                 std::atomic<bool>                                                   outbound_probe_refreshing_ = false;
 #endif
+                // configuration_ always follows the currently promoted main
+                // exchanger. Keep the startup object separately because the
+                // public "main" alias must still be able to return to the
+                // original profile after a hot switch.
                 std::shared_ptr<ppp::configurations::AppConfiguration>              configuration_;
+                std::shared_ptr<ppp::configurations::AppConfiguration>              base_configuration_;
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               qos_;
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        statistics_;
 #if defined(PPP_LOG_VERBOSE)
@@ -444,6 +474,8 @@ namespace ppp {
                     bool                                                            block_quic_       = false;
                     bool                                                            static_mode_      = false;
                     bool                                                            proxy_only_       = false;
+                    bool                                                            proxy_only_forced_= false;
+                    bool                                                            proxy_ip_rules_   = false;
                     uint16_t                                                        mux_              = 0;
                     uint8_t                                                         mux_acceleration_ = 0;
                 };
@@ -510,6 +542,10 @@ namespace ppp {
                 std::atomic<uint64_t>                                               main_outbound_unavailable_since_ = 0;
                 LoadIPListFileVectorPtr                                             ribs_;
                 LoadIPv6ListFileVectorPtr                                           ribs6_;
+                // Keep the number of configured IP-list files after the
+                // pending vectors are moved into the route tables.
+                std::size_t                                                         ip_list_count_ = 0;
+                std::size_t                                                         ip_list6_count_ = 0;
                 IPv6RouteTablePtr                                                   rib6_;
                 ForwardInformationTable6Ptr                                         fib6_;
 
@@ -537,15 +573,10 @@ namespace ppp {
                 int                                                                 ipv6_client_route_prefix_length_ = 0;
                 bool                                                                ipv6_client_nat_mode_ = false;
                 bool                                                                ipv6_client_state_captured_ = false;
-                // Whether the active outbound's server can carry IPv6, decided by
-                // the client configuration's server.ipv6 section (mode Nat66/Gua)
-                // -- the authoritative statement about the server.  NOT the
-                // AssignedIPv6Mode echo, which can read None during a reconnect
-                // or on old server builds.  When false the server cannot carry
-                // IPv6, so the client must keep local IPv6 direct connectivity
-                // (host SLAAC, domestic IPv6, ...) instead of fail-closing the
-                // physical NIC; tunnel IPv6 is simply dropped by
-                // TranslateIPv6Packet.
+                // Whether the active outbound's server has advertised an IPv6
+                // data plane through its latest Information extension. This is
+                // runtime peer state; the client profile's server.ipv6 section
+                // is not authoritative for the remote server.
                 bool                                                                ipv6_server_has_dataplane_ = false;
                 
 #if defined(_WIN32)
@@ -603,6 +634,10 @@ namespace ppp {
 #elif defined(_LINUX)
                 ppp::string                                                         ni_dns_servers_;
                 RouteInformationTablePtr                                            default_routes_;
+#endif
+#if defined(_WIN32) || defined(_MACOS)
+                ppp::string                                                         system_proxy_server_;
+                bool                                                                system_proxy_applied_ = false;
 #endif
             };
         }

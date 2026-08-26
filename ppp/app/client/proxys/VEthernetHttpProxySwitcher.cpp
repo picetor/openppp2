@@ -30,10 +30,21 @@ namespace ppp {
                 }
 
                 boost::asio::ip::address VEthernetHttpProxySwitcher::MyLocalEndPoint(int& bind_port) noexcept {
-                    std::shared_ptr<ppp::configurations::AppConfiguration>& configuration_ = GetConfiguration();
+                    std::shared_ptr<ppp::configurations::AppConfiguration> configuration_ = GetConfiguration();
                     bind_port = configuration_->client.http_proxy.port;
+                    if (configuration_->client.http_proxy.bind.empty()) {
+                        // IPv6 loopback with IPV6_V6ONLY disabled accepts both
+                        // ::1 and IPv4-mapped 127.0.0.1 connections while
+                        // remaining loopback-only.
+                        return boost::asio::ip::address_v6::loopback();
+                    }
 
-                    return ppp::net::Ipep::ToAddress(configuration_->client.http_proxy.bind, true);
+                    boost::system::error_code ec;
+                    boost::asio::ip::address address = StringToAddress(configuration_->client.http_proxy.bind.data(), ec);
+                    if (ec) {
+                        bind_port = ppp::net::IPEndPoint::MinPort;
+                    }
+                    return address;
                 }
             }
         }

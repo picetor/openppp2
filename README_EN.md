@@ -525,7 +525,7 @@ When another proxy application such as Clash or v2rayN owns DNS and routing poli
 .\ppp.exe --mode=proxy --config=.\appsettings.json --proxy-http-port=18080 --proxy-socks-port=11080
 ```
 
-HTTP/SOCKS5 listener addresses and default ports come from the configuration file; `--proxy-http-port` and `--proxy-socks-port` override only the corresponding port. Configuring `0.0.0.0` listens on every IPv4 interface, but Proxy mode does not modify the firewall automatically. It does not create a TUN/TAP, install a driver, change routes, DNS, the system proxy, firewall or LSP state, and it does not load openppp2 IP/geo split rules. At least one HTTP or SOCKS5 listener must bind successfully or startup fails. Proxy mode ignores other `tun-*` arguments; each proxy stream uses an independent PPP transmission so an incompatible vmux peer cannot reject a logical stream and tear down the primary control link with it.
+HTTP/SOCKS5 listener addresses and default ports come from the configuration file; `--proxy-http-port` and `--proxy-socks-port` override the corresponding ports, and port `0` disables that listener. Configuring `0.0.0.0` listens on every IPv4 interface, but Proxy mode does not modify the firewall automatically. It does not create a TUN/TAP, install a driver, change routes, DNS, the system proxy, firewall or LSP state; split rules follow `--bypass-mode`: `ip` reads the IP/DNS files and `geo` reads the GEO files. With both ports set to `0`, it starts a listener-free proxy control mode that loads server profiles and keeps the transport/RPC connection without exposing a local proxy port. Proxy mode ignores other `tun-*` arguments; each proxy stream uses an independent PPP transmission so an incompatible vmux peer cannot reject a logical stream and tear down the primary control link with it.
 
 The other proxy application must route `ppp.exe`, the VPN server hostname, and every resolved A/AAAA server address as `DIRECT`; otherwise a recursive `ppp.exe → external proxy → local openppp2 proxy → ppp.exe` loop can occur. The external proxy is the sole DNS policy owner. Preserve hostnames and use remote resolution when forwarding through SOCKS5. Test UDP/QUIC explicitly and disable QUIC when the upstream SOCKS5 UDP chain is not reliable.
 
@@ -566,15 +566,15 @@ ppp --help
 
 ## 🔍 Debug Build
 
-The Release build (default) only outputs the TUI dashboard — no debug logs. The **Debug build** enables the `PPP_LOG_VERBOSE` macro, producing detailed `LOG_DEBUG` / `LOG_INFO` output for troubleshooting connections, routing, DNS, etc.
+Release and Debug builds use the same logging code. The default runtime level is `error` in both builds; use `--log-level=warn|info|debug` for connection, routing, or DNS troubleshooting without rebuilding the core.
 
 ### Release vs Debug
 
 | | Release | Debug |
 |---|---|---|
-| Compile flags | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3` |
+| Compile flags | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3` (extra watchdog/statistics only) |
 | Optimization | Full | None |
-| Log output | TUI dashboard only | Dashboard + detail logs |
+| Log output | `error` by default, adjustable at runtime | `error` by default, adjustable at runtime |
 | Binary size | Smaller | Larger (with debug symbols) |
 | Use case | Production | Troubleshooting |
 
@@ -592,7 +592,7 @@ openppp2-linux-amd64-debug.zip    ← Debug
 
 ### `--log-file` Usage
 
-The Debug build supports `--log-file` to redirect debug logs to a file (no effect in Release):
+All builds support `--log-file` to write core logs to a file:
 
 ```bash
 # Debug build: write logs to file
@@ -602,7 +602,9 @@ The Debug build supports `--log-file` to redirect debug logs to a file (no effec
 tail -f ./ppp_debug.log
 ```
 
-> **Note**: The TUI dashboard always prints to the console. `--log-file` only redirects `LOG_DEBUG` / `LOG_INFO` entries. The two are independent.
+> **Note**: The TUI dashboard always prints to the console. `--log-file` stores core `LOG_*` entries selected by `--log-level`; the default is error-only.
+
+Log levels are `none < error < warn < info < debug`, with `error` as the default. The TUI/CLI settings can also change the core level over RPC while it is running.
 
 ---
 

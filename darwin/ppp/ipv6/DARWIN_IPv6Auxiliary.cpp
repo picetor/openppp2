@@ -4,11 +4,19 @@
 
 #include <common/unix/UnixAfx.h>
 
+#include <sys/sysctl.h>
+
 namespace ppp {
     namespace darwin {
         namespace ipv6 {
             namespace auxiliary {
                 namespace {
+                    static int  server_original_forwarding = -1;
+                    static bool server_forwarding_changed = false;
+                    static bool server_pf_nat66_applied = false;
+                    static ppp::string server_pf_nat66_anchor = "openppp2/nat66";
+                    static ppp::string server_pf_nat66_interface;
+
                     static bool IsSafeShellToken(const ppp::string& value) noexcept {
                         if (value.empty()) {
                             return false;
@@ -27,6 +35,167 @@ namespace ppp {
 
                         return true;
                     }
+
+                    static bool IsPfEnabled() noexcept {
+                        FILE* pipe = popen("pfctl -s info 2>/dev/null", "r");
+                        if (NULLPTR == pipe) {
+                            return false;
+                        }
+
+                        bool enabled = false;
+                        char buffer[512];
+                        while (fgets(buffer, sizeof(buffer), pipe) != NULLPTR) {
+                            ppp::string line = buffer;
+                            if (line.find("Status: Enabled") != ppp::string::npos) {
+                                enabled = true;
+                                break;
+                            }
+                        }
+                        pclose(pipe);
+                        return enabled;
+                    }
+
+                    static bool IsPfAnchorMounted(const ppp::string& anchor) noexcept {
+                        if (!IsSafeShellToken(anchor)) {
+                            return false;
+                        }
+
+                        FILE* pipe = popen("pfctl -sr 2>/dev/null", "r");
+                        if (NULLPTR == pipe) {
+                            return false;
+                        }
+
+                        ppp::string needle = "anchor \"" + anchor + "\"";
+                        bool mounted = false;
+                        char buffer[1024];
+                        while (fgets(buffer, sizeof(buffer), pipe) != NULLPTR) {
+                            if (ppp::string(buffer).find(needle) != ppp::string::npos) {
+                                mounted = true;
+                                break;
+                            }
+                        }
+                        pclose(pipe);
+                        return mounted;
+                    }
+
+                    static bool RunPfctlRules(const ppp::string& anchor, const ppp::string& rules) noexcept {
+                        if (!IsSafeShellToken(anchor) || rules.empty()) {
+                            return false;
+                        }
+
+                        ppp::string command = "pfctl -a " + anchor + " -f - 2>/dev/null";
+                        FILE* pipe = popen(command.data(), "w");
+                        if (NULLPTR == pipe) {
+                            return false;
+                        }
+
+                        size_t written = fwrite(rules.data(), 1, rules.size(), pipe);
+                        int result = pclose(pipe);
+                        return written == rules.size() && result == 0;
+                    }
+
+                    static bool FlushPfctlAnchor(const ppp::string& anchor) noexcept {
+                        if (!IsSafeShellToken(anchor)) {
+                            return false;
+                        }
+
+                        char command[512];
+                        snprintf(command, sizeof(command), "pfctl -a %s -F all >/dev/null 2>&1", anchor.data());
+                        return system(command) == 0;
+                    }
+                }
+
+                void ReadPrimaryDefaultRoute(ppp::string& interface_name, ppp::string& gateway) noexcept;
+
+                bool PrepareServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
+                    if (NULLPTR == configuration) {
+                        return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6AuxiliaryPrepareServerEnvironmentNullConfig);
+                    }
+                    const auto mode = configuration->server.ipv6.mode;
+                    if (mode != ppp::configurations::AppConfiguration::IPv6Mode_Gua && mode != ppp::configurations::AppConfiguration::IPv6Mode_Nat66) {
+                        return true;
+                    }
+
+                    if (mode == ppp::configurations::AppConfiguration::IPv6Mode_Nat66) {
+                        if (!IsPfEnabled() || !IsPfAnchorMounted(server_pf_nat66_anchor)) {
+                            return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable);
+                        }
+
+                        ppp::string uplink = preferred_nic;
+                        if (uplink.empty()) {
+                            ppp::string default_gateway;
+                            ReadPrimaryDefaultRoute(uplink, default_gateway);
+                        }
+                        server_pf_nat66_interface = uplink;
+
+                        ppp::string prefix = configuration->server.ipv6.cidr;
+                        std::size_t slash = prefix.find('/');
+                        int prefix_length = configuration->server.ipv6.prefix_length;
+                        if (slash != ppp::string::npos) {
+                            ppp::string length = prefix.substr(slash + 1);
+                            prefix = prefix.substr(0, slash);
+                            prefix_length = atoi(length.data());
+                        }
+                        prefix_length = std::max<int>(0, std::min<int>(128, prefix_length));
+                        if (server_pf_nat66_interface.empty() || transit_ifname.empty() || prefix.empty() || !IsSafeShellToken(server_pf_nat66_interface) || !IsSafeShellToken(transit_ifname) || !IsSafeShellToken(prefix)) {
+                            return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable);
+                        }
+
+                        char rules[4096];
+                        snprintf(rules, sizeof(rules),
+                            "nat on %s inet6 from %s/%d to any -> (%s)\n"
+                            "pass quick on %s inet6 from %s/%d to any keep state\n",
+                            server_pf_nat66_interface.data(), prefix.data(), prefix_length, server_pf_nat66_interface.data(),
+                            transit_ifname.data(), prefix.data(), prefix_length);
+
+                        if (!RunPfctlRules(server_pf_nat66_anchor, rules)) {
+                            server_pf_nat66_applied = false;
+                            return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6Nat66Unavailable);
+                        }
+                        server_pf_nat66_applied = true;
+                    }
+
+                    int value = 0;
+                    size_t value_size = sizeof(value);
+                    if (::sysctlbyname("net.inet6.ip6.forwarding", &value, &value_size, NULLPTR, 0) != 0) {
+                        if (server_pf_nat66_applied) {
+                            FlushPfctlAnchor(server_pf_nat66_anchor);
+                            server_pf_nat66_applied = false;
+                        }
+                        return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ForwardingEnableFailed);
+                    }
+
+                    server_original_forwarding = value;
+                    server_forwarding_changed = false;
+                    if (value == 0) {
+                        int enabled = 1;
+                        if (::sysctlbyname("net.inet6.ip6.forwarding", NULLPTR, NULLPTR, &enabled, sizeof(enabled)) != 0) {
+                            if (server_pf_nat66_applied) {
+                                FlushPfctlAnchor(server_pf_nat66_anchor);
+                                server_pf_nat66_applied = false;
+                            }
+                            return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ForwardingEnableFailed);
+                        }
+                        server_forwarding_changed = true;
+                    }
+                    return true;
+                }
+
+                void FinalizeServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
+                    (void)configuration;
+                    (void)preferred_nic;
+                    (void)transit_ifname;
+                    if (server_forwarding_changed && server_original_forwarding >= 0) {
+                        int original = server_original_forwarding;
+                        ::sysctlbyname("net.inet6.ip6.forwarding", NULLPTR, NULLPTR, &original, sizeof(original));
+                    }
+                    if (server_pf_nat66_applied) {
+                        FlushPfctlAnchor(server_pf_nat66_anchor);
+                    }
+                    server_original_forwarding = -1;
+                    server_forwarding_changed = false;
+                    server_pf_nat66_applied = false;
+                    server_pf_nat66_interface.clear();
                 }
 
                 ppp::string ComputeNetworkAddress(const boost::asio::ip::address_v6& address, int prefix_length) noexcept {

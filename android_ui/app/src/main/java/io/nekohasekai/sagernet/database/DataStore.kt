@@ -117,7 +117,7 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var extraArgs by configurationStore.string(Key.EXTRA_ARGS) { "" }
     var rulesGeositeUrl by configurationStore.string(Key.RULES_GEOSITE_URL) { "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" }
     var rulesGeoipUrl by configurationStore.string(Key.RULES_GEOIP_URL) { "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" }
-    var logLevel by configurationStore.stringToInt(Key.LOG_LEVEL) { 2 }
+    var logLevel by configurationStore.stringToInt(Key.LOG_LEVEL) { 1 }
     var logLevelDebugWarningDisable by configurationStore.boolean(Key.LOG_LEVEL_DEBUG_WARNING_DISABLE)
     var enableDebug by configurationStore.boolean(Key.ENABLE_DEBUG) { BuildConfig.DEBUG }
     var allowAppsBypassVpn by configurationStore.boolean(Key.ALLOW_APPS_BYPASS_VPN)

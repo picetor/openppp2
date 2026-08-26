@@ -24,6 +24,10 @@ namespace ppp {
         bool PrepareServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
 #if defined(_LINUX)
             return ppp::linux::ipv6::auxiliary::PrepareServerEnvironment(configuration, preferred_nic, transit_ifname);
+#elif defined(_WIN32)
+            return ppp::win32::ipv6::auxiliary::PrepareServerEnvironment(configuration, preferred_nic, transit_ifname);
+#elif defined(_MACOS)
+            return ppp::darwin::ipv6::auxiliary::PrepareServerEnvironment(configuration, preferred_nic, transit_ifname);
 #else
             if (NULLPTR == configuration) {
                 return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6AuxiliaryPrepareServerEnvironmentNullConfig);
@@ -31,8 +35,14 @@ namespace ppp {
 
             auto mode = configuration->server.ipv6.mode;
             if (ppp::configurations::AppConfiguration::IPv6Mode_Gua == mode || ppp::configurations::AppConfiguration::IPv6Mode_Nat66 == mode) {
-                ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::PlatformNotSupportGUAMode);
-                return false;
+                // Windows/macOS server transit currently owns the virtual
+                // interface and per-client routes in VirtualEthernetSwitcher.
+                // Host-wide forwarding/NAT is deliberately not claimed here:
+                // routed GUA requires an upstream route, while NAT66 requires
+                // a platform packet-filter provider.  Returning success keeps
+                // the transit/client-to-client path available and lets the
+                // provider report unsupported egress capabilities explicitly.
+                return true;
             }
 
             return true;
@@ -45,6 +55,10 @@ namespace ppp {
         void FinalizeServerEnvironment(const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration, const ppp::string& preferred_nic, const ppp::string& transit_ifname) noexcept {
 #if defined(_LINUX)
             ppp::linux::ipv6::auxiliary::FinalizeServerEnvironment(configuration, preferred_nic, transit_ifname);
+#elif defined(_WIN32)
+            ppp::win32::ipv6::auxiliary::FinalizeServerEnvironment(configuration, preferred_nic, transit_ifname);
+#elif defined(_MACOS)
+            ppp::darwin::ipv6::auxiliary::FinalizeServerEnvironment(configuration, preferred_nic, transit_ifname);
 #else
 #endif
         }
