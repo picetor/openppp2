@@ -370,9 +370,15 @@ jobs:
           if (-not (Test-Path -LiteralPath $corePath)) {
             throw "Release core not found: $corePath"
           }
-          $font = Get-ChildItem -LiteralPath "$env:WINDIR\Fonts" -File -ErrorAction Stop |
-            Where-Object { $_.Extension -in '.ttf', '.otf', '.ttc' } |
-            Select-Object -First 1 -ExpandProperty FullName
+          $fontCandidates = @(
+            "$env:WINDIR\Fonts\msyh.ttc",
+            "$env:WINDIR\Fonts\simhei.ttf",
+            "$env:WINDIR\Fonts\simsun.ttc",
+            "$env:WINDIR\Fonts\NotoSansCJKsc-Regular.otf"
+          )
+          $font = $fontCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
           if ([string]::IsNullOrWhiteSpace($font) -or -not (Test-Path -LiteralPath $font)) {
             throw 'No system font found for PPP_TUI_CJK_FONT_PATH'
           }

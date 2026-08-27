@@ -40,7 +40,7 @@ use crate::rpc::schema::{Outbound, Snapshot};
 use crate::rpc::{CoreCommand, Response, RpcClient};
 
 use events::{Action, EventReader};
-use widgets::{bar_chart_columns, plain_card, rule_line};
+use widgets::{bar_chart_columns, pad_display, plain_card, rule_line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -51,7 +51,7 @@ pub enum View {
     Settings,
 }
 
-pub const VIEW_TITLES: [&str; 5] = ["Overview", "Network", "Servers", "Routes", "Settings"];
+pub const VIEW_TITLES: [&str; 5] = ["概览", "网络", "服务器", "分流", "设置"];
 
 pub struct TerminalApp {
     view: View,
@@ -116,9 +116,9 @@ impl TerminalApp {
                     .position(|profile| profile.name == settings.config_path)
             });
         let status = if local_servers.is_empty() {
-            "no server configurations read yet".to_string()
+            "尚未读取服务器配置".to_string()
         } else {
-            format!("{} server configuration(s) read", local_servers.len())
+            format!("已读取 {} 个服务器配置", local_servers.len())
         };
         // Probe the server catalog directly so latency is visible before any
         // core (or VPN link) is started; the control-plane core has no
@@ -147,9 +147,9 @@ impl TerminalApp {
             )
         });
         let status = if has_rpc {
-            "connecting to existing core".to_string()
+            "正在连接已有核心".to_string()
         } else if launch_direct {
-            "starting core from command line".to_string()
+            "正在从命令行启动核心".to_string()
         } else {
             status
         };
@@ -224,7 +224,7 @@ impl TerminalApp {
         self.launch_rx = Some(rx);
         self.launching = true;
         self.catalog_core = catalog_core;
-        self.status = "starting core...".to_string();
+        self.status = "正在启动核心…".to_string();
         self.view = view;
         std::thread::spawn(move || {
             let result = match core_path {
@@ -245,7 +245,7 @@ impl TerminalApp {
             rpc.disconnect();
         }
         if let Some(launcher) = self.launcher.as_mut() {
-            self.status = "core stopping (restoring network)...".to_string();
+            self.status = "正在停止核心（恢复网络）…".to_string();
             let _ = launcher.request_graceful_shutdown();
         }
 
@@ -260,9 +260,9 @@ impl TerminalApp {
         self.snapshot = None;
         self.traffic.reset();
         self.status = if owns_core {
-            "core stopped".to_string()
+            "核心已停止".to_string()
         } else {
-            "disconnected from core".to_string()
+            "已断开核心连接".to_string()
         };
         // The core is gone; a late console-close event must not try again.
         set_emergency_target(None);
@@ -271,13 +271,13 @@ impl TerminalApp {
     /// TCP-probe latency label for a local server profile.
     fn probe_status_text(&self, profile: &LocalServerProfile) -> String {
         let Ok(table) = self.probe_table.lock() else {
-            return "pending".to_string();
+            return "等待探测".to_string();
         };
         match table.state(&profile.name) {
             Some(ProbeState::Ok(rtt)) => format!("{rtt}ms"),
-            Some(ProbeState::Unreachable) => "unreachable".to_string(),
-            Some(ProbeState::Probing) => "probing".to_string(),
-            Some(ProbeState::Pending) | None => "pending".to_string(),
+            Some(ProbeState::Unreachable) => "不可达".to_string(),
+            Some(ProbeState::Probing) => "探测中".to_string(),
+            Some(ProbeState::Pending) | None => "等待探测".to_string(),
         }
     }
 
@@ -344,7 +344,7 @@ impl TerminalApp {
         };
         self.editing = Some(index);
         self.editing_text = current;
-        self.status = format!("editing field {} (Esc cancel, Enter/Tab commit)", index + 1);
+        self.status = format!("正在编辑第 {} 项（Esc 取消，Enter/Tab 确认）", index + 1);
     }
 
     /// Commit the editing buffer back into the settings field.
@@ -410,7 +410,7 @@ impl TerminalApp {
                 });
             }
         }
-        self.status = "settings field updated".to_string();
+        self.status = "设置项已更新".to_string();
         self.save_settings();
     }
 
@@ -425,7 +425,7 @@ impl TerminalApp {
             KeyCode::Esc => {
                 self.editing = None;
                 self.editing_text.clear();
-                self.status = "edit cancelled".to_string();
+                self.status = "已取消编辑".to_string();
             }
             KeyCode::Enter => {
                 self.commit_editing();
@@ -543,9 +543,9 @@ impl TerminalApp {
             };
             match rpc.request_command(command) {
                 Ok(()) => {
-                    self.status = format!("switching to {}", outbound.display_name);
+                    self.status = format!("正在切换到 {}", outbound.display_name);
                 }
-                Err(error) => self.error = Some(format!("switch request failed: {error:#}")),
+                Err(error) => self.error = Some(format!("切换请求失败：{error:#}")),
             }
         }
     }
@@ -574,8 +574,8 @@ impl TerminalApp {
 
     fn save_settings(&mut self) {
         match self.settings.save() {
-            Ok(()) => self.status = format!("settings saved to {}", self.settings.settings_file),
-            Err(error) => self.error = Some(format!("save settings failed: {error:#}")),
+            Ok(()) => self.status = format!("设置已保存到 {}", self.settings.settings_file),
+            Err(error) => self.error = Some(format!("保存设置失败：{error:#}")),
         }
     }
 
@@ -591,7 +591,7 @@ impl TerminalApp {
                     self.launching = false;
                     match result {
                         Ok(launcher) => {
-                            self.status = format!("core started · RPC {}", launcher.endpoint);
+                            self.status = format!("核心已启动 · RPC {}", launcher.endpoint);
                             let endpoint = launcher.endpoint.clone();
                             let token = launcher.token.clone();
                             let pid = launcher.pid();
@@ -601,7 +601,7 @@ impl TerminalApp {
                             self.error = None;
                         }
                         Err(error) => {
-                            self.status = "core start failed".to_string();
+                            self.status = "核心启动失败".to_string();
                             self.error = Some(error);
                         }
                     }
@@ -609,7 +609,7 @@ impl TerminalApp {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.launch_rx = None;
                     self.launching = false;
-                    self.status = "core launcher thread exited".to_string();
+                    self.status = "核心启动线程已退出".to_string();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -633,23 +633,23 @@ impl TerminalApp {
             match rx.try_recv() {
                 Ok(Ok(stream)) => match self.rpc.as_mut() {
                     Some(rpc) => match rpc.attach_stream(stream) {
-                        Ok(()) => self.status = "connecting to core".to_string(),
+                        Ok(()) => self.status = "正在连接核心".to_string(),
                         Err(error) => {
-                            self.status = "RPC attach failed".to_string();
+                            self.status = "RPC 附加失败".to_string();
                             self.error = Some(format!("{error:#}"));
                         }
                     },
                     None => {}
                 },
                 Ok(Err(error)) => {
-                    self.status = "RPC connect failed".to_string();
+                    self.status = "RPC 连接失败".to_string();
                     self.error = Some(format!("{error:#}"));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     self.rpc_connect_rx = Some(rx);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.status = "RPC connect thread exited".to_string();
+                    self.status = "RPC 连接线程已退出".to_string();
                 }
             }
         }
@@ -661,7 +661,7 @@ impl TerminalApp {
                     Ok(Some(response)) => frames.push(response),
                     Ok(None) => break,
                     Err(error) => {
-                        self.status = "RPC channel error".to_string();
+                        self.status = "RPC 通道错误".to_string();
                         self.error = Some(format!("{error:#}"));
                         break;
                     }
@@ -692,7 +692,7 @@ impl TerminalApp {
             set_emergency_target(None);
             self.auto_restart_count = self.auto_restart_count.saturating_add(1);
             if self.auto_restart_count <= 3 {
-                self.status = format!("core exited; restarting ({}/3)...", self.auto_restart_count);
+                self.status = format!("核心已退出，正在重启（{}/3）…", self.auto_restart_count);
                 if was_catalog {
                     let args = catalog_core_args(&self.settings);
                     self.launch_core_with_args(args, View::Servers, true);
@@ -701,8 +701,8 @@ impl TerminalApp {
                     self.launch_core_with_args(args, view, false);
                 }
             } else {
-                self.status = "core exited repeatedly; press p to start".to_string();
-                self.error = Some("core stopped after 3 automatic restart attempts".to_string());
+                self.status = "核心反复退出，请按 p 启动".to_string();
+                self.error = Some("核心连续自动重启 3 次后已停止".to_string());
                 self.auto_restart_count = 0;
             }
         }
@@ -723,7 +723,7 @@ impl TerminalApp {
             Response::Result { method, value, .. } => match method.as_str() {
                 "hello" => {
                     self.error = None;
-                    self.status = "connected to core".to_string();
+                    self.status = "已连接核心".to_string();
                 }
                 "get_snapshot" | "get_outbounds" => {
                     if let Ok(snapshot) = serde_json::from_value::<Snapshot>(value) {
@@ -734,7 +734,7 @@ impl TerminalApp {
                             snapshot.monotonic_ms,
                         );
                         self.snapshot = Some(snapshot);
-                        self.status = format!("phase={phase}");
+                        self.status = format!("阶段：{}", phase_label(&phase));
                         self.error = None;
                     }
                 }
@@ -745,9 +745,9 @@ impl TerminalApp {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     self.status = if accepted {
-                        format!("switch({method}) accepted")
+                        format!("切换（{method}）已接受")
                     } else {
-                        "switch rejected by core".to_string()
+                        "核心拒绝了切换请求".to_string()
                     };
                 }
                 _ => {}
@@ -757,7 +757,7 @@ impl TerminalApp {
                 _ => {}
             },
             Response::Error { code, message, .. } => {
-                self.status = format!("RPC error {code}");
+                self.status = format!("RPC 错误 {code}");
                 self.error = Some(message);
                 if code == 401 {
                     if let Some(rpc) = self.rpc.as_mut() {
@@ -779,7 +779,7 @@ impl TerminalApp {
                     self.quit = true;
                 } else {
                     self.confirm_quit = true;
-                    self.status = "press q/Ctrl+C again to quit".to_string();
+                    self.status = "请再次按 q/Ctrl+C 确认退出".to_string();
                 }
             }
             Action::SwitchView(view) => {
@@ -909,15 +909,15 @@ impl TerminalApp {
             }
             Action::StopCore => {
                 if self.launcher.is_none() && !self.launching {
-                    self.status = "core is not running".to_string();
+                    self.status = "核心未运行".to_string();
                     self.confirm_stop = false;
                 } else if self.confirm_stop {
                     self.confirm_stop = false;
                     self.stop_core();
-                    self.status = "core stopped (p to start)".to_string();
+                    self.status = "核心已停止（按 p 启动）".to_string();
                 } else {
                     self.confirm_stop = true;
-                    self.status = "press o again to stop the core".to_string();
+                    self.status = "请再次按 o 停止核心".to_string();
                 }
             }
             Action::StartCore => {
@@ -928,7 +928,7 @@ impl TerminalApp {
             Action::BypassMode(mode) => {
                 if self.view == View::Routes {
                     self.settings.bypass_mode = mode.to_string();
-                    self.status = format!("bypass mode set to {mode}");
+                    self.status = format!("分流模式已设为 {mode}");
                 }
             }
             Action::Help => {
@@ -965,7 +965,7 @@ impl TerminalApp {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         if self.launcher.is_some() {
-            self.status = format!("applying server {}...", profile.name);
+            self.status = format!("正在应用服务器 {}…", profile.name);
             if self.catalog_core {
                 self.stop_core();
                 let args = self.core_args();
@@ -1432,30 +1432,29 @@ fn draw(frame: &mut ratatui::Frame, app: &TerminalApp) {
         render_popup(
             frame,
             popup_area,
-            "Help",
+            "帮助",
             vec![
                 Line::from(""),
-                Line::from(" 1-5 / Tab          switch page"),
-                Line::from(" Up/Down / j k      move selection"),
-                Line::from(" Ctrl+U / Ctrl+D    half-page scroll"),
-                Line::from(" Home / G           first / last"),
-                Line::from(" Enter              activate / edit"),
-                Line::from(" Space              toggle (TUN / proxy)"),
-                Line::from(" /                  filter servers"),
-                Line::from(" p / Enter          start core"),
-                Line::from(" o                  stop core (confirm twice)"),
-                Line::from(" s                  save settings (Settings)"),
-                Line::from(" r                  save + restart (Settings/Routes)"),
-                Line::from(" i / g / n          bypass mode (Routes)"),
-                Line::from(" Esc                cancel / leave filter"),
-                Line::from(" q / Ctrl+C         quit (press twice)"),
-                Line::from(" ?                  this help"),
+                Line::from(" 1-5 / Tab          切换页面"),
+                Line::from(" Up/Down / j k      移动选择"),
+                Line::from(" Ctrl+U / Ctrl+D    半页滚动"),
+                Line::from(" Home / G           跳到首项/末项"),
+                Line::from(" Enter              执行/编辑"),
+                Line::from(" Space              切换（TUN/代理）"),
+                Line::from(" /                  筛选服务器"),
+                Line::from(" p / Enter          启动核心"),
+                Line::from(" o                  停止核心（需确认两次）"),
+                Line::from(" s                  保存设置（设置页）"),
+                Line::from(" r                  保存并重启（设置/分流页）"),
+                Line::from(" i / g / n          分流模式（分流页）"),
+                Line::from(" Esc                取消/退出筛选"),
+                Line::from(" q / Ctrl+C         退出（需按两次）"),
+                Line::from(" ?                  显示帮助"),
                 Line::from(""),
-                Line::from("  All keys are tmux-safe: no F-key or Ctrl+"),
-                Line::from("  prefix/flow-control collisions. Quit uses"),
-                Line::from("  a double confirmation before stopping."),
+                Line::from("  所有按键兼容 tmux，不使用 F 键或 Ctrl 前缀。"),
+                Line::from("  退出前会二次确认，避免误停止核心。"),
                 Line::from(""),
-                Line::from("            [Enter / Esc / ?] close"),
+                Line::from("            [Enter / Esc / ?] 关闭"),
             ],
         );
     }
@@ -1476,17 +1475,17 @@ fn view_index(view: View) -> usize {
 fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let (state_label, state_color) = if let Some(snapshot) = &app.snapshot {
         match snapshot.phase.as_str() {
-            "connected" => ("* connected ", ratatui::style::Color::Green),
-            "connecting" | "reconnecting" => ("~ connecting", ratatui::style::Color::Yellow),
-            "failed" => ("x failed   ", ratatui::style::Color::Red),
-            _ => ("~ pending  ", ratatui::style::Color::Yellow),
+            "connected" => ("* 已连接 ", ratatui::style::Color::Green),
+            "connecting" | "reconnecting" => ("~ 连接中", ratatui::style::Color::Yellow),
+            "failed" => ("× 失败   ", ratatui::style::Color::Red),
+            _ => ("~ 等待中 ", ratatui::style::Color::Yellow),
         }
     } else if app.launching {
-        ("~ starting ", ratatui::style::Color::Yellow)
+        ("~ 启动中 ", ratatui::style::Color::Yellow)
     } else if app.launcher.is_some() {
-        ("~ connecting", ratatui::style::Color::Yellow)
+        ("~ 连接中", ratatui::style::Color::Yellow)
     } else {
-        ("o idle     ", ratatui::style::Color::DarkGray)
+        ("o 空闲   ", ratatui::style::Color::DarkGray)
     };
 
     let mut spans = vec![
@@ -1511,7 +1510,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
 
     if let Some(latest) = app.traffic.latest() {
         spans.push(Span::raw(format!(
-            "  down {}  up {}",
+            "  下行 {}  上行 {}",
             format_rate(latest.rx_bytes_per_sec),
             format_rate(latest.tx_bytes_per_sec)
         )));
@@ -1520,7 +1519,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // Primary action hint on the right (Enter starts the core).
     if app.launcher.is_none() {
         spans.push(Span::styled(
-            "  Enter:start ",
+            "  回车启动 ",
             Style::default().fg(ratatui::style::Color::Green),
         ));
     }
@@ -1531,11 +1530,11 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
 /// filled with the ACCENT highlight (select-where-you-are).
 fn draw_nav(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let titles = [
-        ("1", "Overview"),
-        ("2", "Network"),
-        ("3", "Servers"),
-        ("4", "Routes"),
-        ("5", "Settings"),
+        ("1", "概览"),
+        ("2", "网络"),
+        ("3", "服务器"),
+        ("4", "分流"),
+        ("5", "设置"),
     ];
     let mut lines = vec![Line::from(Span::styled(
         "┌─ ppp-tui ──┐",
@@ -1543,7 +1542,7 @@ fn draw_nav(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     ))];
     for (index, (key, title)) in titles.iter().enumerate() {
         let active = index == view_index(app.view);
-        let content = format!("│ {key} {title:<9}│");
+        let content = format!("│ {key} {}│", pad_display(title, 7));
         if active {
             // Filled ACCENT background so the current page is obvious.
             lines.push(Line::from(Span::styled(content, selected_style())));
@@ -1560,7 +1559,7 @@ fn draw_nav(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " 1-5 switch",
+        " 1-5 切换页面",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines), area);
@@ -1585,23 +1584,23 @@ fn draw_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
 /// Bottom hints line: context-sensitive key hints.
 fn draw_hints_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let hints = match app.view {
-        View::Overview => " 1-5 page | p/Enter start | o stop | q quit ",
+        View::Overview => " 1-5 页面 | p/Enter 启动 | o 停止 | q 退出 ",
         View::Servers => {
             if app.filter_active {
-                " typing filter... Esc/Enter done "
+                " 正在筛选… Esc/Enter 完成 "
             } else {
-                " 1-5 page | Up/Down move | Enter switch | p start | o stop | / filter "
+                " 1-5 页面 | 上下移动 | Enter 切换 | p 启动 | o 停止 | / 筛选 "
             }
         }
         View::Settings => {
             if app.is_editing() {
-                " editing field... Esc cancel | Enter/Tab commit "
+                " 正在编辑… Esc 取消 | Enter/Tab 确认 "
             } else {
-                " 1-5 page | Up/Down move | Enter edit | Space toggle | s save | r restart "
+                " 1-5 页面 | 上下移动 | Enter 编辑 | Space 切换 | s 保存 | r 重启 "
             }
         }
-        View::Routes => " 1-5 page | i ip | g geo | n none | s save | r restart ",
-        View::Network => " 1-5 page | p/Enter start | o stop | q quit ",
+        View::Routes => " 1-5 页面 | i IP | g GEO | n 无 | s 保存 | r 重启 ",
+        View::Network => " 1-5 页面 | p/Enter 启动 | o 停止 | q 退出 ",
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1629,10 +1628,20 @@ fn clear_frame(frame: &mut ratatui::Frame) {
 /// Truncate a value so long lines (IPv6 URIs, GUIDs) cannot wrap or push
 /// the second column out of the terminal.
 fn trunc(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
+    if unicode_width::UnicodeWidthStr::width(value) <= max {
         value.to_string()
     } else {
-        let cut: String = value.chars().take(max.saturating_sub(1)).collect();
+        let mut cut = String::new();
+        let mut used = 0usize;
+        let limit = max.saturating_sub(1);
+        for character in value.chars() {
+            let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+            if used + character_width > limit {
+                break;
+            }
+            cut.push(character);
+            used += character_width;
+        }
         format!("{cut}…")
     }
 }
@@ -1648,12 +1657,14 @@ fn two_col_card(
     // columns adapt to the available width so wide terminals show full
     // IPv6 addresses/GUIDs instead of truncating at a fixed 27 chars.
     let mut lines = vec![Line::from(rule_line(title, width))];
-    // " label  value  label  value" -> fixed labels take 2*10+3.
+    // " label  value  label  value" -> fixed labels take 2*9+3.
     let value_max = width.saturating_sub(25).max(8) / 2;
     for (l1, v1, l2, v2) in rows {
         lines.push(Line::from(format!(
-            " {l1:<9} {:<value_max$} {l2:<9} {}",
-            trunc(v1, value_max),
+            " {} {} {} {}",
+            pad_display(l1, 9),
+            pad_display(&trunc(v1, value_max), value_max),
+            pad_display(l2, 9),
             trunc(v2, value_max),
         )));
     }
@@ -1696,15 +1707,15 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // overview page before a core starts).  No VPN is started.
     if app.launcher.is_none() && app.snapshot.is_none() {
         let mut lines = vec![Line::styled(
-            rule_line("Server Latency (TCP probe, no VPN)", 60),
+            rule_line("服务器延迟（TCP 探测，不启动 VPN）", 60),
             Style::default().add_modifier(Modifier::BOLD),
         )];
         lines.push(Line::from(""));
         for (index, profile) in app.local_servers.iter().enumerate() {
             let latency = app.probe_status_text(profile);
             let color = match latency.as_str() {
-                "unreachable" => ratatui::style::Color::Red,
-                "pending" | "probing" => ratatui::style::Color::DarkGray,
+                "不可达" => ratatui::style::Color::Red,
+                "等待探测" | "探测中" => ratatui::style::Color::DarkGray,
                 _ => {
                     let rtt = latency.trim_end_matches("ms").parse::<i64>().unwrap_or(999);
                     if rtt < 100 {
@@ -1748,11 +1759,11 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
             ]));
         }
         if app.local_servers.is_empty() {
-            lines.push(Line::from("  (no server configurations found)"));
+            lines.push(Line::from("  （未找到服务器配置）"));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            " Enter: start selected server ",
+            " Enter：启动选中的服务器 ",
             Style::default().fg(ratatui::style::Color::DarkGray),
         )));
         frame.render_widget(Paragraph::new(lines), area);
@@ -1780,13 +1791,13 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         "[ ]"
     };
     let core_state = if app.launcher.is_some() {
-        "running"
+        "运行中"
     } else {
-        "Enter start"
+        "回车启动"
     };
     frame.render_widget(
         Paragraph::new(Line::from(format!(
-            " {tun_state} TUN VPN    {proxy_state} System Proxy    <{core_state}>"
+            " {tun_state} TUN VPN    {proxy_state} 系统代理    <{core_state}>"
         ))),
         chunks[0],
     );
@@ -1795,9 +1806,9 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let mut rows: Vec<(&str, String, &str, String)> = Vec::new();
     if let Some(snapshot) = &app.snapshot {
         rows.push((
-            "State",
-            snapshot.phase.clone(),
-            "Server",
+            "状态",
+            phase_label(&snapshot.phase).to_string(),
+            "服务器",
             snapshot.server.clone(),
         ));
         let active_outbound = snapshot
@@ -1806,48 +1817,48 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
             .find(|outbound| outbound.active)
             .map(|outbound| outbound.display_name.clone())
             .unwrap_or_else(|| "-".to_string());
-        rows.push(("Main", active_outbound, "GUID", snapshot.guid.clone()));
+        rows.push(("主出口", active_outbound, "GUID", snapshot.guid.clone()));
         rows.push((
-            "Transport",
-            snapshot.transport.clone(),
-            "Bypass",
-            snapshot.bypass_mode.clone(),
+            "传输",
+            transport_label(&snapshot.transport).to_string(),
+            "分流",
+            bypass_mode_label(&snapshot.bypass_mode).to_string(),
         ));
         rows.push((
-            "Http",
+            "HTTP",
             snapshot.http_proxy.clone(),
-            "Socks",
+            "SOCKS",
             snapshot.socks_proxy.clone(),
         ));
         rows.push((
-            "Hosting",
+            "角色",
             snapshot.role.clone(),
-            "Time",
+            "时长",
             format_duration_short(snapshot.duration_ms),
         ));
         rows.push((
             "MUX",
             format!(
-                "{} · {} links",
+                "{} · {} 条链路",
                 snapshot.effective_mux_mode, snapshot.mux_active_links
             ),
-            "Total",
+            "总流量",
             format!(
-                "down {} up {}",
+                "下行 {} 上行 {}",
                 format_bytes(snapshot.traffic.in_bytes),
                 format_bytes(snapshot.traffic.out_bytes)
             ),
         ));
         if let Some(latest) = app.traffic.latest() {
             rows.push((
-                "Down",
+                "下载",
                 format_rate(latest.rx_bytes_per_sec),
-                "Up",
+                "上传",
                 format_rate(latest.tx_bytes_per_sec),
             ));
         }
     }
-    let card = two_col_card("Connection Information", &rows, chunks[1].width as usize);
+    let card = two_col_card("连接信息", &rows, chunks[1].width as usize);
     frame.render_widget(Paragraph::new(card), chunks[1]);
 
     // Traffic charts: rx and tx stacked top-to-bottom, each filling the
@@ -1878,9 +1889,9 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // without colour support fall back to plain text).
     let rx_color = ratatui::style::Color::Rgb(74, 196, 124);
     let tx_color = ratatui::style::Color::Rgb(86, 166, 255);
-    let mut chart: Vec<Line<'static>> = vec![Line::from(rule_line("Traffic", chart_width))];
+    let mut chart: Vec<Line<'static>> = vec![Line::from(rule_line("流量", chart_width))];
     chart.push(Line::from(Span::styled(
-        " rx",
+        " 下载",
         Style::default().fg(rx_color),
     )));
     for row in 0..chart_height {
@@ -1890,7 +1901,7 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         )));
     }
     chart.push(Line::from(Span::styled(
-        " tx",
+        " 上传",
         Style::default().fg(tx_color),
     )));
     for row in 0..chart_height {
@@ -1913,11 +1924,50 @@ fn format_duration_short(duration_ms: u64) -> String {
     )
 }
 
+fn phase_label(value: &str) -> &str {
+    match value {
+        "connected" => "已连接",
+        "connecting" => "连接中",
+        "reconnecting" => "重连中",
+        "failed" => "失败",
+        "starting" => "启动中",
+        "stopping" => "停止中",
+        _ => value,
+    }
+}
+
+fn transport_label(value: &str) -> &str {
+    match value.to_ascii_lowercase().as_str() {
+        "ctcp" => "CTCP",
+        "lwip" => "LWIP",
+        "tcp" => "TCP",
+        _ => value,
+    }
+}
+
+fn bypass_mode_label(value: &str) -> &str {
+    match value.to_ascii_lowercase().as_str() {
+        "ip" => "IP",
+        "geo" => "GEO",
+        "no" | "none" => "无",
+        _ => value,
+    }
+}
+
+fn runtime_state_label(value: i32) -> &'static str {
+    match value {
+        1 => "已连接",
+        0 => "连接中",
+        2 => "重连中",
+        _ => "未知",
+    }
+}
+
 fn draw_network(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let Some(snapshot) = &app.snapshot else {
         frame.render_widget(
             Paragraph::new(Line::from(
-                " start the core to see TUN / NIC / proxy / MUX state",
+                " 请先启动核心以查看 TUN / NIC / 代理 / MUX 状态",
             )),
             area,
         );
@@ -1929,20 +1979,17 @@ fn draw_network(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // Proxy-only TUNNEL card (same rows as the GUI).
     if network.mode == "proxy-only" {
         let rows = vec![
-            ("Mode".to_string(), dash(&network.mode)),
-            ("Adapter".to_string(), dash(&network.adapter)),
-            ("Logical IPv4".to_string(), dash(&network.logical_ipv4)),
-            ("Logical IPv6".to_string(), dash(&network.logical_ipv6)),
-            ("Tunnel DNS".to_string(), dash(&network.tunnel_dns)),
-            ("Link State".to_string(), dash(&network.link_state)),
-            ("Mux State".to_string(), dash(&network.mux_state)),
-            (
-                "TCP/IP Transport".to_string(),
-                dash(&network.tcp_ip_transport),
-            ),
-            ("DNS Transport".to_string(), dash(&network.dns_transport)),
+            ("模式".to_string(), dash(&network.mode)),
+            ("适配器".to_string(), dash(&network.adapter)),
+            ("逻辑 IPv4".to_string(), dash(&network.logical_ipv4)),
+            ("逻辑 IPv6".to_string(), dash(&network.logical_ipv6)),
+            ("隧道 DNS".to_string(), dash(&network.tunnel_dns)),
+            ("链路状态".to_string(), dash(&network.link_state)),
+            ("MUX 状态".to_string(), dash(&network.mux_state)),
+            ("TCP/IP 传输".to_string(), dash(&network.tcp_ip_transport)),
+            ("DNS 传输".to_string(), dash(&network.dns_transport)),
         ];
-        lines.extend(plain_card("TUNNEL", &rows, area.width as usize));
+        lines.extend(plain_card("隧道", &rows, area.width as usize));
         lines.push(Line::from(""));
     }
 
@@ -1954,7 +2001,7 @@ fn draw_network(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         lines.extend(network_interface_card("NIC", nic, false, network));
     }
     if network.tun.is_none() && network.nic.is_none() {
-        lines.push(Line::from(" waiting for network information..."));
+        lines.push(Line::from(" 等待网络信息…"));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -1995,13 +2042,13 @@ fn network_interface_card(
         dash(&interface.subnet_mask)
     );
     let mut rows = vec![
-        ("Name".to_string(), name),
-        ("Index".to_string(), interface.index.to_string()),
+        ("名称".to_string(), name),
+        ("索引".to_string(), interface.index.to_string()),
     ];
     if !interface.id.is_empty() {
-        rows.push(("Id".to_string(), interface.id.clone()));
+        rows.push(("ID".to_string(), interface.id.clone()));
     }
-    rows.push(("Interface".to_string(), interface_text));
+    rows.push(("接口".to_string(), interface_text));
     if tun {
         let ipv6 = vec![
             if !interface.ipv6_address.is_empty() {
@@ -2018,28 +2065,25 @@ fn network_interface_card(
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
         if !ipv6.is_empty() {
-            rows.push(("Interface IPv6".to_string(), ipv6.join(" ")));
+            rows.push(("接口 IPv6".to_string(), ipv6.join(" ")));
         }
         rows.extend([
-            ("Aggligator".to_string(), dash(&network.aggligator)),
-            (
-                "Proxy Interlayer".to_string(),
-                dash(&network.proxy_interlayer),
-            ),
+            ("聚合器".to_string(), dash(&network.aggligator)),
+            ("代理中间层".to_string(), dash(&network.proxy_interlayer)),
             ("TCP/IP CC".to_string(), dash(&network.tcp_ip_cc)),
-            ("Block QUIC".to_string(), dash(&network.block_quic)),
-            ("Mux State".to_string(), dash(&network.mux_state)),
-            ("Link State".to_string(), dash(&network.link_state)),
+            ("阻止 QUIC".to_string(), dash(&network.block_quic)),
+            ("MUX 状态".to_string(), dash(&network.mux_state)),
+            ("链路状态".to_string(), dash(&network.link_state)),
         ]);
     } else if !interface.ipv6_gateway.is_empty() {
-        rows.push(("Interface IPv6".to_string(), interface.ipv6_gateway.clone()));
+        rows.push(("接口 IPv6".to_string(), interface.ipv6_gateway.clone()));
     }
     for (index, dns) in interface.dns.iter().enumerate() {
-        rows.push((format!("DNS Server {}", index + 1), dns.clone()));
+        rows.push((format!("DNS 服务器 {}", index + 1), dns.clone()));
     }
     let mut lines = vec![Line::from(rule_line(title, 60))];
     for (label, value) in rows {
-        lines.push(Line::from(format!(" {label:<22} {value}")));
+        lines.push(Line::from(format!(" {} {value}", pad_display(&label, 22))));
     }
     lines
 }
@@ -2065,14 +2109,14 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
         })
         .unwrap_or(0);
     let title = if filter.is_empty() {
-        format!(" Servers ({total}) ")
+        format!(" 服务器（{total}）")
     } else {
-        format!(" Servers filter: {filter} ")
+        format!(" 服务器筛选：{filter} ")
     };
     let hint = if app.filter_active {
-        " typing filter... Esc/Enter done "
+        " 正在输入筛选… Esc/Enter 完成 "
     } else {
-        " Up/Down move | Enter switch | / filter | o stop "
+        " 上下移动 | Enter 切换 | / 筛选 | o 停止 "
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -2093,18 +2137,13 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
         };
         let focused = app.server_selection == row;
         let marker = if focused { ">" } else { " " };
-        let state = match outbound.state {
-            1 => "connected",
-            0 => "connecting",
-            2 => "reconnecting",
-            _ => "unknown",
-        };
+        let state = runtime_state_label(outbound.state);
         let rtt = if outbound.probe_checked && outbound.probe_reachable {
             format!("{}ms", outbound.probe_rtt_ms)
         } else if outbound.probe_checked {
-            "unreachable".to_string()
+            "不可达".to_string()
         } else {
-            "pending".to_string()
+            "等待探测".to_string()
         };
         let name = if outbound.display_name.is_empty() {
             &outbound.tag
@@ -2117,11 +2156,11 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
             outbound.server.clone()
         };
         let text = format!(
-            "{marker} {}  {:<22} {:<16} {:<12} [{}]",
+            "{marker} {}  {} {} {} [{}]",
             if outbound.active { "*" } else { " " },
-            name,
-            detail,
-            state,
+            pad_display(name, 22),
+            pad_display(&detail, 16),
+            pad_display(state, 12),
             rtt
         );
         lines.push(Line::from(Span::styled(
@@ -2134,7 +2173,7 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
         )));
     }
     if lines.is_empty() {
-        lines.push(Line::from("  (no runtime servers match)"));
+        lines.push(Line::from("  （没有匹配的运行中服务器）"));
     }
     lines.push(Line::from(Span::styled(
         hint,
@@ -2162,18 +2201,18 @@ fn draw_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let visible = app.visible_server_indices();
 
     let title = if filter.is_empty() {
-        format!(" Servers ({}) ", app.local_servers.len())
+        format!(" 服务器（{}）", app.local_servers.len())
     } else {
-        format!(" Servers filter: {} ", filter)
+        format!(" 服务器筛选：{} ", filter)
     };
     let hint = if app.filter_active {
         vec![Line::from(Span::styled(
-            " typing filter... Esc/Enter done ",
+            " 正在输入筛选… Esc/Enter 完成 ",
             Style::default().fg(ratatui::style::Color::Yellow),
         ))]
     } else {
         vec![Line::from(Span::styled(
-            " Up/Down move | Enter start | / filter | p start | o stop ",
+            " 上下移动 | Enter 启动 | / 筛选 | p 启动 | o 停止 ",
             Style::default().fg(ratatui::style::Color::DarkGray),
         ))]
     };
@@ -2197,8 +2236,8 @@ fn draw_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         let star = if selected { "*" } else { " " };
         let latency = app.probe_status_text(profile);
         let color = match latency.as_str() {
-            "unreachable" => ratatui::style::Color::Red,
-            "pending" | "probing" => ratatui::style::Color::DarkGray,
+            "不可达" => ratatui::style::Color::Red,
+            "等待探测" | "探测中" => ratatui::style::Color::DarkGray,
             _ => {
                 let rtt = latency.trim_end_matches("ms").parse::<i64>().unwrap_or(999);
                 if rtt < 100 {
@@ -2240,7 +2279,7 @@ fn draw_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         ]));
     }
     if lines.is_empty() {
-        lines.push(Line::from("  (no servers match)"));
+        lines.push(Line::from("  （没有匹配的服务器）"));
     }
     lines.push(Line::from(""));
     lines.extend(hint);
@@ -2445,6 +2484,17 @@ mod ctrl {
         }
     }
 
+    /// Rust writes UTF-8 to stdout, while legacy Windows consoles may still
+    /// use the active ANSI/OEM code page. Set both console code pages before
+    /// rendering Chinese terminal text. This is harmless when stdout is not
+    /// attached to a console (the Win32 calls simply report failure).
+    pub fn set_utf8_code_page() {
+        unsafe {
+            SetConsoleCP(65001);
+            SetConsoleOutputCP(65001);
+        }
+    }
+
     fn emergency_shutdown() {
         // The handler runs on a fresh thread; it may race the main loop,
         // which is itself stopping the core right now.  Run once.
@@ -2487,6 +2537,8 @@ mod ctrl {
     }
 
     extern "system" {
+        fn SetConsoleCP(w_code_page_id: u32) -> i32;
+        fn SetConsoleOutputCP(w_code_page_id: u32) -> i32;
         fn SetConsoleCtrlHandler(
             handler_routine: Option<unsafe extern "system" fn(u32) -> i32>,
             add: i32,
@@ -2510,12 +2562,14 @@ pub fn run(settings: StartupSettings) -> Result<()> {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = io::stdout().execute(crossterm::event::DisableMouseCapture);
         let _ = io::stdout().execute(LeaveAlternateScreen);
-        eprintln!("ppp-tui-cli panic: {info}");
+        eprintln!("ppp-tui-cli 崩溃：{info}");
     }));
 
     // Console-close / Ctrl+Break safety net: closing the console window
     // must not leave the VPN network state behind (the core only restores
     // DNS/routes when it is asked to shut down; a job-object kill cannot).
+    #[cfg(windows)]
+    ctrl::set_utf8_code_page();
     #[cfg(windows)]
     ctrl::install();
 
@@ -2537,7 +2591,7 @@ pub fn run(settings: StartupSettings) -> Result<()> {
             io::stdout()
                 .execute(LeaveAlternateScreen)
                 .context("leave alternate screen")?;
-            eprintln!("ppp-tui-cli: another terminal instance is already running");
+            eprintln!("ppp-tui-cli：已有一个终端实例正在运行");
             std::process::exit(1);
         }
     }
@@ -2589,16 +2643,19 @@ pub fn run(settings: StartupSettings) -> Result<()> {
 fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let mut lines: Vec<Line> = Vec::new();
     let rows = vec![
-        ("Bypass Mode".to_string(), app.settings.bypass_mode.clone()),
-        ("Config".to_string(), app.settings.config_path.clone()),
-        ("Direct DNS".to_string(), "via core".to_string()),
+        (
+            "分流模式".to_string(),
+            bypass_mode_label(&app.settings.bypass_mode).to_string(),
+        ),
+        ("配置文件".to_string(), app.settings.config_path.clone()),
+        ("直连 DNS".to_string(), "由核心处理".to_string()),
     ];
-    lines.extend(plain_card("Routes", &rows, area.width as usize));
+    lines.extend(plain_card("分流", &rows, area.width as usize));
     lines.push(Line::from(""));
 
     // Bypass mode cards (i/g/n keys), mirroring the GUI routes page.
     let mut mode_row = String::new();
-    for (value, label) in [("ip", "IP"), ("geo", "GEO"), ("none", "NONE")] {
+    for (value, label) in [("ip", "IP"), ("geo", "GEO"), ("none", "无")] {
         let active = app.settings.bypass_mode == value;
         mode_row.push_str(&format!(" [{}] {label} ", if active { "x" } else { " " }));
     }
@@ -2609,7 +2666,7 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
 
     let Some(snapshot) = &app.snapshot else {
         lines.push(Line::from(Span::styled(
-            " start the core to see the runtime summary and split rules",
+            " 请先启动核心以查看运行摘要和分流规则",
             Style::default().fg(ratatui::style::Color::DarkGray),
         )));
         frame.render_widget(Paragraph::new(lines), area);
@@ -2619,14 +2676,11 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // Runtime Summary (routes info reported by the core).
     let routes = &snapshot.routes;
     let summary = vec![
-        ("Bypass IPv4".to_string(), dash(&routes.bypass_ipv4_file)),
-        ("Bypass IPv6".to_string(), dash(&routes.bypass_ipv6_file)),
-        ("Gateway".to_string(), dash(&routes.bypass_gateway)),
-        (
-            "Gateway IPv6".to_string(),
-            dash(&routes.bypass_gateway_ipv6),
-        ),
-        ("DNS Rules".to_string(), {
+        ("分流 IPv4".to_string(), dash(&routes.bypass_ipv4_file)),
+        ("分流 IPv6".to_string(), dash(&routes.bypass_ipv6_file)),
+        ("网关".to_string(), dash(&routes.bypass_gateway)),
+        ("IPv6 网关".to_string(), dash(&routes.bypass_gateway_ipv6)),
+        ("DNS 规则".to_string(), {
             let count = routes.dns_rule_count;
             if routes.dns_rules_file.is_empty() {
                 "-".to_string()
@@ -2634,18 +2688,18 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
                 format!("{} ({count})", trunc(&routes.dns_rules_file, 36))
             }
         }),
-        ("Geo Rules".to_string(), trunc(&routes.geo_rules_file, 36)),
+        ("Geo 规则".to_string(), trunc(&routes.geo_rules_file, 36)),
         ("Geosite".to_string(), trunc(&routes.geosite_file, 36)),
         ("GeoIP".to_string(), trunc(&routes.geoip_file, 36)),
     ];
     lines.push(Line::from(""));
-    lines.extend(plain_card("Runtime Summary", &summary, area.width as usize));
+    lines.extend(plain_card("运行摘要", &summary, area.width as usize));
 
     // Split rules (geo mode).
     lines.push(Line::from(""));
     if snapshot.geo.split_rules.is_empty() {
         lines.push(Line::from(Span::styled(
-            " (no split rules in this mode)",
+            " （当前模式没有分流规则）",
             Style::default().fg(ratatui::style::Color::DarkGray),
         )));
     } else {
@@ -2662,11 +2716,11 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
                 (rule.matcher.clone(), display)
             })
             .collect();
-        lines.extend(plain_card("Split Rules", &split, area.width as usize));
+        lines.extend(plain_card("分流规则", &split, area.width as usize));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " i ip | g geo | n none | s save (bypass mode)",
+        " i IP | g GEO | n 无 | s 保存（分流模式）",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines), area);
@@ -2678,57 +2732,57 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
 fn setting_label(index: usize) -> &'static str {
     match index {
         0 => "TUN VPN",
-        1 => "System Proxy",
-        2 => "Mode",
-        3 => "Config",
-        4 => "Server Dir",
-        5 => "Bypass Mode",
+        1 => "系统代理",
+        2 => "运行模式",
+        3 => "配置文件",
+        4 => "服务器目录",
+        5 => "分流模式",
         6 => "TUN IP",
-        7 => "TUN GW",
-        8 => "TUN Mask",
+        7 => "TUN 网关",
+        8 => "TUN 掩码",
         9 => "TUN MUX",
-        10 => "MUX Acceleration",
-        11 => "Link Restart",
-        12 => "HTTP Proxy Port",
-        13 => "SOCKS Proxy Port",
-        14 => "Bypass File",
-        15 => "Bypass6 File",
-        16 => "DNS Rules File",
-        17 => "Geo Rules File",
-        18 => "Geosite File",
-        19 => "Geoip File",
-        20 => "Core Log File",
-        21 => "TUI Log File",
-        22 => "Settings File",
-        23 => "Working Dir",
-        24 => "RPC Address",
+        10 => "MUX 加速",
+        11 => "链路重启",
+        12 => "HTTP 代理端口",
+        13 => "SOCKS 代理端口",
+        14 => "IPv4 分流文件",
+        15 => "IPv6 分流文件",
+        16 => "DNS 规则文件",
+        17 => "Geo 规则文件",
+        18 => "Geosite 文件",
+        19 => "GeoIP 文件",
+        20 => "核心日志文件",
+        21 => "TUI 日志文件",
+        22 => "设置文件",
+        23 => "工作目录",
+        24 => "RPC 地址",
         25 => "RPC Token",
-        26 => "Core Path",
+        26 => "核心路径",
         27 => "TUN Host",
         28 => "TUN VNet",
-        29 => "TUN Static",
-        30 => "TUN Flash",
-        31 => "Block QUIC",
-        32 => "Command",
-        33 => "Core Log Level",
+        29 => "TUN 静态地址",
+        30 => "TUN 快速启动",
+        31 => "阻止 QUIC",
+        32 => "启动命令",
+        33 => "核心日志等级",
         34 => "TCP/IP CC",
-        35 => "Real-time Mode",
-        36 => "DNS Servers",
-        37 => "Auto Restart",
-        38 => "Firewall Rules",
-        39 => "Physical NIC",
-        40 => "Physical Gateway",
-        41 => "TUN Adapter",
-        42 => "TUN Driver",
+        35 => "实时模式",
+        36 => "DNS 服务器",
+        37 => "自动重启",
+        38 => "防火墙规则",
+        39 => "物理网卡",
+        40 => "物理网关",
+        41 => "TUN 适配器",
+        42 => "TUN 驱动",
         43 => "TUN SSMT",
-        44 => "TUN Lease Seconds",
-        45 => "Bypass NIC",
-        46 => "Bypass Gateway",
-        47 => "Bypass IPv6 NIC",
-        48 => "Bypass IPv6 Gateway",
-        49 => "TUN Promisc",
-        50 => "TUN Route",
-        51 => "TUN Protect",
+        44 => "TUN 租约秒数",
+        45 => "IPv4 分流网卡",
+        46 => "IPv4 分流网关",
+        47 => "IPv6 分流网卡",
+        48 => "IPv6 分流网关",
+        49 => "TUN 混杂模式",
+        50 => "TUN 路由",
+        51 => "TUN 保护",
         _ => "",
     }
 }
@@ -2785,7 +2839,7 @@ fn settings_value(app: &TerminalApp, index: usize) -> String {
 fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!(" Settings ({}) ", settings_field_count()),
+        format!(" 设置（共 {} 项）", settings_field_count()),
         Style::default().add_modifier(Modifier::BOLD),
     )));
 
@@ -2847,7 +2901,9 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
                     style,
                 )));
                 rendered += 1;
-                let indent = " ".repeat(prefix.chars().count() + label.chars().count() + 3);
+                let indent = " ".repeat(
+                    prefix.chars().count() + unicode_width::UnicodeWidthStr::width(label) + 3,
+                );
                 let mut rest = value;
                 while !rest.is_empty() && rendered < viewport {
                     let take = rest.chars().count().min(value_max);
@@ -2869,7 +2925,7 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " Enter edit | Space toggle | s save | r save+restart ",
+        " Enter 编辑 | Space 切换 | s 保存 | r 保存并重启 ",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines), area);

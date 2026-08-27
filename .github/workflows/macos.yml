@@ -193,9 +193,22 @@ jobs:
           PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
         run: |
           export MACOSX_DEPLOYMENT_TARGET=11.0
-          font="$(find /System/Library/Fonts /Library/Fonts /System/Library/Fonts/Supplemental -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' \) -print -quit 2>/dev/null)"
+          font=""
+          for candidate in \
+            /System/Library/Fonts/PingFang.ttc \
+            /System/Library/Fonts/STHeiti Light.ttc \
+            /System/Library/Fonts/Hiragino Sans GB.ttc \
+            /Library/Fonts/Arial Unicode.ttf; do
+            if [ -f "$candidate" ]; then
+              font="$candidate"
+              break
+            fi
+          done
+          if [ -z "$font" ] && command -v fc-match >/dev/null 2>&1; then
+            font="$(fc-match -f '%{file}\n' ':lang=zh' | head -n 1)"
+          fi
           if [ -z "$font" ] || [ ! -f "$font" ]; then
-            echo "No system font found for PPP_TUI_CJK_FONT_PATH"
+            echo "No Chinese-capable font found for PPP_TUI_CJK_FONT_PATH"
             exit 1
           fi
           PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins

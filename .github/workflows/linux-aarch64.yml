@@ -119,7 +119,9 @@ jobs:
         env:
           PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
         run: |
-          font="$(fc-match -f '%{file}' sans | head -n 1)"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
+          font="$(fc-match -f '%{file}\n' ':lang=zh' | head -n 1)"
           test -f "$font"
           PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --manifest-path tui/Cargo.toml --bins
 

@@ -1,16 +1,24 @@
-//! ASCII rendering helpers for the terminal front-end: bordered cards,
-//! character bar charts and the footer help line.  Plain ASCII only so the
-//! UI renders correctly over SSH and in any terminal/font.
+//! Rendering helpers for the terminal front-end: bordered cards, character
+//! bar charts and the footer help line.  Text is UTF-8 and column padding is
+//! based on terminal display width so Chinese labels remain aligned.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
+
+/// Pad a string to a terminal display width rather than a byte/character
+/// count. CJK characters normally occupy two terminal cells.
+pub fn pad_display(value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value));
+    format!("{value}{}", " ".repeat(padding))
+}
 
 /// Render a card with an ASCII border and aligned `label  value` rows.
 pub fn ascii_card(title: &str, rows: &[(String, String)]) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(format!("+----- {title} ")));
     for (label, value) in rows {
-        lines.push(Line::from(format!("| {label:<22} {value}")));
+        lines.push(Line::from(format!("| {} {value}", pad_display(label, 22))));
     }
     lines.push(Line::from("+-----"));
     lines
@@ -21,7 +29,7 @@ pub fn ascii_card(title: &str, rows: &[(String, String)]) -> Vec<Line<'static>> 
 /// fit.  Output is one or more lines of block characters.
 pub fn bar_chart_lines(data: &[u64], width: usize) -> Vec<Line<'static>> {
     if data.is_empty() || width == 0 {
-        return vec![Line::from("  (no samples)")];
+        return vec![Line::from("  （暂无数据）")];
     }
     let max = data.iter().copied().max().unwrap_or(1).max(1);
     let bars_width = width.saturating_sub(2).max(1);
@@ -56,7 +64,7 @@ pub fn bar_chart_lines(data: &[u64], width: usize) -> Vec<Line<'static>> {
 
 /// Footer help line (kept short to fit narrow SSH terminals).
 pub fn help_hint() -> &'static str {
-    "1-5 views  Up/Down move  Enter select  p/o start/stop  Ctrl+S save  Ctrl+R restart  q quit"
+    "1-5 页面  上下移动  回车选择  p/o 启停  Ctrl+S 保存  Ctrl+R 重启  q 退出"
 }
 
 /// Horizontal rule with a title, e.g. `----- Routes ----------`.
@@ -64,7 +72,7 @@ pub fn help_hint() -> &'static str {
 pub fn rule_line(title: &str, width: usize) -> String {
     let prefix = format!("----- {title} ");
     let fill = "-"
-        .repeat(width.saturating_sub(prefix.len()).max(0))
+        .repeat(width.saturating_sub(UnicodeWidthStr::width(prefix.as_str())))
         .to_string();
     format!("{prefix}{fill}")
 }
@@ -75,7 +83,7 @@ pub fn rule_line(title: &str, width: usize) -> String {
 pub fn plain_card(title: &str, rows: &[(String, String)], width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(rule_line(title, width))];
     for (label, value) in rows {
-        lines.push(Line::from(format!(" {label:<22} {value}")));
+        lines.push(Line::from(format!(" {} {value}", pad_display(label, 22))));
     }
     lines
 }
@@ -164,6 +172,13 @@ mod tests {
     #[test]
     fn empty_series_placeholder() {
         let lines = bar_chart_lines(&[], 10);
-        assert!(lines[0].to_string().contains("no samples"));
+        assert!(lines[0].to_string().contains("暂无数据"));
+    }
+
+    #[test]
+    fn cjk_padding_uses_terminal_display_width() {
+        assert_eq!(UnicodeWidthStr::width("中文"), 4);
+        assert_eq!(pad_display("中文", 6), "中文  ");
+        assert_eq!(pad_display("abc", 6), "abc   ");
     }
 }
