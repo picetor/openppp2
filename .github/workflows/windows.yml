@@ -26,6 +26,7 @@ on:
       - 'windows/**'
       - 'android/**'
       - 'go/**'
+      - 'tui/**'
       - '.github/workflows/**'
 
 concurrency:
@@ -45,9 +46,11 @@ jobs:
           - name: amd64
             vcpkg_triplet: x64-windows-static
             msbuild_platform: x64
+            rust_target: x86_64-pc-windows-msvc
           - name: i386
             vcpkg_triplet: x86-windows-static
             msbuild_platform: Win32
+            rust_target: i686-pc-windows-msvc
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
@@ -146,6 +149,20 @@ jobs:
           Write-Output "MSBuild: $msbuildPath"
           & $msbuildPath /version
 
+      - name: Install Rust toolchain for release TUI
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Cache Rust TUI release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+          key: windows-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: windows-${{ matrix.platform.rust_target }}-tui-
+
       - name: Build Windows
         id: build
         run: |
@@ -234,6 +251,30 @@ jobs:
 
           echo "ARTIFACT_NAME=$ReleaseArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build Rust TUI release
+        run: |
+          $corePath = "${{ matrix.platform.msbuild_platform }}\Release\ppp.exe"
+          if (-not (Test-Path $corePath)) {
+            $corePath = "Release\ppp.exe"
+          }
+          if (-not (Test-Path $corePath)) {
+            throw "Release core not found: $corePath"
+          }
+          $font = Get-ChildItem -LiteralPath "$env:WINDIR\Fonts" -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in '.ttf', '.otf', '.ttc' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ([string]::IsNullOrWhiteSpace($font) -or -not (Test-Path -LiteralPath $font)) {
+            throw 'No system font found for PPP_TUI_CJK_FONT_PATH'
+          }
+          $env:PPP_TUI_CORE_PATH = (Resolve-Path -LiteralPath $corePath).Path
+          $env:PPP_TUI_CJK_FONT_PATH = $font
+          cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
+
+          $tuiOutput = Join-Path "${{ github.workspace }}" "tui\target\${{ matrix.platform.rust_target }}\release"
+          $packageDir = "${{ github.workspace }}\openppp2-windows-${{ matrix.platform.name }}"
+          Copy-Item (Join-Path $tuiOutput 'ppp-tui.exe') (Join-Path $packageDir 'ppp-tui.exe')
+          Copy-Item (Join-Path $tuiOutput 'ppp-tui-cli.exe') (Join-Path $packageDir 'ppp-tui-cli.exe')
 
       - name: Upload Release artifact
         uses: actions/upload-artifact@v6

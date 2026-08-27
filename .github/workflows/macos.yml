@@ -31,6 +31,7 @@ on:
       - 'windows/**'
       - 'android/**'
       - 'go/**'
+      - 'tui/**'
       - '.github/workflows/**'
 
 concurrency:
@@ -50,10 +51,12 @@ jobs:
           - name: arm64
             arch: arm64
             triple: darwin-arm64
+            rust_target: aarch64-apple-darwin
             repo: Liz-Nozomi/openppp2-macos-arm64-environment
           - name: amd64
             arch: x86_64
             triple: darwin-amd64
+            rust_target: x86_64-apple-darwin
             repo: liulilittle/openppp2-macos-amd64-environment
 
     runs-on: macos-latest
@@ -113,18 +116,47 @@ jobs:
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
-          # Package into complete release zip
-          echo "=== Packaging ${ZIP_NAME}.zip ==="
+      - name: Install Rust toolchain for release TUI
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Cache Rust TUI release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: macos-${{ matrix.platform.rust_target }}-tui-
+
+      - name: Build Rust TUI release
+        env:
+          PPP_TUI_CORE_PATH: ${{ github.workspace }}/bin/ppp
+        run: |
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          font="$(find /System/Library/Fonts /Library/Fonts /System/Library/Fonts/Supplemental -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' \) -print -quit 2>/dev/null)"
+          if [ -z "$font" ] || [ ! -f "$font" ]; then
+            echo "No system font found for PPP_TUI_CJK_FONT_PATH"
+            exit 1
+          fi
+          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
+
+      - name: Package release artifact
+        run: |
+          ZIP_NAME="openppp2-${{ matrix.platform.triple }}"
           PKG_DIR="${ZIP_NAME}"
-          mkdir -p "${PKG_DIR}"
-          cp "${ARTIFACT_NAME}" "${PKG_DIR}/ppp"
-          cp "${GITHUB_WORKSPACE}/appsettings.json" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/dns-rules.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/geo-rules.yaml" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/ip.txt" "${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/ipv6.txt" "${PKG_DIR}/"
-          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "=== Packaging ${ZIP_NAME}.zip ==="
+          mkdir -p "build/${PKG_DIR}"
+          cp bin/ppp "build/${PKG_DIR}/ppp"
+          cp "${GITHUB_WORKSPACE}/appsettings.json" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/dns-rules.txt" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/geo-rules.yaml" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ip.txt" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/ipv6.txt" "build/${PKG_DIR}/"
+          cp "${GITHUB_WORKSPACE}/tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui" "build/${PKG_DIR}/ppp-tui"
+          cp "${GITHUB_WORKSPACE}/tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui-cli" "build/${PKG_DIR}/ppp-tui-cli"
           echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 

@@ -26,6 +26,7 @@ on:
       - 'windows/**'
       - 'android/**'
       - 'go/**'
+      - 'tui/**'
       - '.github/workflows/**'
 
 concurrency:
@@ -71,6 +72,29 @@ jobs:
             '
           sudo chown -R "$(id -u):$(id -g)" bin build
 
+      - name: Install Rust toolchain for release TUI
+        if: matrix.variant == 'base'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust TUI release build
+        if: matrix.variant == 'base'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-amd64-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: linux-amd64-tui-
+
+      - name: Build Rust TUI release
+        if: matrix.variant == 'base'
+        env:
+          PPP_TUI_CORE_PATH: ${{ github.workspace }}/bin/ppp
+        run: |
+          font="$(fc-match -f '%{file}' sans | head -n 1)"
+          test -f "$font"
+          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --manifest-path tui/Cargo.toml --bins
+
       - name: Package artifact
         env:
           VARIANT: ${{ matrix.variant }}
@@ -81,6 +105,10 @@ jobs:
           mkdir -p "build/${package}"
           cp bin/ppp "build/${package}/ppp"
           cp appsettings.json dns-rules.txt geo-rules.yaml firewall-rules.txt ip.txt ipv6.txt "build/${package}/"
+          if [ "$VARIANT" = base ]; then
+            cp tui/target/release/ppp-tui "build/${package}/ppp-tui"
+            cp tui/target/release/ppp-tui-cli "build/${package}/ppp-tui-cli"
+          fi
           echo "PACKAGE=$package" >> "$GITHUB_ENV"
 
       - name: Upload artifact
