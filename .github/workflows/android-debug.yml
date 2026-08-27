@@ -40,7 +40,7 @@ jobs:
 
   build-android-apk:
     needs: purge-old-runs
-    name: Android APK (Debug & Release)
+    name: Android APK (Release)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -180,21 +180,12 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:downloadAssets
 
-      - name: Build debug and release APKs
+      - name: Build release APK
         shell: bash
         working-directory: android_ui
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleOssDebug :app:assembleOssRelease
-
-      - name: Upload debug APKs
-        uses: actions/upload-artifact@v6
-        with:
-          name: openppp2-android-debug-apk
-          path: android_ui/app/build/outputs/apk/oss/debug/*.apk
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 14
+          ./gradlew :app:assembleOssRelease
 
       - name: Upload release APKs
         uses: actions/upload-artifact@v6
