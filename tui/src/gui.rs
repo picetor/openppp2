@@ -4453,16 +4453,17 @@ fn normalize_core_args(mut args: Vec<String>) -> Vec<String> {
 }
 
 fn is_core_executable_arg(value: &str) -> bool {
-    PathBuf::from(value)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            matches!(
-                name.to_ascii_lowercase().as_str(),
-                "ppp-tui.exe" | "ppp-tui" | "ppp.exe" | "ppp" | "ppp-core.exe" | "ppp-core"
-            )
-        })
-        .unwrap_or(false)
+    // Command strings can be authored on Windows and then parsed by the
+    // Linux/macOS client. PathBuf only treats the host platform's separator
+    // as special, so recognize both separators explicitly.
+    let name = value
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(value);
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "ppp-tui.exe" | "ppp-tui" | "ppp.exe" | "ppp" | "ppp-core.exe" | "ppp-core"
+    )
 }
 
 fn remove_command_argument(args: &mut Vec<String>, name: &str) {

@@ -71,7 +71,7 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg/packages
             ${{ github.workspace }}/vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-boost1.91-openssl3-jemalloc
+          key: vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-boost1.91-boost-context-openssl3-jemalloc
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-
 
@@ -81,7 +81,7 @@ jobs:
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `
             boost-asio boost-beast boost-json boost-program-options boost-system boost-thread `
-            boost-lockfree boost-uuid boost-coroutine boost-filesystem boost-stacktrace `
+            boost-lockfree boost-uuid boost-context boost-coroutine boost-filesystem boost-stacktrace `
             openssl jemalloc `
             --triplet ${{ matrix.platform.vcpkg_triplet }} `
             --x-install-root=${{ github.workspace }}\..\vcpkg_installed
@@ -267,7 +267,7 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg/packages
             ${{ github.workspace }}/vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-boost1.91-openssl3-jemalloc
+          key: vcpkg-${{ runner.os }}-boost1.91-boost-context-openssl3-jemalloc
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
@@ -277,7 +277,7 @@ jobs:
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `
             boost-asio boost-beast boost-json boost-program-options boost-system boost-thread `
-            boost-lockfree boost-uuid boost-coroutine boost-filesystem boost-stacktrace `
+            boost-lockfree boost-uuid boost-context boost-coroutine boost-filesystem boost-stacktrace `
             openssl jemalloc `
             --triplet x64-windows-static `
             --x-install-root=${{ github.workspace }}\..\vcpkg_installed
