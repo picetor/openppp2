@@ -2,6 +2,10 @@ name: Cleanup old workflow runs
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - inet6
   schedule:
     # Run during a low-traffic window; manual dispatch is available when
     # immediate cleanup is needed.
