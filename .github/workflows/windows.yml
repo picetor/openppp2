@@ -179,7 +179,9 @@ jobs:
           }
 
           $headerFilesCopied = 0
+          $headerFilesReused = 0
           $libraryFilesCopied = 0
+          $libraryFilesReused = 0
           foreach ($package in $vcpkgPackageDirectories) {
             $pkgInclude = Join-Path $package.FullName "include"
             if (Test-Path -LiteralPath $pkgInclude) {
@@ -190,8 +192,14 @@ jobs:
                 $destination = Join-Path $includeDestination $relativePath
                 $destinationParent = Split-Path -Parent $destination
                 New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
-                Copy-Item -LiteralPath $file.FullName -Destination $destination -Force -ErrorAction Stop
-                $headerFilesCopied++
+                if (Test-Path -LiteralPath $destination) {
+                  # vcpkg may materialize package files as hard links in the
+                  # install tree. Do not copy an existing file onto itself.
+                  $headerFilesReused++
+                } else {
+                  Copy-Item -LiteralPath $file.FullName -Destination $destination -Force -ErrorAction Stop
+                  $headerFilesCopied++
+                }
               }
             }
 
@@ -205,14 +213,20 @@ jobs:
                 Write-Output "  Copying $($libraryFiles.Count) release libs from $($package.Name)..."
               }
               foreach ($file in $libraryFiles) {
-                Copy-Item -LiteralPath $file.FullName -Destination $libDestination -Force -ErrorAction Stop
-                $libraryFilesCopied++
+                $destination = Join-Path $libDestination $file.Name
+                if (Test-Path -LiteralPath $destination) {
+                  $libraryFilesReused++
+                } else {
+                  Copy-Item -LiteralPath $file.FullName -Destination $destination -Force -ErrorAction Stop
+                  $libraryFilesCopied++
+                }
               }
             }
           }
 
-          Write-Output "Copied $headerFilesCopied header files and $libraryFilesCopied release library files"
-          if ($libraryFilesCopied -eq 0) {
+          Write-Output "Copied $headerFilesCopied header files and reused $headerFilesReused existing headers"
+          Write-Output "Copied $libraryFilesCopied release library files and reused $libraryFilesReused existing libraries"
+          if (($libraryFilesCopied + $libraryFilesReused) -eq 0) {
             Write-Output "Package library files found under ${vcpkgPackages}:"
             Get-ChildItem -LiteralPath $vcpkgPackages -Recurse -File -Filter '*.lib' -ErrorAction SilentlyContinue |
               Select-Object -ExpandProperty FullName
