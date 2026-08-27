@@ -128,9 +128,7 @@ namespace ppp {
                 virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
                 virtual bool                                                            SendTo(const boost::asio::ip::udp::endpoint& sourceEP, const ppp::string& destinationHost, const boost::asio::ip::udp::endpoint& destinationEP, const void* packet, int packet_size) noexcept;
                 virtual bool                                                            Update() noexcept;
-#if defined(PPP_LOG_VERBOSE)
                 void                                                                    GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept;
-#endif
                 void                                                                    ResetMuxDataPlane() noexcept;
                 void                                                                    ResetDataChannels() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;

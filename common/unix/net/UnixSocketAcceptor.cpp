@@ -14,14 +14,13 @@ namespace ppp
     {
         static bool ShouldLogSocketAcceptorError() noexcept
         {
-#if defined(PPP_LOG_VERBOSE)
+            if (!ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) {
+                return false;
+            }
             static std::atomic<uint64_t> next_log_time = 0;
             uint64_t now = ppp::threading::Executors::GetTickCount();
             uint64_t expected = next_log_time.load();
             return now >= expected && next_log_time.compare_exchange_strong(expected, now + 1000);
-#else
-            return false;
-#endif
         }
 
         UnixSocketAcceptor::UnixSocketAcceptor() noexcept

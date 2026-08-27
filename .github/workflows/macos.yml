@@ -116,32 +116,6 @@ jobs:
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
-      - name: Install Rust toolchain for release TUI
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.rust_target }}
-
-      - name: Cache Rust TUI release build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: macos-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
-          restore-keys: macos-${{ matrix.platform.rust_target }}-tui-
-
-      - name: Build Rust TUI release
-        env:
-          PPP_TUI_CORE_PATH: ${{ github.workspace }}/bin/ppp
-        run: |
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-          font="$(find /System/Library/Fonts /Library/Fonts /System/Library/Fonts/Supplemental -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' \) -print -quit 2>/dev/null)"
-          if [ -z "$font" ] || [ ! -f "$font" ]; then
-            echo "No system font found for PPP_TUI_CJK_FONT_PATH"
-            exit 1
-          fi
-          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
-
       - name: Package release artifact
         run: |
           ZIP_NAME="openppp2-${{ matrix.platform.triple }}"
@@ -155,8 +129,6 @@ jobs:
           cp "${GITHUB_WORKSPACE}/firewall-rules.txt" "build/${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ip.txt" "build/${PKG_DIR}/"
           cp "${GITHUB_WORKSPACE}/ipv6.txt" "build/${PKG_DIR}/"
-          cp "${GITHUB_WORKSPACE}/tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui" "build/${PKG_DIR}/ppp-tui"
-          cp "${GITHUB_WORKSPACE}/tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui-cli" "build/${PKG_DIR}/ppp-tui-cli"
           echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
@@ -165,6 +137,74 @@ jobs:
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.PKG_DIR }}/
+          if-no-files-found: error
+
+  build-macos-tui:
+    name: build-macos-tui-cli (${{ matrix.platform.name }})
+    needs: build-macos
+    if: ${{ needs.build-macos.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.build_macos) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: arm64
+            triple: darwin-arm64
+            rust_target: aarch64-apple-darwin
+          - name: amd64
+            triple: darwin-amd64
+            rust_target: x86_64-apple-darwin
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download ${{ matrix.platform.name }} core release package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}
+          path: core-package
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: macos-${{ matrix.platform.rust_target }}-tui-
+
+      - name: Build Rust TUI and CLI Release
+        env:
+          PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
+        run: |
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          font="$(find /System/Library/Fonts /Library/Fonts /System/Library/Fonts/Supplemental -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' \) -print -quit 2>/dev/null)"
+          if [ -z "$font" ] || [ ! -f "$font" ]; then
+            echo "No system font found for PPP_TUI_CJK_FONT_PATH"
+            exit 1
+          fi
+          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
+
+      - name: Package TUI and CLI release
+        run: |
+          package="build/openppp2-${{ matrix.platform.triple }}-tui"
+          mkdir -p "$package"
+          cp "tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui" "$package/ppp-tui"
+          cp "tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui-cli" "$package/ppp-tui-cli"
+          cp core-package/appsettings.json core-package/dns-rules.txt core-package/geo-rules.yaml core-package/firewall-rules.txt core-package/ip.txt core-package/ipv6.txt "$package/"
+
+      - name: Upload TUI and CLI artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}-tui-cli
+          path: build/openppp2-${{ matrix.platform.triple }}-tui/
           if-no-files-found: error
 
   build-macos-debug:
@@ -211,7 +251,8 @@ jobs:
             echo "ARM64 detected: disabling SIMD"
           fi
 
-          # Build with Debug configuration (enables PPP_LOG_VERBOSE)
+          # Build with Debug configuration for symbols and source-level stepping.
+          # Verbose diagnostics are selected at runtime with --log-level=debug.
           rm -rf build && mkdir build && cd build
           export MACOSX_DEPLOYMENT_TARGET=11.0
           export CXXFLAGS="-mmacosx-version-min=11.0"

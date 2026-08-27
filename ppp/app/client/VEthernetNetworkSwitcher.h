@@ -21,6 +21,10 @@
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetSocksProxySwitcher.h>
 
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 #if defined(_WIN32)
 #include <windows/ppp/win32/network/Router.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
@@ -407,9 +411,8 @@ namespace ppp {
                 void                                                                AddGeoDynamicRoute(const ppp::app::client::geo::GeoRuleEngine::RouteUpdate& update) noexcept;
                 void                                                                DeleteGeoDynamicRoute(const boost::asio::ip::address& address) noexcept;
                 void                                                                Finalize() noexcept;
-#if defined(PPP_LOG_VERBOSE)
+                void                                                                StartDebugWatchdog(const std::shared_ptr<boost::asio::io_context>& context) noexcept;
                 void                                                                StopDebugWatchdog() noexcept;
-#endif
                 bool                                                                AddRemoteEndPointToIPList(const boost::asio::ip::address& gw) noexcept;
                 bool                                                                UpdateRemoteUri() noexcept;
                 
@@ -462,12 +465,13 @@ namespace ppp {
                 std::shared_ptr<ppp::configurations::AppConfiguration>              base_configuration_;
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               qos_;
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        statistics_;
-#if defined(PPP_LOG_VERBOSE)
                 uint64_t                                                            debug_diagnostics_next_ = 0;
                 std::atomic<uint64_t>                                               debug_last_tick_ = 0;
+                std::mutex                                                           debug_watchdog_mutex_;
+                std::condition_variable                                             debug_watchdog_cv_;
                 std::atomic<bool>                                                   debug_watchdog_stop_ = false;
+                std::atomic<bool>                                                   debug_watchdog_running_ = false;
                 std::thread                                                         debug_watchdog_;
-#endif
                 VEthernetIcmpPacketTable                                            icmppackets_;
                 struct {
                     int                                                             icmppackets_aid_  = 0;

@@ -1,0 +1,64 @@
+name: Cleanup old workflow runs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run during a low-traffic window; manual dispatch is available when
+    # immediate cleanup is needed.
+    - cron: '17 3 * * *'
+
+concurrency:
+  group: cleanup-old-workflow-runs
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep latest 3 completed runs per workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETAIN_COMPLETED_RUNS: 3
+        run: |
+          set -euo pipefail
+
+          workflow_lines="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows?per_page=100" \
+            --jq '.workflows[] | [.id, .name] | @tsv')"
+
+          while IFS=$'\t' read -r workflow_id workflow_name; do
+            [ -n "$workflow_id" ] || continue
+            echo "=== Workflow: ${workflow_name} (${workflow_id}) ==="
+
+            run_lines="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?per_page=100" \
+              --jq '.workflow_runs[] | [.id, .status, .created_at] | @tsv' \
+              | sort -k3,3r)"
+
+            kept_completed=0
+            while IFS=$'\t' read -r run_id status created_at; do
+              [ -n "$run_id" ] || continue
+
+              # Never touch queued, waiting, in-progress, or otherwise
+              # non-completed runs. They may still be part of a build.
+              if [ "$status" != "completed" ]; then
+                echo "Keep active run ${run_id} (${status})"
+                continue
+              fi
+
+              kept_completed=$((kept_completed + 1))
+              if [ "$kept_completed" -le "$RETAIN_COMPLETED_RUNS" ]; then
+                echo "Keep completed run ${run_id} (${created_at})"
+                continue
+              fi
+
+              echo "Delete completed run ${run_id} (${created_at})"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            done <<< "$run_lines"
+          done <<< "$workflow_lines"

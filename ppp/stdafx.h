@@ -25,15 +25,9 @@
 #endif
 #endif
 
-// Keep the existing extra diagnostic watchdogs/statistics Debug-only.  The
-// LOG_* macros below are deliberately independent from this switch and are
-// compiled in every build, then filtered at runtime by LogLevel.
-#if defined(_DEBUG) && !defined(PPP_DEBUG_DIAGNOSTICS)
-#define PPP_DEBUG_DIAGNOSTICS 1
-#endif
-#if defined(PPP_DEBUG_DIAGNOSTICS) && !defined(PPP_LOG_VERBOSE)
-#define PPP_LOG_VERBOSE 1
-#endif
+// Logging and diagnostic instrumentation are compiled into every build.  The
+// runtime LogLevel controls whether verbose diagnostics are executed, so the
+// optimized Release binary can be used for production and troubleshooting.
 
 #if defined(_WIN64)
 #if !defined(WIN64)

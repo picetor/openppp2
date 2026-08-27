@@ -107,16 +107,14 @@ namespace ppp {
             auto self = shared_from_this();
             auto result = ITransmissionQoS::DoReadBytes(y, length, self, *this, this->QoS);
             if (NULLPTR == result) {
-#if defined(PPP_LOG_VERBOSE)
-                std::shared_ptr<boost::asio::ip::tcp::socket> socket = socket_;
-                LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d, socket_open=%d, disposed=%d, remote=%s",
-                    length,
-                    socket ? (int)socket->is_open() : -1,
-                    (int)disposed_,
-                    socket && socket->is_open() ? [&]() -> std::string { boost::system::error_code ec_; auto ep = socket->remote_endpoint(ec_); return ec_ ? "n/a" : ep.address().to_string(); }().c_str() : "n/a");
-#else
-                LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d", length);
-#endif
+                if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) {
+                    std::shared_ptr<boost::asio::ip::tcp::socket> socket = socket_;
+                    LOG_DEBUG("ITcpipTransmission::DoReadBytes: failed, length=%d, socket_open=%d, disposed=%d, remote=%s",
+                        length,
+                        socket ? (int)socket->is_open() : -1,
+                        (int)disposed_,
+                        socket && socket->is_open() ? [&]() -> std::string { boost::system::error_code ec_; auto ep = socket->remote_endpoint(ec_); return ec_ ? "n/a" : ep.address().to_string(); }().c_str() : "n/a");
+                }
             }
             return result;
         }
@@ -165,23 +163,25 @@ namespace ppp {
                 return NULLPTR;
             }
 
-#if defined(PPP_LOG_VERBOSE)
-            boost::system::error_code ec;
-            bool ok = ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(packet.get(), length), y, ec);
-            if (!ok) {
-                LOG_DEBUG("ITcpipTransmission::ReadBytes: async_read failed, length=%d, ec=%d, msg=%s",
-                    length, ec.value(), ec.message().c_str());
-                Dispose();
-                return NULLPTR;
+            bool ok = false;
+            if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) {
+                boost::system::error_code ec;
+                ok = ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(packet.get(), length), y, ec);
+                if (!ok) {
+                    LOG_DEBUG("ITcpipTransmission::ReadBytes: async_read failed, length=%d, ec=%d, msg=%s",
+                        length, ec.value(), ec.message().c_str());
+                    Dispose();
+                    return NULLPTR;
+                }
             }
-#else
-            bool ok = ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(packet.get(), length), y);
-            if (!ok) {
-                LOG_DEBUG("ITcpipTransmission::ReadBytes: async_read failed, length=%d", length);
-                Dispose();
-                return NULLPTR;
+            else {
+                ok = ppp::coroutines::asio::async_read(*socket, boost::asio::buffer(packet.get(), length), y);
+                if (!ok) {
+                    LOG_DEBUG("ITcpipTransmission::ReadBytes: async_read failed, length=%d", length);
+                    Dispose();
+                    return NULLPTR;
+                }
             }
-#endif
 
             std::shared_ptr<ITransmissionStatistics> statistics = this->Statistics;
             if (statistics) {

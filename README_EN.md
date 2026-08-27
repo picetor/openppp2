@@ -572,11 +572,11 @@ Release and Debug builds use the same logging code. The default runtime level is
 
 | | Release | Debug |
 |---|---|---|
-| Compile flags | `-O3` | `-D_DEBUG -DPPP_LOG_VERBOSE -g3` (extra watchdog/statistics only) |
+| Compile flags | `-O3` | `-D_DEBUG -g3` (no Debug-only diagnostic macro) |
 | Optimization | Full | None |
-| Log output | `error` by default, adjustable at runtime | `error` by default, adjustable at runtime |
+| Logging and diagnostics | `error` by default; full diagnostics at `debug` | `error` by default; full diagnostics at `debug` |
 | Binary size | Smaller | Larger (with debug symbols) |
-| Use case | Production | Troubleshooting |
+| Use case | Production and troubleshooting | Source-level stepping/debugging |
 
 ### Getting Debug Builds
 

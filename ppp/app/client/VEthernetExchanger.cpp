@@ -1426,14 +1426,12 @@ namespace ppp {
                 return true;
             }
 
-#if defined(PPP_LOG_VERBOSE)
             void VEthernetExchanger::GetDebugObjectCounts(size_t& mappings, size_t& datagrams, size_t& timers) noexcept {
                 SynchronizedObjectScope scope(syncobj_);
                 mappings = mappings_.size();
                 datagrams = datagrams_.size();
                 timers = deadline_timers_.size();
             }
-#endif
 
             bool VEthernetExchanger::DoKeepAlived(const ITransmissionPtr& transmission, uint64_t now) noexcept {
                 if (disposed_) {

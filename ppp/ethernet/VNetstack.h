@@ -151,9 +151,7 @@ namespace ppp {
             virtual void                                                    Release() noexcept;
             virtual bool                                                    Input(ip_hdr* ip, tcp_hdr* tcp, int tcp_len) noexcept;
             virtual bool                                                    Update(uint64_t now) noexcept;
-#if defined(PPP_LOG_VERBOSE)
             void                                                            GetDebugConnectionCounts(size_t& lan2wan, size_t& wan2lan) noexcept;
-#endif
 
         protected:
             virtual std::shared_ptr<TapTcpClient>                           BeginAcceptClient(const boost::asio::ip::tcp::endpoint& localEP, const boost::asio::ip::tcp::endpoint& remoteEP) noexcept = 0;

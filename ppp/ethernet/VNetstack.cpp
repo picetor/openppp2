@@ -450,13 +450,11 @@ namespace ppp {
             return 72000;
         }
 
-#if defined(PPP_LOG_VERBOSE)
         void VNetstack::GetDebugConnectionCounts(size_t& lan2wan, size_t& wan2lan) noexcept {
             SynchronizedObjectScope scope(syncobj_);
             lan2wan = lan2wan_.size();
             wan2lan = wan2lan_.size();
         }
-#endif
 
         bool VNetstack::Update(uint64_t now) noexcept {
             const uint64_t MaxEstablishedTimeout = GetMaxEstablishedTimeout();

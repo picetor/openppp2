@@ -72,29 +72,6 @@ jobs:
             '
           sudo chown -R "$(id -u):$(id -g)" bin build
 
-      - name: Install Rust toolchain for release TUI
-        if: matrix.variant == 'base'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust TUI release build
-        if: matrix.variant == 'base'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: linux-amd64-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
-          restore-keys: linux-amd64-tui-
-
-      - name: Build Rust TUI release
-        if: matrix.variant == 'base'
-        env:
-          PPP_TUI_CORE_PATH: ${{ github.workspace }}/bin/ppp
-        run: |
-          font="$(fc-match -f '%{file}' sans | head -n 1)"
-          test -f "$font"
-          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --manifest-path tui/Cargo.toml --bins
-
       - name: Package artifact
         env:
           VARIANT: ${{ matrix.variant }}
@@ -105,10 +82,6 @@ jobs:
           mkdir -p "build/${package}"
           cp bin/ppp "build/${package}/ppp"
           cp appsettings.json dns-rules.txt geo-rules.yaml firewall-rules.txt ip.txt ipv6.txt "build/${package}/"
-          if [ "$VARIANT" = base ]; then
-            cp tui/target/release/ppp-tui "build/${package}/ppp-tui"
-            cp tui/target/release/ppp-tui-cli "build/${package}/ppp-tui-cli"
-          fi
           echo "PACKAGE=$package" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -116,6 +89,57 @@ jobs:
         with:
           name: ${{ env.PACKAGE }}
           path: build/${{ env.PACKAGE }}/
+          if-no-files-found: error
+
+  build-amd64-tui:
+    name: build-amd64-tui-cli
+    needs: build-amd64
+    if: ${{ needs.build-amd64.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.build_amd64) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download amd64 core release package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-linux-amd64
+          path: core-package
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-amd64-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: linux-amd64-tui-
+
+      - name: Build Rust TUI and CLI Release
+        env:
+          PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
+        run: |
+          font="$(fc-match -f '%{file}' sans | head -n 1)"
+          test -f "$font"
+          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --manifest-path tui/Cargo.toml --bins
+
+      - name: Package TUI and CLI release
+        run: |
+          package="build/openppp2-linux-amd64-tui"
+          mkdir -p "$package"
+          cp tui/target/release/ppp-tui "$package/ppp-tui"
+          cp tui/target/release/ppp-tui-cli "$package/ppp-tui-cli"
+          cp core-package/appsettings.json core-package/dns-rules.txt core-package/geo-rules.yaml core-package/firewall-rules.txt core-package/ip.txt core-package/ipv6.txt "$package/"
+          chmod +x "$package/ppp-tui" "$package/ppp-tui-cli"
+
+      - name: Upload TUI and CLI artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-linux-amd64-tui-cli
+          path: build/openppp2-linux-amd64-tui/
           if-no-files-found: error
 
   build-amd64-debug:

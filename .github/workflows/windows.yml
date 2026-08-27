@@ -79,7 +79,6 @@ jobs:
             vcpkg-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-
 
       - name: Install dependencies via vcpkg
-        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         run: |
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `
@@ -148,20 +147,6 @@ jobs:
           # Verify using full path (Get-Command won't work in same step after GITHUB_PATH)
           Write-Output "MSBuild: $msbuildPath"
           & $msbuildPath /version
-
-      - name: Install Rust toolchain for release TUI
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.rust_target }}
-
-      - name: Cache Rust TUI release build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\.cargo\registry
-            ~\.cargo\git
-          key: windows-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
-          restore-keys: windows-${{ matrix.platform.rust_target }}-tui-
 
       - name: Build Windows
         id: build
@@ -252,13 +237,56 @@ jobs:
           echo "ARTIFACT_NAME=$ReleaseArtifactName" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Build Rust TUI release
+      - name: Upload Release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-windows-${{ matrix.platform.name }}
+          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}
+          if-no-files-found: error
+
+  build-windows-tui:
+    name: build-windows-tui-cli (${{ matrix.platform.name }})
+    needs: build-windows
+    if: ${{ needs.build-windows.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: amd64
+            rust_target: x86_64-pc-windows-msvc
+          - name: i386
+            rust_target: i686-pc-windows-msvc
+
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download ${{ matrix.platform.name }} core release package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-windows-${{ matrix.platform.name }}
+          path: core-package
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+          key: windows-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
+          restore-keys: windows-${{ matrix.platform.rust_target }}-tui-
+
+      - name: Build Rust TUI and CLI Release
         run: |
-          $corePath = "${{ matrix.platform.msbuild_platform }}\Release\ppp.exe"
-          if (-not (Test-Path $corePath)) {
-            $corePath = "Release\ppp.exe"
-          }
-          if (-not (Test-Path $corePath)) {
+          $corePath = Join-Path "${{ github.workspace }}" 'core-package\ppp.exe'
+          if (-not (Test-Path -LiteralPath $corePath)) {
             throw "Release core not found: $corePath"
           }
           $font = Get-ChildItem -LiteralPath "$env:WINDIR\Fonts" -File -ErrorAction Stop |
@@ -271,16 +299,29 @@ jobs:
           $env:PPP_TUI_CJK_FONT_PATH = $font
           cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
 
+      - name: Package TUI and CLI release
+        run: |
+          $packageDir = "${{ github.workspace }}\openppp2-windows-${{ matrix.platform.name }}-tui"
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
           $tuiOutput = Join-Path "${{ github.workspace }}" "tui\target\${{ matrix.platform.rust_target }}\release"
-          $packageDir = "${{ github.workspace }}\openppp2-windows-${{ matrix.platform.name }}"
           Copy-Item (Join-Path $tuiOutput 'ppp-tui.exe') (Join-Path $packageDir 'ppp-tui.exe')
           Copy-Item (Join-Path $tuiOutput 'ppp-tui-cli.exe') (Join-Path $packageDir 'ppp-tui-cli.exe')
+          Copy-Item "${{ github.workspace }}\core-package\appsettings.json" $packageDir
+          Copy-Item "${{ github.workspace }}\core-package\dns-rules.txt" $packageDir
+          Copy-Item "${{ github.workspace }}\core-package\geo-rules.yaml" $packageDir
+          Copy-Item "${{ github.workspace }}\core-package\firewall-rules.txt" $packageDir
+          Copy-Item "${{ github.workspace }}\core-package\ip.txt" $packageDir
+          Copy-Item "${{ github.workspace }}\core-package\ipv6.txt" $packageDir
+          $driver = "${{ github.workspace }}\core-package\Driver"
+          if (Test-Path -LiteralPath $driver) {
+            Copy-Item -Recurse $driver (Join-Path $packageDir 'Driver')
+          }
 
-      - name: Upload Release artifact
+      - name: Upload TUI and CLI artifact
         uses: actions/upload-artifact@v6
         with:
-          name: openppp2-windows-${{ matrix.platform.name }}
-          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}
+          name: openppp2-windows-${{ matrix.platform.name }}-tui-cli
+          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}-tui
           if-no-files-found: error
 
   build-windows-debug:
@@ -313,7 +354,6 @@ jobs:
             vcpkg-${{ runner.os }}-
 
       - name: Install dependencies via vcpkg
-        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         run: |
           cd ${{ github.workspace }}/vcpkg
           .\vcpkg install `

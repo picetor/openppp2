@@ -50,14 +50,12 @@ Android UI 自己的 Kotlin `Log.*` 仍用于 UI/JNI 提示，不会被核心等
 
 ### 2.2 核心运行日志 `LOG_*`
 
-核心桌面端日志宏位于 [`ppp/stdafx.h`](../ppp/stdafx.h)。改造前的 Release 行为是：
+核心桌面端日志宏位于 [`ppp/stdafx.h`](../ppp/stdafx.h)。现在所有构建都保留完整的
+`LOG_ERROR/WARN/INFO/DEBUG` 调用和 `--log-file` 支持，由运行时等级决定是否输出。
 
-- `LOG_ERROR` 保留；
-- `LOG_WARN`、`LOG_INFO`、`LOG_DEBUG` 在未定义 `PPP_LOG_VERBOSE` 时编译为空；
-- Debug 构建通过 `_DEBUG` 自动定义 `PPP_LOG_VERBOSE`；
-- `--log-file` 的打开逻辑也被 `#if defined(PPP_LOG_VERBOSE)` 包围。
-
-这解释了本次改造的必要性；现在 Release 核心保留全部 `LOG_*` 调用，并由运行时等级决定是否输出。
+`PPP_LOG_VERBOSE` 不再作为 Debug-only 编译开关。原先由它保护的额外诊断代码也会编译进
+所有构建，但只有运行时等级为 `debug` 时才执行；默认 `error` 不启动诊断 watchdog、
+连接/对象采样或额外错误码采集。
 
 当前工作区统计到的日志调用点约为：
 
@@ -268,7 +266,7 @@ TUI/CLI 当前的 RPC 日志环形缓冲区和界面日志环形缓冲区都不�
 1. ✅ 新增统一 `LogLevel` 和字符串解析函数。
 2. ✅ 将 `LOG_ERROR/WARN/INFO/DEBUG` 改为所有构建都编译。
 3. ✅ 移除这些日志宏上的 `PPP_LOG_VERBOSE` 编译裁剪。
-4. ✅ 将非日志的 watchdog、调试统计等功能改用独立的 `PPP_DEBUG_DIAGNOSTICS` 条件，避免为了保留日志而额外启动诊断线程。
+4. ✅ 将非日志的 watchdog、调试统计等功能改为运行时 `LogLevel::Debug` 控制，避免默认 `error` 启动额外诊断线程。
 5. ✅ 实现运行时原子等级和宏层过滤。
 6. ✅ 保证日志 sink 多线程安全。
 
