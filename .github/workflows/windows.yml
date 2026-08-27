@@ -37,7 +37,15 @@ permissions:
   contents: read
 
 jobs:
+  purge-old-runs:
+    name: Purge old workflow runs
+    uses: ./.github/workflows/cleanup-old-runs.yml
+    permissions:
+      contents: read
+      actions: write
+
   build-windows:
+    needs: purge-old-runs
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -343,6 +351,7 @@ jobs:
           if-no-files-found: error
 
   build-windows-debug:
+    needs: purge-old-runs
     runs-on: windows-latest
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg

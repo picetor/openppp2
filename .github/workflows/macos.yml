@@ -42,7 +42,15 @@ permissions:
   contents: read
 
 jobs:
+  purge-old-runs:
+    name: Purge old workflow runs
+    uses: ./.github/workflows/cleanup-old-runs.yml
+    permissions:
+      contents: read
+      actions: write
+
   build-macos:
+    needs: purge-old-runs
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_macos }}
     strategy:
       fail-fast: false
@@ -208,6 +216,7 @@ jobs:
           if-no-files-found: error
 
   build-macos-debug:
+    needs: purge-old-runs
     strategy:
       fail-fast: false
       matrix:

@@ -31,7 +31,15 @@ permissions:
   contents: read
 
 jobs:
+  purge-old-runs:
+    name: Purge old workflow runs
+    uses: ./.github/workflows/cleanup-old-runs.yml
+    permissions:
+      contents: read
+      actions: write
+
   test:
+    needs: purge-old-runs
     strategy:
       fail-fast: false
       matrix:

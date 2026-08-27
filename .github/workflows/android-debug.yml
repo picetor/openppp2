@@ -31,7 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  purge-old-runs:
+    name: Purge old workflow runs
+    uses: ./.github/workflows/cleanup-old-runs.yml
+    permissions:
+      contents: read
+      actions: write
+
   build-android-apk:
+    needs: purge-old-runs
     name: Android APK (Debug & Release)
     runs-on: ubuntu-24.04
     timeout-minutes: 120

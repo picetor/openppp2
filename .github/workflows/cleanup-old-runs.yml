@@ -1,11 +1,8 @@
 name: Cleanup old workflow runs
 
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - inet6
   schedule:
     # Run during a low-traffic window; manual dispatch is available when
     # immediate cleanup is needed.
@@ -13,7 +10,7 @@ on:
 
 concurrency:
   group: cleanup-old-workflow-runs
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read

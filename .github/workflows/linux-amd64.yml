@@ -37,7 +37,15 @@ permissions:
   contents: read
 
 jobs:
+  purge-old-runs:
+    name: Purge old workflow runs
+    uses: ./.github/workflows/cleanup-old-runs.yml
+    permissions:
+      contents: read
+      actions: write
+
   build-amd64:
+    needs: purge-old-runs
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_amd64 }}
     runs-on: ubuntu-24.04
     strategy:
@@ -143,6 +151,7 @@ jobs:
           if-no-files-found: error
 
   build-amd64-debug:
+    needs: purge-old-runs
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
