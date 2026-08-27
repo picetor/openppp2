@@ -8,10 +8,6 @@ on:
     # immediate cleanup is needed.
     - cron: '17 3 * * *'
 
-concurrency:
-  group: cleanup-old-workflow-runs
-  cancel-in-progress: false
-
 permissions:
   contents: read
   actions: write
@@ -59,7 +55,11 @@ jobs:
               fi
 
               echo "Delete completed run ${run_id} (${created_at})"
-              gh api --method DELETE \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+              if gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"; then
+                echo "Deleted completed run ${run_id}"
+              else
+                echo "::warning::Run ${run_id} was already deleted or could not be deleted; continuing"
+              fi
             done <<< "$run_lines"
           done <<< "$workflow_lines"
