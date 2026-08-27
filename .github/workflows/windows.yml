@@ -161,54 +161,95 @@ jobs:
         run: |
           $TS = Get-Date -Format "yyyyMMdd_HHmm"
 
-          Write-Output "=== vcpkg_installed already populated by --x-install-root ==="
+          Write-Output "=== Preparing vcpkg headers and libraries ==="
 
-          # NOTE: --x-install-root does NOT copy header-only boost headers to vcpkg_installed.
-          # Boost headers remain in vcpkg/packages/boost-xxx_x64-windows-static/include/.
-          # We must copy them manually so ppp.vcxproj's IncludePath can find them.
-          Write-Output "=== Copying boost headers to vcpkg_installed ==="
+          # --x-install-root provides the installed tree, but the cached package tree
+          # is the reliable source for headers and static libraries. Copy files one by
+          # one so a failed copy is visible instead of being hidden by a wildcard copy.
           $vcpkgInstalled = "${{ github.workspace }}\..\vcpkg_installed\${{ matrix.platform.vcpkg_triplet }}"
           $vcpkgPackages = "${{ github.workspace }}\vcpkg\packages"
-          if (-not (Test-Path "$vcpkgInstalled\include")) {
-            New-Item -ItemType Directory -Path "$vcpkgInstalled\include" -Force | Out-Null
+          $includeDestination = Join-Path $vcpkgInstalled "include"
+          $libDestination = Join-Path $vcpkgInstalled "lib"
+          New-Item -ItemType Directory -Path $includeDestination -Force | Out-Null
+          New-Item -ItemType Directory -Path $libDestination -Force | Out-Null
+
+          $vcpkgPackageDirectories = @(Get-ChildItem -LiteralPath $vcpkgPackages -Directory)
+          if ($vcpkgPackageDirectories.Count -eq 0) {
+            throw "No vcpkg package directories found under $vcpkgPackages"
           }
-          Get-ChildItem -Path $vcpkgPackages -Directory | ForEach-Object {
-            $pkgInclude = Join-Path $_.FullName "include"
-            if (Test-Path $pkgInclude) {
-              Write-Output "  Copying headers from $($_.Name)..."
-              Copy-Item -Path "$pkgInclude\*" -Destination "$vcpkgInstalled\include\" -Recurse -Force -ErrorAction SilentlyContinue
+
+          $headerFilesCopied = 0
+          $libraryFilesCopied = 0
+          foreach ($package in $vcpkgPackageDirectories) {
+            $pkgInclude = Join-Path $package.FullName "include"
+            if (Test-Path -LiteralPath $pkgInclude) {
+              Write-Output "  Copying headers from $($package.Name)..."
+              $includeFiles = @(Get-ChildItem -LiteralPath $pkgInclude -File -Recurse)
+              foreach ($file in $includeFiles) {
+                $relativePath = $file.FullName.Substring($pkgInclude.Length).TrimStart('\')
+                $destination = Join-Path $includeDestination $relativePath
+                $destinationParent = Split-Path -Parent $destination
+                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+                Copy-Item -LiteralPath $file.FullName -Destination $destination -Force -ErrorAction Stop
+                $headerFilesCopied++
+              }
+            }
+
+            # Only copy the package's release lib directory. Do not recurse into
+            # debug/lib, because those files can have the same names and overwrite
+            # the release libraries needed by the Release build.
+            $pkgLib = Join-Path $package.FullName "lib"
+            if (Test-Path -LiteralPath $pkgLib) {
+              $libraryFiles = @(Get-ChildItem -LiteralPath $pkgLib -File -Filter '*.lib')
+              if ($libraryFiles.Count -gt 0) {
+                Write-Output "  Copying $($libraryFiles.Count) release libs from $($package.Name)..."
+              }
+              foreach ($file in $libraryFiles) {
+                Copy-Item -LiteralPath $file.FullName -Destination $libDestination -Force -ErrorAction Stop
+                $libraryFilesCopied++
+              }
             }
           }
-          # Also copy lib files
-          if (-not (Test-Path "$vcpkgInstalled\lib")) {
-            New-Item -ItemType Directory -Path "$vcpkgInstalled\lib" -Force | Out-Null
+
+          Write-Output "Copied $headerFilesCopied header files and $libraryFilesCopied release library files"
+          if ($libraryFilesCopied -eq 0) {
+            Write-Output "Package library files found under ${vcpkgPackages}:"
+            Get-ChildItem -LiteralPath $vcpkgPackages -Recurse -File -Filter '*.lib' -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName
+            throw "No release vcpkg libraries were copied"
           }
-          Get-ChildItem -Path $vcpkgPackages -Directory | ForEach-Object {
-            $pkgLib = Join-Path $_.FullName "lib"
-            if (Test-Path $pkgLib) {
-              Write-Output "  Copying libs from $($_.Name)..."
-              Copy-Item -Path "$pkgLib\*" -Destination "$vcpkgInstalled\lib\" -Recurse -Force -ErrorAction SilentlyContinue
-            }
-          }
+
           $architectureSuffix = if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') { 'x64' } else { 'x32' }
-          $expectedLibraries = @(
-            "boost_context-vc145-mt-$architectureSuffix-1_91.lib",
-            "boost_coroutine-vc145-mt-$architectureSuffix-1_91.lib",
-            "boost_thread-vc145-mt-$architectureSuffix-1_91.lib",
-            "boost_filesystem-vc145-mt-$architectureSuffix-1_91.lib"
-          )
+          $boostComponents = @('context', 'coroutine', 'thread', 'filesystem')
+          $expectedLibraries = @()
+          foreach ($component in $boostComponents) {
+            $expectedName = "boost_${component}-vc145-mt-$architectureSuffix-1_91.lib"
+            $expectedPath = Join-Path $libDestination $expectedName
+            if (-not (Test-Path -LiteralPath $expectedPath)) {
+              $candidates = @(Get-ChildItem -LiteralPath $libDestination -File -Filter "boost_${component}-*.lib")
+              if ($candidates.Count -eq 1) {
+                # The MSVC toolset suffix is versioned by vcpkg. The project links
+                # the vc145 names, so normalize a single compatible package output.
+                Write-Output "  Normalizing $($candidates[0].Name) to $expectedName"
+                Copy-Item -LiteralPath $candidates[0].FullName -Destination $expectedPath -Force -ErrorAction Stop
+              }
+            }
+            $expectedLibraries += $expectedName
+          }
+
           foreach ($library in $expectedLibraries) {
-            $libraryPath = Join-Path "$vcpkgInstalled\lib" $library
+            $libraryPath = Join-Path $libDestination $library
             if (-not (Test-Path -LiteralPath $libraryPath)) {
-              Write-Error "Required vcpkg library was not copied: $libraryPath"
-              Get-ChildItem -Path $vcpkgInstalled -Recurse -File -Filter 'boost_*.lib' -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty FullName
+              Write-Error "Required vcpkg library is unavailable: $libraryPath"
+              Write-Output "Release libraries staged in ${libDestination}:"
+              Get-ChildItem -LiteralPath $libDestination -File -Filter '*.lib' -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty Name
               exit 1
             }
           }
-          Write-Output "=== Verified Boost libraries in $vcpkgInstalled\lib ==="
+          Write-Output "=== Verified Boost libraries in $libDestination ==="
           $expectedLibraries | ForEach-Object { Write-Output "  $_" }
-          Write-Output "=== Header/lib copy complete ==="
+          Write-Output "=== Header/lib preparation complete ==="
 
           # Create placeholder files for missing items
           if (-not (Test-Path "${{ github.workspace }}\starrylink.net.key")) {
