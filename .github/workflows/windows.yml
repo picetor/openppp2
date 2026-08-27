@@ -182,6 +182,24 @@ jobs:
               Copy-Item -Path "$pkgLib\*" -Destination "$vcpkgInstalled\lib\" -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
+          $architectureSuffix = if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') { 'x64' } else { 'x32' }
+          $expectedLibraries = @(
+            "boost_context-vc145-mt-$architectureSuffix-1_91.lib",
+            "boost_coroutine-vc145-mt-$architectureSuffix-1_91.lib",
+            "boost_thread-vc145-mt-$architectureSuffix-1_91.lib",
+            "boost_filesystem-vc145-mt-$architectureSuffix-1_91.lib"
+          )
+          foreach ($library in $expectedLibraries) {
+            $libraryPath = Join-Path "$vcpkgInstalled\lib" $library
+            if (-not (Test-Path -LiteralPath $libraryPath)) {
+              Write-Error "Required vcpkg library was not copied: $libraryPath"
+              Get-ChildItem -Path $vcpkgInstalled -Recurse -File -Filter 'boost_*.lib' -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+              exit 1
+            }
+          }
+          Write-Output "=== Verified Boost libraries in $vcpkgInstalled\lib ==="
+          $expectedLibraries | ForEach-Object { Write-Output "  $_" }
           Write-Output "=== Header/lib copy complete ==="
 
           # Create placeholder files for missing items
@@ -440,6 +458,23 @@ jobs:
               Copy-Item -Path "$pkgLib\*" -Destination "$vcpkgInstalled\lib\" -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
+          $expectedLibraries = @(
+            'boost_context-vc145-mt-x64-1_91.lib',
+            'boost_coroutine-vc145-mt-x64-1_91.lib',
+            'boost_thread-vc145-mt-x64-1_91.lib',
+            'boost_filesystem-vc145-mt-x64-1_91.lib'
+          )
+          foreach ($library in $expectedLibraries) {
+            $libraryPath = Join-Path "$vcpkgInstalled\lib" $library
+            if (-not (Test-Path -LiteralPath $libraryPath)) {
+              Write-Error "Required vcpkg library was not copied: $libraryPath"
+              Get-ChildItem -Path $vcpkgInstalled -Recurse -File -Filter 'boost_*.lib' -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+              exit 1
+            }
+          }
+          Write-Output "=== Verified Boost libraries in $vcpkgInstalled\lib ==="
+          $expectedLibraries | ForEach-Object { Write-Output "  $_" }
           Write-Output "=== Header/lib copy complete ==="
 
           if (-not (Test-Path "${{ github.workspace }}\starrylink.net.key")) {
