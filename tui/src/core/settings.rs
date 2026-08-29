@@ -60,6 +60,8 @@ pub struct StartupSettings {
     pub tun_promisc: bool,
     pub tun_route: bool,
     pub tun_protect: bool,
+    #[serde(default = "default_tui_log_enabled")]
+    pub tui_log_enabled: bool,
     pub tui_log_file: String,
     pub rpc_address: String,
     pub rpc_token: String,
@@ -121,7 +123,8 @@ impl Default for StartupSettings {
             tun_promisc: true,
             tun_route: false,
             tun_protect: true,
-            tui_log_file: String::new(),
+            tui_log_enabled: true,
+            tui_log_file: "./ppp-tui.log".to_string(),
             rpc_address: String::new(),
             rpc_token: String::new(),
             core_path: None,
@@ -237,6 +240,8 @@ impl StartupSettings {
         let tun_promisc = command_bool(&core_args, "--tun-promisc", defaults.tun_promisc);
         let tun_route = command_bool(&core_args, "--tun-route", defaults.tun_route);
         let tun_protect = command_bool(&core_args, "--tun-protect", defaults.tun_protect);
+        let tui_log_enabled =
+            command_bool(&core_args, "--tui-log-enabled", defaults.tui_log_enabled);
         let tui_log_file =
             command_value(&core_args, "--tui-log").unwrap_or_else(|| defaults.tui_log_file.clone());
 
@@ -306,6 +311,7 @@ impl StartupSettings {
             tun_promisc,
             tun_route,
             tun_protect,
+            tui_log_enabled,
             tui_log_file,
             rpc_address,
             rpc_token,
@@ -330,6 +336,9 @@ impl StartupSettings {
         let Ok(mut saved) = serde_json::from_str::<StartupSettings>(&contents) else {
             return;
         };
+        if !contents.contains("\"tui_log_enabled\"") {
+            saved.tui_log_enabled = !saved.tui_log_file.trim().is_empty();
+        }
         if !contents.contains("\"mode\"") {
             saved.mode = if saved.tun_enabled {
                 "client".to_string()
@@ -373,6 +382,10 @@ impl StartupSettings {
             normalize_path_field(path);
         }
     }
+}
+
+fn default_tui_log_enabled() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------

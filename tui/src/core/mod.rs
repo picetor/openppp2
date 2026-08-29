@@ -6,6 +6,7 @@
 pub mod command;
 pub mod control;
 pub mod embedded;
+pub mod in_process;
 pub mod launcher;
 pub mod probe;
 pub mod server_catalog;

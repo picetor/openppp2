@@ -1,5 +1,6 @@
-//! Core launcher: spawns the C++ headless core as a child process and
-//! discovers its RPC endpoint from the `RPC_LISTEN=` line on stdout.
+//! Compatibility launcher for an external C++ headless core. Release TUI/CLI
+//! builds use the in-process C ABI when the static core is available; this
+//! module remains for explicit `--core-path` and attach/automation scenarios.
 //!
 //! Lifecycle: `spawn()` starts the child; `stop()` terminates it.  The TUI
 //! owns the core when launched this way (single-program UX): closing the UI
@@ -16,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use super::command::command_value;
+#[cfg(not(ppp_in_process_core))]
 use super::embedded;
 use super::settings::resolve_from_working_dir;
 use crate::rpc::{CoreCommand, Response, RpcClient};
@@ -152,6 +154,25 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Append a launcher-side diagnostic. This file is deliberately separate from
+/// the core's --log-file: a core can fail before its logging subsystem is
+/// initialized, and a user-provided log path may also be shared by a manually
+/// started ppp.exe.
+fn append_launch_trace(path: &Path, message: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "[{timestamp}] {message}");
+    let _ = file.flush();
+}
+
 fn random_token() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -220,7 +241,11 @@ pub fn request_graceful_shutdown(endpoint: &str, token: &str) -> bool {
 /// that receives each line as it arrives.  Every line is also appended to
 /// `tee_path` (when given) so a crashed core's last diagnostics survive even
 /// though the channel is only consumed while waiting for `RPC_LISTEN=`.
-fn pipe_stdout(child: &mut Child, tee_path: Option<PathBuf>) -> Option<Receiver<String>> {
+fn pipe_stdout(
+    child: &mut Child,
+    tee_path: Option<PathBuf>,
+    trace_path: Option<PathBuf>,
+) -> Option<Receiver<String>> {
     let stdout = child.stdout.take()?;
     let (tx, rx) = channel();
     thread::spawn(move || {
@@ -238,6 +263,9 @@ fn pipe_stdout(child: &mut Child, tee_path: Option<PathBuf>) -> Option<Receiver<
                     if let Some(file) = tee.as_mut() {
                         let _ = writeln!(file, "{line}");
                     }
+                    if let Some(path) = trace_path.as_ref() {
+                        append_launch_trace(path, &format!("[stdout] {line}"));
+                    }
                     if tx.send(line).is_err() {
                         break;
                     }
@@ -250,6 +278,47 @@ fn pipe_stdout(child: &mut Child, tee_path: Option<PathBuf>) -> Option<Receiver<
         }
     });
     Some(rx)
+}
+
+/// Capture stderr as well as stdout. The C++ core normally writes diagnostics
+/// to stdout, but Windows loader/runtime failures can arrive on stderr before
+/// the core log file exists.
+fn pipe_stderr(child: &mut Child, trace_path: PathBuf) {
+    let Some(stderr) = child.stderr.take() else {
+        append_launch_trace(&trace_path, "stderr pipe unavailable");
+        return;
+    };
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => append_launch_trace(&trace_path, &format!("[stderr] {line}")),
+                Err(error) => {
+                    append_launch_trace(&trace_path, &format!("[stderr read error] {error}"));
+                    break;
+                }
+            }
+        }
+        append_launch_trace(&trace_path, "stderr stream closed");
+    });
+}
+
+fn stop_failed_child(child: &mut Child, trace_path: &Path, reason: &str) -> String {
+    let kill_result = child.kill();
+    let wait_result = child.wait();
+    let status = match wait_result {
+        Ok(status) => status.to_string(),
+        Err(error) => format!("wait-error={error}"),
+    };
+    append_launch_trace(
+        trace_path,
+        &format!(
+            "terminate child pid={} reason={reason} kill={:?} status={status}",
+            child.id(),
+            kill_result
+        ),
+    );
+    status
 }
 
 impl Launcher {
@@ -276,11 +345,13 @@ impl Launcher {
         Self::spawn_process(core_path, extra_args, working_dir, None)
     }
 
-    /// Materialize the embedded core in a private temporary directory and
-    /// launch it without requiring a separate ppp.exe beside the TUI.
+    /// Materialize the embedded compatibility core in a private temporary
+    /// directory and launch it without requiring a separate ppp.exe beside
+    /// the TUI. In-process builds do not compile this path.
     ///
     /// The process still communicates over the existing loopback RPC channel;
-    /// this keeps the C++ core and its C++ TUI implementation untouched.
+    /// this is intentionally only a compatibility path.
+    #[cfg(not(ppp_in_process_core))]
     pub fn spawn_embedded(extra_args: &[String]) -> Result<Launcher> {
         let working_dir = std::env::current_dir().context("get TUI working directory")?;
         Self::spawn_embedded_in(extra_args, &working_dir)
@@ -288,6 +359,7 @@ impl Launcher {
 
     /// Same as `spawn_embedded`, but resolves relative configuration paths
     /// against an explicit directory selected by the desktop client.
+    #[cfg(not(ppp_in_process_core))]
     pub fn spawn_embedded_in(extra_args: &[String], working_dir: &Path) -> Result<Launcher> {
         let staging_dir = embedded_staging_dir()?;
         let core_path = staging_dir.join(if cfg!(windows) {
@@ -342,6 +414,16 @@ impl Launcher {
         cleanup_dir: Option<PathBuf>,
     ) -> Result<Launcher> {
         let token = random_token();
+        let launch_trace_path = working_dir.join("ppp-tui-core-launch.log");
+        let extra_args_preview = extra_args.join(" ");
+        append_launch_trace(
+            &launch_trace_path,
+            &format!(
+                "launch begin core={} cwd={} extra_args={extra_args_preview}",
+                display_path(core_path),
+                display_path(working_dir),
+            ),
+        );
 
         let mut command = Command::new(core_path);
         command.current_dir(working_dir);
@@ -366,11 +448,19 @@ impl Launcher {
             command.arg("--log-file=./ppp-core.log");
             working_dir.join("ppp-core.log")
         };
+        append_launch_trace(
+            &launch_trace_path,
+            &format!(
+                "log paths core_log={} launch_trace={}",
+                display_path(&core_log_file),
+                display_path(&launch_trace_path),
+            ),
+        );
         // TUI 拥有终端：嵌入式核心绝不能把原始诊断写到同一屏幕（与 ratatui
         // 光标移动交错会产生重复/乱码行）。核心诊断已由 --log-file 捕获
         // （默认 ./ppp-core.log），stdout 保持管道化用于 RPC_LISTEN，并且
         // 每行都会追加到核心日志文件 —— 崩溃后最后输出也能保留。
-        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // The embedded core is a Windows console-subsystem executable, but
         // the desktop client owns the only visible window.  Without this
@@ -386,17 +476,31 @@ impl Launcher {
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to start core {}", display_path(core_path)))?;
+        let child_pid = child.id();
+        append_launch_trace(
+            &launch_trace_path,
+            &format!("spawned child pid={child_pid}; waiting for RPC_LISTEN (timeout=20s)"),
+        );
 
         // The core must never outlive the TUI: kill-on-close job object.
         #[cfg(windows)]
         let job = win32::attach_kill_on_close(&mut child);
         #[cfg(not(windows))]
         let job: Option<JobHandle> = None;
+        append_launch_trace(
+            &launch_trace_path,
+            &format!("job_object_attached={}", job.is_some()),
+        );
 
         // Append core stdout to the core's own log file so all core output
         // (diagnostics + retained stdout) lands in ./ppp-core.log.
-        let tee_path = Some(core_log_file);
-        let rx = pipe_stdout(&mut child, tee_path).context("cannot pipe core stdout")?;
+        let rx = pipe_stdout(
+            &mut child,
+            Some(core_log_file.clone()),
+            Some(launch_trace_path.clone()),
+        )
+        .context("cannot pipe core stdout")?;
+        pipe_stderr(&mut child, launch_trace_path.clone());
 
         // Wait for the RPC_LISTEN= line (the core prints it once its RPC
         // server is up; log lines start with '[' and are ignored).  If the
@@ -408,9 +512,14 @@ impl Launcher {
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 let last_lines = tail.join(" | ");
+                append_launch_trace(
+                    &launch_trace_path,
+                    &format!("child exited early pid={child_pid} status={status}"),
+                );
                 bail!(
-                    "core exited early (status {status}) before reporting its RPC endpoint. \
-                     Last output: {last_lines}"
+                    "core exited early (pid={child_pid}, status {status}) before reporting its RPC endpoint. \
+                     Last output: {last_lines}. Launch trace: {}",
+                    display_path(&launch_trace_path)
                 );
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -423,13 +532,11 @@ impl Launcher {
                     // only, so trim the trailing \r (and any whitespace).
                     let line = line.trim();
                     if line.contains("Non-administrators are not allowed to run.") {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        stop_failed_child(&mut child, &launch_trace_path, "administrator required");
                         bail!("VPN/TUN 核心需要管理员权限，请右键以管理员身份启动 ppp-tui.exe。");
                     }
                     if line.contains("Repeat runs are not allowed.") {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        stop_failed_child(&mut child, &launch_trace_path, "repeat run");
                         bail!(
                             "另一个 ppp 核心实例已在运行（Repeat runs are not allowed）。\
                              请先退出其他 ppp-tui / ppp-tui-cli / ppp 窗口，或使用任务管理器结束残留的 ppp-core.exe 进程。"
@@ -439,12 +546,21 @@ impl Launcher {
                         || line.contains("Open tun/tap driver failure.")
                         || line.contains("No available nic could be found.")
                     {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        bail!("VPN/TUN core startup failed: {line}");
+                        stop_failed_child(&mut child, &launch_trace_path, "core startup error");
+                        bail!(
+                            "VPN/TUN core startup failed: {line}. Launch trace: {}",
+                            display_path(&launch_trace_path)
+                        );
                     }
                     if let Some(rest) = line.strip_prefix("RPC_LISTEN=") {
                         endpoint = Some(rest.trim().to_string());
+                        append_launch_trace(
+                            &launch_trace_path,
+                            &format!(
+                                "RPC_LISTEN received pid={child_pid} endpoint={}",
+                                rest.trim()
+                            ),
+                        );
                         break;
                     }
                     tail.push(line.to_string());
@@ -456,10 +572,15 @@ impl Launcher {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // Child closed stdout without printing RPC_LISTEN.
                     if let Ok(Some(status)) = child.try_wait() {
+                        append_launch_trace(
+                            &launch_trace_path,
+                            &format!("stdout closed; child exited pid={child_pid} status={status}"),
+                        );
                         bail!(
-                            "core exited (status {status}) without reporting its RPC endpoint. \
-                             Last output: {}",
-                            tail.join(" | ")
+                            "core exited (pid={child_pid}, status {status}) without reporting its RPC endpoint. \
+                             Last output: {}. Launch trace: {}",
+                            tail.join(" | "),
+                            display_path(&launch_trace_path)
                         );
                     }
                     break;
@@ -470,13 +591,21 @@ impl Launcher {
         let endpoint = match endpoint {
             Some(endpoint) => endpoint,
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                append_launch_trace(
+                    &launch_trace_path,
+                    &format!(
+                        "startup timeout pid={child_pid}; last_lines={}",
+                        tail.join(" | ")
+                    ),
+                );
+                let status = stop_failed_child(&mut child, &launch_trace_path, "startup timeout");
                 bail!(
-                    "core did not report its RPC endpoint within {}s. \
-                     Last output: {}",
+                    "core did not report its RPC endpoint within {}s (pid={child_pid}, terminated={status}). \
+                     Last output: {}. Launch trace: {}. Core log: {}",
                     LAUNCH_TIMEOUT.as_secs(),
-                    tail.join(" | ")
+                    tail.join(" | "),
+                    display_path(&launch_trace_path),
+                    display_path(&core_log_file)
                 );
             }
         };
@@ -567,6 +696,7 @@ impl Drop for Launcher {
     }
 }
 
+#[cfg(not(ppp_in_process_core))]
 fn embedded_staging_dir() -> Result<PathBuf> {
     let mut path = std::env::temp_dir();
     path.push(format!("openppp2-ppp-tui-{}", random_token()));

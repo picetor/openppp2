@@ -18,6 +18,7 @@ namespace lwip {
     class netstack final {
     public:
         static bool                                         open() noexcept;
+        static bool                                         is_open() noexcept;
         static void                                         close() noexcept;
         static void                                         close(const LIBTCPIP_CLOSED_EVENT& event) noexcept;
 

@@ -986,6 +986,15 @@ namespace ppp {
     if (::ppp::diagnostics::IsLogLevelEnabled(::ppp::diagnostics::LogLevel::Debug)) \
         ::ppp::diagnostics::LogPrintDesktop("DEBUG", __FILE__, __LINE__, FORMAT, ##__VA_ARGS__); \
 } while (0)
+
+// The static core is hosted by a Rust UI/CLI, so legacy core diagnostics must
+// never draw into the host terminal. File-backed diagnostics still work: only
+// direct writes to stdout are suppressed. The standalone ppp.exe build does
+// not define PPP_CORE_LIBRARY and keeps its original console output.
+#if defined(PPP_CORE_LIBRARY)
+#define fprintf(STREAM, ...) \
+    (((STREAM) == stdout) ? 0 : ::fprintf((STREAM), __VA_ARGS__))
+#endif
 #endif
 
 #ifndef strcasecmp
@@ -1697,8 +1706,25 @@ namespace ppp {
 
     template <typename... Args>
     inline void                                                             ConsoleFormat(const char* fmt, Args&&... args) noexcept {
-        ::fprintf(stdout, fmt, std::forward<Args>(args)...);
+#if defined(PPP_CORE_LIBRARY)
+        // The Rust host owns the terminal in the in-process build.  Keep
+        // security/mux diagnostics in the normal log pipeline instead of
+        // interleaving raw text with ratatui/CLI output.
+        char text[2048] = {};
+        const int length = std::snprintf(text, sizeof(text), fmt,
+            std::forward<Args>(args)...);
+        if (length > 0)
+        {
+            ::ppp::diagnostics::LogPrintDesktop("WARN", __FILE__, __LINE__, "%s", text);
+        }
+#else
+        // Parenthesized function names intentionally bypass the optional
+        // PPP_CORE_LIBRARY fprintf macro below.  The macro suppresses direct
+        // core stdout output, while this helper remains an ordinary call in
+        // the standalone build.
+        (::fprintf)(stdout, fmt, std::forward<Args>(args)...);
         ::fflush(stdout);
+#endif
     }
 
     bool                                                                    IsUserAnAdministrator() noexcept;

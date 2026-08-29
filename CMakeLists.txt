@@ -226,8 +226,19 @@ FILE(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS
 # Add the compiled output binary files.
 ADD_EXECUTABLE(${NAME} ${PROJECT_SOURCE_DIR}/main.cpp ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES})
 
+# Optional in-process host library for the Rust TUI/CLI.  It intentionally
+# compiles the same source set as ppp, but main.cpp omits its standalone
+# entrypoint when PPP_CORE_LIBRARY is defined.  Keeping this as a separate
+# static target avoids any child executable, temporary staging directory or
+# loopback RPC when the Rust front-end owns the core.
+ADD_LIBRARY(ppp-core STATIC ${PROJECT_SOURCE_DIR}/main.cpp ${SOURCE_FILES} ${PLATFORM_SOURCE_FILES} ${AES_NI_SOURCE_FILES})
+TARGET_COMPILE_DEFINITIONS(ppp-core PRIVATE PPP_CORE_LIBRARY)
+
 # Set the compilation output files path.
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
+SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
+SET_TARGET_PROPERTIES(ppp-core PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
 
 # Set up library connections to dependent libraries.
 IF(PLATFORM_SYSTEM_DARWIN)
@@ -298,6 +309,56 @@ ELSE()
         libboost_coroutine.a 
         libboost_thread.a 
         libboost_context.a 
+        libboost_regex.a
+        libboost_filesystem.a
+        ${_LINUX_RUNTIME_LIBS})
+ENDIF()
+
+# The core library has the same third-party dependencies as the standalone
+# executable.  Repeat the platform link set here because the Rust link step
+# consumes libppp-core.a directly instead of linking the ppp executable.
+IF(PLATFORM_SYSTEM_DARWIN)
+    TARGET_LINK_LIBRARIES(ppp-core
+        ${THIRD_PARTY_LIBRARY_DIR}/openssl/libssl.a
+        ${THIRD_PARTY_LIBRARY_DIR}/openssl/libcrypto.a
+        ${THIRD_PARTY_LIBRARY_DIR}/jemalloc/lib/libjemalloc.a
+        dl
+        pthread
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_system.a
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_coroutine.a
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_thread.a
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_context.a
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_regex.a
+        ${THIRD_PARTY_LIBRARY_DIR}/boost/stage/lib/libboost_filesystem.a)
+ELSEIF(PLATFORM_COMPILER_CLANG)
+    TARGET_LINK_LIBRARIES(ppp-core
+        libssl.a
+        libcrypto.a
+        libjemalloc.a
+        atomic
+        dl
+        pthread
+        libboost_system.a
+        libboost_coroutine.a
+        libboost_thread.a
+        libboost_context.a
+        libboost_regex.a
+        libboost_filesystem.a)
+ELSE()
+    TARGET_LINK_LIBRARIES(ppp-core
+        libssl.a
+        libcrypto.a
+        libjemalloc.a
+        ${_IO_URING_LIBS}
+        ${_TC_LIBS}
+        libzstd.a
+        libz.a
+        dl
+        pthread
+        libboost_system.a
+        libboost_coroutine.a
+        libboost_thread.a
+        libboost_context.a
         libboost_regex.a
         libboost_filesystem.a
         ${_LINUX_RUNTIME_LIBS})

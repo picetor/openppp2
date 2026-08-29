@@ -124,6 +124,13 @@ jobs:
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
+          core_build="../build/openppp2-macos-${{ matrix.platform.name }}-tui-core"
+          mkdir -p "${core_build}/deps"
+          cp ../bin/libppp-core.a "${core_build}/libppp-core.a"
+          cp ../3rd/boost/stage/lib/*.a "${core_build}/deps/"
+          cp ../3rd/jemalloc/lib/libjemalloc.a "${core_build}/deps/"
+          cp ../3rd/openssl/libssl.a ../3rd/openssl/libcrypto.a "${core_build}/deps/"
+
       - name: Package release artifact
         run: |
           ZIP_NAME="openppp2-${{ matrix.platform.triple }}"
@@ -145,6 +152,13 @@ jobs:
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.PKG_DIR }}/
+          if-no-files-found: error
+
+      - name: Upload TUI/CLI core link package
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}-tui-core
+          path: build/openppp2-macos-${{ matrix.platform.name }}-tui-core/
           if-no-files-found: error
 
   build-macos-tui:
@@ -174,6 +188,12 @@ jobs:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: core-package
 
+      - name: Download ${{ matrix.platform.name }} in-process core link package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-macos-${{ matrix.platform.name }}-tui-core
+          path: core-build
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -189,8 +209,6 @@ jobs:
           restore-keys: macos-${{ matrix.platform.rust_target }}-tui-
 
       - name: Build Rust TUI and CLI Release
-        env:
-          PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
         run: |
           export MACOSX_DEPLOYMENT_TARGET=11.0
           font=""
@@ -211,6 +229,10 @@ jobs:
             echo "No Chinese-capable font found for PPP_TUI_CJK_FONT_PATH"
             exit 1
           fi
+          export PPP_TUI_CORE_LIB="$GITHUB_WORKSPACE/core-build/libppp-core.a"
+          export PPP_TUI_CORE_LIB_DIRS="$GITHUB_WORKSPACE/core-build/deps"
+          export PPP_TUI_CORE_LIBS="ssl;crypto;jemalloc;boost_system;boost_coroutine;boost_thread;boost_context;boost_regex;boost_filesystem"
+          export PPP_TUI_CORE_SYSTEM_LIBS="c++;pthread;dl"
           PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
 
       - name: Package TUI and CLI release

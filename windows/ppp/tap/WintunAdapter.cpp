@@ -6,6 +6,7 @@
 #include <windows/ppp/tap/WintunAdapter.h>
 #include <ppp/tap/ITap.h>
 #include <ppp/net/native/ip.h>
+#include <ppp/text/Encoding.h>
 #include <ppp/threading/Executors.h>
 
 #pragma comment(lib, "ws2_32.lib")
@@ -42,6 +43,44 @@ static WintunReleaseReceivePacketFunc       WintunReleaseReceivePacket = NULL;
 static WintunAllocateSendPacketFunc         WintunAllocateSendPacket = NULL;
 static WintunSendPacketFunc                 WintunSendPacket = NULL;
 
+static std::wstring WintunModuleDirectory() noexcept
+{
+    wchar_t module_path[32768] = {};
+    DWORD length = GetModuleFileNameW(NULL, module_path, static_cast<DWORD>(sizeof(module_path) / sizeof(module_path[0])));
+    if (length == 0 || length >= sizeof(module_path) / sizeof(module_path[0]))
+    {
+        return std::wstring();
+    }
+
+    std::wstring path(module_path, length);
+    std::size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos)
+    {
+        return std::wstring();
+    }
+    return path.substr(0, separator);
+}
+
+static bool TryLoadWintun(const std::wstring& path) noexcept
+{
+    if (path.empty())
+    {
+        return false;
+    }
+
+    DLL_HANDLE = LoadLibraryW(path.c_str());
+    if (DLL_HANDLE != NULL)
+    {
+        fprintf(stdout, "[Wintun] LoadLibrary ok path='%s'\r\n",
+            ppp::text::Encoding::wstring_to_utf8(path).data());
+        return true;
+    }
+
+    fprintf(stdout, "[Wintun] LoadLibrary failed path='%s' error=%lu\r\n",
+        ppp::text::Encoding::wstring_to_utf8(path).data(), GetLastError());
+    return false;
+}
+
 // Helper: load/unload Wintun DLL
 struct ReadyWintunAdapter
 {
@@ -51,27 +90,41 @@ struct ReadyWintunAdapter
     bool                                    LoadWintun() noexcept {
         if (DLL_HANDLE) return true;
 
-        // Search for wintun.dll from multiple local or system directories; 
-        // if this driver exists, use Wintun, otherwise fall back to TAP-Windows as originally designed, ensuring deployment flexibility.
-        DLL_HANDLE = LoadLibraryW(L"wintun.dll");
-        if (!DLL_HANDLE) {
-            DLL_HANDLE = LoadLibraryW(L"Driver\\wintun.dll");
-            if (!DLL_HANDLE) {
+        std::wstring module_directory = WintunModuleDirectory();
 #ifdef _WIN64
-                LPCWSTR wzDllPath = L"Driver\\x64\\wintun.dll";
+        const wchar_t* architecture_directory = L"x64";
 #else
-                LPCWSTR wzDllPath = L"Driver\\x86\\wintun.dll";
+        const wchar_t* architecture_directory = L"x86";
 #endif
-                DLL_HANDLE = LoadLibraryW(wzDllPath);
-                if (!DLL_HANDLE) {
-                    return false; // LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32
-                }
+
+        std::wstring candidates[] = {
+            module_directory + L"\\wintun.dll",
+            module_directory + L"\\Driver\\wintun.dll",
+            module_directory + L"\\Driver\\" + architecture_directory + L"\\wintun.dll",
+            std::wstring(L"wintun.dll"),
+            std::wstring(L"Driver\\wintun.dll"),
+            std::wstring(L"Driver\\") + architecture_directory + L"\\wintun.dll",
+        };
+
+        for (const std::wstring& candidate : candidates)
+        {
+            if (TryLoadWintun(candidate))
+            {
+                break;
             }
         }
-        
+
+        if (!DLL_HANDLE)
+        {
+            fprintf(stdout, "[Wintun] no loadable wintun.dll found\r\n");
+            return false;
+        }
+
+        // If this driver exists, use Wintun; otherwise the caller can fall back
+        // to TAP-Windows according to the selected driver mode.
 #define GET_PROC(name) \
     name = (decltype(name))GetProcAddress(DLL_HANDLE, #name); \
-    if (!name) { FreeLibrary(DLL_HANDLE); DLL_HANDLE = NULL; return false; }
+    if (!name) { fprintf(stdout, "[Wintun] missing export %s error=%lu\r\n", #name, GetLastError()); FreeLibrary(DLL_HANDLE); DLL_HANDLE = NULL; return false; }
 
         GET_PROC(WintunCreateAdapter);
         GET_PROC(WintunOpenAdapter);
@@ -111,21 +164,32 @@ bool WintunAdapter::Open() noexcept {
         return true;   // Already opened
     }
 
-    // Try to open existing adapter, otherwise create a new one
+    const std::string adapter_name = ppp::text::Encoding::wstring_to_utf8(adapter_name_);
+
+    // Try to open existing adapter, otherwise create a new one. The GUID is
+    // intentionally left nullable so Wintun retains its normal GUID policy.
     adapter_handle_ = WintunOpenAdapter(adapter_name_.c_str());
     if (!adapter_handle_) {
+        DWORD open_error = GetLastError();
+        fprintf(stdout, "[Wintun] OpenAdapter name='%s' failed error=%lu\r\n", adapter_name.data(), open_error);
         adapter_handle_ = WintunCreateAdapter(adapter_name_.c_str(),
             adapter_desc_.c_str(),
             adapter_guid_ptr_);
         if (!adapter_handle_) {
+            fprintf(stdout, "[Wintun] CreateAdapter name='%s' failed error=%lu\r\n", adapter_name.data(), GetLastError());
             running_flag_.store(WINTUN_RUNING_STATE_STOP);
             return false;
         }
+        fprintf(stdout, "[Wintun] CreateAdapter name='%s' ok\r\n", adapter_name.data());
+    }
+    else {
+        fprintf(stdout, "[Wintun] OpenAdapter name='%s' ok\r\n", adapter_name.data());
     }
 
     // Start the Wintun session
     session_handle_ = WintunStartSession(adapter_handle_, ring_buffer_size_);
     if (!session_handle_) {
+        fprintf(stdout, "[Wintun] StartSession name='%s' failed error=%lu\r\n", adapter_name.data(), GetLastError());
         if (adapter_handle_) WintunCloseAdapter(adapter_handle_);
         adapter_handle_ = NULL;
 
@@ -136,6 +200,7 @@ bool WintunAdapter::Open() noexcept {
     // Create an event that can be used to wake the receive thread
     quit_event_ = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!quit_event_) {
+        fprintf(stdout, "[Wintun] CreateEvent name='%s' failed error=%lu\r\n", adapter_name.data(), GetLastError());
         WintunEndSession(session_handle_);
         session_handle_ = NULL;
 
@@ -153,11 +218,20 @@ bool WintunAdapter::Start() noexcept {
     using Executors = ppp::threading::Executors;
     using Awaitable = Executors::Awaitable;
 
+    fprintf(stdout, "[Wintun] Start begin name='%s' state=%d\r\n",
+        ppp::text::Encoding::wstring_to_utf8(adapter_name_).data(),
+        running_flag_.load(std::memory_order_acquire));
+
     std::shared_ptr<Awaitable> awaitable = ppp::make_shared_object<Awaitable>();
-    if (!awaitable) return false;
+    if (!awaitable)
+    {
+        fprintf(stdout, "[Wintun] Start failed: Awaitable allocation failed\r\n");
+        return false;
+    }
 
     int expected = WINTUN_RUNING_STATE_OPEN;
     if (!running_flag_.compare_exchange_strong(expected, WINTUN_RUNING_STATE_RUNNING, std::memory_order_acquire)) {
+        fprintf(stdout, "[Wintun] Start skipped: state=%d expected=%d\r\n", expected, WINTUN_RUNING_STATE_OPEN);
         return true;   // Already started
     }
 
@@ -167,16 +241,27 @@ bool WintunAdapter::Start() noexcept {
     try {
         std::thread(
             [self, this, awaitable_weak]() {
-                ppp::SetThreadPriorityToMaxLevel();
+                fprintf(stdout, "[Wintun] receive thread entered name='%s'\r\n",
+                    ppp::text::Encoding::wstring_to_utf8(adapter_name_).data());
+
+                // Do not raise this thread to THREAD_PRIORITY_TIME_CRITICAL.
+                // A signaled Wintun read event can otherwise let the receive
+                // loop starve the core's normal-priority startup/RPC threads.
                 ppp::SetThreadName("wintun");
                 receive_thread_id_.store(GetCurrentThreadId(), std::memory_order_release);
 
                 // Signal that the thread has started
                 if (std::shared_ptr<Awaitable> a = awaitable_weak.lock(); a) {
                     a->Processed();
+                    fprintf(stdout, "[Wintun] receive thread ready name='%s'\r\n",
+                        ppp::text::Encoding::wstring_to_utf8(adapter_name_).data());
                 }
 
+                fprintf(stdout, "[Wintun] receive loop begin name='%s'\r\n",
+                    ppp::text::Encoding::wstring_to_utf8(adapter_name_).data());
                 ReceiveLoop();
+                fprintf(stdout, "[Wintun] receive loop end name='%s'\r\n",
+                    ppp::text::Encoding::wstring_to_utf8(adapter_name_).data());
                 receive_thread_id_.store(0, std::memory_order_release);
 
                 int expected = 0;
@@ -186,11 +271,17 @@ bool WintunAdapter::Start() noexcept {
             }).detach();
     }
     catch (...) {
+        fprintf(stdout, "[Wintun] Start failed: receive thread creation threw\r\n");
         Stop();   // Clean up if thread creation fails
         return false;
     }
 
-    return awaitable->Await();
+    fprintf(stdout, "[Wintun] Start waiting for receive thread name='%s'\r\n",
+        ppp::text::Encoding::wstring_to_utf8(adapter_name_).data());
+    const bool ready = awaitable->Await();
+    fprintf(stdout, "[Wintun] Start complete name='%s' ready=%d\r\n",
+        ppp::text::Encoding::wstring_to_utf8(adapter_name_).data(), ready ? 1 : 0);
+    return ready;
 }
 
 void WintunAdapter::Finalize() noexcept {
@@ -284,13 +375,19 @@ bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len) noexcept {
 }
 
 int WintunAdapter::GetInterfaceIndex() noexcept {
-    if (!adapter_handle_) return -1;
+    if (!adapter_handle_)
+    {
+        fprintf(stdout, "[Wintun] GetInterfaceIndex failed: adapter handle is null\r\n");
+        return -1;
+    }
 
     NET_LUID luid{};
     WintunGetAdapterLUID(adapter_handle_, &luid);
 
     NET_IFINDEX interface_index = 0;
-    if (ConvertInterfaceLuidToIndex(&luid, &interface_index) != NO_ERROR) {
+    DWORD error = ConvertInterfaceLuidToIndex(&luid, &interface_index);
+    if (error != NO_ERROR) {
+        fprintf(stdout, "[Wintun] ConvertInterfaceLuidToIndex failed error=%lu\r\n", error);
         return -1;
     }
 
@@ -304,7 +401,12 @@ bool WintunAdapter::Ready() noexcept {
 
 void WintunAdapter::ReceiveLoop() noexcept {
     HANDLE read_event = WintunGetReadWaitEvent(session_handle_);
-    if (!read_event || !quit_event_) return;
+    if (!read_event || !quit_event_)
+    {
+        fprintf(stdout, "[Wintun] receive loop cannot start read_event=%p quit_event=%p error=%lu\r\n",
+            read_event, quit_event_, static_cast<unsigned long>(GetLastError()));
+        return;
+    }
 
     HANDLE events[2] = { read_event, quit_event_ };
 
@@ -349,6 +451,7 @@ void WintunAdapter::ReceiveLoop() noexcept {
         }
 
         // Any other error – exit
+        fprintf(stdout, "[Wintun] receive loop stopping error=%lu\r\n", static_cast<unsigned long>(err));
         running_flag_.store(WINTUN_RUNING_STATE_STOP, std::memory_order_release);
         break;
     }

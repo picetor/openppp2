@@ -182,6 +182,11 @@ namespace ppp {
                 ProtectorNetworkPtr                                                 GetProtectorNetwork()        noexcept { return protect_network_; }
 #endif  
                 std::shared_ptr<ppp::configurations::AppConfiguration>              GetConfiguration()           noexcept { return configuration_; }
+                // Wintun may accept DNS configuration through netsh while its
+                // WMI view still reports an empty DNSServerSearchOrder. Keep
+                // the authoritative startup DNS list as a fallback for the
+                // takeover stage.
+                void                                                                SetConfiguredTunDns(const ppp::vector<boost::asio::ip::address>& addresses) noexcept { configured_tun_dns_ = addresses; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger()               noexcept { return exchanger_; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const boost::asio::ip::address& destination) noexcept;
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const ppp::string& hostname) noexcept;
@@ -555,6 +560,7 @@ namespace ppp {
 
                 std::shared_ptr<NetworkInterface>                                   tun_ni_;
                 std::shared_ptr<NetworkInterface>                                   underlying_ni_;
+                ppp::vector<boost::asio::ip::address>                               configured_tun_dns_;
                 ppp::string                                                         preferred_nic_;
                 boost::asio::ip::address                                            preferred_ngw_;
                 boost::asio::ip::address                                            preferred_ngw6_;

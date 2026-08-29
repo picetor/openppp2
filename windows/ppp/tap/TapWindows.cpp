@@ -17,6 +17,8 @@
 #include <Shellapi.h>
 #include <iphlpapi.h>
 
+#pragma comment(lib, "iphlpapi.lib")
+
 typedef ppp::net::IPEndPoint IPEndPoint;
 typedef ppp::net::Ipep       Ipep;
 
@@ -89,6 +91,117 @@ namespace ppp
             return SetDnsAddresses(interface_index, addresses);
         }
 
+        static bool SetAddressesByNetsh(int interface_index, uint32_t ip, uint32_t mask, uint32_t gw) noexcept
+        {
+            ppp::string interface_name = ppp::win32::network::GetInterfaceName(interface_index);
+            if (interface_name.empty())
+            {
+                fprintf(stdout, "[SetAddresses] netsh fallback cannot resolve interface name idx=%d\r\n", interface_index);
+                return false;
+            }
+
+            IPEndPoint ipEP(ip, 0);
+            IPEndPoint maskEP(mask, 0);
+            if (IPEndPoint::IsInvalid(ipEP) || IPEndPoint::IsInvalid(maskEP))
+            {
+                fprintf(stdout, "[SetAddresses] netsh fallback invalid address idx=%d ip=%u mask=%u\r\n",
+                    interface_index, ip, mask);
+                return false;
+            }
+
+            ppp::string arguments = "interface ipv4 set address name=\"";
+            arguments += interface_name;
+            arguments += "\" source=static address=";
+            arguments += ipEP.ToAddressString();
+            arguments += " mask=";
+            arguments += maskEP.ToAddressString();
+
+            IPEndPoint gwEP(gw, 0);
+            if (!IPEndPoint::IsInvalid(gwEP))
+            {
+                arguments += " gateway=";
+                arguments += gwEP.ToAddressString();
+                arguments += " gwmetric=1";
+            }
+
+            int return_code = INFINITE;
+            const bool launched = ppp::win32::Win32Native::Execute(false, "netsh.exe", arguments.data(), &return_code);
+            fprintf(stdout, "[SetAddresses] netsh idx=%d name='%s' launched=%d rc=%d\r\n",
+                interface_index, interface_name.data(), launched ? 1 : 0, return_code);
+            return launched && return_code == ERROR_SUCCESS;
+        }
+
+        static bool SetAddressesByIpHelper(int interface_index, uint32_t ip, uint32_t mask, uint32_t gw) noexcept
+        {
+            if (interface_index <= 0)
+            {
+                fprintf(stdout, "[SetAddresses-iphlpapi] FAIL: invalid interface index=%d\r\n", interface_index);
+                return false;
+            }
+
+            IPEndPoint ipEP(ip, 0);
+            IPEndPoint maskEP(mask, 0);
+            IPEndPoint gwEP(gw, 0);
+            const bool has_gateway = !IPEndPoint::IsInvalid(gwEP);
+
+            ULONG nte_context = 0;
+            ULONG nte_instance = 0;
+            // The address values used by this module are the same values as
+            // in_addr.s_addr: a DWORD whose bytes are already in network order.
+            // AddIPAddress expects that value directly; applying htonl here
+            // would reverse the address a second time on Windows.
+            DWORD address_error = ::AddIPAddress(
+                ip, mask, static_cast<DWORD>(interface_index),
+                &nte_context, &nte_instance);
+            const bool address_ok = address_error == NO_ERROR ||
+                address_error == ERROR_OBJECT_ALREADY_EXISTS ||
+                address_error == ERROR_ALREADY_EXISTS;
+            fprintf(stdout,
+                "[SetAddresses-iphlpapi] AddIPAddress idx=%d ip=%s mask=%s err=%lu ctx=%lu ok=%d\r\n",
+                interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(),
+                static_cast<unsigned long>(address_error), static_cast<unsigned long>(nte_context),
+                address_ok ? 1 : 0);
+
+            if (!address_ok || !has_gateway)
+            {
+                return address_ok;
+            }
+
+            MIB_IPFORWARDROW route;
+            ::ZeroMemory(&route, sizeof(route));
+            route.dwForwardDest = 0;
+            route.dwForwardMask = 0;
+            // MIB_IPFORWARDROW address fields use the same network-order
+            // representation as in_addr.s_addr.
+            route.dwForwardNextHop = gw;
+            route.dwForwardIfIndex = static_cast<DWORD>(interface_index);
+            route.dwForwardType = MIB_IPROUTE_TYPE_INDIRECT;
+            route.dwForwardProto = MIB_IPPROTO_NETMGMT;
+
+            MIB_IPINTERFACE_ROW interface_row;
+            ::ZeroMemory(&interface_row, sizeof(interface_row));
+            interface_row.Family = AF_INET;
+            interface_row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+            DWORD metric = 1;
+            DWORD interface_error = ::GetIpInterfaceEntry(&interface_row);
+            if (interface_error == NO_ERROR && interface_row.Metric > metric)
+            {
+                metric = interface_row.Metric;
+            }
+            route.dwForwardMetric1 = metric;
+
+            DWORD route_error = ::CreateIpForwardEntry(&route);
+            const bool route_ok = route_error == NO_ERROR ||
+                route_error == ERROR_OBJECT_ALREADY_EXISTS ||
+                route_error == ERROR_ALREADY_EXISTS;
+            fprintf(stdout,
+                "[SetAddresses-iphlpapi] CreateIpForwardEntry idx=%d gateway=%s metric=%lu interface_err=%lu err=%lu ok=%d\r\n",
+                interface_index, gwEP.ToAddressString().data(),
+                static_cast<unsigned long>(metric), static_cast<unsigned long>(interface_error),
+                static_cast<unsigned long>(route_error), route_ok ? 1 : 0);
+            return route_ok;
+        }
+
         bool TapWindows::SetAddresses(int interface_index, uint32_t ip, uint32_t mask, uint32_t gw) noexcept
         {
             IPEndPoint ipEP(ip, 0);
@@ -106,29 +219,35 @@ namespace ppp
             }
 
             IPEndPoint gwEP(gw, 0);
-            if (IPEndPoint::IsInvalid(gwEP))
-            {
-                ppp::string interface_name = ppp::win32::network::GetInterfaceName(interface_index);
-                if (interface_name.empty())
-                {
-                    fprintf(stdout, "[SetAddresses] FAIL: GetInterfaceName(%d) returned empty\r\n", interface_index);
-                    return false;
-                }
-
-                fprintf(stdout, "[SetAddresses] Using netsh: idx=%d name='%s' ip=%s mask=%s\r\n",
-                    interface_index, interface_name.data(), ipEP.ToAddressString().data(), maskEP.ToAddressString().data());
-                return ppp::win32::network::SetIPAddresses(interface_name, ipEP.ToAddressString(), maskEP.ToAddressString());
-            }
-
+            const bool has_gateway = !IPEndPoint::IsInvalid(gwEP);
             fprintf(stdout, "[SetAddresses] Using WMI: idx=%d ip=%s mask=%s gw=%s\r\n",
-                interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(), gwEP.ToAddressString().data());
-            if (!ppp::win32::network::SetIPAddresses(interface_index, { ipEP.ToAddressString() }, { maskEP.ToAddressString() }))
+                interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(),
+                has_gateway ? gwEP.ToAddressString().data() : "none");
+
+            bool wmi_ok = ppp::win32::network::SetIPAddresses(
+                interface_index, { ipEP.ToAddressString() }, { maskEP.ToAddressString() });
+            if (wmi_ok && has_gateway)
             {
-                fprintf(stdout, "[SetAddresses] FAIL: SetIPAddresses(WMI) failed\r\n");
-                return false;
+                wmi_ok = ppp::win32::network::SetDefaultIPGateway(interface_index, { gwEP.ToAddressString() });
+            }
+            if (wmi_ok)
+            {
+                return true;
             }
 
-            return ppp::win32::network::SetDefaultIPGateway(interface_index, { gwEP.ToAddressString() });
+            fprintf(stdout, "[SetAddresses] WMI configuration failed; trying netsh\r\n");
+            if (SetAddressesByNetsh(interface_index, ip, mask, gw))
+            {
+                return true;
+            }
+
+            // Wintun can have a valid interface index before its friendly name
+            // is exposed through the WMI adapter-configuration provider. In
+            // that state netsh may launch successfully but return code 1. The
+            // IP Helper API addresses the interface by index and works for
+            // both Wintun and TAP without relying on the Control Panel name.
+            fprintf(stdout, "[SetAddresses] netsh failed; trying IP Helper by interface index\r\n");
+            return SetAddressesByIpHelper(interface_index, ip, mask, gw);
         }
 
         bool TapWindows::FindAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept
@@ -176,31 +295,52 @@ namespace ppp
 
                 if (!ifname.empty())
                 {
-                    // Set primary DNS: netsh interface ip set dns name="..." static <dns>
+                    // Do not use system() here. Besides inheriting the shell,
+                    // it makes netsh's default DNS validation run inside the
+                    // core startup thread. On Wintun that validation can wait
+                    // several seconds (or until the TUI kills the core), so
+                    // RPC_LISTEN is never reached. Execute netsh directly and
+                    // disable validation: DNS is a local adapter setting, and
+                    // reachability is not a valid startup prerequisite.
                     {
-                        char cmd[512];
-                        ::snprintf(cmd, sizeof(cmd),
-                            "netsh interface ip set dns name=\"%s\" static %s",
-                            ifname.data(), dns_addresses_stloc[0].data());
-                        int rc = ::system(cmd);
-                        fprintf(stdout, "[SetAdapterInterface] netsh set dns 1: %s (rc=%d)\r\n",
-                            dns_addresses_stloc[0].data(), rc);
+                        ppp::string arguments = "interface ipv4 set dnsservers name=\"";
+                        arguments += ifname;
+                        arguments += "\" source=static address=";
+                        arguments += dns_addresses_stloc[0];
+                        arguments += " validate=no";
+                        int rc = INFINITE;
+                        const bool launched = ppp::win32::Win32Native::Execute(
+                            false, "netsh.exe", arguments.data(), &rc, 3000);
+                        fprintf(stdout, "[SetAdapterInterface] netsh set dns 1: %s (launched=%d rc=%d)\r\n",
+                            dns_addresses_stloc[0].data(), launched ? 1 : 0, rc);
                     }
-                    // Set secondary DNS: netsh interface ip add dns name="..." <dns> index=2
+                    // Set secondary DNS. Keep the same no-validation behavior
+                    // and log before/after every command so a future driver or
+                    // Windows-version-specific delay is visible immediately.
                     for (size_t i = 1; i < dns_addresses_stloc.size() && i < 4; ++i)
                     {
                         const auto& s = dns_addresses_stloc[i];
                         if (s.empty() || s == "255.255.255.255") continue;
-                        char cmd[512];
-                        ::snprintf(cmd, sizeof(cmd),
-                            "netsh interface ip add dns name=\"%s\" %s index=%zu",
-                            ifname.data(), s.data(), i + 1);
-                        int rc = ::system(cmd);
-                        fprintf(stdout, "[SetAdapterInterface] netsh add dns %zu: %s (rc=%d)\r\n",
-                            i + 1, s.data(), rc);
+                        fprintf(stdout, "[SetAdapterInterface] netsh add dns %zu begin: %s\r\n",
+                            i + 1, s.data());
+                        ppp::string arguments = "interface ipv4 add dnsservers name=\"";
+                        arguments += ifname;
+                        arguments += "\" address=";
+                        arguments += s;
+                        arguments += " index=";
+                        arguments += std::to_string(i + 1);
+                        arguments += " validate=no";
+                        int rc = INFINITE;
+                        const bool launched = ppp::win32::Win32Native::Execute(
+                            false, "netsh.exe", arguments.data(), &rc, 3000);
+                        fprintf(stdout, "[SetAdapterInterface] netsh add dns %zu: %s (launched=%d rc=%d)\r\n",
+                            i + 1, s.data(), launched ? 1 : 0, rc);
                     }
                 }
             }
+
+            fprintf(stdout, "[SetAdapterInterface] address/dns setup complete addr=%d dns=%d\r\n",
+                set_addr_ok ? 1 : 0, set_dns_ok ? 1 : 0);
 
             return set_addr_ok;
         }
@@ -220,11 +360,13 @@ namespace ppp
 
                 if (!wintun->Open())
                 {
+                    fprintf(stdout, "[TapWindows::CreateWintunAdapter] WintunAdapter::Open failed\r\n");
                     wintun->Stop();
                     return NULLPTR;
                 }
 
                 int interface_index = wintun->GetInterfaceIndex();
+                fprintf(stdout, "[TapWindows::CreateWintunAdapter] interface_index=%d\r\n", interface_index);
                 if (interface_index < 0)
                 {
                     wintun->Stop();
@@ -233,15 +375,19 @@ namespace ppp
 
                 if (!SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses))
                 {
+                    fprintf(stdout, "[TapWindows::CreateWintunAdapter] SetAdapterInterface failed\r\n");
                     wintun->Stop();
                     return NULLPTR;
                 }
 
+                fprintf(stdout, "[TapWindows::CreateWintunAdapter] starting Wintun receive thread\r\n");
                 if (!wintun->Start())
                 {
+                    fprintf(stdout, "[TapWindows::CreateWintunAdapter] WintunAdapter::Start failed\r\n");
                     wintun->Stop();
                     return NULLPTR;
                 }
+                fprintf(stdout, "[TapWindows::CreateWintunAdapter] Wintun receive thread started\r\n");
 
                 std::shared_ptr<TapWindows> tap = make_shared_object<TapWindows>(context, nic, wintun.get(), ip, gw, mask, hosted_network);
                 if (NULL == tap)
@@ -278,13 +424,13 @@ namespace ppp
                 return NULLPTR;
             }
 
-            IPEndPoint gwEP(ip, 0);
+            IPEndPoint gwEP(gw, 0);
             if (IPEndPoint::IsInvalid(gwEP))
             {
                 return NULLPTR;
             }
 
-            IPEndPoint maskEP(ip, 0);
+            IPEndPoint maskEP(mask, 0);
             if (IPEndPoint::IsInvalid(maskEP))
             {
                 return NULLPTR;
@@ -767,6 +913,8 @@ namespace ppp
                     }
 
                     ppp::string component_id = ToLower<ppp::string>(componentId);
+                    NetworkInterfacePtr suffix_match;
+                    ppp::string suffix_match_guid;
                     std::size_t interfaces_size = interfaces.size();
                     for (std::size_t i = 0; i < interfaces_size; i++)
                     {
@@ -788,6 +936,27 @@ namespace ppp
                             network_interface = ni;
                             return ni->Guid;
                         }
+
+                        // Windows appends a numeric suffix when an old TAP
+                        // adapter with the requested name is still present
+                        // (for example, "PPP 1"). Reuse only the adapter
+                        // whose name is the requested name plus a separator;
+                        // do not match arbitrary names such as "PPP-test".
+                        if (!suffix_match && connection_id.size() > component_id.size() &&
+                            connection_id.compare(0, component_id.size(), component_id) == 0 &&
+                            connection_id[component_id.size()] == ' ')
+                        {
+                            suffix_match = ni;
+                            suffix_match_guid = ni->Guid;
+                        }
+                    }
+
+                    if (suffix_match)
+                    {
+                        network_interface = suffix_match;
+                        fprintf(stdout, "[TapWindows] matched suffixed adapter name='%s' for requested='%s'\r\n",
+                            suffix_match->ConnectionId.data(), componentId.data());
+                        return suffix_match_guid;
                     }
                 }
                 return ppp::string();

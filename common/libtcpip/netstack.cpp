@@ -99,6 +99,8 @@ namespace lwip {
     static std::shared_ptr<boost::asio::deadline_timer> timeout_;
     static struct netif*                                netif_              = NULLPTR;
     static struct tcp_pcb*                              pcb_                = NULLPTR;
+    static std::atomic<bool>                            opened_             = false;
+    static bool                                         lwip_initialized_    = false;
     static Ptr2Socket                                   p2ss_;
     static Nat2Socket                                   n2ss_;
     static SynchronizedObject                           lockobj_;
@@ -780,8 +782,10 @@ namespace lwip {
                 uint32_t dip      = htonl(ip_addr_get_ip4_u32(dest));
                 uint32_t sip      = htonl(ip_addr_get_ip4_u32(src));
 
-                boost::asio::ip::tcp::endpoint dep(boost::asio::ip::address_v4(dip), h->dest);
-                boost::asio::ip::tcp::endpoint sep(boost::asio::ip::address_v4(sip), h->src);
+                // lwIP stores TCP header ports in network byte order, while
+                // Boost.Asio endpoints require host-order ports.
+                boost::asio::ip::tcp::endpoint dep(boost::asio::ip::address_v4(dip), ntohs(h->dest));
+                boost::asio::ip::tcp::endpoint sep(boost::asio::ip::address_v4(sip), ntohs(h->src));
 
                 int r = e(dep, sep, h->seqno, h->ackno, h->wnd);
                 LOG_DEBUG("lwip::netstack_tcp_do_before_accept: source=%s:%u, destination=%s:%u, seq=%u, ack=%u, wnd=%u, result=%d",
@@ -895,7 +899,7 @@ namespace lwip {
 
     bool netstack::open() noexcept {
         boost::asio::io_context& context = *netstack::Executor;
-        if (timeout_) {
+        if (opened_.load(std::memory_order_acquire) || timeout_) {
             return false;
         }
 
@@ -904,19 +908,31 @@ namespace lwip {
             return false;
         }
 
+        // lwIP's global pools and the static loopback netif are process-wide.
+        // They are intentionally initialized once; close() tears down the
+        // TCP objects but does not remove the static loopback netif, so a
+        // later in-process core start can reuse it safely.
+        if (!lwip_initialized_) {
 #if defined(_WIN32)
-        sys_init();
+            sys_init();
 #endif
-        lwip_init();
+            lwip_init();
+            lwip_initialized_ = true;
+        }
 
         struct netif* netif = netif_list;
+        if (!netif) {
+            timeout_.reset();
+            return false;
+        }
+
         netif->output = netstack_ip_output_v4; /*netif_loop_output_ipv4*/
 
         if (!netif->input) {
             netif->input = ::ip_input;
         }
 
-        ip4_addr_t ips[] = { netstack::IP, netstack::MASK, netstack::IP };
+        ip4_addr_t ips[] = { netstack::IP, netstack::MASK, netstack::GW };
         netif_set_ipaddr(netif, ips + 0);
         netif_set_netmask(netif, ips + 1);
         netif_set_gw(netif, ips + 2);
@@ -924,12 +940,20 @@ namespace lwip {
         netif_ = netif;
         netif_default = netif;
         if (!netstack_tcp_init()) {
+            netif_ = NULLPTR;
+            netif_default = NULLPTR;
+            timeout_.reset();
             return false;
         }
 
+        opened_.store(true, std::memory_order_release);
         NetstackInternal::run();
         netstack_check_timeouts();
         return true;
+    }
+
+    bool netstack::is_open() noexcept {
+        return opened_.load(std::memory_order_acquire);
     }
 
     void netstack::close() noexcept {
@@ -944,6 +968,8 @@ namespace lwip {
                 struct tcp_pcb* pcb = pcb_;
                 pcb_   = NULLPTR;
                 netif_ = NULLPTR;
+                netif_default = NULLPTR;
+                opened_.store(false, std::memory_order_release);
 
                 boost::system::error_code ec;
                 std::shared_ptr<boost::asio::deadline_timer> timeout = std::move(timeout_);

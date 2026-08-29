@@ -22,6 +22,7 @@ namespace ppp
             static void*                                        GetProcAddress(const char* moduleName, const char* functionName) noexcept;
             static bool                                         DnsFlushResolverCache() noexcept;
             static bool                                         Execute(bool runas, const char* filePath, const char* argumentText, int* returnCode) noexcept;
+            static bool                                         Execute(bool runas, const char* filePath, const char* argumentText, int* returnCode, uint32_t timeout_ms) noexcept;
             static bool                                         Execute(bool runas, const char* commandText) noexcept;
             static bool                                         EnableDebugPrivilege() noexcept;
             static bool                                         CloseHandle(const void* handle) noexcept;

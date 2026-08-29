@@ -1,15 +1,16 @@
 //! Native desktop client UI.
 //!
 //! This replaces the terminal renderer with an ordinary egui window. The
-//! C++ core remains headless and is still controlled through the existing
-//! loopback RPC contract; only the presentation and input layer changed.
+//! The front-end owns the C++ core through the in-process C ABI when the
+//! platform build provides it. External loopback RPC remains available for
+//! attaching to an already-running headless core.
 
 use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{
@@ -25,13 +26,18 @@ use ppp_tui::core::probe::{spawn_probe_loop, ProbeState, ProbeTable};
 use ppp_tui::core::settings::{normalize_log_level, normalize_tcp_ip_cc};
 use ppp_tui::core::traffic::{format_bytes, format_rate, TrafficHistory};
 use ppp_tui::rpc::schema::{Network, NetworkInterface, Outbound, Snapshot};
-use ppp_tui::rpc::{CoreCommand, Response, RpcClient};
+use ppp_tui::rpc::{CoreClient, CoreCommand, Response, RpcClient};
 
 const ACCENT: Color32 = Color32::from_rgb(86, 166, 255);
 const GOOD: Color32 = Color32::from_rgb(74, 196, 124);
 const WARN: Color32 = Color32::from_rgb(242, 184, 76);
 const BAD: Color32 = Color32::from_rgb(235, 97, 97);
 const MUTED: Color32 = Color32::from_rgb(155, 165, 180);
+
+// All TUI diagnostics, including startup and panic messages, must use the
+// same user-configured path as runtime TUI logs.  `None` is the explicit
+// opt-out controlled by `tui_log_enabled`.
+static TUI_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -40,6 +46,12 @@ enum View {
     Servers,
     Routes,
     Settings,
+}
+
+enum CoreLaunch {
+    Process(Launcher),
+    #[cfg(ppp_in_process_core)]
+    InProcess(CoreClient),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +123,8 @@ pub struct StartupSettings {
     pub tun_promisc: bool,
     pub tun_route: bool,
     pub tun_protect: bool,
+    #[serde(default = "default_tui_log_enabled")]
+    pub tui_log_enabled: bool,
     pub tui_log_file: String,
     pub rpc_address: String,
     pub rpc_token: String,
@@ -172,6 +186,7 @@ impl Default for StartupSettings {
             tun_promisc: true,
             tun_route: false,
             tun_protect: true,
+            tui_log_enabled: true,
             tui_log_file: "./ppp-tui.log".to_string(),
             rpc_address: String::new(),
             rpc_token: String::new(),
@@ -286,6 +301,8 @@ impl StartupSettings {
         let tun_promisc = command_bool(&core_args, "--tun-promisc", defaults.tun_promisc);
         let tun_route = command_bool(&core_args, "--tun-route", defaults.tun_route);
         let tun_protect = command_bool(&core_args, "--tun-protect", defaults.tun_protect);
+        let tui_log_enabled =
+            command_bool(&core_args, "--tui-log-enabled", defaults.tui_log_enabled);
         let tui_log_file =
             command_value(&core_args, "--tui-log").unwrap_or_else(|| defaults.tui_log_file.clone());
 
@@ -355,6 +372,7 @@ impl StartupSettings {
             tun_promisc,
             tun_route,
             tun_protect,
+            tui_log_enabled,
             tui_log_file,
             rpc_address,
             rpc_token,
@@ -379,6 +397,12 @@ impl StartupSettings {
         let Ok(mut saved) = serde_json::from_str::<StartupSettings>(&contents) else {
             return;
         };
+        if !contents.contains("\"tui_log_enabled\"") {
+            // Older configurations used an empty path as the opt-out. Keep
+            // that intent only during migration; the boolean is authoritative
+            // for all subsequently saved configurations.
+            saved.tui_log_enabled = !saved.tui_log_file.trim().is_empty();
+        }
         if !contents.contains("\"mode\"") {
             saved.mode = if saved.tun_enabled {
                 "client".to_string()
@@ -431,9 +455,10 @@ pub struct DesktopApp {
     selected_local_server: Option<usize>,
     runtime_server_selection: usize,
     catalog_core: bool,
-    rpc: Option<RpcClient>,
+    rpc: Option<CoreClient>,
     launcher: Option<Launcher>,
-    launch_rx: Option<Receiver<Result<Launcher, String>>>,
+    in_process_core: bool,
+    launch_rx: Option<Receiver<Result<CoreLaunch, String>>>,
     rpc_connect_rx: Option<Receiver<Result<TcpStream, String>>>,
     rpc_connecting: bool,
     snapshot: Option<Snapshot>,
@@ -504,6 +529,7 @@ impl DesktopApp {
             catalog_core: false,
             rpc: None,
             launcher: None,
+            in_process_core: false,
             launch_rx: None,
             rpc_connect_rx: None,
             rpc_connecting: false,
@@ -528,6 +554,10 @@ impl DesktopApp {
         ));
         boot_log("DesktopApp::new done");
         app
+    }
+
+    fn has_owned_core(&self) -> bool {
+        self.launcher.is_some() || self.in_process_core
     }
 
     fn needs_admin(&self) -> bool {
@@ -568,17 +598,28 @@ impl DesktopApp {
                     self.launch_rx = None;
                     self.launching = false;
                     match result {
-                        Ok(launcher) => {
+                        Ok(CoreLaunch::Process(launcher)) => {
                             boot_log(&format!(
-                                "poll_core: core launched endpoint={} catalog_core={}",
+                                "poll_core: process core launched endpoint={} catalog_core={}",
                                 launcher.endpoint, self.catalog_core
                             ));
                             self.status = format!("核心已启动 · RPC {}", launcher.endpoint);
-                            self.rpc = Some(RpcClient::new(
+                            self.rpc = Some(CoreClient::rpc(
                                 launcher.endpoint.clone(),
                                 launcher.token.clone(),
                             ));
                             self.launcher = Some(launcher);
+                            self.in_process_core = false;
+                            self.error = None;
+                            self.auto_restart_count = 0;
+                        }
+                        #[cfg(ppp_in_process_core)]
+                        Ok(CoreLaunch::InProcess(client)) => {
+                            boot_log("poll_core: in-process core started");
+                            self.status = "核心已启动 · 同进程".to_string();
+                            self.rpc = Some(client);
+                            self.launcher = None;
+                            self.in_process_core = true;
                             self.error = None;
                             self.auto_restart_count = 0;
                         }
@@ -707,44 +748,51 @@ impl DesktopApp {
         // loses its core.  An intentional stop_core() already took the
         // launcher out of self.launcher, so this only fires on unexpected
         // exits.
-        if !self.launching && self.launcher.is_some() {
-            let exited = self
-                .launcher
-                .as_mut()
-                .map(|launcher| launcher.has_exited().is_some())
-                .unwrap_or(false);
-            if exited {
-                let was_catalog = self.catalog_core;
-                let view = self.view;
-                boot_log("poll_core: core exited unexpectedly; scheduling auto-restart");
-                self.rpc = None;
-                self.rpc_connect_rx = None;
-                self.rpc_connecting = false;
-                self.launcher = None;
-                self.snapshot = None;
-                self.traffic.reset();
-                self.auto_restart_count += 1;
-                if self.auto_restart_count <= 3 {
-                    self.status =
-                        format!("核心异常退出，自动重启中（{}/3）…", self.auto_restart_count);
-                    boot_log(&format!(
-                        "poll_core: auto-restart attempt {}/3 catalog_core={}",
-                        self.auto_restart_count, was_catalog
-                    ));
-                    if was_catalog {
-                        self.start_catalog_core();
-                    } else {
-                        self.start_embedded_to(view);
-                    }
+        let process_exited = self
+            .launcher
+            .as_mut()
+            .map(|launcher| launcher.has_exited().is_some())
+            .unwrap_or(false);
+        #[cfg(ppp_in_process_core)]
+        let in_process_exited = self.in_process_core
+            && self
+                .rpc
+                .as_ref()
+                .map(|core| !core.is_running())
+                .unwrap_or(true);
+        #[cfg(not(ppp_in_process_core))]
+        let in_process_exited = false;
+        if !self.launching && (process_exited || in_process_exited) {
+            let was_catalog = self.catalog_core;
+            let view = self.view;
+            boot_log("poll_core: core exited unexpectedly; scheduling auto-restart");
+            self.rpc = None;
+            self.rpc_connect_rx = None;
+            self.rpc_connecting = false;
+            self.launcher = None;
+            self.in_process_core = false;
+            self.snapshot = None;
+            self.traffic.reset();
+            self.auto_restart_count += 1;
+            if self.auto_restart_count <= 3 {
+                self.status = format!("核心异常退出，自动重启中（{}/3）…", self.auto_restart_count);
+                boot_log(&format!(
+                    "poll_core: auto-restart attempt {}/3 catalog_core={}",
+                    self.auto_restart_count, was_catalog
+                ));
+                if was_catalog {
+                    self.start_catalog_core();
                 } else {
-                    self.status = "核心多次异常退出，已停止自动重启".to_string();
-                    self.error = Some(
-                        "核心连续 3 次异常退出，已停止自动重启；请检查网络与配置后手动启动。"
-                            .to_string(),
-                    );
-                    boot_log("poll_core: auto-restart limit reached");
-                    self.auto_restart_count = 0;
+                    self.start_embedded_to(view);
                 }
+            } else {
+                self.status = "核心多次异常退出，已停止自动重启".to_string();
+                self.error = Some(
+                    "核心连续 3 次异常退出，已停止自动重启；请检查网络与配置后手动启动。"
+                        .to_string(),
+                );
+                boot_log("poll_core: auto-restart limit reached");
+                self.auto_restart_count = 0;
             }
         }
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -830,6 +878,7 @@ impl DesktopApp {
         }
     }
 
+    #[cfg(not(ppp_in_process_core))]
     fn catalog_core_args(&self) -> Vec<String> {
         let mut args = normalize_core_args(split_command_line(&self.settings.command));
         for name in [
@@ -839,6 +888,7 @@ impl DesktopApp {
             "--rpc-max-clients",
             "--log-level",
             "--tui-log",
+            "--tui-log-enabled",
             "--lwip",
             "--rt",
             "--dns",
@@ -929,6 +979,7 @@ impl DesktopApp {
             "--catalog-only",
             "--log-level",
             "--tui-log",
+            "--tui-log-enabled",
         ] {
             remove_command_argument(&mut args, name);
         }
@@ -1175,6 +1226,7 @@ impl DesktopApp {
             &self.settings.log_file,
             "./ppp-core.log",
         );
+        set_command_argument(&mut args, "--log-level", &self.settings.log_level);
         args
     }
 
@@ -1186,7 +1238,7 @@ impl DesktopApp {
         if self.launching {
             return;
         }
-        if self.launcher.is_some() {
+        if self.has_owned_core() {
             if self.catalog_core {
                 self.stop_core(true);
             } else {
@@ -1200,11 +1252,25 @@ impl DesktopApp {
     }
 
     fn start_catalog_core(&mut self) {
-        if self.launching || self.launcher.is_some() {
+        if self.launching || self.has_owned_core() {
             return;
         }
-        let args = self.catalog_core_args();
-        self.launch_core_with_args(args, true, View::Servers, "正在准备服务器配置…");
+        #[cfg(ppp_in_process_core)]
+        {
+            // Server discovery/probing is already implemented in Rust.  The
+            // in-process C++ core is reserved for the actual VPN runtime;
+            // starting a temporary catalog core would initialize the global
+            // C++ executor twice in one process.
+            self.catalog_core = false;
+            self.view = View::Servers;
+            self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
+            return;
+        }
+        #[cfg(not(ppp_in_process_core))]
+        {
+            let args = self.catalog_core_args();
+            self.launch_core_with_args(args, true, View::Servers, "正在准备服务器配置…");
+        }
     }
 
     fn launch_core_with_args(
@@ -1246,8 +1312,24 @@ impl DesktopApp {
         std::thread::spawn(move || {
             boot_log("launch worker: spawn begin");
             let result = match core_path {
-                Some(path) => Launcher::spawn_in(&path, &args, &working_dir),
-                None => Launcher::spawn_embedded_in(&args, &working_dir),
+                Some(path) => {
+                    Launcher::spawn_in(&path, &args, &working_dir).map(CoreLaunch::Process)
+                }
+                None => {
+                    #[cfg(ppp_in_process_core)]
+                    {
+                        // The C++ core must not render its legacy console
+                        // dashboard into the Rust window. Headless here
+                        // means “no core UI”, not “use RPC”.
+                        let mut in_process_args = args.clone();
+                        set_command_argument(&mut in_process_args, "--headless", "yes");
+                        CoreClient::in_process(&in_process_args).map(CoreLaunch::InProcess)
+                    }
+                    #[cfg(not(ppp_in_process_core))]
+                    {
+                        Launcher::spawn_embedded_in(&args, &working_dir).map(CoreLaunch::Process)
+                    }
+                }
             }
             .map_err(|error| format!("{error:#}"));
             boot_log(&format!(
@@ -1266,15 +1348,19 @@ impl DesktopApp {
         }
         self.save_settings();
         self.stop_core(false);
-        self.rpc = Some(RpcClient::new(
+        self.rpc = Some(CoreClient::rpc(
             address,
             self.settings.rpc_token.trim().to_string(),
         ));
+        self.in_process_core = false;
         self.status = "准备连接已有核心".to_string();
         self.error = None;
     }
 
     fn save_settings(&mut self) {
+        // Apply the new destination before the confirmation log is emitted so
+        // Save takes effect immediately, including when logging was disabled.
+        configure_tui_logging(&self.settings);
         match self.settings.save() {
             Ok(()) => {
                 self.write_tui_log("settings saved");
@@ -1414,22 +1500,12 @@ impl DesktopApp {
     }
 
     fn write_tui_log(&self, message: &str) {
-        if self.settings.tui_log_file.trim().is_empty() {
-            return;
-        }
-        let base = working_directory(&self.settings);
-        let path = resolve_from_working_dir(&base, &self.settings.tui_log_file);
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
-            return;
-        };
+        configure_tui_logging(&self.settings);
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or_default();
-        let _ = writeln!(file, "[{timestamp}] {message}");
+        append_tui_log(&format!("[{timestamp}] {message}\n"));
     }
 
     fn refresh_server_catalog(&mut self) {
@@ -1524,6 +1600,8 @@ impl DesktopApp {
         self.settings.tun_promisc = command_bool(&args, "--tun-promisc", self.settings.tun_promisc);
         self.settings.tun_route = command_bool(&args, "--tun-route", self.settings.tun_route);
         self.settings.tun_protect = command_bool(&args, "--tun-protect", self.settings.tun_protect);
+        self.settings.tui_log_enabled =
+            command_bool(&args, "--tui-log-enabled", self.settings.tui_log_enabled);
         import_text(&args, "--tui-log", &mut self.settings.tui_log_file);
         self.settings.tun_host = command_bool(&args, "--tun-host", self.settings.tun_host);
         self.settings.tun_vnet = command_bool(&args, "--tun-vnet", self.settings.tun_vnet);
@@ -1541,7 +1619,7 @@ impl DesktopApp {
     }
 
     fn restart_core(&mut self) {
-        if self.launcher.is_none() {
+        if !self.has_owned_core() {
             self.error = Some("只有由本窗口启动的核心才能在这里重启".to_string());
             return;
         }
@@ -1553,16 +1631,23 @@ impl DesktopApp {
     fn stop_core(&mut self, shutdown: bool) {
         boot_log(&format!(
             "stop_core: shutdown={shutdown} launcher={} rpc={} launching={}",
-            self.launcher.is_some(),
+            self.has_owned_core(),
             self.rpc.is_some(),
             self.launching,
         ));
-        let owns_core = self.launcher.is_some();
+        let owns_core = self.has_owned_core();
         if let Some(rpc) = self.rpc.as_mut() {
             // Never use the live UI session as the shutdown transport. It
             // may be unauthenticated or have an in-flight snapshot; the
             // owned Launcher performs a fresh authenticated shutdown below.
             rpc.disconnect();
+        }
+        #[cfg(ppp_in_process_core)]
+        if shutdown && self.in_process_core {
+            if let Some(rpc) = self.rpc.as_ref() {
+                boot_log("stop_core: stopping in-process core and restoring network");
+                let _ = rpc.stop_owned();
+            }
         }
         if shutdown && owns_core {
             if let Some(launcher) = self.launcher.as_mut() {
@@ -1576,6 +1661,7 @@ impl DesktopApp {
         if let Some(mut launcher) = self.launcher.take() {
             launcher.stop();
         }
+        self.in_process_core = false;
         self.catalog_core = false;
         self.snapshot = None;
         self.traffic.reset();
@@ -1651,7 +1737,7 @@ impl DesktopApp {
                     let _ = self.settings.save();
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                if self.launcher.is_some() && !self.catalog_core {
+                if self.has_owned_core() && !self.catalog_core {
                     if ui.button("停止核心").clicked() {
                         self.stop_active_core_and_return_to_ready();
                     }
@@ -1974,7 +2060,7 @@ impl DesktopApp {
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if self.launcher.is_some() && !self.catalog_core {
+                if self.has_owned_core() && !self.catalog_core {
                     if ui.button("停止 VPN 核心").clicked() {
                         self.stop_active_core_and_return_to_ready();
                     }
@@ -1996,7 +2082,7 @@ impl DesktopApp {
                 } else if ui.button("打开启动设置").clicked() {
                     self.view = View::Settings;
                 }
-                if self.rpc.is_none() && self.launcher.is_none() {
+                if self.rpc.is_none() && !self.has_owned_core() {
                     if ui.button("查看服务器").clicked() {
                         self.view = View::Servers;
                     }
@@ -2237,7 +2323,7 @@ impl DesktopApp {
             }
             let can_start = self.selected_local_server.is_some()
                 && !self.launching
-                && (self.launcher.is_none() || self.catalog_core);
+                && (!self.has_owned_core() || self.catalog_core);
             if ui
                 .add_enabled(can_start, egui::Button::new("选择并启动"))
                 .clicked()
@@ -2459,7 +2545,7 @@ impl DesktopApp {
 
     fn draw_routes(&mut self, ui: &mut egui::Ui) {
         ui.heading("分流");
-        let can_restart = self.launcher.is_some() && !self.launching;
+        let can_restart = self.has_owned_core() && !self.launching;
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("选择分流引擎并编辑对应文件；保存后可应用设置并重启核心。")
@@ -2809,9 +2895,20 @@ impl DesktopApp {
                 ui,
                 "TUI 日志文件",
                 "--tui-log",
-                "Rust 界面的启动、设置和错误日志；留空则不写 TUI 日志",
+                "Rust 界面的启动、设置和错误日志；由开关控制是否写入",
                 &mut self.settings.tui_log_file,
-                "例如 ./ppp-tui.log；留空关闭 TUI 文件日志",
+                "例如 ./ppp-tui.log；留空使用工作目录下的默认文件",
+            );
+            if ui
+                .checkbox(&mut self.settings.tui_log_enabled, "启用 TUI 日志")
+                .changed()
+            {
+                configure_tui_logging(&self.settings);
+            }
+            ui.label(
+                RichText::new("关闭后不写入启动、设置和错误日志；保存后立即生效")
+                    .small()
+                    .color(MUTED),
             );
         });
         ui.add_space(12.0);
@@ -3297,7 +3394,7 @@ impl DesktopApp {
                 };
                 if ui
                     .add_enabled(
-                        !self.launching && self.launcher.is_none(),
+                        !self.launching && !self.has_owned_core(),
                         egui::Button::new(launch_label),
                     )
                     .clicked()
@@ -3343,6 +3440,10 @@ impl DesktopApp {
 
 impl App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // The settings page edits this field in place. Refresh the shared
+        // logger before any per-frame diagnostics so clearing the path takes
+        // effect without requiring a restart.
+        configure_tui_logging(&self.settings);
         self.frame_counter = self.frame_counter.saturating_add(1);
         let frame = self.frame_counter;
         let verbose = self.verbose_frame_log();
@@ -3352,7 +3453,7 @@ impl App for DesktopApp {
                 self.view,
                 self.first_frame_rendered,
                 self.catalog_core,
-                self.launcher.is_some(),
+                self.has_owned_core(),
                 self.rpc.is_some(),
                 self.launching,
                 self.local_servers.len(),
@@ -4611,6 +4712,7 @@ fn relaunch_elevated() -> anyhow::Result<()> {
 }
 
 pub fn run(settings: StartupSettings) -> eframe::Result<()> {
+    configure_tui_logging(&settings);
     boot_log("run() entered");
     // 单实例保护：同一时间只允许一个 GUI 窗口。回环 TCP 端口锁
     // （跨平台、零依赖）；重复启动时提示并退出，避免多个实例抢占
@@ -4640,10 +4742,7 @@ pub fn run(settings: StartupSettings) -> eframe::Result<()> {
         {
             let message = "另一个 ppp-tui 窗口已在运行。\n请先关闭它，或检查任务管理器中的 ppp-tui.exe / ppp-core.exe 残留进程。";
             boot_log("single-instance lock failed after retries; treating as existing instance");
-            write_diagnostic_log(
-                "ppp-tui.log",
-                "[single-instance] 另一个 ppp-tui 实例已在运行，本次启动退出\n",
-            );
+            write_diagnostic_log("[single-instance] 另一个 ppp-tui 实例已在运行，本次启动退出\n");
             #[cfg(windows)]
             {
                 let script = format!(
@@ -4663,12 +4762,24 @@ pub fn run(settings: StartupSettings) -> eframe::Result<()> {
     }
 
     boot_log("building NativeOptions");
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("PPP PRIVATE NETWORK™ 2")
+        .with_inner_size([1160.0, 780.0])
+        .with_min_inner_size([900.0, 620.0])
+        // The Windows drag-and-drop bridge initializes OLE as STA.  Some
+        // environments initialize the GUI thread as MTA first, which makes
+        // winit panic with RPC_E_CHANGED_MODE while creating the window.
+        // TUI does not currently consume file-drop events, so avoid that
+        // optional bridge and keep startup compatible with both COM modes.
+        .with_drag_and_drop(false)
+        .with_visible(true);
+    if let Some(icon) = bundled_window_icon() {
+        viewport = viewport.with_icon(icon);
+    } else {
+        boot_log("failed to decode bundled window icon; using eframe default");
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("PPP PRIVATE NETWORK™ 2")
-            .with_inner_size([1160.0, 780.0])
-            .with_min_inner_size([900.0, 620.0])
-            .with_visible(true),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -4685,47 +4796,97 @@ pub fn run(settings: StartupSettings) -> eframe::Result<()> {
     result
 }
 
-/// Startup progress log appended to ./ppp-tui.log (the same file as the
-/// runtime TUI log, so all TUI diagnostics share one file) in the process
-/// working directory.  Independent of StartupSettings so it works even when
-/// the app stalls before settings are loaded.
+/// Configure the shared TUI log destination. The explicit boolean controls
+/// whether startup diagnostics and panic reporting are persisted; an empty
+/// enabled path falls back to the default file in the working directory.
+pub(crate) fn configure_tui_logging(settings: &StartupSettings) {
+    let path = tui_log_path_for_settings(settings);
+    let cell = TUI_LOG_PATH.get_or_init(|| Mutex::new(None));
+    *cell.lock().unwrap_or_else(|poison| poison.into_inner()) = path;
+}
+
+fn tui_log_path_for_settings(settings: &StartupSettings) -> Option<PathBuf> {
+    if !settings.tui_log_enabled {
+        return None;
+    }
+    let base = working_directory(settings);
+    let path = if settings.tui_log_file.trim().is_empty() {
+        "./ppp-tui.log"
+    } else {
+        settings.tui_log_file.trim()
+    };
+    Some(resolve_from_working_dir(&base, path))
+}
+
+fn default_tui_log_enabled() -> bool {
+    true
+}
+
+/// Startup progress log uses the same configured path as runtime TUI logs.
 fn boot_log(message: &str) {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
-    write_diagnostic_log("ppp-tui.log", &format!("[{timestamp}] {message}\n"));
+    write_diagnostic_log(&format!("[{timestamp}] {message}\n"));
 }
 
-/// Write startup diagnostics somewhere writable even when the executable is
-/// under an administrator-owned deployment directory.  Direct double-click
-/// launches commonly cannot append beside the exe, while an elevated batch
-/// launch can; trying all locations keeps both modes diagnosable.
-pub(crate) fn write_diagnostic_log(name: &str, message: &str) {
-    let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            paths.push(parent.join(name));
-        }
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        paths.push(PathBuf::from(local_app_data).join("openppp2").join(name));
-    }
-    paths.push(std::env::temp_dir().join("openppp2").join(name));
-    if let Ok(current_dir) = std::env::current_dir() {
-        paths.push(current_dir.join(name));
-    }
+fn configured_tui_log_path() -> Option<PathBuf> {
+    TUI_LOG_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
 
-    for path in paths {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = file.write_all(message.as_bytes());
-            let _ = file.flush();
-            return;
-        }
+fn bundled_window_icon() -> Option<egui::IconData> {
+    const ICON_ICO: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../icon.ico"));
+    let decoded = image::load_from_memory_with_format(ICON_ICO, image::ImageFormat::Ico)
+        .ok()
+        .or_else(|| {
+            let embedded_png = embedded_ico_payload(ICON_ICO)?;
+            image::load_from_memory_with_format(embedded_png, image::ImageFormat::Png).ok()
+        })?;
+    let width = decoded.width();
+    let height = decoded.height();
+    let rgba = decoded.to_rgba8();
+    Some(egui::IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
+}
+
+fn embedded_ico_payload(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 22 || bytes.get(0..4) != Some(&[0, 0, 1, 0]) {
+        return None;
     }
+    let image_size = u32::from_le_bytes(bytes[14..18].try_into().ok()?) as usize;
+    let image_offset = u32::from_le_bytes(bytes[18..22].try_into().ok()?) as usize;
+    let image_end = image_offset.checked_add(image_size)?;
+    let payload = bytes.get(image_offset..image_end)?;
+    payload.starts_with(b"\x89PNG\r\n\x1a\n").then_some(payload)
+}
+
+fn append_tui_log(message: &str) {
+    let Some(path) = configured_tui_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = file.write_all(message.as_bytes());
+    let _ = file.flush();
+}
+
+/// Write a startup diagnostic using the configured TUI path. Unlike the old
+/// fallback search, this never creates a hidden default log when logging is
+/// disabled in the settings page.
+pub(crate) fn write_diagnostic_log(message: &str) {
+    append_tui_log(message);
 }
 
 #[cfg(test)]
@@ -4781,5 +4942,43 @@ mod tests {
             Some("8080".to_string())
         );
         assert_eq!(proxy_port_from_display("off"), None);
+    }
+
+    #[test]
+    fn disabled_tui_logging_ignores_configured_path() {
+        let mut settings = StartupSettings::default();
+        settings.tui_log_enabled = false;
+        settings.tui_log_file = "custom.log".to_string();
+        assert!(tui_log_path_for_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn enabled_tui_logging_uses_default_when_path_is_empty() {
+        let mut settings = StartupSettings::default();
+        settings.tui_log_file.clear();
+        let path = tui_log_path_for_settings(&settings).expect("logging is enabled");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("ppp-tui.log")
+        );
+    }
+
+    #[test]
+    fn client_core_log_level_is_forwarded_after_owned_arguments_are_removed() {
+        let mut args = vec!["--mode=client".to_string(), "--log-level=error".to_string()];
+        remove_command_argument(&mut args, "--log-level");
+        set_command_argument(&mut args, "--log-level", "debug");
+        assert_eq!(
+            command_value(&args, "--log-level").as_deref(),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn bundled_window_icon_is_decodable() {
+        let icon = bundled_window_icon().expect("repository icon.ico should decode");
+        assert_eq!(icon.width, icon.height);
+        assert!(icon.width >= 16);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
     }
 }

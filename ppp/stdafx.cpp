@@ -904,7 +904,7 @@ namespace ppp {
 
         return SetConsoleCursorPosition(hConsole, pos);
 #else
-        return ::fprintf(stdout, previous ? "\033[%dA" : "\033[%dB", line) > 0;
+        return (::fprintf)(stdout, previous ? "\033[%dA" : "\033[%dB", line) > 0;
 #endif
     }
 
@@ -926,7 +926,7 @@ namespace ppp {
         COORD coord = { (SHORT)x, (SHORT)y };
         return ::SetConsoleCursorPosition(hConsole, coord);
 #else
-        return ::fprintf(stdout, "\033[%d;%dH", x, y) > 0;
+        return (::fprintf)(stdout, "\033[%d;%dH", x, y) > 0;
 #endif
     }
 

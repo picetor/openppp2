@@ -2543,6 +2543,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "eframe",
+ "image",
  "ratatui",
  "serde",
  "serde_json",

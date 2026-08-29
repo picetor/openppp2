@@ -30,7 +30,7 @@ case "${variant}" in
     *) cmake_flags="${cmake_flags} -DNOT_HAVE_SIMD=ON" ;;
 esac
 
-rm -rf build bin/ppp
+rm -rf build bin/ppp bin/libppp-core.a
 cmake -S . -B build ${cmake_flags}
 cmake --build build --parallel "$(getconf _NPROCESSORS_ONLN)"
 

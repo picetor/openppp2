@@ -327,7 +327,7 @@ namespace ppp
                 bool                            try_open_loopback() noexcept
                 {
                     SynchronizedObjectScope scope(syncobj_);
-                    if (opened_)
+                    if (opened_ && lwip::netstack::is_open())
                     {
                         return true;
                     }

@@ -1,7 +1,7 @@
 # ppp-tui — Rust native desktop client for openppp2
 
-独立 Rust 原生窗口客户端，连接 C++ 核心（`ppp --headless --rpc-listen`）的本地
-JSON-RPC 通道。窗口使用鼠标点击操作，不再依赖 Windows Terminal，也不显示 Logs 页面。
+独立 Rust 原生窗口客户端。Release 构建将 C++ 核心静态链接进 TUI/CLI，窗口和终端
+直接通过稳定 C ABI 控制同一进程内的核心；连接已有核心时仍支持本地 JSON-RPC。
 
 ## 构建
 
@@ -13,8 +13,9 @@ cargo build --release
 # 产物: target\release\ppp-tui.exe
 ```
 
-默认构建会把仓库中可用的 `ppp.exe`（优先 `x64\Release`，其次
-`x64\Debug`）内嵌进 `ppp-tui.exe`。也可以显式指定核心产物：
+提供 `ppp-core` 静态库时，TUI/CLI 会直接链接核心，不会释放临时 `ppp.exe`。通过
+`PPP_TUI_CORE_LIB` 指定静态库，并用 `PPP_TUI_CORE_LIB_DIRS`、`PPP_TUI_CORE_LIBS`
+和 `PPP_TUI_CORE_SYSTEM_LIBS` 指定依赖库。若没有静态库，仍可显式指定兼容核心产物：
 
 ```powershell
 $env:PPP_TUI_CORE_PATH = "D:\path\to\x64\Release\ppp.exe"
@@ -29,10 +30,8 @@ cargo build --release
 .\build-standalone.ps1 -CoreConfiguration Debug
 ```
 
-发布时只需要 Rust TUI 可执行文件和用户自己的配置/规则文件，不需要另行
-分发 `ppp.exe`。启动时 TUI 会把内嵌核心释放到私有临时目录，以 headless
-隐藏子进程运行，不会打开外置控制台窗口；退出时自动停止并清理该临时目录。
-C++ TUI 源码不参与改动。
+发布时只需要 Rust TUI/CLI 可执行文件、驱动和用户自己的配置/规则文件，不需要另行
+分发 `ppp.exe`。显式使用 `PPP_TUI_CORE_PATH` 时才会走兼容的外部核心路径。
 
 > 2026-08-14 验证：`cargo build`（debug/release）零警告；`cargo test` 12/12
 > 通过（3 流量采样单元测试 + 7 契约黄金测试）。首次构建需访问 crates.io
@@ -80,12 +79,10 @@ tui\target\release\ppp-tui.exe
 ```
 
 窗口启动后可自由进入“总览 / 网络 / 服务器 / 分流 / 启动设置”，不强制固定操作顺序。
-启动后，Rust 界面会先启动一个目录核心：它使用 `--mode=proxy` 和
-`--catalog-only=yes`，只读取工作目录下的服务器目录（默认 `./config`），启动 RPC，
-不加载主 `--config`、不创建 TUN、不建立 VPN 链路，也不打开 HTTP/SOCKS 监听。
-“服务器”页会显示配置名、GUID、主入口和多入口；即使目录为空，目录核心也会保持运行。
-用户选中服务器后点击“进入总览并启动”，程序会停止目录核心，将选中的 JSON 作为
-`--config` 启动真正的内置核心，随后进入“总览 / 网络”等运行页面。
+启动后，Rust 界面直接读取工作目录下的服务器目录（默认 `./config`）并做 TCP 探测；
+“服务器”页会显示配置名、GUID、主入口和多入口，不启动临时核心。用户选中服务器后
+点击“进入总览并启动”，同一个 TUI/CLI 进程直接启动真正的 C++ 核心并随后进入
+“总览 / 网络”等运行页面。
 也可以先在“启动设置”中修改目录和启动参数，然后点击“刷新服务器配置”。
 默认启动参数由结构化设置生成，不再重复填充 `--mode`、RPC、TUN 默认值。也可以填写外部核心路径；
 留空外部路径即使用内置核心。窗口内还支持填入 RPC 地址和 Token 连接已有核心。
@@ -108,8 +105,8 @@ HTTP/SOCKS 端口留空时不覆盖选中的 `--config`，界面会读取当前�
 `geo-rules.yaml`、`geosite.dat` 和 `geoip.dat`，`no` 不读取用户分流规则。
 
 “高级启动参数”只用于未被界面接管的额外 CLI 参数。也可以粘贴完整启动命令，点击
-“从高级命令导入到上方设置”，程序会提取已支持的字段并去除重复参数；TUI 自动注入
-的 `--headless`、RPC 地址、RPC Token 不需要填写。
+“从高级命令导入到上方设置”，程序会提取已支持的字段并去除重复参数；外部兼容核心
+模式下才会自动注入 `--headless`、RPC 地址、RPC Token。
 
 “连接方式”中可以开启或关闭 `TUN VPN 模式`，以及开启 `系统代理`。TUN 模式关闭时
 核心使用 `--mode=proxy` 运行，并自动将 `--proxy-http-port` 与
@@ -131,8 +128,8 @@ tui/target/release/ppp-tui.exe --mode=client --config=./appsettings.json
 ```
 
 也兼容传统的核心启动写法。`start`、`ppp.exe`（包括 `start "标题" ppp.exe`）
-会被 TUI 自动识别并去除，剩余参数直接用于内置核心；因此不需要把核心文件另行
-放在 TUI 旁边：
+会被 TUI 自动识别并去除，剩余参数直接用于同进程核心；若显式配置 `--core-path`，
+才会改用外部核心：
 
 ```powershell
 tui/target/release/ppp-tui.exe start ppp.exe --mode=client --config=./config/rfcJP.json `
@@ -191,23 +188,23 @@ lwIP TCP 路径。当前默认建议使用 `auto`：Windows 使用 Wintun 时默
   数字 `1-5` 切页（F 键仅作增强）、`↑↓/j/k` 移动、`Enter` 执行、
   `p/o` 启动/停止核心、`/` 过滤服务器、`?` 帮助、`q` 退出（二次确认）；
   设置页 `Enter` 进入字段编辑（直接打字，`Esc` 取消，`Tab` 提交并下一个）。
-  不带核心参数启动时，CLI 会先启动无 TUN/无监听的目录核心并显示 TCP 探测延迟预览；
+  不带核心参数启动时，CLI 会直接显示 Rust TCP 探测延迟预览，不启动临时目录核心；
   命令行带 `--mode`、`--config` 等核心参数时会直接启动实际核心，行为与窗口版一致。
 - 启动后（窗口版总览页、服务器页；终端版服务器页）直接对 `./config/*.json` 的
   服务器地址做 TCP 延迟探测（每 5 秒刷新），无需启动核心即可看到各服务器延迟；
   只有点击“选择并启动”才会真正启动核心。核心启动后服务器页优先显示核心自身的探测结果。
 - 启动设置中的核心日志默认为 `./ppp-core.log`，TUI 日志统一写入 `./ppp-tui.log`。
   核心的 stdout 保留输出（RPC_LISTEN、崩溃前最后输出）也追加到核心日志文件；
-  TUI 的启动诊断、panic、运行日志全部合并进 `./ppp-tui.log`。TUI 日志路径留空时
-  完全不写 TUI 文件日志；日志开关是运行时设置，同一份 release 程序即可承担正常运行
-  和问题诊断，不需要另外打包一个 debug 版。
+  TUI 的启动诊断、panic、运行日志全部合并进 `./ppp-tui.log`。是否写入由“启用 TUI 日志”
+  开关控制；开关关闭时即使配置了路径也完全不写，开关开启但路径留空时使用工作目录下的
+  默认文件。保存设置会立即应用到当前进程，同一份 release 程序即可承担正常运行和问题诊断，
+  不需要另外打包一个 debug 版。
 - “服务器”页的“切换”和“Rank #1”按钮直接提交切换请求，不再弹确认框。
 - 关闭窗口或点击“停止核心”会先请求内置核心优雅退出，等待 DNS、路由和 TUN
   状态恢复后再结束进程；只有核心无响应时才强制结束。连接已有核心时只断开客户端。
-- 核心作为 TUI 的受控子进程：Windows 上通过 Job Object（KILL_ON_JOB_CLOSE）保证
-  TUI 无论正常退出、崩溃还是被强制结束，核心都不会残留成孤儿进程；核心异常退出
-  （崩溃、被杀、或核心自身 --link-restart 触发重启）时 TUI 会自动重新拉起（最多
-  连续 3 次），并给出明确提示。内嵌核心进程名为 ppp-tui-core.exe。
+- Release TUI/CLI 与核心在同一进程内：退出时通过 C ABI 请求核心同步执行 DNS、路由、
+  TUN 等清理，再释放核心线程；核心异常退出时界面会给出明确提示并按上限自动重启。
+  显式使用外部核心时，Windows Job Object 和原有子进程保护仍然生效。
 - `--link-restart` / `--auto-restart` 现在由启动设置页直接配置并转发给核心；核心执行
   优雅重启后，TUI 会重新连接。TUI 另外保留核心崩溃/被外部终止时的有限次数自动拉起，
   并通过 Job Object 约束子进程生命周期。

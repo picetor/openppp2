@@ -1,11 +1,12 @@
-//! The C++ headless core bundled into the Rust TUI executable at build time.
+//! Legacy child-process core resources.
 //!
-//! `build.rs` copies the selected `ppp.exe` into Cargo's `OUT_DIR`; the bytes
-//! below are then linked into `ppp-tui`.  The core is still launched as a
-//! child process so the existing local RPC boundary and the C++ TUI code stay
-//! unchanged.
+//! The in-process build links `ppp-core` directly and does not include an
+//! executable. These constants only exist for the compatibility build that
+//! still launches an embedded headless core.
 
+#[cfg(not(ppp_in_process_core))]
 pub const CORE_EXE: &[u8] = include_bytes!(env!("PPP_TUI_EMBEDDED_CORE"));
 
+#[cfg(not(ppp_in_process_core))]
 #[allow(dead_code)]
 pub const CORE_SOURCE: &str = env!("PPP_TUI_EMBEDDED_CORE_SOURCE");

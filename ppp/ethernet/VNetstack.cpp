@@ -230,7 +230,6 @@ namespace ppp {
                     ppp::net::Socket::SetSignalPipeline(handle, false);
                     
                     listenEP_ = IPEndPoint::ToEndPoint(Socket::GetLocalEndPoint(acceptor->GetHandle()));
-                    constantof(localPort) = listenEP_.Port;
                 }
             }
 
@@ -243,7 +242,11 @@ namespace ppp {
             lwip_ = lwip;
             acceptor_ = acceptor;
 
-            lwip::netstack::Localhost = localPort;
+            // IPEndPoint/Boost.Asio ports are host-order.  When localPort is
+            // zero the acceptor selects an ephemeral port; the old code tried
+            // to write that value through a const reference and then kept
+            // using the original zero, which made lwIP connect to 127.0.0.1:0.
+            lwip::netstack::Localhost = listenEP_.Port;
 #ifdef SYSNAT
             sysnat_ = SysnatAttachDriver(tap, sysnat_interface_name_);
 #endif
@@ -756,7 +759,11 @@ namespace ppp {
             const int dest_port = dest.port();
             const int src_port = src.port();
 
-            std::shared_ptr<TapTcpLink> link = this->LwIpAcceptLink(src_ip, dest_ip, src_port, dest_port);
+            // LwIpAcceptLink keeps the same wire-order port representation as
+            // the packet/link tables.  The callback endpoints themselves are
+            // Boost.Asio endpoints and therefore use host-order ports.
+            std::shared_ptr<TapTcpLink> link = this->LwIpAcceptLink(
+                src_ip, dest_ip, htons(static_cast<uint16_t>(src_port)), htons(static_cast<uint16_t>(dest_port)));
             if (NULLPTR == link) {
                 return -1;
             }
@@ -827,9 +834,12 @@ namespace ppp {
                 }
                 
                 link->dstAddr = dstAddr;
-                link->dstPort = ntohs(dstPort);
+                // Keep link/table ports in network byte order, just like the
+                // TCP header and the non-lwIP path.  Convert only at the
+                // Boost.Asio endpoint boundary below.
+                link->dstPort = static_cast<UInt16>(dstPort);
                 link->srcAddr = srcAddr;
-                link->srcPort = ntohs(srcPort);
+                link->srcPort = static_cast<UInt16>(srcPort);
                 link->natPort = (UInt16)key;
                 link->lwip = true;
                 link->closed = false;
@@ -839,8 +849,8 @@ namespace ppp {
                 break;
             }
 
-            boost::asio::ip::tcp::endpoint localEP = IPEndPoint::WrapAddressV4<boost::asio::ip::tcp>(srcAddr, srcPort);
-            boost::asio::ip::tcp::endpoint remoteEP = IPEndPoint::WrapAddressV4<boost::asio::ip::tcp>(dstAddr, dstPort);
+            boost::asio::ip::tcp::endpoint localEP = IPEndPoint::WrapAddressV4<boost::asio::ip::tcp>(srcAddr, ntohs(static_cast<uint16_t>(srcPort)));
+            boost::asio::ip::tcp::endpoint remoteEP = IPEndPoint::WrapAddressV4<boost::asio::ip::tcp>(dstAddr, ntohs(static_cast<uint16_t>(dstPort)));
 
             std::shared_ptr<TapTcpClient> socket = this->BeginAcceptClient(localEP, remoteEP);
             if (NULLPTR == socket) {

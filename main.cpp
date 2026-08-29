@@ -21,6 +21,7 @@
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/rpc/LocalRpcServer.h>
+#include <ppp/core/CoreApi.h>
 
 // Platform-specific includes
 #if defined(_WIN32)
@@ -65,6 +66,17 @@
 #include <sys/select.h>
 #include <termios.h>
 #endif
+
+#include <condition_variable>
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 // Using declarations for cleaner code
 using ppp::configurations::AppConfiguration;
@@ -464,6 +476,7 @@ private:
     ppp::transmissions::ITransmissionStatistics     transmission_statistics_;            // Traffic statistics
 
     bool                                            headless_                   = false; // Headless mode (no TUI)
+    bool                                            owns_console_presentation_  = true;  // Rust owns it for in-process hosting
     bool                                            catalog_only_               = false; // Load server directory without starting a VPN link
     ppp::string                                     rpc_listen_;                         // RPC listen address "ip:port"
     ppp::string                                     rpc_token_;                          // RPC authentication token
@@ -490,6 +503,65 @@ static std::mutex                                    g_rpc_logs_syncobj;
 static std::atomic<uint64_t>                         g_rpc_log_seq = 0;                   // Next seq to assign
 static std::atomic<uint64_t>                         g_rpc_logs_last_pushed_seq = 0;      // Seq pushed to RPC clients
 static constexpr std::size_t                         RPC_LOG_CAPACITY = 2000;
+static std::atomic<ppp_core_log_callback>            g_core_log_callback = nullptr;
+static std::atomic<void*>                             g_core_log_user_data = nullptr;
+// An in-process front-end owns the console/window lifecycle.  The standalone
+// core keeps its native console handlers and presentation behavior, while an
+// embedded core leaves those responsibilities to Rust.
+static std::atomic<bool>                               g_core_in_process_host = false;
+// There is one process-wide executor/default application. Reject a second
+// embedded core instead of allowing two front-ends to overwrite DEFAULT_.
+static std::atomic<bool>                               g_core_api_instance_active = false;
+// The PPP global constructor starts process-wide services (lwIP, DNS and
+// the executor tick thread). A TUI can stop and restart the owned core in the
+// same process, so those services must be initialized exactly once.
+static std::once_flag                                 g_core_runtime_initializer;
+static FILE*                                          g_core_log_file = nullptr;
+
+// A Rust TUI launches the compatibility core with stdout connected to a
+// pipe. CRT stdout is then fully buffered, which can hide the exact startup
+// stage until the process is killed on timeout. Keep startup diagnostics
+// observable even when the core fails before RPC_LISTEN is printed.
+static void ConfigureCoreOutputStreams() noexcept
+{
+    ::fflush(stdout);
+    ::setvbuf(stdout, NULLPTR, _IONBF, 0);
+    ::fflush(stderr);
+    ::setvbuf(stderr, NULLPTR, _IONBF, 0);
+}
+
+static void CloseCoreLogFile() noexcept
+{
+    // The asynchronous desktop logger must be drained before the file is
+    // closed. Otherwise a detached log worker from the previous in-process
+    // core can write into a closed FILE* during the next TUI restart.
+    ppp::diagnostics::FlushLogs();
+    if (NULLPTR != g_core_log_file)
+    {
+        fclose(g_core_log_file);
+        g_core_log_file = NULLPTR;
+    }
+    ppp::diagnostics::SetLogStream(stdout);
+}
+
+static void OpenCoreLogFile() noexcept
+{
+    if (LOG_FILE_PATH_.empty())
+    {
+        return;
+    }
+
+    FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
+    if (NULLPTR == log_file)
+    {
+        return;
+    }
+
+    setvbuf(log_file, NULLPTR, _IONBF, 0);
+    g_core_log_file = log_file;
+    ppp::diagnostics::SetLogStream(log_file);
+    fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
+}
 
 static void RpcLogSink(const char* tag, const char* text) noexcept {
     if (NULLPTR == tag || NULLPTR == text || text[0] == '\x0') return;
@@ -500,12 +572,22 @@ static void RpcLogSink(const char* tag, const char* text) noexcept {
     entry.line = text;
     entry.timestamp_ms = ppp::threading::Executors::GetTickCount();
 
-    std::lock_guard<std::mutex> scope(g_rpc_logs_syncobj);
-    if (g_rpc_logs.size() >= RPC_LOG_CAPACITY)
     {
-        g_rpc_logs.erase(g_rpc_logs.begin());
+        std::lock_guard<std::mutex> scope(g_rpc_logs_syncobj);
+        if (g_rpc_logs.size() >= RPC_LOG_CAPACITY)
+        {
+            g_rpc_logs.erase(g_rpc_logs.begin());
+        }
+        g_rpc_logs.emplace_back(std::move(entry));
     }
-    g_rpc_logs.emplace_back(std::move(entry));
+
+    // Never invoke a host callback while holding the ring-buffer mutex. A
+    // callback may enqueue another core/UI action and must not deadlock the
+    // diagnostics path.
+    ppp_core_log_callback callback = g_core_log_callback.load(std::memory_order_acquire);
+    if (NULLPTR != callback) {
+        callback(g_core_log_user_data.load(std::memory_order_acquire), tag, text);
+    }
 }
 
 #if defined(_MACOS)
@@ -582,28 +664,32 @@ static struct {
 // Constructor
 PppApplication::PppApplication() noexcept
 {
-    // Hide console cursor for cleaner output
-    ppp::HideConsoleCursor(true);
+    owns_console_presentation_ = !g_core_in_process_host.load(std::memory_order_acquire);
+    if (owns_console_presentation_)
+    {
+        // Hide console cursor for cleaner output
+        ppp::HideConsoleCursor(true);
 
 #if defined(_WIN32)
-    // Set console window title
-    SetConsoleTitleW(L"PPP PRIVATE NETWORK\u2122 2");
+        // Set console window title
+        SetConsoleTitleW(L"PPP PRIVATE NETWORK\u2122 2");
 
-    // Set console buffer and window size on Windows
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE); 
-    if (NULLPTR != hConsole)
-    {
-        COORD cSize = { 120, ppp::win32::Win32Native::IsWindows11OrLaterVersion() ? 46 : 47 };
-        if (SetConsoleScreenBufferSize(hConsole, cSize))
+        // Set console buffer and window size on Windows
+        HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (NULLPTR != hConsole)
         {
-            SMALL_RECT rSize = { 0, 0, cSize.X - 1, cSize.Y - 1 };
-            SetConsoleWindowInfo(hConsole, TRUE, &rSize);
+            COORD cSize = { 120, ppp::win32::Win32Native::IsWindows11OrLaterVersion() ? 46 : 47 };
+            if (SetConsoleScreenBufferSize(hConsole, cSize))
+            {
+                SMALL_RECT rSize = { 0, 0, cSize.X - 1, cSize.Y - 1 };
+                SetConsoleWindowInfo(hConsole, TRUE, &rSize);
+            }
         }
-    }
 
-    // Disable console close button to prevent accidental termination
-    ppp::win32::Win32Native::EnabledConsoleWindowClosedButton(false);
+        // Disable console close button to prevent accidental termination
+        ppp::win32::Win32Native::EnabledConsoleWindowClosedButton(false);
 #endif
+    }
 }
 
 // Destructor
@@ -615,13 +701,18 @@ PppApplication::~PppApplication() noexcept
 // Clean up resources
 void PppApplication::Release() noexcept 
 {
-    // Restore console cursor
-    ppp::HideConsoleCursor(false);
+    // Restore console presentation only when this application owns it.  In
+    // the in-process build Rust/egui/ratatui owns the terminal and window;
+    // the C++ destructor must not reset its cursor or close-button state.
+    if (owns_console_presentation_)
+    {
+        ppp::HideConsoleCursor(false);
 
 #if defined(_WIN32)
-    // Re-enable console close button
-    ppp::win32::Win32Native::EnabledConsoleWindowClosedButton(true);
+        // Re-enable console close button
+        ppp::win32::Win32Native::EnabledConsoleWindowClosedButton(true);
 #endif
+    }
 
     // Release prevention lock
     prevent_rerun_.Close();
@@ -2280,6 +2371,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
 
             // Open switcher
+            ethernet->SetConfiguredTunDns(network_interface->DnsAddresses);
             if (!ethernet->Open(tap))
             {
                 auto ni = ethernet->GetUnderlyingNetworkInterface();
@@ -2391,6 +2483,7 @@ std::shared_ptr<BufferswapAllocator> PppApplication::GetBufferAllocator() noexce
 // Parse and prepare command line arguments
 int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) noexcept
 {
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare enter argc=%d\r\n", argc);
     // Parse runtime logging before any configuration or RPC startup so early
     // startup failures also obey the selected level.  Release and Debug use
     // the same log implementation; the default is intentionally error-only.
@@ -2404,6 +2497,12 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     {
         LOG_FILE_PATH_ = File::GetFullPath(File::RewritePath(LOG_FILE_PATH_.data()).data());
     }
+    // A Rust TUI can stop and start the C++ core more than once in one
+    // process. Reset the previous run's file-backed sink before parsing the
+    // new runtime configuration, including the explicit empty-path case.
+    CloseCoreLogFile();
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare logging-ready log_file='%s'\r\n",
+        LOG_FILE_PATH_.data());
 
     // Parse headless / RPC options.  The local RPC server powers the Rust
     // TUI front-end (docs/RUST_TUI_DESIGN_CN.md); --rpc-listen requires
@@ -2415,6 +2514,8 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     rpc_token_ = ppp::GetCommandArgument("--rpc-token", argc, argv);
     rpc_max_clients_ = std::max<int>(1,
         atoi(ppp::GetCommandArgument("--rpc-max-clients", argc, argv, "1").data()));
+    fprintf(stdout, "[CoreStartup] stage=rpc-arguments listen='%s' headless=%d catalog_only=%d\r\n",
+        rpc_listen_.data(), headless_ ? 1 : 0, catalog_only_ ? 1 : 0);
     if (rpc_listen_.size() > 0 && rpc_token_.empty())
     {
         fprintf(stdout, "%s\r\n", "--rpc-listen requires --rpc-token.");
@@ -2429,13 +2530,16 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
 
     // Load configuration
     ppp::string path;
+    fprintf(stdout, "[CoreStartup] stage=configuration-load begin\r\n");
     std::shared_ptr<AppConfiguration> configuration = LoadConfiguration(argc, argv, path);
     if (NULLPTR == configuration)
     {
+        fprintf(stdout, "[CoreStartup] FAIL stage=configuration-load\r\n");
         return -1;
     }
     else
     {
+        fprintf(stdout, "[CoreStartup] stage=configuration-load ok path='%s'\r\n", path.data());
         // Gets whether client mode or server mode is currently running.
         ppp::string mode;
         static constexpr const char* mode_keys[] = { "--mode", "--m", "-mode", "-m" };
@@ -2454,11 +2558,16 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         // tearing down the operating-system network takeover.
         proxy_mode_ = mode == "proxy" || configuration->client.proxy_only;
         client_mode_ = proxy_mode_ || IsModeClientOrServer(argc, argv);
+        fprintf(stdout, "[CoreStartup] stage=mode-resolve mode='%s' client=%d proxy=%d\r\n",
+            mode.data(), client_mode_ ? 1 : 0, proxy_mode_ ? 1 : 0);
 
         if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration))
         {
+            fprintf(stdout, "[CoreStartup] FAIL stage=server-configurations\r\n");
             return -1;
         }
+        fprintf(stdout, "[CoreStartup] stage=server-configurations ok count=%zu\r\n",
+            outbound_configurations_.size());
 
         if (proxy_mode_)
         {
@@ -2536,6 +2645,8 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     // command line.
     std::shared_ptr<NetworkInterface> network_interface =
         proxy_mode_ ? ppp::make_shared_object<NetworkInterface>() : GetNetworkInterface(argc, argv);
+    fprintf(stdout, "[CoreStartup] stage=network-interface parsed mode=%s ok=%d\r\n",
+        proxy_mode_ ? "proxy" : "client/server", NULLPTR != network_interface ? 1 : 0);
     if (NULLPTR == network_interface)
     {
         return -1;
@@ -2609,6 +2720,7 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     if (client_mode_ &&
         !LoadGeoOutboundConfigurations(network_interface, configuration))
     {
+        fprintf(stdout, "[CoreStartup] FAIL stage=geo-outbound-configurations\r\n");
         return -1;
     }
 
@@ -2617,6 +2729,15 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     // Configure DNS settings
     ppp::net::asio::vdns::ttl = configuration->udp.dns.ttl;
     ppp::net::asio::vdns::enabled = configuration->udp.dns.turbo;
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare exit ok=1 lwip=%d tun_driver=%s\r\n",
+        network_interface->Lwip ? 1 : 0,
+#if defined(_WIN32)
+        ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Wintun ? "wintun" :
+            (ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Tap ? "tap" : "auto")
+#else
+        "n/a"
+#endif
+    );
     
     return 0;
 }
@@ -2852,7 +2973,7 @@ void PppApplication::PrintHelpInformation() noexcept
         col_description_width, "Network protocol stack selection",
         col_default_width,
 #if defined(_WIN32)
-        ppp::tap::TapWindows::IsWintun() ? "no" : "yes"
+        "no"
 #else
         "no"
 #endif
@@ -3122,8 +3243,12 @@ void PppApplication::PrintHelpInformation() noexcept
 boost::asio::ip::address PppApplication::GetNetworkAddress(const char* name, int MIN_PREFIX_ADDRESS, int MAX_PREFIX_ADDRESS, int argc, const char* argv[]) noexcept
 {
     ppp::string address_string = ppp::GetCommandArgument(name, argc, argv);
+    fprintf(stdout, "[CoreStartup] address-parse begin name='%s' raw='%s'\r\n",
+        name != NULLPTR ? name : "", address_string.data());
     if (address_string.empty())
     {
+        fprintf(stdout, "[CoreStartup] address-parse end name='%s' result=empty-any\r\n",
+            name != NULLPTR ? name : "");
         return boost::asio::ip::address_v4::any();
     }
 
@@ -3131,6 +3256,8 @@ boost::asio::ip::address PppApplication::GetNetworkAddress(const char* name, int
     address_string = ppp::RTrim<ppp::string>(address_string);
     if (address_string.empty())
     {
+        fprintf(stdout, "[CoreStartup] address-parse end name='%s' result=trimmed-empty-any\r\n",
+            name != NULLPTR ? name : "");
         return boost::asio::ip::address_v4::any();
     }
 
@@ -3159,9 +3286,14 @@ boost::asio::ip::address PppApplication::GetNetworkAddress(const char* name, int
 
     if (IPEndPoint::IsInvalid(address))
     {
+        fprintf(stdout, "[CoreStartup] address-parse end name='%s' result=invalid-any\r\n",
+            name != NULLPTR ? name : "");
         return boost::asio::ip::address_v4::any();
     }
 
+    std::string parsed_address = address.to_string();
+    fprintf(stdout, "[CoreStartup] address-parse end name='%s' result='%s'\r\n",
+        name != NULLPTR ? name : "", parsed_address.c_str());
     return address;
 }
 
@@ -3203,7 +3335,12 @@ void PppApplication::GetDnsAddresses(ppp::vector<boost::asio::ip::address>& addr
 #endif
 
     ppp::string dns = ppp::GetCommandArgument("--dns", argc, argv);
-    if (Ipep::ToDnsAddresses(dns, addresses, at_least_two) < 1) {
+    fprintf(stdout, "[CoreStartup] dns-parse begin raw='%s' at_least_two=%d config=%d\r\n",
+        dns.data(), at_least_two ? 1 : 0, configuration_ != NULLPTR ? 1 : 0);
+    int parsed = Ipep::ToDnsAddresses(dns, addresses, at_least_two);
+    fprintf(stdout, "[CoreStartup] dns-parse user-result=%d count=%zu\r\n",
+        parsed, addresses.size());
+    if (parsed < 1) {
         boost::system::error_code ec;
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_1, ec));
         addresses.emplace_back(ppp::StringToAddress(PPP_PREFERRED_DNS_SERVER_2, ec));
@@ -3227,16 +3364,19 @@ void PppApplication::GetDnsAddresses(ppp::vector<boost::asio::ip::address>& addr
             }
         }
     }
+    fprintf(stdout, "[CoreStartup] dns-parse end count=%zu\r\n", addresses.size());
 }
 
 // Parse network interface configuration from command line arguments
 std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, const char* argv[]) noexcept
 {
+    fprintf(stdout, "[CoreStartup] network-interface begin\r\n");
     std::shared_ptr<NetworkInterface> ni = ppp::make_shared_object<NetworkInterface>();
     if (NULLPTR != ni)
     {
 #if defined(_WIN32)
         ppp::string tun_driver = ToLower(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--tun-driver", argc, argv, "auto"))));
+        fprintf(stdout, "[CoreStartup] network-interface driver-arg='%s'\r\n", tun_driver.data());
         if (tun_driver == "wintun")
         {
             ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Wintun);
@@ -3254,32 +3394,51 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Auto);
         }
 
-        ni->Lwip = ppp::ToBoolean(ppp::GetCommandArgument("--lwip", argc, argv, ppp::tap::TapWindows::IsWintun() ? ppp::string() : "y").data());
+        // Keep the platform default on the reliable C/TCP path. The Windows
+        // TAP + lwIP path remains available through an explicit --lwip=yes,
+        // but it currently cannot reach an established state on all Windows
+        // configurations.
+        ni->Lwip = ppp::ToBoolean(ppp::GetCommandArgument("--lwip", argc, argv).data());
+        fprintf(stdout, "[CoreStartup] network-interface driver-mode-set lwip=%d\r\n", ni->Lwip ? 1 : 0);
 #else
         ni->Lwip = ppp::ToBoolean(ppp::GetCommandArgument("--lwip", argc, argv).data());
 #endif
 
         ni->Nic = ppp::RTrim(ppp::LTrim(ppp::GetCommandArgument("--nic", argc, argv)));
         ni->BlockQUIC = ppp::ToBoolean(ppp::GetCommandArgument("--block-quic", argc, argv).data());
+        fprintf(stdout, "[CoreStartup] network-interface basic nic='%s' block_quic=%d\r\n",
+            ni->Nic.data(), ni->BlockQUIC ? 1 : 0);
 
         // Parse DNS servers
+        fprintf(stdout, "[CoreStartup] network-interface dns begin\r\n");
         GetDnsAddresses(ni->DnsAddresses, argc, argv);
+        fprintf(stdout, "[CoreStartup] network-interface dns parsed count=%zu\r\n", ni->DnsAddresses.size());
         if (!ni->DnsAddresses.empty()) {
             auto dns_servers = ppp::net::asio::vdns::servers;
+            fprintf(stdout, "[CoreStartup] network-interface dns global-reset ptr=%d\r\n",
+                dns_servers != NULLPTR ? 1 : 0);
+            if (dns_servers == NULLPTR)
+            {
+                fprintf(stdout, "[CoreStartup] FAIL stage=network-interface reason=dns-global-null\r\n");
+                return NULLPTR;
+            }
             dns_servers->clear();
 
             for (const boost::asio::ip::address& dns_server : ni->DnsAddresses) {
                 dns_servers->emplace_back(boost::asio::ip::udp::endpoint(dns_server, PPP_DNS_SYS_PORT));
             }
         }
+        fprintf(stdout, "[CoreStartup] network-interface dns end\r\n");
 
         // Parse network addresses
+        fprintf(stdout, "[CoreStartup] network-interface addresses begin\r\n");
         ni->Ngw = GetNetworkAddress("--ngw", 0, 32, "0.0.0.0", argc, argv);
         ni->IPAddress = GetNetworkAddress("--tun-ip", 0, 32, "10.0.0.2", argc, argv);
         ni->SubmaskAddress = GetNetworkAddress("--tun-mask", 16, 32, "255.255.255.252", argc, argv);
 
         // Suggested Ethernet card address setting.
         ni->GatewayServer = GetNetworkAddress("--tun-gw", 0, 32, "10.0.0.1", argc, argv);
+        fprintf(stdout, "[CoreStartup] network-interface addresses end\r\n");
 
 #if defined(_WIN32)
         // DHCP-MASQ lease time in seconds.
@@ -3291,10 +3450,13 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
 #endif
 
         // Calculate valid IP address based on gateway and subnet
+        fprintf(stdout, "[CoreStartup] network-interface address-normalize begin\r\n");
         ni->IPAddress = Ipep::FixedIPAddress(ni->IPAddress, ni->GatewayServer, ni->SubmaskAddress);
         ni->StaticMode = ppp::ToBoolean(ppp::GetCommandArgument("--tun-static", argc, argv).data());
         ni->HostedNetwork = ppp::ToBoolean(ppp::GetCommandArgument("--tun-host", argc, argv, "y").data());
         ni->VNet = ppp::ToBoolean(ppp::GetCommandArgument("--tun-vnet", argc, argv, "y").data());
+        fprintf(stdout, "[CoreStartup] network-interface address-normalize end hosted=%d vnet=%d\r\n",
+            ni->HostedNetwork ? 1 : 0, ni->VNet ? 1 : 0);
 
         ppp::string bypass_mode = ToLower(ppp::LTrim(ppp::RTrim(
             ppp::GetCommandArgument("--bypass-mode", argc, argv, "ip"))));
@@ -3311,6 +3473,7 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             fprintf(stdout, "Invalid --bypass-mode '%s'; expected ip, geo, or no.\r\n", bypass_mode.data());
             return NULLPTR;
         }
+        fprintf(stdout, "[CoreStartup] network-interface bypass-mode='%s'\r\n", bypass_mode.data());
 
         ni->GeoRules = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
             "--geo-rules", argc, argv, "./geo-rules.yaml").data()).data());
@@ -3318,18 +3481,29 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             "--geosite", argc, argv, "./geosite.dat").data()).data());
         ni->GeoIP = File::GetFullPath(File::RewritePath(ppp::GetCommandArgument(
             "--geoip", argc, argv, "./geoip.dat").data()).data());
+        fprintf(stdout, "[CoreStartup] network-interface geo-paths rules='%s' site='%s' ip='%s'\r\n",
+            ni->GeoRules.data(), ni->GeoSite.data(), ni->GeoIP.data());
 
 #if defined(_LINUX)
         ni->BypassNic = ppp::RTrim(ppp::LTrim(ppp::GetCommandArgument("--bypass-nic", argc, argv)));
 #endif
         ni->BypassNgw = GetNetworkAddress("--bypass-ngw", 0, 32, "0.0.0.0", argc, argv);
-        ni->BypassLoadList(File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass", argc, argv, "./ip.txt"))).data()).data()));
+        ppp::string bypass_path = File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(
+            ppp::GetCommandArgument("--bypass", argc, argv, "./ip.txt"))).data()).data());
+        fprintf(stdout, "[CoreStartup] network-interface bypass4 begin path='%s'\r\n", bypass_path.data());
+        int bypass4_count = ni->BypassLoadList(bypass_path);
+        fprintf(stdout, "[CoreStartup] network-interface bypass4 end count=%d\r\n", bypass4_count);
 
 #if defined(_LINUX)
         ni->BypassNic6 = ppp::RTrim(ppp::LTrim(ppp::GetCommandArgument("--bypass-nic6", argc, argv)));
 #endif
         ni->BypassNgw6 = GetNetworkAddress("--bypass-ngw6", 0, 128, "::", argc, argv);
-        ni->BypassLoadList6(File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(ppp::GetCommandArgument("--bypass6", argc, argv, "./ipv6.txt"))).data()).data()));
+        ppp::string bypass6_path = File::GetFullPath(File::RewritePath(ppp::LTrim(ppp::RTrim(
+            ppp::GetCommandArgument("--bypass6", argc, argv, "./ipv6.txt"))).data()).data());
+        fprintf(stdout, "[CoreStartup] network-interface bypass6 begin path='%s'\r\n", bypass6_path.data());
+        int bypass6_count = ni->BypassLoadList6(bypass6_path);
+        fprintf(stdout, "[CoreStartup] network-interface bypass6 end count=%d\r\n", bypass6_count);
+        fprintf(stdout, "[CoreStartup] network-interface bypass-lists end\r\n");
 
         // Parse configuration files
         ni->DNSRules = ppp::GetCommandArgument("--dns-rules", argc, argv, "./dns-rules.txt");
@@ -3342,12 +3516,32 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         {
             ni->MuxAcceleration = 0;
         }
+        fprintf(stdout, "[CoreStartup] network-interface mux mux=%u acceleration=%u\r\n",
+            static_cast<unsigned int>(ni->Mux), static_cast<unsigned int>(ni->MuxAcceleration));
 
 #if defined(_WIN32) || defined(_MACOS)
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
 #if defined(_WIN32)
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
-        ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
+        // An explicit Wintun adapter is identified by its name, not by a TAP
+        // component GUID. Do not enumerate Windows network interfaces during
+        // argument preparation: WMI/IP Helper enumeration can block for many
+        // seconds when a stale TAP adapter or a stopped Wintun service exists.
+        // TapWindows::Create performs the definitive Wintun DLL/device check.
+        if (ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Wintun)
+        {
+            ni->ComponentId = ni->Wintun;
+            fprintf(stdout, "[CoreStartup] network-interface wintun explicit name='%s' skip-component-enumeration\r\n",
+                ni->Wintun.data());
+        }
+        else
+        {
+            fprintf(stdout, "[CoreStartup] network-interface component-query begin name='%s'\r\n",
+                ni->Wintun.data());
+            ni->ComponentId = ppp::tap::TapWindows::FindComponentId(ni->Wintun);
+            fprintf(stdout, "[CoreStartup] network-interface component-query end component='%s'\r\n",
+                ni->ComponentId.data());
+        }
 #else
         ni->ComponentId = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
 #if defined(_MACOS)
@@ -3398,6 +3592,12 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         // Clean up component ID
         ni->ComponentId = ppp::LTrim<ppp::string>(ni->ComponentId);
         ni->ComponentId = ppp::RTrim<ppp::string>(ni->ComponentId);
+        fprintf(stdout, "[CoreStartup] network-interface end component='%s'\r\n",
+            ni->ComponentId.data());
+    }
+    else
+    {
+        fprintf(stdout, "[CoreStartup] FAIL stage=network-interface reason=allocate\r\n");
     }
     return ni;
 }
@@ -4256,6 +4456,7 @@ bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
     }
 
     server_directory_ = File::GetFullPath(File::RewritePath(value.data()).data());
+    fprintf(stdout, "[CoreStartup] server-config directory='%s'\r\n", server_directory_.data());
     ppp::vector<ppp::string> files;
     if (server_directory_.empty() ||
         !File::GetAllFileNames(server_directory_.data(), false, files))
@@ -4294,11 +4495,14 @@ bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
 
         std::shared_ptr<AppConfiguration> configuration =
             ppp::make_shared_object<AppConfiguration>();
+        fprintf(stdout, "[CoreStartup] server-config load begin file='%s'\r\n", file.data());
         if (NULLPTR == configuration || !configuration->Load(file))
         {
             fprintf(stdout, "Failed to load server configuration: %s\r\n", file.data());
             return false;
         }
+
+        fprintf(stdout, "[CoreStartup] server-config load ok file='%s'\r\n", file.data());
 
         // Do not open the primary configuration twice when its JSON also lives
         // in --server-dir. Duplicate sessions with the same GUID/server can make
@@ -4594,6 +4798,7 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
     // the only configuration loaded in this phase is the server directory.
     if (catalog_only_)
     {
+        fprintf(stdout, "[CoreStartup] configuration-load catalog-only branch\r\n");
         std::shared_ptr<AppConfiguration> configuration =
             ppp::make_shared_object<AppConfiguration>();
         if (NULLPTR != configuration)
@@ -4615,6 +4820,8 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
 
         argument_value = File::RewritePath(argument_value.data());
         argument_value = File::GetFullPath(argument_value.data());
+        fprintf(stdout, "[CoreStartup] configuration candidate key='%s' path='%s'\r\n",
+            argument_key, argument_value.data());
         if (argument_value.empty())
         {
             continue;
@@ -4721,6 +4928,7 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
     for (ppp::string& configuration_path : configuration_paths)
     {
         configuration_path = File::GetFullPath(File::RewritePath(configuration_path.data()).data());
+        fprintf(stdout, "[CoreStartup] configuration file check path='%s'\r\n", configuration_path.data());
         if (!File::Exists(configuration_path.data()))
         {
             continue;
@@ -4732,10 +4940,12 @@ std::shared_ptr<AppConfiguration> PppApplication::LoadConfiguration(int argc, co
             continue;
         }
 
+        fprintf(stdout, "[CoreStartup] configuration file load begin path='%s'\r\n", configuration_path.data());
         if (!configuration->Load(configuration_path))
         {
             continue;
         }
+        fprintf(stdout, "[CoreStartup] configuration file load ok path='%s'\r\n", configuration_path.data());
 
         // Initialize buffer allocator if configured
 #if defined(_WIN32)
@@ -4823,8 +5033,12 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
     fprintf(stdout, "[PrepEth] ComponentId='%s' Wintun='%s'\r\n", network_interface->ComponentId.data(), network_interface->Wintun.data());
 
     ppp::tap::TapWindows::DriverMode driver_mode = ppp::tap::TapWindows::GetDriverMode();
+    const char* driver_mode_name = driver_mode == ppp::tap::TapWindows::DriverMode::Wintun ? "wintun" :
+        (driver_mode == ppp::tap::TapWindows::DriverMode::Tap ? "tap" : "auto");
     bool use_wintun = driver_mode == ppp::tap::TapWindows::DriverMode::Wintun ||
         (driver_mode == ppp::tap::TapWindows::DriverMode::Auto && ppp::tap::TapWindows::IsWintun());
+    fprintf(stdout, "[PrepEth] driver_mode=%s(%d) use_wintun=%d\r\n",
+        driver_mode_name, static_cast<int>(driver_mode), use_wintun ? 1 : 0);
     if (use_wintun)
     {
         network_interface->ComponentId = network_interface->Wintun;
@@ -4998,10 +5212,18 @@ static bool Windows_PreferredNetwork(int argc, const char* argv[]) noexcept
 // Main application entry point
 int PppApplication::Main(int argc, const char* argv[]) noexcept
 {
+    fprintf(stdout, "[CoreStartup] Main enter client=%d proxy=%d headless=%d catalog_only=%d config='%s'\r\n",
+        client_mode_ ? 1 : 0,
+        proxy_mode_ ? 1 : 0,
+        headless_ ? 1 : 0,
+        catalog_only_ ? 1 : 0,
+        configuration_path_.data());
+
     // Require administrator/root privileges
     if (!proxy_mode_ && !ppp::IsUserAnAdministrator()) // $ROOT is 0.
     {
         fprintf(stdout, "%s\r\n", "Non-administrators are not allowed to run.");
+        fprintf(stdout, "[CoreStartup] FAIL stage=administrator-check\r\n");
         return -1;
     }
 
@@ -5010,6 +5232,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     if (prevent_rerun_.Exists(rerun_name.data()))
     {
         fprintf(stdout, "%s\r\n", "Repeat runs are not allowed.");
+        fprintf(stdout, "[CoreStartup] FAIL stage=repeat-run-lock exists=1\r\n");
         return -1;
     }
 
@@ -5017,6 +5240,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     if (!prevent_rerun_.Open(rerun_name.data()))
     {
         fprintf(stdout, "%s\r\n", "Failed to open the repeat run lock.");
+        fprintf(stdout, "[CoreStartup] FAIL stage=repeat-run-lock open=0\r\n");
         return -1;
     }
 
@@ -5024,11 +5248,15 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // Windows-specific setup
     if (client_mode_ && !proxy_mode_)
     {
+        fprintf(stdout, "[CoreStartup] stage=windows-prepare begin\r\n");
         // Prepare the environment for the virtual Ethernet network device card.
         if (!Windows_PreparedEthernetEnvironment(network_interface_))
         {
+            fprintf(stdout, "[CoreStartup] FAIL stage=windows-prepare\r\n");
             return -1;
         }
+        fprintf(stdout, "[CoreStartup] stage=windows-prepare ok component='%s'\r\n",
+            network_interface_->ComponentId.data());
     }
 
     // Save original QUIC setting
@@ -5041,8 +5269,10 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // server configuration is selected.
     if (!catalog_only_ && !PreparedLoopbackEnvironment(network_interface_))
     {
+        fprintf(stdout, "[CoreStartup] FAIL stage=loopback-prepare\r\n");
         return -1;
     }
+    fprintf(stdout, "[CoreStartup] stage=loopback-prepare ok skipped=%d\r\n", catalog_only_ ? 1 : 0);
 
     // Initialize timers and statistics
     stopwatch_.Restart();
@@ -5113,6 +5343,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
         if (NULLPTR == rpc_server || !rpc_server->Open(rpc_listen_))
         {
             fprintf(stdout, "%s\r\n", "Failed to open the local RPC server.");
+            fprintf(stdout, "[CoreStartup] FAIL stage=rpc-open listen='%s'\r\n", rpc_listen_.data());
             return -1;
         }
 
@@ -5132,6 +5363,8 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
             ppp::string address_string = ppp::net::Ipep::ToAddressString<ppp::string>(address);
             fprintf(stdout, "RPC_LISTEN=%s:%d\r\n", address_string.data(), endpoint.port());
             fflush(stdout);
+            fprintf(stdout, "[CoreStartup] stage=rpc-ready endpoint=%s:%d\r\n",
+                address_string.data(), endpoint.port());
         }
     }
 
@@ -5178,43 +5411,662 @@ static int Run(const std::shared_ptr<PppApplication>& APP, int prepared_status, 
         return prepared_status > 0 ? 0 : -1;
     }
 
-    // Register shutdown handlers
-    PppApplication::AddShutdownApplicationEventHandler();
+    // Register shutdown handlers.  An embedded host has its own synchronous
+    // C ABI stop path; registering the standalone handler here would consume
+    // Ctrl+C/console-close before the Rust owner can restore the terminal.
+    if (!g_core_in_process_host.load(std::memory_order_acquire))
+    {
+        PppApplication::AddShutdownApplicationEventHandler();
+    }
 
     // Register restart signal handler on Unix-like systems
 #if SIGRESTART
-    signal(SIGRESTART, // SIG_DFL
-        [](int) noexcept
-        {
-            PppApplication::ShutdownApplication(true);
-        });
+    if (!g_core_in_process_host.load(std::memory_order_acquire))
+    {
+        signal(SIGRESTART, // SIG_DFL
+            [](int) noexcept
+            {
+                PppApplication::ShutdownApplication(true);
+            });
+    }
 #endif
 
-    // Run main application
+// Run main application
     return APP->Main(argc, argv);
 }
 
+// -----------------------------------------------------------------------------
+// In-process core host API
+// -----------------------------------------------------------------------------
+//
+// The Rust TUI/CLI can link the core as a static library and call this API
+// directly.  The executor still runs on a dedicated C++ thread, but there is
+// no child process, temporary executable, stdout discovery or loopback RPC.
+// All calls crossing the language boundary use the opaque handle and UTF-8
+// JSON strings declared in ppp/core/CoreApi.h.
+
+struct ppp_core_handle final {
+    struct CommandRequest final {
+        std::mutex                                          mutex;
+        std::condition_variable                             completed_cv;
+        bool                                                completed = false;
+        bool                                                success = false;
+        std::string                                         result;
+        std::string                                         error;
+    };
+
+    std::mutex                                              state_mutex;
+    std::condition_variable                                 state_cv;
+    std::mutex                                              command_mutex;
+    std::shared_ptr<boost::asio::io_context>                context;
+    std::thread                                             thread;
+    bool                                                    startup_completed = false;
+    bool                                                    startup_success = false;
+    bool                                                    finished = false;
+    int                                                     result_code = -1;
+    std::string                                             error;
+};
+
+static void CoreApiSetError(char* buffer, size_t buffer_size, const std::string& error) noexcept
+{
+    if (NULLPTR == buffer || buffer_size < 1) {
+        return;
+    }
+
+    size_t length = std::min(buffer_size - 1, error.size());
+    if (length > 0) {
+        std::memcpy(buffer, error.data(), length);
+    }
+    buffer[length] = '\x0';
+}
+
+static void CoreApiSignalStartup(
+    ppp_core_handle* handle,
+    bool success,
+    int result_code,
+    const std::string& error) noexcept
+{
+    if (NULLPTR == handle) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> scope(handle->state_mutex);
+    handle->startup_completed = true;
+    handle->startup_success = success;
+    handle->result_code = result_code;
+    if (!success) {
+        handle->error = error;
+    }
+    handle->state_cv.notify_all();
+}
+
+static void CoreApiSignalFinished(ppp_core_handle* handle, int result_code) noexcept
+{
+    if (NULLPTR == handle) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> scope(handle->state_mutex);
+    handle->finished = true;
+    handle->result_code = result_code;
+    handle->state_cv.notify_all();
+}
+
+static void CoreApiRun(
+    ppp_core_handle* handle,
+    const std::shared_ptr<std::vector<std::string>>& arguments) noexcept
+{
+    ConfigureCoreOutputStreams();
+    fprintf(stdout, "[CoreApi] runtime thread begin argc=%zu\r\n", arguments ? arguments->size() : 0u);
+
+    struct CoreApiInstanceGuard final {
+        ~CoreApiInstanceGuard() noexcept {
+            g_core_api_instance_active.store(false, std::memory_order_release);
+        }
+    } active_guard;
+
+    int result_code = -1;
+    std::shared_ptr<PppApplication> APP;
+    g_core_in_process_host.store(true, std::memory_order_release);
+
+    try {
+        std::vector<const char*> argv;
+        argv.reserve(arguments->size());
+        for (const std::string& argument : *arguments) {
+            argv.emplace_back(argument.c_str());
+        }
+
+        int argc = static_cast<int>(argv.size());
+        const char** argv_data = argv.empty() ? NULLPTR : argv.data();
+
+        ppp::RT = ppp::ToBoolean(ppp::GetCommandArgument("--rt", argc, argv_data, "y").data());
+        fprintf(stdout, "[CoreApi] stage=global-init begin\r\n");
+        std::call_once(g_core_runtime_initializer,
+            []() noexcept
+            {
+                ppp::global::cctor();
+            });
+        fprintf(stdout, "[CoreApi] stage=global-init ok\r\n");
+
+        APP = ppp::make_shared_object<PppApplication>();
+        DEFAULT_ = APP;
+        if (NULLPTR == APP) {
+            g_core_in_process_host.store(false, std::memory_order_release);
+            CoreApiSignalStartup(handle, false, -1, "failed to allocate core application");
+            CoreApiSignalFinished(handle, -1);
+            return;
+        }
+
+        int prepared_status = APP->PreparedArgumentEnvironment(argc, argv_data);
+        fprintf(stdout, "[CoreApi] stage=arguments-prepared status=%d\r\n", prepared_status);
+        if (prepared_status != 0) {
+            APP->PrintHelpInformation();
+            g_core_in_process_host.store(false, std::memory_order_release);
+            CoreApiSignalStartup(handle, false, prepared_status,
+                "core arguments were rejected");
+            APP->Release();
+            DEFAULT_.reset();
+            CoreApiSignalFinished(handle, prepared_status);
+            return;
+        }
+
+#if BOOST_ASIO_HAS_IO_URING != 0
+        if (!ppp::diagnostics::IfIOUringKernelVersion()) {
+            g_core_in_process_host.store(false, std::memory_order_release);
+            CoreApiSignalStartup(handle, false, -1,
+                "io-uring requires a Linux kernel version of 5.10 or newer");
+            APP->Release();
+            DEFAULT_.reset();
+            CoreApiSignalFinished(handle, -1);
+            return;
+        }
+#endif
+
+        OpenCoreLogFile();
+        fprintf(stdout, "[CoreApi] stage=log-open ok\r\n");
+
+        // The direct host receives logs through the same sink used by the
+        // legacy RPC path.  The sink is harmless when no callback is set.
+        ppp::diagnostics::SetLogSink(RpcLogSink);
+
+#if defined(_MACOS)
+        // The standalone entry point applies this before entering the
+        // executor.  The in-process host must keep the same protection from
+        // EMFILE when the desktop client opens many tunnel sockets.
+        ConfigureOpenFileDescriptorLimit();
+#endif
+
+        result_code = Executors::Run(
+            APP->GetBufferAllocator(),
+            [APP, prepared_status, handle](int callback_argc, const char* callback_argv[]) noexcept -> int
+            {
+                // Executors::Run attaches the default context immediately
+                // before invoking this callback. Capture it only here; it is
+                // null during the host thread's pre-Run initialization.
+                {
+                    std::lock_guard<std::mutex> scope(handle->state_mutex);
+                    handle->context = Executors::GetDefault();
+                }
+                if (NULLPTR == handle->context) {
+                    fprintf(stdout, "[CoreApi] FAIL stage=executor-context\r\n");
+                    CoreApiSignalStartup(handle, false, -1,
+                        "core executor context is unavailable");
+                    return -1;
+                }
+                fprintf(stdout, "[CoreApi] stage=run begin\r\n");
+                int code = Run(APP, prepared_status, callback_argc, callback_argv);
+                fprintf(stdout, "[CoreApi] stage=run end status=%d\r\n", code);
+                CoreApiSignalStartup(handle, code == 0, code,
+                    code == 0 ? std::string() : "core startup failed");
+                return code;
+            },
+            argc,
+            argv_data);
+
+        // Main() may fail after preparing part of the network environment
+        // (for example when the periodic timer cannot be created).  The
+        // standalone executable historically only released its lock here,
+        // but an embedded host must never report startup failure while
+        // leaving DNS/routes/TUN ownership behind.
+        // Dispose is idempotent and is required even when the executor stops
+        // unexpectedly; the shutdown command normally did this earlier, but
+        // an event-loop failure must not skip DNS/routes/TUN restoration.
+        APP->Dispose();
+        APP->Release();
+        if (DEFAULT_ == APP) {
+            DEFAULT_.reset();
+        }
+        CloseCoreLogFile();
+        g_core_in_process_host.store(false, std::memory_order_release);
+    }
+    catch (const std::exception& exception) {
+        g_core_in_process_host.store(false, std::memory_order_release);
+        CoreApiSignalStartup(handle, false, -1, exception.what());
+        if (NULLPTR != APP) {
+            APP->Dispose();
+            APP->Release();
+        }
+        DEFAULT_.reset();
+        CloseCoreLogFile();
+        result_code = -1;
+    }
+    catch (...) {
+        g_core_in_process_host.store(false, std::memory_order_release);
+        CoreApiSignalStartup(handle, false, -1, "unknown exception in core runtime");
+        if (NULLPTR != APP) {
+            APP->Dispose();
+            APP->Release();
+        }
+        DEFAULT_.reset();
+        CloseCoreLogFile();
+        result_code = -1;
+    }
+
+    CoreApiSignalFinished(handle, result_code);
+}
+
+static bool CoreApiWaitFinished(ppp_core_handle* handle, int timeout_ms) noexcept
+{
+    if (NULLPTR == handle) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(handle->state_mutex);
+    if (timeout_ms <= 0) {
+        handle->state_cv.wait(lock, [handle]() noexcept { return handle->finished; });
+        return true;
+    }
+
+    return handle->state_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+        [handle]() noexcept { return handle->finished; });
+}
+
+static bool CoreApiInvoke(
+    ppp_core_handle* handle,
+    const char* method,
+    const char* params_json,
+    std::string& result,
+    std::string& error) noexcept
+{
+    try {
+        if (NULLPTR == handle || NULLPTR == method || method[0] == '\x0') {
+            error = "invalid core command";
+            return false;
+        }
+
+        std::shared_ptr<boost::asio::io_context> context;
+        {
+            std::lock_guard<std::mutex> state_scope(handle->state_mutex);
+            if (handle->finished) {
+                error = "core has already stopped";
+                return false;
+            }
+            context = handle->context;
+        }
+        if (NULLPTR == context) {
+            error = "core executor is unavailable";
+            return false;
+        }
+
+        Json::Value params = params_json != NULLPTR && params_json[0] != '\x0' ?
+            ppp::auxiliary::JsonAuxiliary::FromString(params_json) :
+            Json::Value(Json::objectValue);
+        if (params.isNull()) {
+            error = "invalid command parameters JSON";
+            return false;
+        }
+
+        std::shared_ptr<ppp_core_handle::CommandRequest> request =
+            std::make_shared<ppp_core_handle::CommandRequest>();
+        if (NULLPTR == request) {
+            error = "failed to allocate command request";
+            return false;
+        }
+
+        ppp::string method_copy(method);
+        boost::asio::post(*context,
+            [request, method_copy, params]() noexcept
+            {
+                Json::Value value;
+                ppp::string dispatch_error;
+                bool ok = false;
+
+                try {
+                    std::shared_ptr<PppApplication> APP = DEFAULT_;
+                    if (NULLPTR != APP) {
+                        ok = APP->ExecuteRpcCommand(method_copy, params, value, dispatch_error);
+                    }
+                    else {
+                        dispatch_error = "core application is unavailable";
+                    }
+                }
+                catch (...) {
+                    dispatch_error = "exception while executing core command";
+                    ok = false;
+                }
+
+                std::lock_guard<std::mutex> scope(request->mutex);
+                request->success = ok;
+                if (ok) {
+                    request->result = ppp::auxiliary::JsonAuxiliary::ToString(value);
+                }
+                else {
+                    request->error = dispatch_error.empty() ? "core command rejected" : dispatch_error;
+                }
+                request->completed = true;
+                request->completed_cv.notify_one();
+            });
+
+        std::unique_lock<std::mutex> request_lock(request->mutex);
+        if (!request->completed_cv.wait_for(request_lock, std::chrono::seconds(30),
+            [request]() noexcept { return request->completed; })) {
+            error = "core command timed out";
+            return false;
+        }
+
+        result = request->result;
+        error = request->error;
+        return request->success;
+    }
+    catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+    catch (...) {
+        error = "exception while scheduling core command";
+        return false;
+    }
+}
+
+extern "C" ppp_core_handle* ppp_core_start(
+    int argc,
+    const char* const* argv,
+    ppp_core_log_callback log_callback,
+    void* user_data,
+    char* error_buffer,
+    size_t error_buffer_size)
+{
+    CoreApiSetError(error_buffer, error_buffer_size, std::string());
+    if (argc < 0 || (argc > 0 && NULLPTR == argv)) {
+        CoreApiSetError(error_buffer, error_buffer_size, "invalid core arguments");
+        return NULLPTR;
+    }
+
+    ppp_core_handle* handle = NULLPTR;
+    bool active_acquired = false;
+    try {
+        std::shared_ptr<std::vector<std::string>> arguments =
+            std::make_shared<std::vector<std::string>>();
+        arguments->reserve(static_cast<size_t>(argc));
+        for (int i = 0; i < argc; ++i) {
+            arguments->emplace_back(argv[i] != NULLPTR ? argv[i] : "");
+        }
+
+        bool expected = false;
+        if (!g_core_api_instance_active.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+            CoreApiSetError(error_buffer, error_buffer_size,
+                "another in-process core is already active");
+            return NULLPTR;
+        }
+        active_acquired = true;
+
+        handle = new ppp_core_handle();
+        g_core_log_user_data.store(user_data, std::memory_order_release);
+        g_core_log_callback.store(log_callback, std::memory_order_release);
+        handle->thread = std::thread(CoreApiRun, handle, arguments);
+
+        std::unique_lock<std::mutex> lock(handle->state_mutex);
+        if (!handle->state_cv.wait_for(lock, std::chrono::seconds(20),
+            [handle]() noexcept { return handle->startup_completed; })) {
+            lock.unlock();
+            ppp_core_stop(handle, error_buffer, error_buffer_size);
+            ppp_core_destroy(handle);
+            CoreApiSetError(error_buffer, error_buffer_size,
+                "core did not finish startup within 20 seconds");
+            return NULLPTR;
+        }
+
+        if (!handle->startup_success) {
+            std::string error = handle->error.empty() ? "core startup failed" : handle->error;
+            lock.unlock();
+            if (handle->thread.joinable()) {
+                handle->thread.join();
+            }
+            g_core_log_callback.store(nullptr, std::memory_order_release);
+            g_core_log_user_data.store(nullptr, std::memory_order_release);
+            if (active_acquired) {
+                g_core_api_instance_active.store(false, std::memory_order_release);
+            }
+            delete handle;
+            CoreApiSetError(error_buffer, error_buffer_size, error);
+            return NULLPTR;
+        }
+
+        return handle;
+    }
+    catch (const std::exception& exception) {
+        if (NULLPTR != handle) {
+            if (handle->thread.joinable()) {
+                handle->thread.join();
+            }
+            delete handle;
+        }
+        if (active_acquired) {
+            g_core_api_instance_active.store(false, std::memory_order_release);
+        }
+        g_core_log_callback.store(nullptr, std::memory_order_release);
+        g_core_log_user_data.store(nullptr, std::memory_order_release);
+        CoreApiSetError(error_buffer, error_buffer_size, exception.what());
+        return NULLPTR;
+    }
+    catch (...) {
+        if (NULLPTR != handle) {
+            if (handle->thread.joinable()) {
+                handle->thread.join();
+            }
+            delete handle;
+        }
+        if (active_acquired) {
+            g_core_api_instance_active.store(false, std::memory_order_release);
+        }
+        g_core_log_callback.store(nullptr, std::memory_order_release);
+        g_core_log_user_data.store(nullptr, std::memory_order_release);
+        CoreApiSetError(error_buffer, error_buffer_size, "failed to start core runtime");
+        return NULLPTR;
+    }
+}
+
+extern "C" int ppp_core_command(
+    ppp_core_handle* handle,
+    const char* method,
+    const char* params_json,
+    char** result_json,
+    char* error_buffer,
+    size_t error_buffer_size)
+{
+    CoreApiSetError(error_buffer, error_buffer_size, std::string());
+    if (NULLPTR != result_json) {
+        *result_json = NULLPTR;
+    }
+    if (NULLPTR == handle) {
+        CoreApiSetError(error_buffer, error_buffer_size, "invalid core handle");
+        return 0;
+    }
+
+    try {
+        std::lock_guard<std::mutex> command_scope(handle->command_mutex);
+        std::string result;
+        std::string error;
+        if (!CoreApiInvoke(handle, method, params_json, result, error)) {
+            CoreApiSetError(error_buffer, error_buffer_size, error);
+            return 0;
+        }
+
+        if (NULLPTR != result_json) {
+            char* copy = static_cast<char*>(std::malloc(result.size() + 1));
+            if (NULLPTR == copy) {
+                CoreApiSetError(error_buffer, error_buffer_size, "failed to allocate command result");
+                return 0;
+            }
+            std::memcpy(copy, result.data(), result.size());
+            copy[result.size()] = '\x0';
+            *result_json = copy;
+        }
+        return 1;
+    }
+    catch (const std::exception& exception) {
+        CoreApiSetError(error_buffer, error_buffer_size, exception.what());
+        return 0;
+    }
+    catch (...) {
+        CoreApiSetError(error_buffer, error_buffer_size, "exception while invoking core command");
+        return 0;
+    }
+}
+
+extern "C" int ppp_core_snapshot(
+    ppp_core_handle* handle,
+    char** snapshot_json,
+    char* error_buffer,
+    size_t error_buffer_size)
+{
+    return ppp_core_command(handle, "get_snapshot", "{}", snapshot_json,
+        error_buffer, error_buffer_size);
+}
+
+extern "C" int ppp_core_set_log_level(
+    ppp_core_handle* handle,
+    const char* level,
+    char* error_buffer,
+    size_t error_buffer_size)
+{
+    std::string params = "{\"level\":\"";
+    if (NULLPTR != level) {
+        for (const char* p = level; *p != '\x0'; ++p) {
+            if (*p == '\\' || *p == '"') params.push_back('\\');
+            params.push_back(*p);
+        }
+    }
+    params += "\"}";
+    return ppp_core_command(handle, "set_log_level", params.data(), NULLPTR,
+        error_buffer, error_buffer_size);
+}
+
+extern "C" int ppp_core_is_running(ppp_core_handle* handle)
+{
+    if (NULLPTR == handle) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> scope(handle->state_mutex);
+    return handle->startup_success && !handle->finished ? 1 : 0;
+}
+
+extern "C" int ppp_core_stop(
+    ppp_core_handle* handle,
+    char* error_buffer,
+    size_t error_buffer_size)
+{
+    CoreApiSetError(error_buffer, error_buffer_size, std::string());
+    if (NULLPTR == handle) {
+        CoreApiSetError(error_buffer, error_buffer_size, "invalid core handle");
+        return 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> scope(handle->state_mutex);
+        if (handle->finished) {
+            return 1;
+        }
+    }
+
+    char* ignored = NULLPTR;
+    if (!ppp_core_command(handle, "shutdown",
+        "{\"confirm\":\"shutdown\",\"restart\":false}",
+        &ignored, error_buffer, error_buffer_size)) {
+        if (NULLPTR != ignored) std::free(ignored);
+        return 0;
+    }
+    if (NULLPTR == ignored) {
+        CoreApiSetError(error_buffer, error_buffer_size, "core returned no shutdown result");
+        return 0;
+    }
+    Json::Value shutdown_result =
+        ppp::auxiliary::JsonAuxiliary::FromString(ignored);
+    bool accepted = shutdown_result.get("accepted", Json::Value(false)).asBool();
+    if (NULLPTR != ignored) std::free(ignored);
+    if (!accepted) {
+        CoreApiSetError(error_buffer, error_buffer_size, "core did not accept shutdown");
+        return 0;
+    }
+
+    if (!CoreApiWaitFinished(handle, 30000)) {
+        CoreApiSetError(error_buffer, error_buffer_size,
+            "core did not finish network cleanup within 30 seconds");
+        return 0;
+    }
+    return 1;
+}
+
+extern "C" void ppp_core_destroy(ppp_core_handle* handle)
+{
+    if (NULLPTR == handle) {
+        return;
+    }
+
+    char error[256] = {};
+    ppp_core_stop(handle, error, sizeof(error));
+    if (handle->thread.joinable()) {
+        handle->thread.join();
+    }
+    g_core_log_callback.store(nullptr, std::memory_order_release);
+    g_core_log_user_data.store(nullptr, std::memory_order_release);
+    delete handle;
+}
+
+extern "C" void ppp_core_free_string(char* value)
+{
+    std::free(value);
+}
+
 // Program entry point
+#if !defined(PPP_CORE_LIBRARY)
 int main(int argc, const char* argv[]) noexcept
 {
+    ConfigureCoreOutputStreams();
+    fprintf(stdout, "[CoreStartup] process begin argc=%d\r\n", argc);
+#if defined(_WIN32)
+    fprintf(stdout, "[CoreStartup] process pid=%lu\r\n",
+        static_cast<unsigned long>(::GetCurrentProcessId()));
+#endif
+
     // Configure real-time mode
     ppp::RT = ppp::ToBoolean(ppp::GetCommandArgument("--rt", argc, argv, "y").data());
+    fprintf(stdout, "[CoreStartup] stage=rt-config ok\r\n");
 
 #if defined(_WIN32)
     // Switch console to UTF-8 code page so Unicode box-drawing characters
     // (├ ─ │ └ ┬ ┐ ┘ ┤ etc.) render correctly instead of showing as '?'.
     ::SetConsoleOutputCP(65001);
+    fprintf(stdout, "[CoreStartup] stage=console-codepage ok\r\n");
 #endif
 
     // Initialize global state
+    fprintf(stdout, "[CoreStartup] stage=global-init begin\r\n");
     ppp::global::cctor();
+    fprintf(stdout, "[CoreStartup] stage=global-init ok\r\n");
 
     // Create application instance
+    fprintf(stdout, "[CoreStartup] stage=application-allocate begin\r\n");
     std::shared_ptr<PppApplication> APP = ppp::make_shared_object<PppApplication>();
     DEFAULT_ = APP;
+    fprintf(stdout, "[CoreStartup] stage=application-allocate ok=%d\r\n", NULLPTR != APP ? 1 : 0);
 
     // Prepare environment and run
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare begin\r\n");
     int prepared_status = APP->PreparedArgumentEnvironment(argc, argv);
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare status=%d\r\n", prepared_status);
 
     // Help and argument errors do not need the event loop or kernel features.
     if (prepared_status != 0)
@@ -5237,16 +6089,8 @@ int main(int argc, const char* argv[]) noexcept
 
     // When --log-file is specified, redirect core LOG_* output to file in all
     // builds.  The dashboard UI (fprintf to stdout) stays on console.
-    if (LOG_FILE_PATH_.size() > 0)
-    {
-        FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
-        if (NULLPTR != log_file)
-        {
-            setvbuf(log_file, NULLPTR, _IONBF, 0);
-            ppp::diagnostics::SetLogStream(log_file);
-            fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
-        }
-    }
+    OpenCoreLogFile();
+    fprintf(stdout, "[CoreStartup] stage=log-open ok\r\n");
 
 #if defined(_MACOS)
     // A full-tunnel client can legitimately own hundreds of TCP sockets even
@@ -5255,10 +6099,13 @@ int main(int argc, const char* argv[]) noexcept
     ConfigureOpenFileDescriptorLimit();
 #endif
 
+    fprintf(stdout, "[CoreStartup] stage=executor-run begin\r\n");
     int result_code = Executors::Run(APP->GetBufferAllocator(), 
         [APP, prepared_status](int argc, const char* argv[]) noexcept -> int
         {
+            fprintf(stdout, "[CoreStartup] stage=run-callback begin\r\n");
             int result_code = Run(APP, prepared_status, argc, argv);
+            fprintf(stdout, "[CoreStartup] stage=run-callback end status=%d\r\n", result_code);
 #if defined(_WIN32)
             if (result_code != 0)
             {
@@ -5267,9 +6114,12 @@ int main(int argc, const char* argv[]) noexcept
 #endif
             return result_code;
         }, argc, argv);
+    fprintf(stdout, "[CoreStartup] stage=executor-run end status=%d\r\n", result_code);
     
     // Clean up and optionally restart
+    APP->Dispose();
     APP->Release();
+    CloseCoreLogFile();
 
     // Restart application if requested
     if (GLOBAL_.restart)
@@ -5303,3 +6153,4 @@ int main(int argc, const char* argv[]) noexcept
 
     return result_code;
 }
+#endif

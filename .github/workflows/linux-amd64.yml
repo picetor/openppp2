@@ -77,6 +77,19 @@ jobs:
               sh tools/ci/prepare-musl-deps.sh /tmp/openppp2-3rd
               sh tools/ci/build-musl.sh "$ARCHITECTURE" "$VARIANT" Release /tmp/openppp2-3rd
               sh tools/ci/test-musl-network.sh
+              if [ "$VARIANT" = base ]; then
+                core_build="build/openppp2-linux-amd64-tui-core"
+                mkdir -p "$core_build/deps"
+                cp bin/libppp-core.a "$core_build/libppp-core.a"
+                cp /tmp/openppp2-3rd/boost/stage/lib/*.a "$core_build/deps/"
+                cp /tmp/openppp2-3rd/jemalloc/lib/libjemalloc.a "$core_build/deps/"
+                cp /tmp/openppp2-3rd/openssl/libssl.a /tmp/openppp2-3rd/openssl/libcrypto.a \
+                  /tmp/openppp2-3rd/openssl/libz.a /tmp/openppp2-3rd/openssl/libzstd.a "$core_build/deps/"
+                for library in libstdc++.a libgcc.a libgcc_eh.a libatomic.a; do
+                  library_path="$(gcc -print-file-name="$library")"
+                  if [ -f "$library_path" ]; then cp "$library_path" "$core_build/deps/"; fi
+                done
+              fi
             '
           sudo chown -R "$(id -u):$(id -g)" bin build
 
@@ -99,6 +112,14 @@ jobs:
           path: build/${{ env.PACKAGE }}/
           if-no-files-found: error
 
+      - name: Upload TUI/CLI core link package
+        if: ${{ matrix.variant == 'base' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-linux-amd64-tui-core
+          path: build/openppp2-linux-amd64-tui-core/
+          if-no-files-found: error
+
   build-amd64-tui:
     name: build-amd64-tui-cli
     needs: build-amd64
@@ -114,8 +135,16 @@ jobs:
           name: openppp2-linux-amd64
           path: core-package
 
+      - name: Download amd64 in-process core link package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-linux-amd64-tui-core
+          path: core-build
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -127,21 +156,25 @@ jobs:
           restore-keys: linux-amd64-tui-
 
       - name: Build Rust TUI and CLI Release
-        env:
-          PPP_TUI_CORE_PATH: ${{ github.workspace }}/core-package/ppp
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig musl-tools
           font="$(fc-match -f '%{file}\n' ':lang=zh' | head -n 1)"
           test -f "$font"
-          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --manifest-path tui/Cargo.toml --bins
+          export PPP_TUI_CORE_LIB="$GITHUB_WORKSPACE/core-build/libppp-core.a"
+          export PPP_TUI_CORE_LIB_DIRS="$GITHUB_WORKSPACE/core-build/deps"
+          export PPP_TUI_CORE_LIBS="ssl;crypto;jemalloc;zstd;z;boost_system;boost_coroutine;boost_thread;boost_context;boost_regex;boost_filesystem"
+          export PPP_TUI_CORE_SYSTEM_LIBS="pthread;dl;m"
+          export PPP_TUI_CORE_STATIC_SYSTEM_LIBS="stdc++;gcc;gcc_eh;atomic"
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target x86_64-unknown-linux-musl --manifest-path tui/Cargo.toml --bins
 
       - name: Package TUI and CLI release
         run: |
           package="build/openppp2-linux-amd64-tui"
           mkdir -p "$package"
-          cp tui/target/release/ppp-tui "$package/ppp-tui"
-          cp tui/target/release/ppp-tui-cli "$package/ppp-tui-cli"
+          cp tui/target/x86_64-unknown-linux-musl/release/ppp-tui "$package/ppp-tui"
+          cp tui/target/x86_64-unknown-linux-musl/release/ppp-tui-cli "$package/ppp-tui-cli"
           cp core-package/appsettings.json core-package/dns-rules.txt core-package/geo-rules.yaml core-package/firewall-rules.txt core-package/ip.txt core-package/ipv6.txt "$package/"
           chmod +x "$package/ppp-tui" "$package/ppp-tui-cli"
 

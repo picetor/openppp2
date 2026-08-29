@@ -9,10 +9,17 @@ pub mod schema;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(ppp_in_process_core)]
+use std::sync::{Arc, Mutex};
+#[cfg(ppp_in_process_core)]
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+
+#[cfg(ppp_in_process_core)]
+use crate::core::in_process::CoreHandle;
 
 const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -354,6 +361,240 @@ impl RpcClient {
             }
         }
         Ok(Some(response))
+    }
+}
+
+/// UI-facing core client.  A normal attach still uses the legacy loopback
+/// RPC client, while a core owned by the Rust binary uses the C++ runtime
+/// directly.  Keeping this small adapter lets both front-ends migrate without
+/// duplicating snapshot and command handling.
+pub enum CoreClient {
+    Rpc(RpcClient),
+    #[cfg(ppp_in_process_core)]
+    InProcess(InProcessClient),
+}
+
+#[cfg(ppp_in_process_core)]
+pub struct InProcessClient {
+    core: Arc<Mutex<CoreHandle>>,
+    responses: Arc<Mutex<VecDeque<Response>>>,
+    pending: Arc<Mutex<VecDeque<(u64, String)>>>,
+    next_id: u64,
+}
+
+#[cfg(ppp_in_process_core)]
+impl InProcessClient {
+    fn start(args: &[String]) -> Result<Self> {
+        Ok(Self {
+            core: Arc::new(Mutex::new(CoreHandle::start(args)?)),
+            responses: Arc::new(Mutex::new(VecDeque::new())),
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            next_id: 1,
+        })
+    }
+
+    fn is_running(&self) -> bool {
+        self.core
+            .lock()
+            .map(|core| core.is_running())
+            .unwrap_or(false)
+    }
+
+    fn request_command(&mut self, command: CoreCommand) -> Result<()> {
+        if !self.is_running() {
+            bail!("core is not running");
+        }
+
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let method = command.method().to_string();
+        let params = serde_json::to_string(&command.params()).context("serialize core command")?;
+        self.pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("core pending queue poisoned"))?
+            .push_back((id, method.clone()));
+
+        let core = Arc::clone(&self.core);
+        let responses = Arc::clone(&self.responses);
+        let pending = Arc::clone(&self.pending);
+        thread::spawn(move || {
+            let result = core
+                .lock()
+                .map_err(|_| "core handle lock poisoned".to_string())
+                .and_then(|core| {
+                    core.command(&method, &params)
+                        .map_err(|error| format!("{error:#}"))
+                });
+
+            if let Ok(mut queue) = pending.lock() {
+                if let Some(position) = queue.iter().position(|(pending_id, _)| *pending_id == id) {
+                    queue.remove(position);
+                }
+            }
+            if let Ok(mut queue) = responses.lock() {
+                match result {
+                    Ok(value) => queue.push_back(Response::Result { id, method, value }),
+                    Err(message) => queue.push_back(Response::Error {
+                        id,
+                        method,
+                        code: 500,
+                        message,
+                    }),
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Option<Response>> {
+        Ok(self
+            .responses
+            .lock()
+            .map_err(|_| anyhow::anyhow!("core response queue poisoned"))?
+            .pop_front())
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .map(|queue| !queue.is_empty())
+            .unwrap_or(true)
+    }
+
+    fn stop(&self) -> Result<()> {
+        self.core
+            .lock()
+            .map_err(|_| anyhow::anyhow!("core handle lock poisoned"))?
+            .stop()
+    }
+
+    fn register_emergency_stop(&self) {
+        crate::core::in_process::register_emergency_core(Arc::clone(&self.core));
+    }
+
+    fn clear_emergency_stop(&self) {
+        crate::core::in_process::clear_emergency_core();
+    }
+}
+
+#[cfg(ppp_in_process_core)]
+impl Drop for InProcessClient {
+    fn drop(&mut self) {
+        // Do not let the process-wide console callback keep an old core alive
+        // after the UI has intentionally discarded this client.
+        self.clear_emergency_stop();
+    }
+}
+
+impl CoreClient {
+    pub fn rpc(address: String, token: String) -> Self {
+        Self::Rpc(RpcClient::new(address, token))
+    }
+
+    #[cfg(ppp_in_process_core)]
+    pub fn in_process(args: &[String]) -> Result<Self> {
+        Ok(Self::InProcess(InProcessClient::start(args)?))
+    }
+
+    pub fn is_connected(&self) -> bool {
+        match self {
+            Self::Rpc(client) => client.is_connected(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.is_running(),
+        }
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        match self {
+            Self::Rpc(client) => client.is_authenticated(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.is_running(),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        match self {
+            Self::Rpc(client) => client.is_connected(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.is_running(),
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        match self {
+            Self::Rpc(client) => client.address(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(_) => "in-process",
+        }
+    }
+
+    pub fn has_pending(&self) -> bool {
+        match self {
+            Self::Rpc(client) => client.has_pending(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.has_pending(),
+        }
+    }
+
+    pub fn attach_stream(&mut self, stream: TcpStream) -> Result<()> {
+        match self {
+            Self::Rpc(client) => client.attach_stream(stream),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(_) => bail!("cannot attach a stream to an in-process core"),
+        }
+    }
+
+    pub fn request_command(&mut self, command: CoreCommand) -> Result<()> {
+        match self {
+            Self::Rpc(client) => client.request_command(command),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.request_command(command),
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<Option<Response>> {
+        match self {
+            Self::Rpc(client) => client.poll(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(client) => client.poll(),
+        }
+    }
+
+    pub fn disconnect(&mut self) {
+        match self {
+            Self::Rpc(client) => client.disconnect(),
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(_) => {}
+        }
+    }
+
+    #[cfg(ppp_in_process_core)]
+    pub fn stop_owned(&self) -> Result<()> {
+        match self {
+            Self::InProcess(client) => {
+                let result = client.stop();
+                if result.is_ok() {
+                    client.clear_emergency_stop();
+                }
+                result
+            }
+            Self::Rpc(_) => Ok(()),
+        }
+    }
+
+    #[cfg(ppp_in_process_core)]
+    pub fn register_emergency_stop(&self) {
+        if let Self::InProcess(client) = self {
+            client.register_emergency_stop();
+        }
+    }
+
+    pub fn is_in_process(&self) -> bool {
+        match self {
+            Self::Rpc(_) => false,
+            #[cfg(ppp_in_process_core)]
+            Self::InProcess(_) => true,
+        }
     }
 }
 

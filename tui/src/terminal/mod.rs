@@ -1,7 +1,8 @@
 //! Linux terminal front-end (ratatui/crossterm).
 //!
-//! Same shared business layer as the window front-end: the same RPC client,
-//! core launcher, startup settings and server catalog.  Only presentation
+//! Same shared business layer as the window front-end: the same core client,
+//! startup settings and server catalog. The owned-core path is in-process;
+//! external loopback RPC remains available for attach mode. Only presentation
 //! and input differ (ASCII cards, character bar charts, keyboard focus).
 
 pub mod events;
@@ -37,7 +38,7 @@ use crate::core::settings::{
 };
 use crate::core::traffic::{format_bytes, format_rate, TrafficHistory};
 use crate::rpc::schema::{Outbound, Snapshot};
-use crate::rpc::{CoreCommand, Response, RpcClient};
+use crate::rpc::{CoreClient, CoreCommand, Response, RpcClient};
 
 use events::{Action, EventReader};
 use widgets::{bar_chart_columns, pad_display, plain_card, rule_line};
@@ -53,6 +54,12 @@ pub enum View {
 
 pub const VIEW_TITLES: [&str; 5] = ["概览", "网络", "服务器", "分流", "设置"];
 
+enum CoreLaunch {
+    Process(Launcher),
+    #[cfg(ppp_in_process_core)]
+    InProcess(CoreClient),
+}
+
 pub struct TerminalApp {
     view: View,
     settings: StartupSettings,
@@ -64,11 +71,12 @@ pub struct TerminalApp {
     /// Settings page: focused field row.
     settings_selection: usize,
     settings_scroll: usize,
-    rpc: Option<RpcClient>,
+    rpc: Option<CoreClient>,
     rpc_connect_rx: Option<Receiver<anyhow::Result<std::net::TcpStream>>>,
     launcher: Option<Launcher>,
     catalog_core: bool,
-    launch_rx: Option<Receiver<Result<Launcher, String>>>,
+    in_process_core: bool,
+    launch_rx: Option<Receiver<Result<CoreLaunch, String>>>,
     snapshot: Option<Snapshot>,
     traffic: TrafficHistory,
     last_refresh: Instant,
@@ -141,7 +149,7 @@ impl TerminalApp {
             View::Servers
         };
         let rpc = has_rpc.then(|| {
-            RpcClient::new(
+            CoreClient::rpc(
                 settings.rpc_address.trim().to_string(),
                 settings.rpc_token.trim().to_string(),
             )
@@ -166,6 +174,7 @@ impl TerminalApp {
             rpc_connect_rx: None,
             launcher: None,
             catalog_core: false,
+            in_process_core: false,
             launch_rx: None,
             snapshot: None,
             traffic: TrafficHistory::new(),
@@ -188,21 +197,38 @@ impl TerminalApp {
         app
     }
 
+    fn has_owned_core(&self) -> bool {
+        self.launcher.is_some() || self.in_process_core
+    }
+
     // ------------------------------------------------------------------
     // Core lifecycle (same semantics as the window front-end)
     // ------------------------------------------------------------------
 
     fn start_catalog_core(&mut self) {
-        if self.launching || self.launcher.is_some() {
+        if self.launching || self.has_owned_core() {
             return;
         }
-        self.auto_restart_count = 0;
-        let args = catalog_core_args(&self.settings);
-        self.launch_core_with_args(args, View::Servers, true);
+        #[cfg(ppp_in_process_core)]
+        {
+            // The Rust catalog/probe layer is independent of the C++ core.
+            // Do not start a temporary in-process core here: the C++ executor
+            // is process-global and cannot be initialized twice safely.
+            self.catalog_core = false;
+            self.view = View::Servers;
+            self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
+            return;
+        }
+        #[cfg(not(ppp_in_process_core))]
+        {
+            self.auto_restart_count = 0;
+            let args = catalog_core_args(&self.settings);
+            self.launch_core_with_args(args, View::Servers, true);
+        }
     }
 
     fn start_direct_core(&mut self) {
-        if self.launching || self.launcher.is_some() {
+        if self.launching || self.has_owned_core() {
             return;
         }
         self.auto_restart_count = 0;
@@ -228,8 +254,25 @@ impl TerminalApp {
         self.view = view;
         std::thread::spawn(move || {
             let result = match core_path {
-                Some(path) => Launcher::spawn_in(&path, &args, &working_dir),
-                None => Launcher::spawn_embedded_in(&args, &working_dir),
+                Some(path) => {
+                    Launcher::spawn_in(&path, &args, &working_dir).map(CoreLaunch::Process)
+                }
+                None => {
+                    #[cfg(ppp_in_process_core)]
+                    {
+                        // Keep the C++ core's legacy console renderer out of
+                        // the Rust terminal screen. Headless only disables
+                        // core presentation; commands still use the direct
+                        // in-process API.
+                        let mut in_process_args = args.clone();
+                        set_command_argument(&mut in_process_args, "--headless", "yes");
+                        CoreClient::in_process(&in_process_args).map(CoreLaunch::InProcess)
+                    }
+                    #[cfg(not(ppp_in_process_core))]
+                    {
+                        Launcher::spawn_embedded_in(&args, &working_dir).map(CoreLaunch::Process)
+                    }
+                }
             }
             .map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
@@ -240,9 +283,15 @@ impl TerminalApp {
         // An attached CLI must only disconnect. An owned core gets the
         // shared graceful-shutdown path, which waits for the RPC request to
         // be accepted before Launcher waits for Dispose() to finish.
-        let owns_core = self.launcher.is_some();
+        let owns_core = self.has_owned_core();
         if let Some(rpc) = self.rpc.as_mut() {
             rpc.disconnect();
+        }
+        #[cfg(ppp_in_process_core)]
+        if self.in_process_core {
+            if let Some(rpc) = self.rpc.as_ref() {
+                let _ = rpc.stop_owned();
+            }
         }
         if let Some(launcher) = self.launcher.as_mut() {
             self.status = "正在停止核心（恢复网络）…".to_string();
@@ -252,6 +301,7 @@ impl TerminalApp {
         if let Some(mut launcher) = self.launcher.take() {
             launcher.stop();
         }
+        self.in_process_core = false;
         self.launch_rx = None;
         self.launching = false;
         self.catalog_core = false;
@@ -563,12 +613,13 @@ impl TerminalApp {
         let was_attached = !rpc_address.trim().is_empty();
         self.stop_core();
         if was_attached {
-            self.rpc = Some(RpcClient::new(
+            self.rpc = Some(CoreClient::rpc(
                 rpc_address.trim().to_string(),
                 self.settings.rpc_token.trim().to_string(),
             ));
+            self.in_process_core = false;
         } else {
-            self.start_catalog_core();
+            self.start_direct_core();
         }
     }
 
@@ -590,14 +641,27 @@ impl TerminalApp {
                     self.launch_rx = None;
                     self.launching = false;
                     match result {
-                        Ok(launcher) => {
+                        Ok(CoreLaunch::Process(launcher)) => {
                             self.status = format!("核心已启动 · RPC {}", launcher.endpoint);
                             let endpoint = launcher.endpoint.clone();
                             let token = launcher.token.clone();
                             let pid = launcher.pid();
-                            self.rpc = Some(RpcClient::new(endpoint.clone(), token.clone()));
+                            self.rpc = Some(CoreClient::rpc(endpoint.clone(), token.clone()));
                             set_emergency_target(Some((endpoint, token, pid)));
                             self.launcher = Some(launcher);
+                            self.in_process_core = false;
+                            self.error = None;
+                        }
+                        #[cfg(ppp_in_process_core)]
+                        Ok(CoreLaunch::InProcess(client)) => {
+                            self.status = "核心已启动 · 同进程".to_string();
+                            self.rpc = Some(client);
+                            self.launcher = None;
+                            self.in_process_core = true;
+                            if let Some(core) = self.rpc.as_ref() {
+                                core.register_emergency_stop();
+                            }
+                            set_emergency_target(None);
                             self.error = None;
                         }
                         Err(error) => {
@@ -675,17 +739,27 @@ impl TerminalApp {
 
         // Keep the CLI usable when the owned core crashes or exits early,
         // matching the window client's bounded automatic relaunch behavior.
-        let core_exited = self
+        let process_exited = self
             .launcher
             .as_mut()
             .and_then(|launcher| launcher.has_exited())
             .is_some();
-        if core_exited && !self.launching {
+        #[cfg(ppp_in_process_core)]
+        let in_process_exited = self.in_process_core
+            && self
+                .rpc
+                .as_ref()
+                .map(|core| !core.is_running())
+                .unwrap_or(true);
+        #[cfg(not(ppp_in_process_core))]
+        let in_process_exited = false;
+        if (process_exited || in_process_exited) && !self.launching {
             let view = self.view;
             let was_catalog = self.catalog_core;
             self.launcher.take();
             self.rpc = None;
             self.rpc_connect_rx = None;
+            self.in_process_core = false;
             self.catalog_core = false;
             self.snapshot = None;
             self.traffic.reset();
@@ -836,7 +910,7 @@ impl TerminalApp {
                 }
                 View::Settings => self.activate_settings_selection(),
                 View::Overview => {
-                    if self.launcher.is_none() && !self.launching {
+                    if !self.has_owned_core() && !self.launching {
                         if let Some(index) = self.selected_local_server {
                             self.activate_server_selection_at(index);
                         } else {
@@ -893,6 +967,10 @@ impl TerminalApp {
                         self.settings.tun_protect = !self.settings.tun_protect;
                         self.save_settings();
                     }
+                    52 => {
+                        self.settings.tui_log_enabled = !self.settings.tui_log_enabled;
+                        self.save_settings();
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -903,12 +981,12 @@ impl TerminalApp {
                 }
             }
             Action::Restart => {
-                if matches!(self.view, View::Settings | View::Routes) && self.launcher.is_some() {
+                if matches!(self.view, View::Settings | View::Routes) && self.has_owned_core() {
                     self.restart_core();
                 }
             }
             Action::StopCore => {
-                if self.launcher.is_none() && !self.launching {
+                if !self.has_owned_core() && !self.launching {
                     self.status = "核心未运行".to_string();
                     self.confirm_stop = false;
                 } else if self.confirm_stop {
@@ -921,8 +999,15 @@ impl TerminalApp {
                 }
             }
             Action::StartCore => {
-                if self.launcher.is_none() && !self.launching {
-                    self.start_catalog_core();
+                if !self.has_owned_core() && !self.launching {
+                    #[cfg(ppp_in_process_core)]
+                    {
+                        self.start_direct_core();
+                    }
+                    #[cfg(not(ppp_in_process_core))]
+                    {
+                        self.start_catalog_core();
+                    }
                 }
             }
             Action::BypassMode(mode) => {
@@ -964,7 +1049,7 @@ impl TerminalApp {
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        if self.launcher.is_some() {
+        if self.has_owned_core() {
             self.status = format!("正在应用服务器 {}…", profile.name);
             if self.catalog_core {
                 self.stop_core();
@@ -1035,6 +1120,10 @@ impl TerminalApp {
                 self.settings.tun_protect = !self.settings.tun_protect;
                 self.save_settings();
             }
+            52 => {
+                self.settings.tui_log_enabled = !self.settings.tui_log_enabled;
+                self.save_settings();
+            }
             index => self.begin_editing(index),
         }
     }
@@ -1057,6 +1146,7 @@ fn catalog_core_args(settings: &StartupSettings) -> Vec<String> {
         "--rpc-max-clients",
         "--log-level",
         "--tui-log",
+        "--tui-log-enabled",
         "--lwip",
         "--rt",
         "--dns",
@@ -1130,6 +1220,7 @@ fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
         "--catalog-only",
         "--log-level",
         "--tui-log",
+        "--tui-log-enabled",
         "--lwip",
     ] {
         remove_command_argument(&mut args, name);
@@ -1384,7 +1475,7 @@ fn ensure_visible(selection: &usize, scroll: &mut usize, viewport: usize) {
 }
 
 fn settings_field_count() -> usize {
-    52
+    53
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,7 +1573,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         }
     } else if app.launching {
         ("~ 启动中 ", ratatui::style::Color::Yellow)
-    } else if app.launcher.is_some() {
+    } else if app.has_owned_core() {
         ("~ 连接中", ratatui::style::Color::Yellow)
     } else {
         ("o 空闲   ", ratatui::style::Color::DarkGray)
@@ -1517,7 +1608,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     }
 
     // Primary action hint on the right (Enter starts the core).
-    if app.launcher.is_none() {
+    if !app.has_owned_core() {
         spans.push(Span::styled(
             "  回车启动 ",
             Style::default().fg(ratatui::style::Color::Green),
@@ -1705,7 +1796,7 @@ fn render_popup(frame: &mut ratatui::Frame, area: Rect, title: &str, lines: Vec<
 fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     // Idle: show the server latency preview (mirrors the window client
     // overview page before a core starts).  No VPN is started.
-    if app.launcher.is_none() && app.snapshot.is_none() {
+    if !app.has_owned_core() && app.snapshot.is_none() {
         let mut lines = vec![Line::styled(
             rule_line("服务器延迟（TCP 探测，不启动 VPN）", 60),
             Style::default().add_modifier(Modifier::BOLD),
@@ -1790,7 +1881,7 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     } else {
         "[ ]"
     };
-    let core_state = if app.launcher.is_some() {
+    let core_state = if app.has_owned_core() {
         "运行中"
     } else {
         "回车启动"
@@ -2438,14 +2529,10 @@ mod tests {
 // Windows console-close watchdog
 // ---------------------------------------------------------------------------
 //
-// Closing the console window (X), Ctrl+Break, logoff or system shutdown
-// terminates this process without running `stop_core`; the kill-on-close
-// Job Object would then force-kill the core before it restores Windows
-// DNS/routes, leaving the host without working DNS.  The OS grants a
-// console app a few seconds on close, so this handler first delivers an
-// RPC `shutdown` over a fresh connection and then keeps the process alive
-// (its Job Object stays open) until the core finishes restoring and exits
-// by itself.
+// Closing the console window (X), Ctrl+Break, logoff or system shutdown can
+// arrive outside the terminal event loop. External cores use the RPC/PID
+// fallback below; an in-process core uses the C ABI directly and waits for
+// synchronous DNS/routes/TUN cleanup before allowing the process to exit.
 #[cfg(windows)]
 mod ctrl {
     use crate::core::launcher::request_graceful_shutdown;
@@ -2471,8 +2558,11 @@ mod ctrl {
         match ctrl_type {
             CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT
             | CTRL_SHUTDOWN_EVENT => {
-                emergency_shutdown();
-                1 // handled
+                if emergency_shutdown() {
+                    1 // handled
+                } else {
+                    0 // no owned core; let the normal console behavior run
+                }
             }
             _ => 0,
         }
@@ -2495,12 +2585,25 @@ mod ctrl {
         }
     }
 
-    fn emergency_shutdown() {
+    fn emergency_shutdown() -> bool {
         // The handler runs on a fresh thread; it may race the main loop,
         // which is itself stopping the core right now.  Run once.
         if STOPPING.swap(true, Ordering::SeqCst) {
-            return;
+            return true;
         }
+
+        #[cfg(ppp_in_process_core)]
+        if crate::core::in_process::emergency_core_registered() {
+            if crate::core::in_process::emergency_stop() {
+                crate::core::in_process::clear_emergency_core();
+                std::process::exit(0);
+            }
+            // Do not fall through to process termination after a failed
+            // synchronous stop: the C++ core may still be restoring network
+            // state. Keeping the handler active is safer than killing it.
+            return true;
+        }
+
         let target = {
             TARGET
                 .lock()
@@ -2508,7 +2611,8 @@ mod ctrl {
                 .take()
         };
         let Some((endpoint, token, pid)) = target else {
-            return;
+            STOPPING.store(false, Ordering::SeqCst);
+            return false;
         };
         // Deliver the shutdown even if the live session was never
         // authenticated (fresh blocking connection with its own hello).
@@ -2726,7 +2830,7 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Field labels for the Settings page (indices 0..=51, see
+/// Field labels for the Settings page (indices 0..=52, see
 /// settings_field_count).  Toggle fields get a [x]/[ ] prefix at render
 /// time; text fields show their value after the label.
 fn setting_label(index: usize) -> &'static str {
@@ -2783,6 +2887,7 @@ fn setting_label(index: usize) -> &'static str {
         49 => "TUN 混杂模式",
         50 => "TUN 路由",
         51 => "TUN 保护",
+        52 => "TUI 日志",
         _ => "",
     }
 }
@@ -2857,6 +2962,7 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         49 => app.settings.tun_promisc,
         50 => app.settings.tun_route,
         51 => app.settings.tun_protect,
+        52 => app.settings.tui_log_enabled,
         _ => false,
     };
 
@@ -2869,7 +2975,10 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
         if rendered >= viewport {
             break;
         }
-        let toggle = matches!(index, 0 | 1 | 27 | 28 | 29 | 30 | 31 | 35 | 49 | 50 | 51);
+        let toggle = matches!(
+            index,
+            0 | 1 | 27 | 28 | 29 | 30 | 31 | 35 | 49 | 50 | 51 | 52
+        );
         let focused = app.settings_selection == index;
         let style = if focused {
             selected_style()

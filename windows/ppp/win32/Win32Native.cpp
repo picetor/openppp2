@@ -516,6 +516,11 @@ namespace ppp
 
         bool Win32Native::Execute(bool runas, const char* filePath, const char* argumentText, int* returnCode) noexcept
         {
+            return Execute(runas, filePath, argumentText, returnCode, INFINITE);
+        }
+
+        bool Win32Native::Execute(bool runas, const char* filePath, const char* argumentText, int* returnCode, uint32_t timeout_ms) noexcept
+        {
             if (NULLPTR == filePath || *filePath == '\x0')
             {
                 return false;
@@ -548,8 +553,20 @@ namespace ppp
 
             if (NULLPTR != returnCode)
             {
-                WaitForSingleObject(sei.hProcess, INFINITE);
-                if (!GetExitCodeProcess(sei.hProcess, reinterpret_cast<DWORD*>(returnCode)))
+                DWORD wait_result = WaitForSingleObject(sei.hProcess, static_cast<DWORD>(timeout_ms));
+                if (wait_result == WAIT_TIMEOUT)
+                {
+                    // The timeout is intended for short-lived helper commands
+                    // such as netsh. Never leave one holding the core startup
+                    // path after the caller has stopped waiting for it.
+                    TerminateProcess(sei.hProcess, ERROR_TIMEOUT);
+                    WaitForSingleObject(sei.hProcess, 1000);
+                    *returnCode = WAIT_TIMEOUT;
+                    CloseHandle(sei.hProcess);
+                    return false;
+                }
+                if (wait_result != WAIT_OBJECT_0 ||
+                    !GetExitCodeProcess(sei.hProcess, reinterpret_cast<DWORD*>(returnCode)))
                 {
                     *returnCode = INFINITE;
                 }

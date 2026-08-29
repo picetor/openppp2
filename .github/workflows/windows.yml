@@ -286,6 +286,42 @@ jobs:
             exit 1
           }
 
+          # Build the same Release core as a static library for the Rust
+          # front-ends. main.cpp omits its standalone main() under
+          # PPP_CORE_LIBRARY and exposes the C ABI in ppp/core/CoreApi.h.
+          msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=${{ matrix.platform.msbuild_platform }} `
+            /p:BuildCoreLibrary=true `
+            /p:ConfigurationType=StaticLibrary `
+            /t:Build `
+            /p:VcpkgEnableManifest=false `
+            /m
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "MSBuild static core failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          $coreLibCandidates = @(
+            "${{ matrix.platform.msbuild_platform }}\Release\ppp-core.lib",
+            "Release\ppp-core.lib"
+          )
+          $coreLib = $coreLibCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($coreLib)) {
+            throw "Static core library ppp-core.lib was not produced"
+          }
+          Write-Output "Found static core library at: $coreLib"
+
+          $coreBuildDir = "openppp2-windows-${{ matrix.platform.name }}-tui-core"
+          if (Test-Path -LiteralPath $coreBuildDir) {
+            Remove-Item -LiteralPath $coreBuildDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path (Join-Path $coreBuildDir 'deps') -Force | Out-Null
+          Copy-Item -LiteralPath $coreLib -Destination (Join-Path $coreBuildDir 'ppp-core.lib')
+          Get-ChildItem -LiteralPath $libDestination -File -Filter '*.lib' |
+            Copy-Item -Destination (Join-Path $coreBuildDir 'deps') -Force
+
           # Find the Release executable
           $releaseExe = "${{ matrix.platform.msbuild_platform }}\Release\ppp.exe"
           if (-not (Test-Path $releaseExe)) {
@@ -325,6 +361,13 @@ jobs:
           path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}
           if-no-files-found: error
 
+      - name: Upload TUI/CLI core link package
+        uses: actions/upload-artifact@v6
+        with:
+          name: openppp2-windows-${{ matrix.platform.name }}-tui-core
+          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}-tui-core
+          if-no-files-found: error
+
   build-windows-tui:
     name: build-windows-tui-cli (${{ matrix.platform.name }})
     needs: build-windows
@@ -335,8 +378,10 @@ jobs:
         platform:
           - name: amd64
             rust_target: x86_64-pc-windows-msvc
+            boost_suffix: x64
           - name: i386
             rust_target: i686-pc-windows-msvc
+            boost_suffix: x32
 
     runs-on: windows-latest
 
@@ -349,6 +394,12 @@ jobs:
         with:
           name: openppp2-windows-${{ matrix.platform.name }}
           path: core-package
+
+      - name: Download ${{ matrix.platform.name }} in-process core link package
+        uses: actions/download-artifact@v5
+        with:
+          name: openppp2-windows-${{ matrix.platform.name }}-tui-core
+          path: core-build
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -366,9 +417,10 @@ jobs:
 
       - name: Build Rust TUI and CLI Release
         run: |
-          $corePath = Join-Path "${{ github.workspace }}" 'core-package\ppp.exe'
-          if (-not (Test-Path -LiteralPath $corePath)) {
-            throw "Release core not found: $corePath"
+          $coreLibrary = Join-Path "${{ github.workspace }}" 'core-build\ppp-core.lib'
+          $coreLibraryDirectory = Join-Path "${{ github.workspace }}" 'core-build\deps'
+          if (-not (Test-Path -LiteralPath $coreLibrary)) {
+            throw "Static core library not found: $coreLibrary"
           }
           $fontCandidates = @(
             "$env:WINDIR\Fonts\msyh.ttc",
@@ -382,7 +434,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($font) -or -not (Test-Path -LiteralPath $font)) {
             throw 'No system font found for PPP_TUI_CJK_FONT_PATH'
           }
-          $env:PPP_TUI_CORE_PATH = (Resolve-Path -LiteralPath $corePath).Path
+          $env:PPP_TUI_CORE_LIB = (Resolve-Path -LiteralPath $coreLibrary).Path
+          $env:PPP_TUI_CORE_LIB_DIRS = (Resolve-Path -LiteralPath $coreLibraryDirectory).Path
+          $env:PPP_TUI_CORE_LIBS = "libssl;libcrypto;jemalloc_s;boost_context-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_coroutine-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_thread-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_filesystem-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91"
+          $env:PPP_TUI_CORE_SYSTEM_LIBS = "ws2_32;iphlpapi;shlwapi;qwave;pdh;winmm;wbemuuid;shell32;crypt32;propsys;dbghelp;rpcrt4;ole32;comsuppw;setupapi;fwpuclnt;netapi32;wininet;cryptui;advapi32;secur32;bcrypt;psapi;user32;oleaut32;version;dnsapi;mswsock;ncrypt;wintrust"
           $env:PPP_TUI_CJK_FONT_PATH = $font
           cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
 

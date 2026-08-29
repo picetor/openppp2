@@ -3366,7 +3366,9 @@ namespace ppp {
                 return Windows_GetNetworkInterface(ai, ni);
             }
 
-            static std::shared_ptr<VEthernetNetworkSwitcher::NetworkInterface> Windows_GetTapNetworkInterface(const std::shared_ptr<VEthernetNetworkSwitcher::ITap>& tap) noexcept {
+            static std::shared_ptr<VEthernetNetworkSwitcher::NetworkInterface> Windows_GetTapNetworkInterface(
+                const std::shared_ptr<VEthernetNetworkSwitcher::ITap>& tap,
+                const ppp::vector<boost::asio::ip::address>& fallback_dns) noexcept {
                 int interface_index = tap->GetInterfaceIndex();
                 if (interface_index == -1) {
                     return NULLPTR;
@@ -3376,7 +3378,29 @@ namespace ppp {
                 if (ppp::win32::network::GetAllAdapterInterfaces(interfaces)) {
                     for (auto&& ai : interfaces) {
                         if (ai->IfIndex == interface_index) {
-                            return Windows_GetNetworkInterface(ai);
+                            auto result = Windows_GetNetworkInterface(ai);
+                            if (NULLPTR != result) {
+                                bool has_ipv4_dns = false;
+                                for (const auto& address : result->DnsAddresses) {
+                                    if (address.is_v4() && !address.is_unspecified() && !address.is_loopback()) {
+                                        has_ipv4_dns = true;
+                                        break;
+                                    }
+                                }
+                                if (!has_ipv4_dns) {
+                                    for (const auto& address : fallback_dns) {
+                                        if (!address.is_v4() || address.is_unspecified() || address.is_loopback()) {
+                                            continue;
+                                        }
+                                        if (std::find(result->DnsAddresses.begin(), result->DnsAddresses.end(), address) == result->DnsAddresses.end()) {
+                                            result->DnsAddresses.emplace_back(address);
+                                        }
+                                    }
+                                    LOG_INFO("Windows TUN DNS: WMI returned no usable IPv4 server; restored %llu configured fallback server(s), ifIndex=%d",
+                                        (unsigned long long)result->DnsAddresses.size(), interface_index);
+                                }
+                            }
+                            return result;
                         }
                     }
                 }
@@ -4448,35 +4472,74 @@ namespace ppp {
                 if (NULLPTR == context) return false;
 
                 boost::system::error_code ec;
-                auto udp4 = make_shared_object<boost::asio::ip::udp::socket>(*context);
-                udp4->open(boost::asio::ip::udp::v4(), ec);
-                if (!ec) udp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
-                if (ec) { LOG_ERROR("Local DNS: cannot bind UDP 127.0.0.1:53, error=%s", ec.message().data()); return false; }
+                bool ipv4_ready = false;
+                bool ipv6_ready = false;
 
-                auto tcp4 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
-                tcp4->open(boost::asio::ip::tcp::v4(), ec);
-                if (!ec) tcp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
-                if (!ec) tcp4->listen(boost::asio::socket_base::max_listen_connections, ec);
-                if (ec) { LOG_ERROR("Local DNS: cannot bind TCP 127.0.0.1:53, error=%s", ec.message().data()); return false; }
+                // Treat IPv4 and IPv6 independently. IPv6 can be disabled on
+                // a Windows installation, and another program can occupy one
+                // family on port 53. A failure in one family must not make us
+                // publish a DNS address for an unbound loopback listener.
+                {
+                    auto udp4 = make_shared_object<boost::asio::ip::udp::socket>(*context);
+                    udp4->open(boost::asio::ip::udp::v4(), ec);
+                    if (!ec) udp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
+                    if (ec) {
+                        LOG_ERROR("Local DNS: cannot bind UDP 127.0.0.1:53, error=%s", ec.message().data());
+                    }
+                    else {
+                        auto tcp4 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
+                        ec.clear();
+                        tcp4->open(boost::asio::ip::tcp::v4(), ec);
+                        if (!ec) tcp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
+                        if (!ec) tcp4->listen(boost::asio::socket_base::max_listen_connections, ec);
+                        if (ec) {
+                            LOG_ERROR("Local DNS: cannot bind TCP 127.0.0.1:53, error=%s", ec.message().data());
+                        }
+                        else {
+                            local_dns_udp4_ = udp4;
+                            local_dns_tcp4_ = tcp4;
+                            ReceiveLocalDnsUdp(udp4);
+                            AcceptLocalDnsTcp(tcp4);
+                            ipv4_ready = true;
+                        }
+                    }
+                }
 
-                auto udp6 = make_shared_object<boost::asio::ip::udp::socket>(*context);
-                udp6->open(boost::asio::ip::udp::v6(), ec);
-                if (!ec) udp6->set_option(boost::asio::ip::v6_only(true), ec);
-                if (!ec) udp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
-                if (ec) { LOG_ERROR("Local DNS: cannot bind UDP [::1]:53, error=%s", ec.message().data()); return false; }
+                ec.clear();
+                {
+                    auto udp6 = make_shared_object<boost::asio::ip::udp::socket>(*context);
+                    udp6->open(boost::asio::ip::udp::v6(), ec);
+                    if (!ec) udp6->set_option(boost::asio::ip::v6_only(true), ec);
+                    if (!ec) udp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
+                    if (ec) {
+                        LOG_ERROR("Local DNS: cannot bind UDP [::1]:53, error=%s", ec.message().data());
+                    }
+                    else {
+                        auto tcp6 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
+                        ec.clear();
+                        tcp6->open(boost::asio::ip::tcp::v6(), ec);
+                        if (!ec) tcp6->set_option(boost::asio::ip::v6_only(true), ec);
+                        if (!ec) tcp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
+                        if (!ec) tcp6->listen(boost::asio::socket_base::max_listen_connections, ec);
+                        if (ec) {
+                            LOG_ERROR("Local DNS: cannot bind TCP [::1]:53, error=%s", ec.message().data());
+                        }
+                        else {
+                            local_dns_udp6_ = udp6;
+                            local_dns_tcp6_ = tcp6;
+                            ReceiveLocalDnsUdp(udp6);
+                            AcceptLocalDnsTcp(tcp6);
+                            ipv6_ready = true;
+                        }
+                    }
+                }
 
-                auto tcp6 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
-                tcp6->open(boost::asio::ip::tcp::v6(), ec);
-                if (!ec) tcp6->set_option(boost::asio::ip::v6_only(true), ec);
-                if (!ec) tcp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
-                if (!ec) tcp6->listen(boost::asio::socket_base::max_listen_connections, ec);
-                if (ec) { LOG_ERROR("Local DNS: cannot bind TCP [::1]:53, error=%s", ec.message().data()); return false; }
-
-                local_dns_udp4_ = udp4; local_dns_udp6_ = udp6;
-                local_dns_tcp4_ = tcp4; local_dns_tcp6_ = tcp6;
-                ReceiveLocalDnsUdp(udp4); ReceiveLocalDnsUdp(udp6);
-                AcceptLocalDnsTcp(tcp4); AcceptLocalDnsTcp(tcp6);
-                LOG_INFO("Local DNS: listening on UDP/TCP 127.0.0.1:53 and [::1]:53");
+                if (!ipv4_ready && !ipv6_ready) {
+                    LOG_ERROR("Local DNS: neither IPv4 nor IPv6 loopback listener could be started");
+                    return false;
+                }
+                LOG_INFO("Local DNS: listening families ipv4=%d ipv6=%d",
+                    ipv4_ready ? 1 : 0, ipv6_ready ? 1 : 0);
                 return true;
             }
 
@@ -4725,7 +4788,7 @@ namespace ppp {
                 if (!proxy_only_) {
 #if defined(_WIN32)
                 // Get network interface information for TAP-Windows virtual Ethernet devices!
-                tun_ni_ = Windows_GetTapNetworkInterface(tap);
+                tun_ni_ = Windows_GetTapNetworkInterface(tap, configured_tun_dns_);
 #else
                 // Get network interface information for Linux tun/tap virtual Ethernet devices!
                 tun_ni_ = Unix_GetTapNetworkInterface(tap);
@@ -5177,15 +5240,55 @@ namespace ppp {
                         }
                     }
                     ni_dns_servers_[tap_if_index] = tun_ni->DnsAddresses;
+                    bool need_loopback_v4 = false;
+                    for (const auto& [if_index, servers] : all_dns_v4) {
+                        if (if_index != tap_if_index && !servers.empty()) {
+                            need_loopback_v4 = true;
+                            break;
+                        }
+                    }
+
+                    // Snapshot IPv6 DNS before changing any adapter. A Wintun
+                    // interface may have no IPv6 DNS at all; that is a valid
+                    // IPv4-only Windows configuration and must not prevent the
+                    // IPv4 DNS proxy from starting.
+                    ni_dns_servers_v6_.clear();
+                    ni_router_discovery_disabled_v6_.clear();
+                    ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v6;
+                    const bool have_ipv6_dns_snapshot =
+                        ppp::win32::network::GetAllNicsDnsAddressesV6(all_dns_v6) > 0;
+                    bool need_loopback_v6 = false;
+                    if (have_ipv6_dns_snapshot) {
+                        ni_dns_servers_v6_ = all_dns_v6;
+                        for (const auto& [if_index, servers] : all_dns_v6) {
+                            if (if_index != tap_if_index && !servers.empty()) {
+                                need_loopback_v6 = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    auto rollback_dns_takeover = [this]() noexcept {
+                        DeleteRoute();
+                        if (!ni_dns_servers_v6_.empty()) {
+                            auto restore_dns6 = ni_dns_servers_v6_;
+                            ppp::win32::network::SetAllNicsDnsAddressesV6(restore_dns6);
+                        }
+                        if (!ni_dns_servers_.empty()) {
+                            auto restore_dns = ni_dns_servers_;
+                            ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
+                        }
+                        ni_dns_servers_v6_.clear();
+                        ni_dns_servers_.clear();
+                        StopLocalDnsProxy();
+                        route_added_.store(false);
+                    };
+
                     ppp::vector<ppp::string> system_dns_strings;
                     system_dns_strings.emplace_back(tun_ni->GatewayServer.to_string());
                     ppp::win32::network::ClearDnsAddresses(dns_if_index);
                     if (!ppp::win32::network::SetDnsAddresses(dns_if_index, system_dns_strings)) {
-                        auto restore_dns = ni_dns_servers_;
-                        ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
-                        ni_dns_servers_.clear();
-                        DeleteRoute();
-                        route_added_.store(false);
+                        rollback_dns_takeover();
                         LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot set TUN DNS");
                         return false;
                     }
@@ -5197,22 +5300,40 @@ namespace ppp {
                     // the answer from the tunnel DNS.  Disconnected adapters are
                     // already excluded by the snapshot above and are not touched.
                     ppp::vector<int> non_tap_v4_indexes;
-                    for (auto&& [if_index, servers] : all_dns_v4) {
-                        if (if_index != tap_if_index && !servers.empty()) {
-                            ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" });
-                            non_tap_v4_indexes.emplace_back(if_index);
-                        }
-                    }
-
-                    ni_dns_servers_v6_.clear();
-                    ni_router_discovery_disabled_v6_.clear();
-                    ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v6;
                     ppp::vector<int> non_tap_v6_indexes;
                     // Bring up the loopback DNS proxy first so every NIC can
                     // point at 127.0.0.1/[::1] and its queries are funneled into
                     // the tunnel instead of racing the ISP resolver.
-                    StartLocalDnsProxy();
-                    if (ppp::win32::network::GetAllNicsDnsAddressesV6(all_dns_v6)) {
+                    if (need_loopback_v4 || need_loopback_v6) {
+                        const bool local_dns_started = StartLocalDnsProxy();
+                        const bool loopback_v4_ready = local_dns_udp4_ && local_dns_tcp4_;
+                        const bool loopback_v6_ready = local_dns_udp6_ && local_dns_tcp6_;
+                        LOG_INFO("Windows DNS loopback readiness: need_ipv4=%d ready_ipv4=%d need_ipv6=%d ready_ipv6=%d",
+                            need_loopback_v4 ? 1 : 0, loopback_v4_ready ? 1 : 0,
+                            need_loopback_v6 ? 1 : 0, loopback_v6_ready ? 1 : 0);
+                        if (!local_dns_started ||
+                            (need_loopback_v4 && !loopback_v4_ready) ||
+                            (need_loopback_v6 && !loopback_v6_ready)) {
+                            rollback_dns_takeover();
+                            LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: required DNS loopback family is unavailable");
+                            return false;
+                        }
+
+                        // Pin every connected non-TAP IPv4 DNS only after the
+                        // IPv4 listener has been verified.
+                        for (auto&& [if_index, servers] : all_dns_v4) {
+                            if (if_index != tap_if_index && !servers.empty()) {
+                                if (ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" })) {
+                                    non_tap_v4_indexes.emplace_back(if_index);
+                                }
+                                else {
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv4 DNS to 127.0.0.1, ifIndex=%d", if_index);
+                                    rollback_dns_takeover();
+                                    return false;
+                                }
+                            }
+                        }
+
                         // Snapshot the original IPv6 DNS of every NIC so shutdown can
                         // restore them.  The Windows DNS Client queries every NIC's
                         // resolvers in parallel and accepts the first answer.  A
@@ -5222,7 +5343,6 @@ namespace ppp {
                         // answer from the tunnel DNS.  Instead of clearing (which RA
                         // RDNSS may re-inject) we pin every non-TAP NIC to the local
                         // proxy ::1, a static value RA never overwrites.
-                        ni_dns_servers_v6_ = all_dns_v6;
                         for (const auto& [if_index, servers] : all_dns_v6) {
                             if (if_index != tap_if_index && !servers.empty()) {
                                 // Pin the resolver to the local proxy ::1 only.  Do NOT
@@ -5233,8 +5353,14 @@ namespace ppp {
                                 // IPv6-only server connectivity.  RDNSS re-injection of
                                 // the ISP resolver is instead defeated by re-pinning
                                 // ::1 every 30s via the DNS guard timer below.
-                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
-                                non_tap_v6_indexes.emplace_back(if_index);
+                                if (ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" })) {
+                                    non_tap_v6_indexes.emplace_back(if_index);
+                                }
+                                else {
+                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv6 DNS to ::1, ifIndex=%d", if_index);
+                                    rollback_dns_takeover();
+                                    return false;
+                                }
                             }
                         }
                     }

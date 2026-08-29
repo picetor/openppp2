@@ -54,6 +54,17 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+  <!--
+    Select the static-library build before Microsoft.Cpp.props is imported.
+    The C++ targets cache the link tool from ConfigurationType; changing it
+    later would leave the project looking static while still executing the
+    application linker.
+  -->
+  <PropertyGroup Condition="'$(BuildCoreLibrary)'=='true'">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <TargetName>ppp-core</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
@@ -234,7 +245,13 @@
       <AdditionalDependencies>libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(BuildCoreLibrary)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>PPP_CORE_LIBRARY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="ppp\core\CoreApi.h" />
     <ClCompile Include="common\aesni\aes.cpp" />
     <ClCompile Include="common\aesni\impl\simd_aes_128_cfb.cpp" />
     <ClCompile Include="common\aesni\impl\simd_aes_256_cfb.cpp" />
