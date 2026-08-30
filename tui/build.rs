@@ -10,169 +10,134 @@ fn main() {
         .expect("tui crate must live below the repository root");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
-    println!("cargo:rustc-check-cfg=cfg(ppp_in_process_core)");
+    if env::var_os("PPP_TUI_CORE_PATH").is_some() {
+        panic!(
+            "PPP_TUI_CORE_PATH is no longer supported; build ppp-core.lib and use PPP_TUI_CORE_LIB"
+        );
+    }
+
+    let check_only = env::var_os("PPP_TUI_CHECK_ONLY").is_some();
     let configured_library = env::var_os("PPP_TUI_CORE_LIB").map(PathBuf::from);
-    let configured_external = env::var_os("PPP_TUI_CORE_PATH").map(PathBuf::from);
-    // An explicit executable path is an intentional compatibility request.
-    // Do not silently replace it with an auto-discovered static library just
-    // because a developer build happens to leave ppp-core.lib in the tree.
-    let core_library = if configured_external.is_none() {
-        configured_library
-            .filter(|path| path.is_file())
-            .or_else(|| {
-                [
-                    repo_root.join("x64/Release/ppp-core.lib"),
-                    repo_root.join("Release/ppp-core.lib"),
-                    repo_root.join("x64/Debug/ppp-core.lib"),
-                    repo_root.join("Debug/ppp-core.lib"),
-                ]
-                .into_iter()
-                .find(|path| path.is_file())
-            })
-    } else {
-        None
-    };
+    let core_library = configured_library
+        .clone()
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            [
+                repo_root.join("x64/Release/ppp-core.lib"),
+                repo_root.join("Release/ppp-core.lib"),
+                repo_root.join("x64/Debug/ppp-core.lib"),
+                repo_root.join("Debug/ppp-core.lib"),
+                repo_root.join("bin/libppp-core.a"),
+            ]
+            .into_iter()
+            .find(|path| path.is_file())
+        });
 
     println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_LIB");
+    println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_PATH");
+    println!("cargo:rerun-if-env-changed=PPP_TUI_CHECK_ONLY");
     println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_LIBS");
     println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_LIB_DIRS");
     println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_SYSTEM_LIBS");
     println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_STATIC_SYSTEM_LIBS");
-    println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_PATH");
 
-    if let Some(core_library) = core_library {
-        // The in-process build links the C++ engine directly.  Do not require
-        // or embed a ppp.exe in this mode: a Rust binary with the static core
-        // is the product, while ppp.exe remains a separate thin CLI host.
-        // Cargo does not otherwise know that the archive changed when the
-        // C++ core is rebuilt in place, so make the embedded core a real build
-        // input. This prevents a TUI rebuild from silently retaining an old
-        // network/runtime implementation.
-        println!("cargo:rerun-if-changed={}", core_library.display());
-        println!("cargo:rustc-cfg=ppp_in_process_core");
-        if let Some(parent) = core_library.parent() {
-            println!("cargo:rustc-link-search=native={}", parent.display());
+    let Some(core_library) = core_library else {
+        if let Some(path) = configured_library {
+            panic!(
+                "PPP_TUI_CORE_LIB does not point to a static core library: {}",
+                path.display()
+            );
         }
-        let library_name = core_library
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("ppp-core")
-            .strip_prefix("lib")
-            .unwrap_or_else(|| {
-                core_library
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("ppp-core")
-            });
-        println!("cargo:rustc-link-lib=static={library_name}");
-        // `rustc-link-lib` from a package build script is attached to the
-        // package library target.  The products are binaries, so pass the
-        // concrete archive to both final binary link steps as well.
-        emit_link_argument_for_bins(&core_library);
-
-        let dependency_directories = env::var_os("PPP_TUI_CORE_LIB_DIRS")
-            .map(|directories| {
-                directories
-                    .to_string_lossy()
-                    .split(|character| character == ';' || character == ',')
-                    .filter_map(|directory| {
-                        let directory = directory.trim();
-                        (!directory.is_empty()).then(|| PathBuf::from(directory))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for directory in &dependency_directories {
-            println!("cargo:rustc-link-search=native={}", directory.display());
+        if !check_only {
+            panic!(
+                "ppp-tui requires the in-process static core library; build ppp-core.lib/libppp-core.a first"
+            );
         }
-
-        if let Some(libraries) = env::var_os("PPP_TUI_CORE_LIBS") {
-            let value = libraries.to_string_lossy();
-            for library in value.split(|character| character == ';' || character == ',') {
-                let library = library.trim();
-                if !library.is_empty() {
-                    println!("cargo:rustc-link-lib=static={library}");
-                    emit_named_library_for_bins(library, &dependency_directories, true, true);
-                }
-            }
-        }
-        if let Some(libraries) = env::var_os("PPP_TUI_CORE_SYSTEM_LIBS") {
-            for library in libraries
-                .to_string_lossy()
-                .split(|character| character == ';' || character == ',')
-            {
-                let library = library.trim();
-                if !library.is_empty() {
-                    println!("cargo:rustc-link-lib={library}");
-                    emit_named_library_for_bins(library, &dependency_directories, false, false);
-                }
-            }
-        }
-        if let Some(libraries) = env::var_os("PPP_TUI_CORE_STATIC_SYSTEM_LIBS") {
-            for library in libraries
-                .to_string_lossy()
-                .split(|character| character == ';' || character == ',')
-            {
-                let library = library.trim();
-                if !library.is_empty() {
-                    println!("cargo:rustc-link-lib=static={library}");
-                    emit_named_library_for_bins(library, &dependency_directories, true, false);
-                }
-            }
-            #[cfg(not(windows))]
-            emit_link_argument_for_bins(Path::new("-Wl,-Bdynamic"));
-        }
-
+        println!(
+            "cargo:warning=PPP_TUI_CHECK_ONLY is set; skipping native core linking for compile-only validation"
+        );
         embed_cjk_font(&out_dir);
         #[cfg(windows)]
         embed_windows_icon(repo_root, &out_dir);
         return;
-    }
-
-    let configured = env::var_os("PPP_TUI_CORE_PATH").map(PathBuf::from);
-    let candidates = [
-        repo_root.join("x64/Release/ppp.exe"),
-        repo_root.join("Release/ppp.exe"),
-        repo_root.join("x64/Debug/ppp.exe"),
-        repo_root.join("Debug/ppp.exe"),
-    ];
-
-    for candidate in &candidates {
-        println!("cargo:rerun-if-changed={}", candidate.display());
-    }
-
-    let core_path = match configured {
-        Some(path) if path.is_file() => path,
-        Some(path) => panic!(
-            "PPP_TUI_CORE_PATH does not point to a file: {}",
-            path.display()
-        ),
-        None => candidates
-            .into_iter()
-            .find(|path| path.is_file())
-            .unwrap_or_else(|| {
-                panic!("ppp-tui requires an embedded core executable; set PPP_TUI_CORE_PATH to a built ppp.exe")
-            }),
     };
 
-    let embedded_path = out_dir.join("ppp-embedded.exe");
-    fs::copy(&core_path, &embedded_path).unwrap_or_else(|error| {
-        panic!(
-            "cannot copy core {} to {}: {error}",
-            core_path.display(),
-            embedded_path.display()
-        )
-    });
+    // The C++ engine is always linked into the Rust products. Cargo does not
+    // otherwise know that the archive changed when the core is rebuilt in
+    // place, so make it a real build input.
+    println!("cargo:rerun-if-changed={}", core_library.display());
+    if let Some(parent) = core_library.parent() {
+        println!("cargo:rustc-link-search=native={}", parent.display());
+    }
+    let library_name = core_library
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("ppp-core")
+        .strip_prefix("lib")
+        .unwrap_or_else(|| {
+            core_library
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("ppp-core")
+        });
+    println!("cargo:rustc-link-lib=static={library_name}");
+    // `rustc-link-lib` from a package build script is attached to the
+    // package library target. The products are binaries, so pass the
+    // concrete archive to both final binary link steps as well.
+    emit_link_argument_for_bins(&core_library);
 
-    println!("cargo:rerun-if-env-changed=PPP_TUI_CORE_PATH");
-    println!(
-        "cargo:rustc-env=PPP_TUI_EMBEDDED_CORE={}",
-        embedded_path.display()
-    );
-    println!(
-        "cargo:rustc-env=PPP_TUI_EMBEDDED_CORE_SOURCE={}",
-        core_path.display()
-    );
+    let dependency_directories = env::var_os("PPP_TUI_CORE_LIB_DIRS")
+        .map(|directories| {
+            directories
+                .to_string_lossy()
+                .split(|character| character == ';' || character == ',')
+                .filter_map(|directory| {
+                    let directory = directory.trim();
+                    (!directory.is_empty()).then(|| PathBuf::from(directory))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for directory in &dependency_directories {
+        println!("cargo:rustc-link-search=native={}", directory.display());
+    }
+
+    if let Some(libraries) = env::var_os("PPP_TUI_CORE_LIBS") {
+        let value = libraries.to_string_lossy();
+        for library in value.split(|character| character == ';' || character == ',') {
+            let library = library.trim();
+            if !library.is_empty() {
+                println!("cargo:rustc-link-lib=static={library}");
+                emit_named_library_for_bins(library, &dependency_directories, true, true);
+            }
+        }
+    }
+    if let Some(libraries) = env::var_os("PPP_TUI_CORE_SYSTEM_LIBS") {
+        for library in libraries
+            .to_string_lossy()
+            .split(|character| character == ';' || character == ',')
+        {
+            let library = library.trim();
+            if !library.is_empty() {
+                println!("cargo:rustc-link-lib={library}");
+                emit_named_library_for_bins(library, &dependency_directories, false, false);
+            }
+        }
+    }
+    if let Some(libraries) = env::var_os("PPP_TUI_CORE_STATIC_SYSTEM_LIBS") {
+        for library in libraries
+            .to_string_lossy()
+            .split(|character| character == ';' || character == ',')
+        {
+            let library = library.trim();
+            if !library.is_empty() {
+                println!("cargo:rustc-link-lib=static={library}");
+                emit_named_library_for_bins(library, &dependency_directories, true, false);
+            }
+        }
+        #[cfg(not(windows))]
+        emit_link_argument_for_bins(Path::new("-Wl,-Bdynamic"));
+    }
 
     embed_cjk_font(&out_dir);
 

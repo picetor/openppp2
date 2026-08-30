@@ -1,9 +1,8 @@
 //! Linux terminal front-end (ratatui/crossterm).
 //!
-//! Same shared business layer as the window front-end: the same core client,
-//! startup settings and server catalog. The owned-core path is in-process;
-//! external loopback RPC remains available for attach mode. Only presentation
-//! and input differ (ASCII cards, character bar charts, keyboard focus).
+//! Same shared business layer as the window front-end: the same in-process
+//! core client, startup settings and server catalog. External loopback RPC
+//! remains available only for attach mode. Only presentation and input differ.
 
 pub mod events;
 pub mod widgets;
@@ -30,7 +29,6 @@ use crate::core::command::{
     normalize_core_args, remove_command_argument, set_bool_if_non_default, set_command_argument,
     set_optional_command_argument, set_optional_if_not_default, split_command_line,
 };
-use crate::core::launcher::Launcher;
 use crate::core::probe::{spawn_probe_loop, ProbeState, ProbeTable};
 use crate::core::server_catalog::{load_server_catalog, LocalServerProfile};
 use crate::core::settings::{
@@ -55,8 +53,6 @@ pub enum View {
 pub const VIEW_TITLES: [&str; 5] = ["概览", "网络", "服务器", "分流", "设置"];
 
 enum CoreLaunch {
-    Process(Launcher),
-    #[cfg(ppp_in_process_core)]
     InProcess(CoreClient),
 }
 
@@ -73,7 +69,6 @@ pub struct TerminalApp {
     settings_scroll: usize,
     rpc: Option<CoreClient>,
     rpc_connect_rx: Option<Receiver<anyhow::Result<std::net::TcpStream>>>,
-    launcher: Option<Launcher>,
     catalog_core: bool,
     in_process_core: bool,
     launch_rx: Option<Receiver<Result<CoreLaunch, String>>>,
@@ -172,7 +167,6 @@ impl TerminalApp {
             settings_scroll: 0,
             rpc,
             rpc_connect_rx: None,
-            launcher: None,
             catalog_core: false,
             in_process_core: false,
             launch_rx: None,
@@ -198,7 +192,7 @@ impl TerminalApp {
     }
 
     fn has_owned_core(&self) -> bool {
-        self.launcher.is_some() || self.in_process_core
+        self.in_process_core
     }
 
     // ------------------------------------------------------------------
@@ -209,22 +203,11 @@ impl TerminalApp {
         if self.launching || self.has_owned_core() {
             return;
         }
-        #[cfg(ppp_in_process_core)]
-        {
-            // The Rust catalog/probe layer is independent of the C++ core.
-            // Do not start a temporary in-process core here: the C++ executor
-            // is process-global and cannot be initialized twice safely.
-            self.catalog_core = false;
-            self.view = View::Servers;
-            self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
-            return;
-        }
-        #[cfg(not(ppp_in_process_core))]
-        {
-            self.auto_restart_count = 0;
-            let args = catalog_core_args(&self.settings);
-            self.launch_core_with_args(args, View::Servers, true);
-        }
+        // The Rust catalog/probe layer is independent of the C++ core. Do
+        // not start a second core just to populate the server list.
+        self.catalog_core = false;
+        self.view = View::Servers;
+        self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
     }
 
     fn start_direct_core(&mut self) {
@@ -237,15 +220,6 @@ impl TerminalApp {
     }
 
     fn launch_core_with_args(&mut self, args: Vec<String>, view: View, catalog_core: bool) {
-        let working_dir = crate::core::settings::working_directory(&self.settings);
-        let core_path = self.settings.core_path.clone().map(|path| {
-            let path = std::path::PathBuf::from(path);
-            if path.is_absolute() {
-                path
-            } else {
-                working_dir.join(path)
-            }
-        });
         let (tx, rx) = channel();
         self.launch_rx = Some(rx);
         self.launching = true;
@@ -253,53 +227,30 @@ impl TerminalApp {
         self.status = "正在启动核心…".to_string();
         self.view = view;
         std::thread::spawn(move || {
-            let result = match core_path {
-                Some(path) => {
-                    Launcher::spawn_in(&path, &args, &working_dir).map(CoreLaunch::Process)
-                }
-                None => {
-                    #[cfg(ppp_in_process_core)]
-                    {
-                        // Keep the C++ core's legacy console renderer out of
-                        // the Rust terminal screen. Headless only disables
-                        // core presentation; commands still use the direct
-                        // in-process API.
-                        let mut in_process_args = args.clone();
-                        set_command_argument(&mut in_process_args, "--headless", "yes");
-                        CoreClient::in_process(&in_process_args).map(CoreLaunch::InProcess)
-                    }
-                    #[cfg(not(ppp_in_process_core))]
-                    {
-                        Launcher::spawn_embedded_in(&args, &working_dir).map(CoreLaunch::Process)
-                    }
-                }
-            }
-            .map_err(|error| format!("{error:#}"));
+            // Keep the C++ core's legacy console renderer out of the Rust
+            // terminal screen. Headless disables only core presentation; the
+            // engine remains in this process.
+            let mut in_process_args = args;
+            set_command_argument(&mut in_process_args, "--headless", "yes");
+            let result = CoreClient::in_process(&in_process_args)
+                .map(CoreLaunch::InProcess)
+                .map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
         });
     }
 
     fn stop_core(&mut self) {
         // An attached CLI must only disconnect. An owned core gets the
-        // shared graceful-shutdown path, which waits for the RPC request to
-        // be accepted before Launcher waits for Dispose() to finish.
+        // shared graceful-shutdown path, which restores network state before
+        // returning.
         let owns_core = self.has_owned_core();
         if let Some(rpc) = self.rpc.as_mut() {
             rpc.disconnect();
         }
-        #[cfg(ppp_in_process_core)]
         if self.in_process_core {
             if let Some(rpc) = self.rpc.as_ref() {
                 let _ = rpc.stop_owned();
             }
-        }
-        if let Some(launcher) = self.launcher.as_mut() {
-            self.status = "正在停止核心（恢复网络）…".to_string();
-            let _ = launcher.request_graceful_shutdown();
-        }
-
-        if let Some(mut launcher) = self.launcher.take() {
-            launcher.stop();
         }
         self.in_process_core = false;
         self.launch_rx = None;
@@ -315,7 +266,6 @@ impl TerminalApp {
             "已断开核心连接".to_string()
         };
         // The core is gone; a late console-close event must not try again.
-        set_emergency_target(None);
     }
 
     /// TCP-probe latency label for a local server profile.
@@ -341,7 +291,7 @@ impl TerminalApp {
 
     /// Enter edit mode on settings field `index` (text fields only).
     fn begin_editing(&mut self, index: usize) {
-        if !matches!(index, 2..=51) {
+        if index == 26 || !matches!(index, 2..=51) {
             return;
         }
         let current = match index {
@@ -369,7 +319,6 @@ impl TerminalApp {
             23 => self.settings.working_dir.clone(),
             24 => self.settings.rpc_address.clone(),
             25 => self.settings.rpc_token.clone(),
-            26 => self.settings.core_path.clone().unwrap_or_default(),
             27 => self.settings.tun_host.to_string(),
             28 => self.settings.tun_vnet.to_string(),
             29 => self.settings.tun_static.to_string(),
@@ -428,13 +377,6 @@ impl TerminalApp {
             23 => self.settings.working_dir = text,
             24 => self.settings.rpc_address = text,
             25 => self.settings.rpc_token = text,
-            26 => {
-                self.settings.core_path = if text.trim().is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
-            }
             33 => self.settings.log_level = normalize_log_level(&text),
             34 => self.settings.tcp_ip_cc = normalize_tcp_ip_cc(&text),
             36 => self.settings.dns = text,
@@ -641,27 +583,13 @@ impl TerminalApp {
                     self.launch_rx = None;
                     self.launching = false;
                     match result {
-                        Ok(CoreLaunch::Process(launcher)) => {
-                            self.status = format!("核心已启动 · RPC {}", launcher.endpoint);
-                            let endpoint = launcher.endpoint.clone();
-                            let token = launcher.token.clone();
-                            let pid = launcher.pid();
-                            self.rpc = Some(CoreClient::rpc(endpoint.clone(), token.clone()));
-                            set_emergency_target(Some((endpoint, token, pid)));
-                            self.launcher = Some(launcher);
-                            self.in_process_core = false;
-                            self.error = None;
-                        }
-                        #[cfg(ppp_in_process_core)]
                         Ok(CoreLaunch::InProcess(client)) => {
                             self.status = "核心已启动 · 同进程".to_string();
                             self.rpc = Some(client);
-                            self.launcher = None;
                             self.in_process_core = true;
                             if let Some(core) = self.rpc.as_ref() {
                                 core.register_emergency_stop();
                             }
-                            set_emergency_target(None);
                             self.error = None;
                         }
                         Err(error) => {
@@ -737,39 +665,29 @@ impl TerminalApp {
             self.handle_response(response);
         }
 
-        // Keep the CLI usable when the owned core crashes or exits early,
-        // matching the window client's bounded automatic relaunch behavior.
-        let process_exited = self
-            .launcher
-            .as_mut()
-            .and_then(|launcher| launcher.has_exited())
-            .is_some();
-        #[cfg(ppp_in_process_core)]
+        // Keep the CLI usable when the owned core exits unexpectedly, matching
+        // the window client's bounded automatic relaunch behavior.
         let in_process_exited = self.in_process_core
             && self
                 .rpc
                 .as_ref()
                 .map(|core| !core.is_running())
                 .unwrap_or(true);
-        #[cfg(not(ppp_in_process_core))]
-        let in_process_exited = false;
-        if (process_exited || in_process_exited) && !self.launching {
+        if in_process_exited && !self.launching {
             let view = self.view;
             let was_catalog = self.catalog_core;
-            self.launcher.take();
             self.rpc = None;
             self.rpc_connect_rx = None;
             self.in_process_core = false;
             self.catalog_core = false;
             self.snapshot = None;
             self.traffic.reset();
-            set_emergency_target(None);
             self.auto_restart_count = self.auto_restart_count.saturating_add(1);
             if self.auto_restart_count <= 3 {
                 self.status = format!("核心已退出，正在重启（{}/3）…", self.auto_restart_count);
                 if was_catalog {
-                    let args = catalog_core_args(&self.settings);
-                    self.launch_core_with_args(args, View::Servers, true);
+                    let args = self.core_args();
+                    self.launch_core_with_args(args, view, false);
                 } else {
                     let args = self.core_args();
                     self.launch_core_with_args(args, view, false);
@@ -1000,14 +918,7 @@ impl TerminalApp {
             }
             Action::StartCore => {
                 if !self.has_owned_core() && !self.launching {
-                    #[cfg(ppp_in_process_core)]
-                    {
-                        self.start_direct_core();
-                    }
-                    #[cfg(not(ppp_in_process_core))]
-                    {
-                        self.start_catalog_core();
-                    }
+                    self.start_direct_core();
                 }
             }
             Action::BypassMode(mode) => {
@@ -1043,7 +954,7 @@ impl TerminalApp {
         self.selected_local_server = Some(index);
         let working_dir = crate::core::settings::working_directory(&self.settings);
         self.settings.config_path =
-            crate::core::settings::core_path_string(&working_dir, &profile.path);
+            crate::core::settings::relative_path_string(&working_dir, &profile.path);
         self.settings.server_dir = profile
             .path
             .parent()
@@ -1131,83 +1042,6 @@ impl TerminalApp {
     fn toggle_tun_enabled(&mut self) {
         self.settings.tun_enabled = !self.settings.tun_enabled;
     }
-}
-
-/// Construct the core command line from the same settings contract used by
-/// the window client. Preserve advanced command-line options, then replace
-/// only arguments owned by the TUI so split-mode changes cannot leave stale
-/// TUN/proxy values behind.
-fn catalog_core_args(settings: &StartupSettings) -> Vec<String> {
-    let mut args = normalize_core_args(split_command_line(&settings.command));
-    for name in [
-        "--headless",
-        "--rpc-listen",
-        "--rpc-token",
-        "--rpc-max-clients",
-        "--log-level",
-        "--tui-log",
-        "--tui-log-enabled",
-        "--lwip",
-        "--rt",
-        "--dns",
-        "--auto-restart",
-        "--firewall-rules",
-        "--config",
-        "--set-http-proxy",
-        "--nic",
-        "--ngw",
-        "--tun",
-        "--tun-driver",
-        "--tun-ip",
-        "--tun-gw",
-        "--tun-mask",
-        "--tun-host",
-        "--tun-vnet",
-        "--tun-static",
-        "--tun-flash",
-        "--block-quic",
-        "--tun-ssmt",
-        "--tun-lease-time-in-seconds",
-        "--tun-promisc",
-        "--tun-route",
-        "--tun-protect",
-        "--proxy-http-port",
-        "--proxy-socks-port",
-        "--bypass-mode",
-        "--bypass",
-        "--bypass-nic",
-        "--bypass-ngw",
-        "--bypass6",
-        "--bypass-nic6",
-        "--bypass-ngw6",
-        "--dns-rules",
-        "--geo-rules",
-        "--geosite",
-        "--geoip",
-    ] {
-        remove_command_argument(&mut args, name);
-    }
-    set_command_argument(&mut args, "--mode", "proxy");
-    set_optional_command_argument(&mut args, "--server-dir", &settings.server_dir);
-    set_command_argument(&mut args, "--proxy-http-port", "0");
-    set_command_argument(&mut args, "--proxy-socks-port", "0");
-    set_command_argument(&mut args, "--catalog-only", "yes");
-    set_bool_if_non_default(&mut args, "--rt", settings.rt, true);
-    set_optional_if_not_default(&mut args, "--tun-mux", &settings.tun_mux, "");
-    set_optional_if_not_default(
-        &mut args,
-        "--tun-mux-acceleration",
-        &settings.tun_mux_acceleration,
-        "",
-    );
-    set_optional_if_not_default(
-        &mut args,
-        "--log-file",
-        &settings.log_file,
-        "./ppp-core.log",
-    );
-    set_command_argument(&mut args, "--log-level", &settings.log_level);
-    args
 }
 
 fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
@@ -1443,13 +1277,6 @@ fn rpc_connect_background(address: String) -> Receiver<anyhow::Result<std::net::
 
 /// Record the core this process currently owns so the Windows console-close
 /// watchdog can reach it after this process is told to die.
-fn set_emergency_target(target: Option<(String, String, u32)>) {
-    #[cfg(windows)]
-    ctrl::set_target(target);
-    #[cfg(not(windows))]
-    let _ = target;
-}
-
 fn move_list(count: usize, selection: &mut usize, scroll: &mut usize, delta: i64) {
     if count == 0 {
         return;
@@ -2422,23 +2249,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_mode_is_proxy_only_and_keeps_server_directory() {
-        let mut settings = StartupSettings::default();
-        settings.command =
-            "--mode=client --config=main.json --tun-ip=10.0.0.1 --catalog-only=no".to_string();
-        settings.server_dir = "config".to_string();
-        let args = catalog_core_args(&settings);
-
-        assert!(has_arg(&args, "--mode=proxy"));
-        assert!(has_arg(&args, "--server-dir=config"));
-        assert!(has_arg(&args, "--catalog-only=yes"));
-        assert!(has_arg(&args, "--proxy-http-port=0"));
-        assert!(has_arg(&args, "--proxy-socks-port=0"));
-        assert!(!args.iter().any(|arg| arg.starts_with("--config")));
-        assert!(!args.iter().any(|arg| arg.starts_with("--tun-ip")));
-    }
-
-    #[test]
     fn tcp_ip_cc_setting_maps_to_lwip_switch() {
         let mut settings = StartupSettings::default();
         settings.command = "--mode=client --lwip=yes".to_string();
@@ -2530,14 +2340,11 @@ mod tests {
 // ---------------------------------------------------------------------------
 //
 // Closing the console window (X), Ctrl+Break, logoff or system shutdown can
-// arrive outside the terminal event loop. External cores use the RPC/PID
-// fallback below; an in-process core uses the C ABI directly and waits for
-// synchronous DNS/routes/TUN cleanup before allowing the process to exit.
+// arrive outside the terminal event loop. The in-process core uses the C ABI
+// directly and waits for synchronous DNS/routes/TUN cleanup before exit.
 #[cfg(windows)]
 mod ctrl {
-    use crate::core::launcher::request_graceful_shutdown;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
 
     const CTRL_C_EVENT: u32 = 0;
     const CTRL_BREAK_EVENT: u32 = 1;
@@ -2545,13 +2352,7 @@ mod ctrl {
     const CTRL_LOGOFF_EVENT: u32 = 5;
     const CTRL_SHUTDOWN_EVENT: u32 = 6;
 
-    /// The core currently owned by this process (endpoint, token, PID).
-    static TARGET: Mutex<Option<(String, String, u32)>> = Mutex::new(None);
     static STOPPING: AtomicBool = AtomicBool::new(false);
-
-    pub fn set_target(target: Option<(String, String, u32)>) {
-        *TARGET.lock().unwrap_or_else(|poison| poison.into_inner()) = target;
-    }
 
     #[allow(non_snake_case)]
     unsafe extern "system" fn console_handler(ctrl_type: u32) -> i32 {
@@ -2592,7 +2393,6 @@ mod ctrl {
             return true;
         }
 
-        #[cfg(ppp_in_process_core)]
         if crate::core::in_process::emergency_core_registered() {
             if crate::core::in_process::emergency_stop() {
                 crate::core::in_process::clear_emergency_core();
@@ -2603,41 +2403,8 @@ mod ctrl {
             // state. Keeping the handler active is safer than killing it.
             return true;
         }
-
-        let target = {
-            TARGET
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .take()
-        };
-        let Some((endpoint, token, pid)) = target else {
-            STOPPING.store(false, Ordering::SeqCst);
-            return false;
-        };
-        // Deliver the shutdown even if the live session was never
-        // authenticated (fresh blocking connection with its own hello).
-        let _shutdown_acknowledged = request_graceful_shutdown(&endpoint, &token);
-        // Even if the acknowledgement is lost because the core closes its
-        // RPC session while disposing, it may already be restoring DNS. Never
-        // call process::exit immediately after a failed/ambiguous request:
-        // the Job Object would kill the core halfway through cleanup.
-        // Dispose can take up to 10s waiting for DNS guard workers, so wait
-        // before allowing the console process to terminate. (CTRL_C and
-        // CTRL_BREAK are not subject to the shorter close-event deadline.)
-        wait_for_core_exit(pid, 15000);
-        std::process::exit(0);
-    }
-
-    fn wait_for_core_exit(pid: u32, timeout_ms: u32) {
-        unsafe {
-            const SYNCHRONIZE: u32 = 0x0010_0000;
-            let handle = OpenProcess(SYNCHRONIZE, 0, pid);
-            if handle.is_null() {
-                return;
-            }
-            WaitForSingleObject(handle, timeout_ms);
-            CloseHandle(handle);
-        }
+        STOPPING.store(false, Ordering::SeqCst);
+        false
     }
 
     extern "system" {
@@ -2647,13 +2414,6 @@ mod ctrl {
             handler_routine: Option<unsafe extern "system" fn(u32) -> i32>,
             add: i32,
         ) -> i32;
-        fn OpenProcess(
-            dw_desired_access: u32,
-            b_inherit_handle: i32,
-            dw_process_id: u32,
-        ) -> *mut core::ffi::c_void;
-        fn WaitForSingleObject(h_handle: *mut core::ffi::c_void, dw_milliseconds: u32) -> u32;
-        fn CloseHandle(h_object: *mut core::ffi::c_void) -> i32;
     }
 }
 
@@ -2861,7 +2621,7 @@ fn setting_label(index: usize) -> &'static str {
         23 => "工作目录",
         24 => "RPC 地址",
         25 => "RPC Token",
-        26 => "核心路径",
+        26 => "核心模式",
         27 => "TUN Host",
         28 => "TUN VNet",
         29 => "TUN 静态地址",
@@ -2892,8 +2652,9 @@ fn setting_label(index: usize) -> &'static str {
     }
 }
 
-/// Current value of a text settings field (index 2..=26, 32..=34 and 36..=48); toggle
-/// fields are rendered with [x]/[ ] and return an empty value here.
+/// Current value of a text settings field; index 26 is a read-only mode
+/// indicator. Toggle fields are rendered with [x]/[ ] and return an empty
+/// value here.
 fn settings_value(app: &TerminalApp, index: usize) -> String {
     match index {
         2 => app.settings.mode.clone(),
@@ -2920,7 +2681,7 @@ fn settings_value(app: &TerminalApp, index: usize) -> String {
         23 => app.settings.working_dir.clone(),
         24 => app.settings.rpc_address.clone(),
         25 => app.settings.rpc_token.clone(),
-        26 => app.settings.core_path.clone().unwrap_or_default(),
+        26 => "同进程 C ABI".to_string(),
         32 => app.settings.command.clone(),
         33 => app.settings.log_level.clone(),
         34 => app.settings.tcp_ip_cc.clone(),

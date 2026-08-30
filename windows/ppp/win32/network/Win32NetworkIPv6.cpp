@@ -1,4 +1,5 @@
 #include <windows/ppp/win32/network/NetworkInterface.h>
+#include <windows/ppp/win32/Win32Native.h>
 
 #include <ppp/stdafx.h>
 #include <ppp/net/IPEndPoint.h>
@@ -10,16 +11,6 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
-
-#ifndef PPP_POPEN
-#if defined(_MSC_VER)
-#define PPP_POPEN  ::_popen
-#define PPP_PCLOSE ::_pclose
-#else
-#define PPP_POPEN  ::popen
-#define PPP_PCLOSE ::pclose
-#endif
-#endif
 
 #pragma comment(lib, "Iphlpapi.lib")
 #pragma comment(lib, "Netapi32.lib")
@@ -37,9 +28,10 @@ namespace ppp
                     return false;
                 }
 
-                ppp::string cmd = "netsh " + command + " > nul 2>&1";
-                int result = ::system(cmd.c_str());
-                return result == 0;
+                int result = INFINITE;
+                const bool launched = ppp::win32::Win32Native::Execute(
+                    false, "netsh.exe", command.data(), &result, 10000);
+                return launched && result == ERROR_SUCCESS;
             }
 
             bool SetIPv6DefaultRoute(int interface_index, int metric) noexcept
@@ -463,26 +455,19 @@ namespace ppp
                 //
                 // Returns label on success, -1 on failure.
 
-                std::string cmd = "netsh interface ipv6 show prefixpolicies 2>nul";
-                FILE* pipe = PPP_POPEN(cmd.c_str(), "r");
-                if (NULLPTR == pipe) {
-                    return -1;
-                }
-
-                char buffer[512];
-                std::string output;
-                while (::fgets(buffer, sizeof(buffer), pipe) != NULLPTR) {
-                    output += buffer;
-                }
-                PPP_PCLOSE(pipe);
-
+                // Do not use _popen here.  The CRT implements it through
+                // cmd.exe, which causes a visible console flash in the TUI.
+                // Win32Native::Echo uses CreateProcess + CREATE_NO_WINDOW and
+                // still gives us the command output to parse.
+                ppp::string output = ppp::win32::Win32Native::Echo(
+                    "netsh interface ipv6 show prefixpolicies");
                 if (output.empty()) {
                     return -1;
                 }
 
                 // Parse each line looking for "::/0" (or "::/0 " with trailing space).
                 // Each data line has format: precedence, label, prefix
-                std::istringstream iss(output);
+                std::istringstream iss(std::string(output.data(), output.size()));
                 std::string line;
                 while (std::getline(iss, line)) {
                     if (line.empty()) continue;

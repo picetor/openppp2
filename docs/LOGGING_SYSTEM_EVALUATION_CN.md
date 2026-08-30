@@ -101,13 +101,13 @@ Android UI 自己的 Kotlin `Log.*` 仍用于 UI/JNI 提示，不会被核心等
 
 Rust 前端现在会把核心日志等级纳入启动参数和设置/RPC；核心日志文件作为完整排查来源。TUI 自身的启动诊断仍独立追加到 `ppp-tui.log`，不受核心等级宏过滤。
 
-核心嵌入逻辑位于 [`tui/build.rs`](../tui/build.rs)：
+核心静态链接逻辑位于 [`tui/build.rs`](../tui/build.rs)：
 
-- 显式设置 `PPP_TUI_CORE_PATH` 时可以指定核心；
-- 未指定时严格按 Release 候选顺序选择，不再按文件修改时间选择；
-- 这样可避免较新的 Debug 核心被嵌入 Release TUI。
+- 通过 `PPP_TUI_CORE_LIB` 指定 `ppp-core` 静态库；
+- 未指定时严格按 Release、Debug 候选顺序查找静态库，不再选择外部 `ppp.exe`；
+- 缺少静态库时正式构建直接失败，避免生成带兼容后备路径的 TUI。
 
-Release TUI 构建后应继续验证嵌入核心的 hash/来源；本地构建已用 `x64/Release/ppp.exe` 完成该验证。
+Release TUI 构建后应继续记录静态库的 hash/来源；运行时不释放核心文件到临时目录。
 
 ## 3. 目标日志行为
 
@@ -290,10 +290,10 @@ TUI/CLI 当前的 RPC 日志环形缓冲区和界面日志环形缓冲区都不�
 ### 阶段四：Release 构建和嵌入
 
 1. ✅ Release 核心和 Debug 核心都编译完整 `LOG_*` 代码。
-2. ✅ `tui/build.rs` 优先使用显式 `PPP_TUI_CORE_PATH`。
-3. ✅ 未显式指定时严格优先 Release 核心，不按修改时间在 Debug/Release 之间随机选择。
-4. CI 先构建当前版本的 Release 核心，再构建并嵌入 Release TUI；本地 Release 构建已验证。
-5. ✅ Release help/build smoke test 已验证 `--log-level`、`--log-file` 和 Release 核心嵌入；跨平台运行时 smoke test 仍需在对应 CI 完成。
+2. ✅ `tui/build.rs` 只接受 `PPP_TUI_CORE_LIB` 或仓库内的 `ppp-core` 静态库。
+3. ✅ 缺少静态库时正式构建失败，不再在 Debug/Release 之间选择外部可执行文件。
+4. CI 先构建当前版本的 Release 核心，再构建并静态链接 Release TUI；本地 Release 构建已验证。
+5. ✅ Release help/build smoke test 已验证 `--log-level`、`--log-file` 和同进程核心链接；跨平台运行时 smoke test 仍需在对应 CI 完成。
 
 ## 6. 安全和稳定性要求
 

@@ -26,15 +26,17 @@ namespace ppp {
 
                 std::shared_ptr<VEthernetExchanger> exchanger = ethernet->GetExchanger(remoteEP.address());
                 if (NULLPTR == exchanger) {
-                    LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, destination=%s, selected_outbound=direct_or_unavailable",
-                        ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data());
+                    LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, destination=%s, port=%u, selected_outbound=direct_or_unavailable",
+                        ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data(),
+                        static_cast<unsigned int>(remoteEP.port()));
                     return NULLPTR;
                 }
 
                 NetworkState network_state = exchanger->GetNetworkState();
                 if (network_state != NetworkState::NetworkState_Established) {
-                    LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, destination=%s, selected_outbound=%s, reason=outbound_not_established",
-                        ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data(), exchanger->GetOutboundTag().data());
+                    LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, destination=%s, port=%u, selected_outbound=%s, reason=outbound_not_established",
+                        ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data(),
+                        static_cast<unsigned int>(remoteEP.port()), exchanger->GetOutboundTag().data());
                     return NULLPTR;
                 }
                 
@@ -51,8 +53,9 @@ namespace ppp {
                     return NULLPTR;
                 }
 
-                LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, trace=%p, transport_trace=%p, destination=%s, selected_outbound=%s",
-                    connection.get(), strand.get(), ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data(), exchanger->GetOutboundTag().data());
+                LOG_DEBUG("VEthernetNetworkTcpipStack::BeginAcceptClient: source=tap, trace=%p, transport_trace=%p, destination=%s, port=%u, selected_outbound=%s",
+                    connection.get(), strand.get(), ppp::net::Ipep::ToAddressString<ppp::string>(remoteEP).data(),
+                    static_cast<unsigned int>(remoteEP.port()), exchanger->GetOutboundTag().data());
                 connection->Open(localEP, remoteEP);
                 return connection;
             }

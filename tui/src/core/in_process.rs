@@ -1,11 +1,9 @@
-//! Rust FFI wrapper for the statically linked C++ core.
+//! In-process C ABI wrapper for the statically linked C++ core.
 //!
-//! This module is compiled only when build.rs finds `ppp-core.lib`/`libppp-core`.
 //! The wrapper owns the C++ handle and keeps all blocking calls off the UI
 //! thread; the higher-level client in `rpc::mod` turns completed calls into the
 //! existing typed Response model.
 
-#[cfg(ppp_in_process_core)]
 mod enabled {
     use anyhow::{bail, Context, Result};
     use std::ffi::{CStr, CString};
@@ -83,12 +81,12 @@ mod enabled {
     impl CoreHandle {
         pub fn start(args: &[String]) -> Result<Self> {
             // The C++ command-line parser follows the normal argc/argv
-            // convention and deliberately starts scanning at argv[1].  The
-            // Rust launcher stores only the extra core arguments, so without
+            // convention and deliberately starts scanning at argv[1]. The
+            // Rust host stores only the extra core arguments, so without
             // a synthetic argv[0] the first option (commonly --lwip=yes) is
             // silently ignored and the core falls back to CTCP.
             let mut arguments = Vec::with_capacity(args.len() + 1);
-            arguments.push(CString::new("ppp-tui-core").context("core argv[0] contains NUL")?);
+            arguments.push(CString::new("ppp-tui").context("core argv[0] contains NUL")?);
             arguments.extend(
                 args.iter()
                     .map(|value| CString::new(value.as_str()).context("core argument contains NUL"))
@@ -229,7 +227,6 @@ mod enabled {
     }
 }
 
-#[cfg(ppp_in_process_core)]
 pub use enabled::{
     clear_emergency_core, emergency_core_registered, emergency_stop, register_emergency_core,
     CoreHandle,

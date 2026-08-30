@@ -1657,6 +1657,81 @@ namespace ppp
                 return any;
             }
 
+            static bool IsStaleTunnelInterface(int interface_index) noexcept
+            {
+                NetworkInterfacePtr network_interface =
+                    GetNetworkInterfaceByInterfaceIndex(interface_index);
+                if (NULLPTR == network_interface)
+                {
+                    return false;
+                }
+
+                // Only openppp2 owns this marker.  Do not infer ownership from
+                // generic TAP/Wintun/PPP labels: another PPP client may expose
+                // an adapter such as "PPP 1" with a TAP-Windows description.
+                // Removing its address or routes can disrupt an unrelated
+                // connection and can also make the current tunnel appear to
+                // start successfully while the other client is broken.
+                const char* const openppp2_marker = "PPP PRIVATE NETWORK 2";
+                return (!network_interface->Description.empty() &&
+                    network_interface->Description.find(openppp2_marker) != ppp::string::npos) ||
+                    (!network_interface->ConnectionId.empty() &&
+                        network_interface->ConnectionId.find(openppp2_marker) != ppp::string::npos);
+            }
+
+            static bool TakeoverExistingIPv4Route(uint32_t destination, uint32_t mask,
+                uint32_t gateway, int interface_index, int metric, DWORD& error) noexcept
+            {
+                std::shared_ptr<MIB_IPFORWARDTABLE> table =
+                    ppp::win32::network::Router::GetIpForwardTable();
+                if (NULLPTR == table)
+                {
+                    error = ERROR_NOT_READY;
+                    return false;
+                }
+
+                bool target_route_exists = false;
+                for (DWORD i = 0; i < table->dwNumEntries; ++i)
+                {
+                    MIB_IPFORWARDROW& route = table->table[i];
+                    if (route.dwForwardDest != destination ||
+                        route.dwForwardMask != mask ||
+                        route.dwForwardNextHop != gateway)
+                    {
+                        continue;
+                    }
+
+                    if (static_cast<int>(route.dwForwardIfIndex) == interface_index)
+                    {
+                        target_route_exists = true;
+                    }
+                    else
+                    {
+                        // A route with the same key on an old TAP interface
+                        // blocks CreateIpForwardEntry even though the desired
+                        // route belongs to the current Wintun interface.
+                        if (IsStaleTunnelInterface(static_cast<int>(route.dwForwardIfIndex)))
+                        {
+                            ppp::win32::network::Router::Delete(route);
+                        }
+                        else
+                        {
+                            error = ERROR_OBJECT_ALREADY_EXISTS;
+                            return false;
+                        }
+                    }
+                }
+
+                if (target_route_exists)
+                {
+                    error = NO_ERROR;
+                    return true;
+                }
+
+                return ppp::win32::network::Router::Add(
+                    destination, mask, gateway, metric, interface_index, &error);
+            }
+
             RouteAddStatistics AddAllRoutes(
                 std::shared_ptr<ppp::net::native::RouteInformationTable> rib,
                 const ppp::unordered_map<uint32_t, int>& gateway_interfaces) noexcept
@@ -1689,12 +1764,18 @@ namespace ppp
                         {
                             ++statistics.Succeeded;
                         }
-                        elif(error == ERROR_OBJECT_ALREADY_EXISTS)
+                        elif(error == ERROR_OBJECT_ALREADY_EXISTS || error == ERROR_ALREADY_EXISTS)
                         {
-                            // Route takeover is intentionally idempotent. A route
-                            // retained by Windows or installed by another entry in
-                            // the same RIB already represents the requested state.
-                            ++statistics.Succeeded;
+                            if (TakeoverExistingIPv4Route(entry.Destination, mask,
+                                entry.NextHop, interface_index, 1, error))
+                            {
+                                ++statistics.Succeeded;
+                            }
+                            else
+                            {
+                                ++statistics.Failed;
+                                ++statistics.Errors[error];
+                            }
                         }
                         else
                         {
@@ -1729,30 +1810,44 @@ namespace ppp
                     return false;
                 }
 
-                auto key = [](DWORD dwForwardDest, DWORD dwForwardMask, DWORD dwForwardNextHop) noexcept
-                    {
-                        return ((ppp::Int128)dwForwardDest) << 64 | ((ppp::Int128)dwForwardMask) << 32 | ((ppp::Int128)dwForwardNextHop);
-                    };
-
-                ppp::unordered_map<ppp::Int128, MIB_IPFORWARDROW> routes;
+                // Do not collapse rows by destination/mask/next-hop. Windows
+                // can retain duplicate rows on different interfaces after a
+                // TAP -> Wintun migration, and deleting only one row leaves
+                // the old adapter able to win route selection later.
+                ppp::vector<MIB_IPFORWARDROW> routes;
                 for (DWORD dwNumEntries = 0; dwNumEntries < mib->dwNumEntries; dwNumEntries++)
                 {
                     MIB_IPFORWARDROW& r = mib->table[dwNumEntries];
-                    routes.emplace(key(r.dwForwardDest, r.dwForwardMask, r.dwForwardNextHop), r);
+                    bool matched = false;
+                    for (auto&& [_, entries] : rib->GetAllRoutes())
+                    {
+                        for (auto&& entry : entries)
+                        {
+                            auto mask = ppp::net::IPEndPoint::PrefixToNetmask(entry.Prefix);
+                            if (r.dwForwardDest == entry.Destination &&
+                                r.dwForwardMask == mask &&
+                                r.dwForwardNextHop == entry.NextHop)
+                            {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (matched)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (matched)
+                    {
+                        routes.emplace_back(r);
+                    }
                 }
 
                 bool any = false;
-                for (auto&& [_, entries] : rib->GetAllRoutes())
+                for (MIB_IPFORWARDROW& route : routes)
                 {
-                    for (auto&& entry : entries)
-                    {
-                        auto mask = ppp::net::IPEndPoint::PrefixToNetmask(entry.Prefix);
-                        if (auto tail = routes.find(key(entry.Destination, mask, entry.NextHop)); tail != routes.end())
-                        {
-                            any |= ppp::win32::network::Router::Delete(tail->second);
-                            routes.erase(tail);
-                        }
-                    }
+                    any |= ppp::win32::network::Router::Delete(route);
                 }
                 return any;
             }
@@ -1762,7 +1857,6 @@ namespace ppp
                 std::string tp = gw.to_string();
                 ppp::string ip = ppp::string(tp.data(), tp.size());
                 ppp::win32::Win32Native::Echo("route delete 0.0.0.0 mask 0.0.0.0 " + ip);
-                ppp::win32::Win32Native::Echo("route delete 128.0.0.0 mask 128.0.0.0 " + ip);
                 ppp::win32::Win32Native::Echo("route delete 128.0.0.0 mask 128.0.0.0 " + ip);
             }
 
@@ -1786,7 +1880,22 @@ namespace ppp
                         auto endl = bypass_gws.end();
                         if (tail == endl)
                         {
-                            routes.emplace_back(r);
+                            bool already_captured = false;
+                            for (const MIB_IPFORWARDROW& captured : routes)
+                            {
+                                if (captured.dwForwardDest == r.dwForwardDest &&
+                                    captured.dwForwardMask == r.dwForwardMask &&
+                                    captured.dwForwardNextHop == r.dwForwardNextHop &&
+                                    captured.dwForwardIfIndex == r.dwForwardIfIndex)
+                                {
+                                    already_captured = true;
+                                    break;
+                                }
+                            }
+                            if (!already_captured)
+                            {
+                                routes.emplace_back(r);
+                            }
                         }
                     }
                     else

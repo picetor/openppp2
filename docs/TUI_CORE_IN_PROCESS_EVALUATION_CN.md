@@ -5,7 +5,7 @@
 
 ## 结论
 
-项目可以改成 TUI/CLI 与 C++ 核心真正同进程运行，并彻底移除“内嵌可执行文件释放到临时目录后再通过 RPC 启动”的方案。
+项目已改成 TUI/CLI 与 C++ 核心真正同进程运行，并彻底移除“内嵌可执行文件释放到临时目录后再通过 RPC 启动”的方案。
 
 最终推荐结构：
 
@@ -23,20 +23,20 @@ ppp-core（C++ 静态核心库）
 
 `ppp.exe` 可以继续存在，但只应作为共用核心库的薄命令行宿主，不应再作为 TUI 启动的子进程。
 
-本次改造已按该结论落地第一版：新增 `ppp/core/CoreApi.h` C ABI，CMake 和 MSBuild
-都能产出 `ppp-core` 静态库；Rust GUI/CLI 在检测到该库时默认直接持有核心句柄，
-目录读取/探测继续由 Rust 完成，停止路径通过核心 API 同步等待网络清理。没有静态库
-时才保留旧的内嵌子进程路径，显式 `--core-path` 或 RPC attach 也仍可用。
+本次改造已按该结论落地：新增 `ppp/core/CoreApi.h` C ABI，CMake 和 MSBuild
+都能产出 `ppp-core` 静态库；Rust GUI/CLI 构建时必须链接该库并直接持有核心句柄，
+目录读取/探测继续由 Rust 完成，停止路径通过核心 API 同步等待网络清理。TUI 不再支持
+外置核心路径、内嵌可执行文件或临时目录释放；RPC 仅保留给用户主动连接独立运行的核心。
 
 ## 当前实现的问题
 
-当前所谓“内嵌核心”实际上是：
+历史上的“内嵌核心”实际上是：
 
 ```text
 Rust TUI → 释放 ppp.exe 到临时目录 → 启动子进程 → localhost JSON-RPC → C++ 核心
 ```
 
-相关代码在 `tui/src/core/launcher.rs` 和 `tui/src/core/embedded.rs`。它带来几个结构性问题：
+这套历史代码已从 TUI 删除。它带来的结构性问题包括：
 
 1. 核心使用自身可执行文件目录查找 `Driver`，临时释放目录没有 TAP 驱动文件。
 2. TUI、核心和 RPC 各有一套生命周期，关闭顺序复杂，容易留下 DNS、路由或虚拟网卡状态。
@@ -49,7 +49,8 @@ Rust TUI → 释放 ppp.exe 到临时目录 → 启动子进程 → localhost JS
 
 ## RPC 是否必须保留
 
-关于“保留独立核心 + RPC 作为兼容路径”：它不是最终目标的必要条件。最终可以删除 `LocalRpcServer`、Rust `RpcClient`、`RPC_LISTEN` 和本地 token 鉴权。
+关于“保留独立核心 + RPC 作为兼容路径”：TUI 自有核心不再需要 RPC；独立运行的
+`ppp.exe` 仍可通过 RPC 被 TUI/CLI 主动连接，因此客户端 RPC 代码暂时保留。
 
 但需要区分两个概念：
 
@@ -195,25 +196,26 @@ ppp-tui-cli            Rust + ppp-core-static
 4. 优先验证 Wintun+ctcp 与 TAP+lwIP 两组组合。
 5. 验证正常关闭、窗口关闭、启动失败和重复启动。
 
-### 阶段 C：移除 TUI 自有 RPC
+### 阶段 C：移除 TUI 自有核心的 RPC/子进程链路
 
-1. 删除 TUI owned-core 的 `Launcher`、`RpcClient` 和临时释放逻辑。
-2. 把 `CoreCommand` 改为直接 API 调用。
-3. 把日志事件改为回调或线程安全事件队列。
-4. 目录核心改为 Rust 读取，消除双核心启动。
+1. ✅ 删除 TUI owned-core 的 `Launcher`、嵌入核心和临时释放逻辑。
+2. ✅ 把 owned-core 的 `CoreCommand` 改为直接 C ABI 调用。
+3. 保留独立核心 attach 所需的 `RpcClient` 和日志/快照通道。
+4. ✅ 目录核心改为 Rust 读取，消除双核心启动。
 
 ### 阶段 D：多平台和最终清理
 
 1. 接入 Linux/macOS CMake 静态库 target。
 2. 更新 Windows、Linux、macOS CI，构建 TUI/CLI 与同一核心库。
 3. 保留 `ppp.exe` 作为独立核心宿主，但不再作为 TUI 子进程。
-4. 如果确认不需要外部 attach，再删除 `LocalRpcServer` 和相关参数。
+4. 独立 `ppp.exe` 继续使用自己的 RPC 服务；TUI 不为同进程核心创建 RPC 服务。
 
 ## 最终验收条件
 
-- TUI/CLI 启动时不生成 `ppp-tui-core.exe` 临时文件。
-- 日志中不再出现 `RPC_LISTEN=`、RPC token 和核心 TCP 回环连接。
-- TAP+lwIP 不依赖核心可执行文件旁边的临时 `Driver` 查找路径。
+- TUI/CLI 启动时不生成 `ppp-tui-core.exe` 临时文件，也不启动核心子进程。
+- owned-core 日志中不再出现 `RPC_LISTEN=`、RPC token 和核心 TCP 回环连接；显式 attach
+  独立核心时仍允许出现这些信息。
+- TAP+lwIP 只从最终 TUI/CLI 的发布目录读取 `Driver`，不依赖临时目录。
 - Wintun+ctcp、TAP+lwIP 均可连接和断开。
 - 正常退出后 DNS、路由、TUN/TAP 状态全部恢复。
 - TUI 与 CLI 使用同一套核心 API、日志等级和状态快照。
@@ -222,4 +224,6 @@ ppp-tui-cli            Rust + ppp-core-static
 
 ## 最终建议
 
-可以删除当前 RPC/子进程架构，但应先完成“核心库化 + C ABI + Windows 原型”，再删除旧链路。直接把二十万行 C++ 代码整体搬进 Rust 会增加风险；把现有核心变成可复用库，再让各端共享它，才是可控且可回滚的真正一体化方案。
+核心库化、C ABI 和同进程链路已经完成。继续维护时应保持 TUI/CLI 只通过 C ABI
+控制 owned-core；独立 `ppp.exe` 的 RPC 仅作为明确的外部 attach 功能，不应重新成为
+TUI 的启动后备路径。

@@ -536,13 +536,92 @@ namespace ppp
                 *returnCode = INFINITE;
             }
 
+            // Directly create non-elevated helpers.  ShellExecuteEx("open")
+            // delegates console applications to the shell and can briefly
+            // create a visible cmd/conhost window even when nShow=SW_HIDE.
+            // This path is used for netsh and tapinstall, so CREATE_NO_WINDOW
+            // is required for a GUI/TUI client.
+            if (!runas)
+            {
+                // The embedded core can inherit a deliberately minimal PATH
+                // from the Rust launcher.  CreateProcessA does not reliably
+                // locate an unqualified application name when it is passed as
+                // lpApplicationName, so resolve helpers such as netsh.exe
+                // before creating the hidden process.  This also keeps the
+                // no-console-window behavior intact.
+                char resolved_path[MAX_PATH * 4] = {};
+                const char* executable_path = filePath;
+                DWORD resolved_length = ::SearchPathA(
+                    NULLPTR, filePath, NULLPTR,
+                    static_cast<DWORD>(sizeof(resolved_path)),
+                    resolved_path, NULLPTR);
+                if (resolved_length > 0 && resolved_length < sizeof(resolved_path))
+                {
+                    executable_path = resolved_path;
+                }
+
+                ppp::string command_line = "\"";
+                command_line += executable_path;
+                command_line += "\"";
+                if (*argumentText != '\x0')
+                {
+                    command_line += " ";
+                    command_line += argumentText;
+                }
+
+                STARTUPINFOA si;
+                PROCESS_INFORMATION pi;
+                ZeroMemory(&si, sizeof(si));
+                ZeroMemory(&pi, sizeof(pi));
+                si.cb = sizeof(si);
+                si.dwFlags = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
+
+                if (!CreateProcessA(executable_path, command_line.data(), NULLPTR, NULLPTR,
+                    FALSE, CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi))
+                {
+                    return false;
+                }
+
+                DWORD wait_result = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
+                if (wait_result == WAIT_TIMEOUT)
+                {
+                    // Never leave a helper holding the core startup path after
+                    // the caller has stopped waiting for it.
+                    TerminateProcess(pi.hProcess, ERROR_TIMEOUT);
+                    WaitForSingleObject(pi.hProcess, 1000);
+                    if (NULLPTR != returnCode)
+                    {
+                        *returnCode = WAIT_TIMEOUT;
+                    }
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    return false;
+                }
+
+                if (NULLPTR != returnCode)
+                {
+                    DWORD exit_code = INFINITE;
+                    if (wait_result != WAIT_OBJECT_0 || !GetExitCodeProcess(pi.hProcess, &exit_code))
+                    {
+                        exit_code = INFINITE;
+                    }
+                    *returnCode = static_cast<int>(exit_code);
+                }
+
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                return true;
+            }
+
+            // Keep ShellExecute's runas behavior for operations that genuinely
+            // require a UAC elevation prompt.
             SHELLEXECUTEINFOA sei;
             memset(&sei, 0, sizeof(sei));
-
             sei.cbSize = sizeof(sei);
             sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-            sei.nShow = SW_HIDE;
-            sei.lpVerb = runas ? "runas" : "open";
+            sei.nShow = SW_SHOWNORMAL;
+            sei.lpVerb = "runas";
             sei.lpFile = filePath;
             sei.lpParameters = argumentText;
 
@@ -556,9 +635,6 @@ namespace ppp
                 DWORD wait_result = WaitForSingleObject(sei.hProcess, static_cast<DWORD>(timeout_ms));
                 if (wait_result == WAIT_TIMEOUT)
                 {
-                    // The timeout is intended for short-lived helper commands
-                    // such as netsh. Never leave one holding the core startup
-                    // path after the caller has stopped waiting for it.
                     TerminateProcess(sei.hProcess, ERROR_TIMEOUT);
                     WaitForSingleObject(sei.hProcess, 1000);
                     *returnCode = WAIT_TIMEOUT;
@@ -1096,7 +1172,8 @@ namespace ppp
             PROCESS_INFORMATION pi;
             ZeroMemory(&pi, sizeof(pi));
 
-            bool ok = CreateProcessA(NULLPTR, (LPSTR)command.data(), NULLPTR, NULLPTR, TRUE, 0, NULLPTR, NULLPTR, &si, &pi);
+            bool ok = CreateProcessA(NULLPTR, (LPSTR)command.data(), NULLPTR, NULLPTR, TRUE,
+                CREATE_NO_WINDOW, NULLPTR, NULLPTR, &si, &pi);
             if (!ok)
             {
                 CloseHandle(hStdin);

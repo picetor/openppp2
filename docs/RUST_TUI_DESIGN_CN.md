@@ -1,10 +1,10 @@
 # Rust TUI 前端设计文档
 
-> 状态：**M1~M6 已实现并通过本机验证**——
+> 状态：**M1~M6 已实现并通过本机验证；TUI/CLI owned-core 已切换为同进程 C ABI**——
 > 核心侧（headless + 本地 RPC + 日志事件流）MSBuild Debug x64 编译通过；
 > Rust 侧 `tui/` cargo 工程 `cargo build`（debug/release）零警告、
 > `cargo test` 10/10 通过（3 单元 + 7 契约黄金测试，含桌面快照 fixture）。
-> 剩余：**管理员终端冒烟测试**（`ppp.exe --headless --rpc-listen ...` + `ppp-tui` 闭环）。
+> 独立核心 attach 的管理员终端冒烟测试仍可单独执行；TUI owned-core 不再依赖该闭环。
 > 适用范围：**桌面端**（Windows / Linux / macOS）。**不包含 Android**——Android 已有
 > SagerNet 系 App UI（`android_ui/`），本设计不涉及其改造。
 > 关联：`tests/contracts/runtime-snapshot/`（运行状态 JSON 契约）、`main.cpp`
@@ -17,6 +17,10 @@
 > `ppp::diagnostics::g_log_sink` hook（`stdafx.h` LOG_TAG 宏统一走
 > `LogPrintDesktop`，输出格式不变），OnTick 每秒批量推送 `event:log`，
 > `get_logs {since_seq}` 支持追平。
+>
+> **架构更新**：下文早期的“自动拉起子进程/临时释放核心”描述是历史方案。当前
+> `ppp-core` 静态链接进 `ppp-tui`/`ppp-tui-cli`，owned-core 只通过 C ABI 在同一进程
+> 内创建、启动、控制和停止；RPC 仅用于主动连接独立运行的 `ppp.exe`。
 
 ---
 
@@ -56,12 +60,11 @@ openppp2 桌面端的用户界面是**内嵌在 `main.cpp` 里的字符仪表盘
 
 ### 1.3 目标
 
-1. 用 **Rust 编写独立 TUI 前端进程**（`ppp-tui`），替换内置仪表盘的交互体验；
-2. C++ 核心增加 **headless 模式 + 本地 RPC**（`--headless --rpc-listen`），
-   导出结构化运行状态、接收控制命令；
+1. 用 **Rust 编写独立 TUI 前端**（`ppp-tui`），替换内置仪表盘的交互体验；
+2. C++ 核心产出 `ppp-core` 静态库和稳定 C ABI，供 `ppp-tui`/`ppp-tui-cli` 同进程调用；
 3. 复用项目已有的 **runtime-snapshot JSON 契约**思路（`schema_version` 版本化），
    前后端可独立演进、互不崩溃；
-4. 支持"核心后台运行、TUI 随时 attach/detach"（类似 tmux 分离会话）；
+4. 支持显式连接独立后台核心；owned-core 不通过 RPC 或子进程运行；
 5. 桌面三平台一致体验（Windows Terminal / iTerm2 / 主流 Linux 终端）；
 6. **交互与视觉显著超越内置 TUI**：
    - 实时流量折线图（rx/tx 双曲线，Sparkline/Canvas）；
@@ -73,7 +76,7 @@ openppp2 桌面端的用户界面是**内嵌在 `main.cpp` 里的字符仪表盘
 ### 1.4 非目标
 
 - ❌ 不用 Rust 重写核心（20 万行 C++ 不现实）；
-- ❌ 不在同一进程内通过 FFI 嵌入 Rust TUI（构建链复杂、收益低）；
+- ❌ 不把 C++ 核心改写成 Rust；同进程边界使用稳定 C ABI；
 - ❌ 不做 Android 版本（Android 已有原生 App）；
 - ❌ 不替代管理面板（`go/` Web 管理端职责不变）；
 - ❌ 不做 Web 界面（本设计只覆盖终端）。
@@ -83,38 +86,36 @@ openppp2 桌面端的用户界面是**内嵌在 `main.cpp` 里的字符仪表盘
 ## 2. 总体架构
 
 ```
-┌──────────────────────────┐        ┌───────────────────────────┐
-│       ppp-tui (Rust)      │        │     ppp (C++ 核心)         │
-│                          │        │                           │
-│  ratatui 渲染层           │        │  现有全部逻辑不动          │
-│  crossterm 输入/终端      │  JSON  │  + headless 模式(跳过仪表盘)│
-│  状态模型 + 命令客户端    │◄──────►│  + RPC 服务(本地 TCP)      │
-│  日志流接收器             │ 帧协议  │  + 状态快照导出            │
-└──────────────────────────┘        └───────────────────────────┘
-        ▲                                   ▲
-        │ 用户键盘/鼠标                      │ 现有代码路径
-        ▼                                   ▼
-   终端 (Windows Terminal / iTerm2 / ...)   TAP/隧道/路由/探测/热切换...
+┌──────────────────────────────────────┐
+│ ppp-tui / ppp-tui-cli（Rust）         │
+│ ratatui/egui + 状态模型 + C ABI 控制  │
+└──────────────────┬───────────────────┘
+                   │ 同进程 FFI
+                   ▼
+┌──────────────────────────────────────┐
+│ ppp-core（C++ 静态库）                 │
+│ TAP/Wintun、DNS、路由、MUX、日志       │
+└──────────────────────────────────────┘
+
+独立 `ppp.exe` 仍可作为后台/脚本宿主，TUI 仅在用户显式指定 RPC 时 attach。
 ```
 
-### 2.1 三种运行形态
+### 2.1 两种运行形态
 
 | 形态 | 命令 | 说明 |
 |---|---|---|
-| 传统一体 | `ppp --mode=client ...` | 无 `--headless`，行为与现在完全一致（内置 TUI 兜底） |
+| 同进程 owned-core | `ppp-tui --mode=client ...` | 静态核心在 TUI 进程内启动，不创建子进程、不创建 owned-core RPC |
 | 核心后台 | `ppp --mode=client --headless --rpc-listen=127.0.0.1:39100 --rpc-token=<token>` | 无仪表盘、无键盘监听；仅提供 RPC |
-| 前端 attach | `ppp-tui --rpc=127.0.0.1:39100 --token=<token>` | 连接已运行核心；也可 `ppp-tui --mode=client --config=...` 自动拉起核心 |
+| 前端 attach | `ppp-tui --rpc=127.0.0.1:39100 --token=<token>` | 仅连接用户已经运行的独立核心 |
 
-> `ppp-tui --mode=client ...` 内部流程：先尝试连接 `--rpc-listen` 指定地址的已运行
-> 核心；失败则用相同参数 `spawn` 一个 `ppp --headless` 子进程并连接之。退出 TUI 时
-> 默认**分离**（核心继续运行），`q` 连按两次或 `--stop-on-exit` 才停止核心。
+> owned-core 的启动、控制和退出都走 C ABI；attach 模式的 RPC 只对外部核心生效。
 
-### 2.2 为什么是"两个进程 + JSON over TCP"
+### 2.2 为什么保留外部 attach 的 JSON over TCP
 
-- 进程边界 = 语言边界：核心保持 C++ 零依赖增量，前端用 Rust 生态自由发挥；
+- 同进程 owned-core 没有进程边界；核心仍保持 C++ 实现，前端用 Rust 生态自由发挥；
 - 本地 TCP（仅回环）比 Unix socket / 命名管道更简单且三平台一致，配合 token 鉴权；
 - JSON 帧人类可读、可调试，与项目现有 JSON 文化一致（配置、管理面板、快照契约）；
-- 性能充足：状态快照 1s 一次 + 日志事件流，本地回环无压力。
+- 性能足够支持外部后台核心的状态快照和日志事件流。
 
 ---
 
@@ -317,7 +318,7 @@ tui/                          # 仓库新增目录（独立 cargo workspace）
 │   │   ├── mod.rs            # 键盘事件 → 动作
 │   │   └── mouse.rs          # 鼠标事件 → 动作（命中测试：标签/行/按钮/滚轮）
 │   └── core/
-│       ├── launcher.rs       # spawn/attach 核心进程管理
+│       ├── in_process.rs     # C ABI 同进程核心句柄
 │       ├── config.rs         # 参数透传（--mode/--config/--server-dir...）
 │       └── traffic.rs        # 流量速率采样环形缓冲（120 点）+ 单位换算
 └── tests/
@@ -443,9 +444,9 @@ tui/                          # 仓库新增目录（独立 cargo workspace）
 | 场景 | 行为 |
 |---|---|
 | `ppp-tui` 单独运行 + 核心已在跑 | attach；token 不符或端口不通 → 明确报错 |
-| `ppp-tui --mode=client ...` 自动拉起 | spawn `ppp --headless --rpc-listen=127.0.0.1:0 --rpc-token=<随机>`；`--rpc-listen=:0` 表示随机端口，通过 stdout 一行 `RPC_LISTEN=ip:port` 通知 TUI（headless 下允许该单行输出） |
-| TUI 退出 | 默认仅断开 RPC，核心继续（detach）；`--stop-on-exit` 或确认"停止核心"时发 `shutdown` |
-| 核心崩溃 | TUI 显示错误横幅 + 退避重连；被拉起的核心崩溃时可提示重新拉起 |
+| `ppp-tui --mode=client ...` 同进程启动 | 直接调用 `ppp_core_start`，不 spawn 子进程、不等待 `RPC_LISTEN` |
+| TUI 退出 | owned-core 通过 `ppp_core_stop` 同步清理；attach 模式仅断开 RPC |
+| 核心崩溃 | TUI 显示错误横幅；owned-core 不启动外部替代进程 |
 | `Ctrl+C` 于核心终端 | 核心原有行为不变（headless 下直接走 shutdown 路径） |
 
 **随机端口协商**：`--rpc-listen=127.0.0.1:0` 时核心绑定随机端口，headless 模式下
@@ -562,7 +563,7 @@ tui/src/
 │   ├── client.rs
 │   └── schema.rs
 ├── core/
-│   ├── launcher.rs           # 内置核心释放、启动、RPC 发现
+│   ├── in_process.rs         # 静态核心 C ABI 封装
 │   └── traffic.rs            # 速率和流量历史
 └── ui/
     ├── gui/                  # Windows/macOS egui
@@ -643,10 +644,10 @@ Home/End          跳到开头或结尾
 #### 12.3.3 Windows 平台适配
 
 ```text
-核心：ppp.exe
+核心：静态链接进 ppp-tui.exe
 TUN：Wintun/TAP
 权限：Client + TUN 通常需要 UAC
-打包：单文件 ppp-tui.exe
+打包：ppp-tui.exe + Driver/运行时资源目录
 图标：Windows ICO 和 UAC 标识
 ```
 
@@ -656,11 +657,11 @@ Proxy 模式默认普通权限启动。Client + TUN 模式通过顶部 UAC 按�
 #### 12.3.4 macOS 平台适配
 
 ```text
-核心：ppp
+核心：静态链接进 ppp-tui
 TUN：utun
 路径：统一使用 /
-核心释放：设置 Unix 可执行权限
-打包：PPP PRIVATE NETWORK 2.app
+核心释放：不释放独立核心文件
+打包：PPP PRIVATE NETWORK 2.app 及其驱动/运行时资源
 ```
 
 推荐的应用包结构：
@@ -743,18 +744,19 @@ sudo ./ppp-tui-cli --mode=client --config=./config/HKBN.json
 Proxy 模式仍然可以不使用 TUN；如果关闭 TUN，核心只提供连接和代理控制能力，不
 修改本机路由和 DNS。
 
-### 12.5 三个平台的内置核心
+### 12.5 三个平台的同进程核心
 
-`build.rs` 按 Rust target 选择对应核心：
+`build.rs` 按 Rust target 链接对应的 `ppp-core` 静态库：
 
 ```text
-Windows：x64/Release/ppp.exe 或 x64/Debug/ppp.exe
-Linux：  bin/ppp 或 target/release/ppp
-macOS：  bin/ppp
+Windows：x64/Release/ppp-core.lib 或 x64/Debug/ppp-core.lib
+Linux：  bin/libppp-core.a
+macOS：  bin/libppp-core.a
 ```
 
-构建时将核心复制到 Rust 构建输出并嵌入前端。运行时释放到临时目录，启动后通过
-本机回环 RPC 连接。用户不需要单独放置核心控制台程序。
+构建时将核心静态链接进 Rust 前端。运行时由同一进程通过 C ABI 创建、启动和停止核心，
+不释放临时文件，也不通过本机回环 RPC 控制 owned-core。独立运行的 `ppp.exe` 仍可作为
+脚本/服务端宿主，并由用户显式 attach。
 
 每个平台分别构建自己的可执行文件；“单文件”指每个平台的发布产物包含对应平台
 核心，不意味着一个 Windows 文件同时运行 Linux 或 macOS 核心。
@@ -785,8 +787,8 @@ Windows/macOS GUI ↔ Linux TUI：字段、功能、状态和操作逻辑一致
 
 #### Phase B：macOS GUI
 
-- 让 `build.rs` 选择并嵌入 macOS 核心。
-- 补充 Unix 核心释放和执行权限处理。
+- 让 `build.rs` 链接 macOS `ppp-core` 静态库。
+- 验证同进程核心的权限和驱动资源处理。
 - 使用现有 `eframe` 页面验证总览、网络、服务器、分流和启动设置。
 - 增加 `.app` 打包脚本，签名和公证放到发布阶段。
 
@@ -805,5 +807,5 @@ macOS GUI：  Proxy / Client + utun
 Linux TUI：  Proxy / Client + TUN / Server
 ```
 
-每个平台都验证：内置核心释放、配置目录读取、服务器选择、停止核心、DNS/路由
+每个平台都验证：静态核心启动、配置目录读取、服务器选择、停止核心、DNS/路由
 恢复、日志路径和窗口/终端退出恢复。

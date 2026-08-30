@@ -9,16 +9,13 @@ pub mod schema;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-#[cfg(ppp_in_process_core)]
 use std::sync::{Arc, Mutex};
-#[cfg(ppp_in_process_core)]
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-#[cfg(ppp_in_process_core)]
 use crate::core::in_process::CoreHandle;
 
 const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
@@ -364,17 +361,14 @@ impl RpcClient {
     }
 }
 
-/// UI-facing core client.  A normal attach still uses the legacy loopback
-/// RPC client, while a core owned by the Rust binary uses the C++ runtime
-/// directly.  Keeping this small adapter lets both front-ends migrate without
-/// duplicating snapshot and command handling.
+/// UI-facing core client. An explicitly attached core still uses the loopback
+/// RPC client, while a core owned by this process uses the C++ runtime directly.
+/// Keeping this small adapter lets both front-ends share command handling.
 pub enum CoreClient {
     Rpc(RpcClient),
-    #[cfg(ppp_in_process_core)]
     InProcess(InProcessClient),
 }
 
-#[cfg(ppp_in_process_core)]
 pub struct InProcessClient {
     core: Arc<Mutex<CoreHandle>>,
     responses: Arc<Mutex<VecDeque<Response>>>,
@@ -382,7 +376,6 @@ pub struct InProcessClient {
     next_id: u64,
 }
 
-#[cfg(ppp_in_process_core)]
 impl InProcessClient {
     fn start(args: &[String]) -> Result<Self> {
         Ok(Self {
@@ -477,7 +470,6 @@ impl InProcessClient {
     }
 }
 
-#[cfg(ppp_in_process_core)]
 impl Drop for InProcessClient {
     fn drop(&mut self) {
         // Do not let the process-wide console callback keep an old core alive
@@ -491,7 +483,6 @@ impl CoreClient {
         Self::Rpc(RpcClient::new(address, token))
     }
 
-    #[cfg(ppp_in_process_core)]
     pub fn in_process(args: &[String]) -> Result<Self> {
         Ok(Self::InProcess(InProcessClient::start(args)?))
     }
@@ -499,7 +490,6 @@ impl CoreClient {
     pub fn is_connected(&self) -> bool {
         match self {
             Self::Rpc(client) => client.is_connected(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.is_running(),
         }
     }
@@ -507,7 +497,6 @@ impl CoreClient {
     pub fn is_authenticated(&self) -> bool {
         match self {
             Self::Rpc(client) => client.is_authenticated(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.is_running(),
         }
     }
@@ -515,7 +504,6 @@ impl CoreClient {
     pub fn is_running(&self) -> bool {
         match self {
             Self::Rpc(client) => client.is_connected(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.is_running(),
         }
     }
@@ -523,7 +511,6 @@ impl CoreClient {
     pub fn address(&self) -> &str {
         match self {
             Self::Rpc(client) => client.address(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(_) => "in-process",
         }
     }
@@ -531,7 +518,6 @@ impl CoreClient {
     pub fn has_pending(&self) -> bool {
         match self {
             Self::Rpc(client) => client.has_pending(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.has_pending(),
         }
     }
@@ -539,7 +525,6 @@ impl CoreClient {
     pub fn attach_stream(&mut self, stream: TcpStream) -> Result<()> {
         match self {
             Self::Rpc(client) => client.attach_stream(stream),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(_) => bail!("cannot attach a stream to an in-process core"),
         }
     }
@@ -547,7 +532,6 @@ impl CoreClient {
     pub fn request_command(&mut self, command: CoreCommand) -> Result<()> {
         match self {
             Self::Rpc(client) => client.request_command(command),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.request_command(command),
         }
     }
@@ -555,7 +539,6 @@ impl CoreClient {
     pub fn poll(&mut self) -> Result<Option<Response>> {
         match self {
             Self::Rpc(client) => client.poll(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(client) => client.poll(),
         }
     }
@@ -563,12 +546,10 @@ impl CoreClient {
     pub fn disconnect(&mut self) {
         match self {
             Self::Rpc(client) => client.disconnect(),
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(_) => {}
         }
     }
 
-    #[cfg(ppp_in_process_core)]
     pub fn stop_owned(&self) -> Result<()> {
         match self {
             Self::InProcess(client) => {
@@ -582,7 +563,6 @@ impl CoreClient {
         }
     }
 
-    #[cfg(ppp_in_process_core)]
     pub fn register_emergency_stop(&self) {
         if let Self::InProcess(client) = self {
             client.register_emergency_stop();
@@ -592,7 +572,6 @@ impl CoreClient {
     pub fn is_in_process(&self) -> bool {
         match self {
             Self::Rpc(_) => false,
-            #[cfg(ppp_in_process_core)]
             Self::InProcess(_) => true,
         }
     }

@@ -13,12 +13,12 @@ cargo build --release
 # 产物: target\release\ppp-tui.exe
 ```
 
-提供 `ppp-core` 静态库时，TUI/CLI 会直接链接核心，不会释放临时 `ppp.exe`。通过
-`PPP_TUI_CORE_LIB` 指定静态库，并用 `PPP_TUI_CORE_LIB_DIRS`、`PPP_TUI_CORE_LIBS`
-和 `PPP_TUI_CORE_SYSTEM_LIBS` 指定依赖库。若没有静态库，仍可显式指定兼容核心产物：
+TUI/CLI 必须链接 `ppp-core` 静态库；构建完成后核心代码就在最终的 TUI/CLI 可执行文件中，
+运行时不会释放临时 `ppp.exe` 或启动核心子进程。通过 `PPP_TUI_CORE_LIB` 指定静态库，
+并用 `PPP_TUI_CORE_LIB_DIRS`、`PPP_TUI_CORE_LIBS` 和 `PPP_TUI_CORE_SYSTEM_LIBS` 指定依赖库。
 
 ```powershell
-$env:PPP_TUI_CORE_PATH = "D:\path\to\x64\Release\ppp.exe"
+$env:PPP_TUI_CORE_LIB = "D:\path\to\x64\Release\ppp-core.lib"
 cargo build --release
 ```
 
@@ -30,8 +30,8 @@ cargo build --release
 .\build-standalone.ps1 -CoreConfiguration Debug
 ```
 
-发布时只需要 Rust TUI/CLI 可执行文件、驱动和用户自己的配置/规则文件，不需要另行
-分发 `ppp.exe`。显式使用 `PPP_TUI_CORE_PATH` 时才会走兼容的外部核心路径。
+发布时只需要 TUI/CLI 可执行文件、驱动和用户自己的配置/规则文件，不需要另行分发
+`ppp.exe`。驱动和核心需要读取的运行时资源仍应放在可执行文件旁边的发布目录中。
 
 > 2026-08-14 验证：`cargo build`（debug/release）零警告；`cargo test` 12/12
 > 通过（3 流量采样单元测试 + 7 契约黄金测试）。首次构建需访问 crates.io
@@ -72,7 +72,7 @@ x64/Debug/ppp.exe --mode=client --config=./appsettings.json `
 tui\target\release\ppp-tui.exe --rpc 127.0.0.1:39100 --token 你的令牌
 ```
 
-### 方式二：窗口内启动内置核心（推荐）
+### 方式二：窗口内启动同进程核心（推荐）
 
 ```powershell
 tui\target\release\ppp-tui.exe
@@ -84,8 +84,8 @@ tui\target\release\ppp-tui.exe
 点击“进入总览并启动”，同一个 TUI/CLI 进程直接启动真正的 C++ 核心并随后进入
 “总览 / 网络”等运行页面。
 也可以先在“启动设置”中修改目录和启动参数，然后点击“刷新服务器配置”。
-默认启动参数由结构化设置生成，不再重复填充 `--mode`、RPC、TUN 默认值。也可以填写外部核心路径；
-留空外部路径即使用内置核心。窗口内还支持填入 RPC 地址和 Token 连接已有核心。
+默认启动参数由结构化设置生成，不再重复填充 `--mode`、RPC、TUN 默认值。窗口内支持填入
+RPC 地址和 Token 连接已有核心；该选项只用于主动连接已经独立运行的核心。
 
 “启动命令接口”提供启动模式（`client` 客户端、`proxy` 无 TUN/无监听的目录或控制模式、
 `server` 服务端）、配置文件、服务器目录（默认 `./config`）、TUN IP/网关/掩码、
@@ -105,8 +105,8 @@ HTTP/SOCKS 端口留空时不覆盖选中的 `--config`，界面会读取当前�
 `geo-rules.yaml`、`geosite.dat` 和 `geoip.dat`，`no` 不读取用户分流规则。
 
 “高级启动参数”只用于未被界面接管的额外 CLI 参数。也可以粘贴完整启动命令，点击
-“从高级命令导入到上方设置”，程序会提取已支持的字段并去除重复参数；外部兼容核心
-模式下才会自动注入 `--headless`、RPC 地址、RPC Token。
+“从高级命令导入到上方设置”，程序会提取已支持的字段并去除重复参数；同进程核心会
+自动补充必要的 headless 启动标志。
 
 “连接方式”中可以开启或关闭 `TUN VPN 模式`，以及开启 `系统代理`。TUN 模式关闭时
 核心使用 `--mode=proxy` 运行，并自动将 `--proxy-http-port` 与
@@ -128,8 +128,7 @@ tui/target/release/ppp-tui.exe --mode=client --config=./appsettings.json
 ```
 
 也兼容传统的核心启动写法。`start`、`ppp.exe`（包括 `start "标题" ppp.exe`）
-会被 TUI 自动识别并去除，剩余参数直接用于同进程核心；若显式配置 `--core-path`，
-才会改用外部核心：
+会被 TUI 自动识别并去除，剩余参数直接用于同进程核心：
 
 ```powershell
 tui/target/release/ppp-tui.exe start ppp.exe --mode=client --config=./config/rfcJP.json `
@@ -188,7 +187,7 @@ lwIP TCP 路径。当前默认建议使用 `auto`：Windows 使用 Wintun 时默
   数字 `1-5` 切页（F 键仅作增强）、`↑↓/j/k` 移动、`Enter` 执行、
   `p/o` 启动/停止核心、`/` 过滤服务器、`?` 帮助、`q` 退出（二次确认）；
   设置页 `Enter` 进入字段编辑（直接打字，`Esc` 取消，`Tab` 提交并下一个）。
-  不带核心参数启动时，CLI 会直接显示 Rust TCP 探测延迟预览，不启动临时目录核心；
+  不带核心参数启动时，CLI 会直接显示 Rust TCP 探测延迟预览，不启动核心；
   命令行带 `--mode`、`--config` 等核心参数时会直接启动实际核心，行为与窗口版一致。
 - 启动后（窗口版总览页、服务器页；终端版服务器页）直接对 `./config/*.json` 的
   服务器地址做 TCP 延迟探测（每 5 秒刷新），无需启动核心即可看到各服务器延迟；
@@ -200,14 +199,12 @@ lwIP TCP 路径。当前默认建议使用 `auto`：Windows 使用 Wintun 时默
   默认文件。保存设置会立即应用到当前进程，同一份 release 程序即可承担正常运行和问题诊断，
   不需要另外打包一个 debug 版。
 - “服务器”页的“切换”和“Rank #1”按钮直接提交切换请求，不再弹确认框。
-- 关闭窗口或点击“停止核心”会先请求内置核心优雅退出，等待 DNS、路由和 TUN
+- 关闭窗口或点击“停止核心”会先请求同进程核心优雅退出，等待 DNS、路由和 TUN
   状态恢复后再结束进程；只有核心无响应时才强制结束。连接已有核心时只断开客户端。
 - Release TUI/CLI 与核心在同一进程内：退出时通过 C ABI 请求核心同步执行 DNS、路由、
   TUN 等清理，再释放核心线程；核心异常退出时界面会给出明确提示并按上限自动重启。
-  显式使用外部核心时，Windows Job Object 和原有子进程保护仍然生效。
 - `--link-restart` / `--auto-restart` 现在由启动设置页直接配置并转发给核心；核心执行
-  优雅重启后，TUI 会重新连接。TUI 另外保留核心崩溃/被外部终止时的有限次数自动拉起，
-  并通过 Job Object 约束子进程生命周期。
+  优雅重启后，TUI 会重新连接。TUI 另外保留核心崩溃时的有限次数同进程重新初始化。
 
 ## 测试
 

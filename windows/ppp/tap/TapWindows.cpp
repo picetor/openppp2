@@ -1,6 +1,7 @@
 #include <windows/ppp/tap/TapWindows.h>
 #include <windows/ppp/win32/Win32Native.h>
 #include <windows/ppp/win32/network/NetworkInterface.h>
+#include <windows/ppp/win32/network/Router.h>
 #include <windows/ppp/tap/tap-windows.h>
 
 #include <ppp/io/File.h>
@@ -17,6 +18,8 @@
 #include <Shellapi.h>
 #include <iphlpapi.h>
 
+#include <algorithm>
+
 #pragma comment(lib, "iphlpapi.lib")
 
 typedef ppp::net::IPEndPoint IPEndPoint;
@@ -28,6 +31,389 @@ namespace ppp
     {
         static ppp::string TapWindows_FindComponentId(const ppp::string& key, ppp::win32::network::NetworkInterfacePtr& network_interface) noexcept;
         static std::atomic<TapWindows::DriverMode> TAP_WINDOWS_DRIVER_MODE(TapWindows::DriverMode::Auto);
+
+        // Wintun creates a new interface while a previous TAP instance may
+        // still retain the old IPv4 address.  AddIPAddress() reports
+        // ERROR_OBJECT_ALREADY_EXISTS in that situation, but the error does
+        // not mean that the requested address belongs to the target interface.
+        // Keep all ownership checks here so the startup path cannot continue
+        // with an APIPA-only Wintun interface.
+        static bool GetIPv4AddressOwners(uint32_t ip, ppp::vector<int>& owners) noexcept
+        {
+            owners.clear();
+
+            ULONG buffer_length = 15000;
+            ppp::vector<BYTE> buffer(buffer_length);
+            ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+            DWORD result = ::GetAdaptersAddresses(AF_INET, flags, NULLPTR,
+                reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &buffer_length);
+            if (result == ERROR_BUFFER_OVERFLOW)
+            {
+                buffer.resize(buffer_length);
+                result = ::GetAdaptersAddresses(AF_INET, flags, NULLPTR,
+                    reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &buffer_length);
+            }
+            if (result != NO_ERROR)
+            {
+                fprintf(stdout, "[SetAddresses] GetAdaptersAddresses failed err=%lu\r\n",
+                    static_cast<unsigned long>(result));
+                return false;
+            }
+
+            for (PIP_ADAPTER_ADDRESSES adapter = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                adapter != NULLPTR; adapter = adapter->Next)
+            {
+                for (PIP_ADAPTER_UNICAST_ADDRESS unicast = adapter->FirstUnicastAddress;
+                    unicast != NULLPTR; unicast = unicast->Next)
+                {
+                    if (NULLPTR == unicast->Address.lpSockaddr ||
+                        unicast->Address.lpSockaddr->sa_family != AF_INET)
+                    {
+                        continue;
+                    }
+
+                    const SOCKADDR_IN* address = reinterpret_cast<const SOCKADDR_IN*>(unicast->Address.lpSockaddr);
+                    if (address->sin_addr.S_un.S_addr == ip)
+                    {
+                        owners.emplace_back(static_cast<int>(adapter->IfIndex));
+                        break;
+                    }
+                }
+            }
+            return true;
+        }
+
+        static bool HasIPv4Address(int interface_index, uint32_t ip) noexcept
+        {
+            ppp::vector<int> owners;
+            if (!GetIPv4AddressOwners(ip, owners))
+            {
+                return false;
+            }
+            return std::find(owners.begin(), owners.end(), interface_index) != owners.end();
+        }
+
+        static bool WaitForIPv4Address(int interface_index, uint32_t ip) noexcept
+        {
+            for (int attempt = 0; attempt < 10; ++attempt)
+            {
+                if (HasIPv4Address(interface_index, ip))
+                {
+                    return true;
+                }
+                ::Sleep(50);
+            }
+            return false;
+        }
+
+        static bool HasIPv4Route(int interface_index, uint32_t destination, uint32_t mask, uint32_t gateway) noexcept
+        {
+            std::shared_ptr<MIB_IPFORWARDTABLE> table = ppp::win32::network::Router::GetIpForwardTable();
+            if (NULLPTR == table)
+            {
+                return false;
+            }
+
+            for (DWORD i = 0; i < table->dwNumEntries; ++i)
+            {
+                const MIB_IPFORWARDROW& route = table->table[i];
+                if (static_cast<int>(route.dwForwardIfIndex) == interface_index &&
+                    route.dwForwardDest == destination &&
+                    route.dwForwardMask == mask &&
+                    route.dwForwardNextHop == gateway)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool IsIPv4SubnetInUse(uint32_t network, uint32_t mask, int ignored_interface_index) noexcept
+        {
+            ULONG buffer_length = 15000;
+            ppp::vector<BYTE> buffer(buffer_length);
+            ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+            DWORD result = ::GetAdaptersAddresses(AF_INET, flags, NULLPTR,
+                reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &buffer_length);
+            if (result == ERROR_BUFFER_OVERFLOW)
+            {
+                buffer.resize(buffer_length);
+                result = ::GetAdaptersAddresses(AF_INET, flags, NULLPTR,
+                    reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &buffer_length);
+            }
+            if (result != NO_ERROR)
+            {
+                fprintf(stdout, "[SetAddresses] GetAdaptersAddresses subnet check failed err=%lu\r\n",
+                    static_cast<unsigned long>(result));
+                return true;
+            }
+
+            const uint32_t network_host = ntohl(network);
+            const uint32_t mask_host = ntohl(mask);
+            for (PIP_ADAPTER_ADDRESSES adapter = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+                adapter != NULLPTR; adapter = adapter->Next)
+            {
+                if (static_cast<int>(adapter->IfIndex) == ignored_interface_index)
+                {
+                    continue;
+                }
+
+                for (PIP_ADAPTER_UNICAST_ADDRESS unicast = adapter->FirstUnicastAddress;
+                    unicast != NULLPTR; unicast = unicast->Next)
+                {
+                    if (NULLPTR == unicast->Address.lpSockaddr ||
+                        unicast->Address.lpSockaddr->sa_family != AF_INET)
+                    {
+                        continue;
+                    }
+
+                    const SOCKADDR_IN* address = reinterpret_cast<const SOCKADDR_IN*>(unicast->Address.lpSockaddr);
+                    if ((ntohl(address->sin_addr.S_un.S_addr) & mask_host) == network_host)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        static bool IsStaleVirtualAdapter(int interface_index) noexcept;
+
+        static bool HasExternalIPv4AddressOwner(const ppp::vector<int>& owners, int interface_index) noexcept
+        {
+            for (int owner : owners)
+            {
+                if (owner != interface_index && !IsStaleVirtualAdapter(owner))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Windows does not allow the same IPv4 address/subnet to be assigned
+        // to two adapters.  Another PPP client may legitimately keep the
+        // historical openppp2 address (192.168.12.68), so do not steal it.
+        // For the normal /24 tunnel layout, preserve the host and gateway
+        // portions and move only the private third octet to an unused subnet.
+        static bool SelectAvailableIPv4Address(int interface_index, uint32_t& ip,
+            uint32_t& gateway, uint32_t mask) noexcept
+        {
+            ppp::vector<int> owners;
+            if (!GetIPv4AddressOwners(ip, owners))
+            {
+                return false;
+            }
+            if (!HasExternalIPv4AddressOwner(owners, interface_index))
+            {
+                return true;
+            }
+
+            const uint32_t mask_host = ntohl(mask);
+            if (mask_host != 0xFFFFFF00U)
+            {
+                fprintf(stdout,
+                    "[SetAddresses] IPv4 address conflict cannot auto-relocate non-/24 mask ip=%s mask=%s\r\n",
+                    IPEndPoint(ip, 0).ToAddressString().data(),
+                    IPEndPoint(mask, 0).ToAddressString().data());
+                return false;
+            }
+
+            const uint32_t ip_host = ntohl(ip);
+            const uint32_t gateway_host = ntohl(gateway);
+            const uint32_t host_ip = ip_host & 0xFFU;
+            uint32_t host_gateway = gateway_host & 0xFFU;
+            if (host_ip == 0U || host_ip == 255U ||
+                host_gateway == 0U || host_gateway == 255U || host_ip == host_gateway)
+            {
+                fprintf(stdout,
+                    "[SetAddresses] IPv4 address conflict cannot auto-relocate invalid host layout ip=%s gateway=%s\r\n",
+                    IPEndPoint(ip, 0).ToAddressString().data(),
+                    IPEndPoint(gateway, 0).ToAddressString().data());
+                return false;
+            }
+
+            const uint32_t first = (ip_host >> 24) & 0xFFU;
+            const uint32_t second = (ip_host >> 16) & 0xFFU;
+            const bool requested_private = first == 10U ||
+                (first == 172U && second >= 16U && second <= 31U) ||
+                (first == 192U && second == 168U);
+            const uint32_t pool_prefix = requested_private ?
+                (ip_host & 0xFFFF0000U) : 0xC0A80000U;
+            const uint32_t requested_third = (ip_host >> 8) & 0xFFU;
+            const uint32_t requested_network = ip_host & mask_host;
+
+            for (uint32_t offset = 1; offset <= 255; ++offset)
+            {
+                const uint32_t third = (requested_third + offset) & 0xFFU;
+                const uint32_t candidate_network_host = pool_prefix | (third << 8);
+                if (candidate_network_host == requested_network ||
+                    IsIPv4SubnetInUse(htonl(candidate_network_host), mask, interface_index))
+                {
+                    continue;
+                }
+
+                ip = htonl(candidate_network_host | host_ip);
+                host_gateway = std::min<uint32_t>(host_gateway, 254U);
+                gateway = htonl(candidate_network_host | host_gateway);
+                fprintf(stdout,
+                    "[SetAddresses] IPv4 subnet conflict resolved without touching other adapter: "
+                    "requested=%s/%s selected=%s gateway=%s\r\n",
+                    IPEndPoint(htonl(requested_network), 0).ToAddressString().data(),
+                    IPEndPoint(mask, 0).ToAddressString().data(),
+                    IPEndPoint(ip, 0).ToAddressString().data(),
+                    IPEndPoint(gateway, 0).ToAddressString().data());
+                return true;
+            }
+
+            fprintf(stdout, "[SetAddresses] no unused private /24 subnet available for ip=%s\r\n",
+                IPEndPoint(ip, 0).ToAddressString().data());
+            return false;
+        }
+
+        static bool IsStaleVirtualAdapter(int interface_index) noexcept
+        {
+            ppp::win32::network::NetworkInterfacePtr network_interface =
+                ppp::win32::network::GetNetworkInterfaceByInterfaceIndex(interface_index);
+            if (NULLPTR == network_interface)
+            {
+                return false;
+            }
+
+            // Only remove addresses from adapters carrying openppp2's own
+            // marker. A generic TAP/Wintun/PPP label is not ownership proof;
+            // for example, PPP 1 is a separate PPP client's TAP adapter.
+            const char* const openppp2_marker = "PPP PRIVATE NETWORK 2";
+            return (!network_interface->Description.empty() &&
+                network_interface->Description.find(openppp2_marker) != ppp::string::npos) ||
+                (!network_interface->ConnectionId.empty() &&
+                    network_interface->ConnectionId.find(openppp2_marker) != ppp::string::npos);
+        }
+
+        static bool DeleteIPv4AddressByNetsh(int interface_index, uint32_t ip) noexcept
+        {
+            ppp::string interface_name = ppp::win32::network::GetInterfaceName(interface_index);
+            IPEndPoint ipEP(ip, 0);
+            if (interface_name.empty() || IPEndPoint::IsInvalid(ipEP))
+            {
+                fprintf(stdout, "[SetAddresses] cannot delete stale address idx=%d name='%s' ip=%u\r\n",
+                    interface_index, interface_name.data(), ip);
+                return false;
+            }
+
+            ppp::string arguments = "interface ipv4 delete address name=\"";
+            arguments += interface_name;
+            arguments += "\" address=";
+            arguments += ipEP.ToAddressString();
+
+            int return_code = INFINITE;
+            const bool launched = ppp::win32::Win32Native::Execute(
+                false, "netsh.exe", arguments.data(), &return_code, 3000);
+            fprintf(stdout, "[SetAddresses] delete stale address idx=%d name='%s' ip=%s launched=%d rc=%d\r\n",
+                interface_index, interface_name.data(), ipEP.ToAddressString().data(),
+                launched ? 1 : 0, return_code);
+            return launched && return_code == ERROR_SUCCESS;
+        }
+
+        static void DeleteStaleVirtualIPv4Routes(int interface_index, uint32_t ip,
+            uint32_t mask, uint32_t gateway) noexcept
+        {
+            std::shared_ptr<MIB_IPFORWARDTABLE> table = ppp::win32::network::Router::GetIpForwardTable();
+            if (NULLPTR == table)
+            {
+                return;
+            }
+
+            const uint32_t network = htonl(ntohl(ip) & ntohl(mask));
+            for (DWORD i = 0; i < table->dwNumEntries; ++i)
+            {
+                MIB_IPFORWARDROW& route = table->table[i];
+                const bool connected_route = route.dwForwardDest == network &&
+                    route.dwForwardMask == mask;
+                const bool tunnel_gateway_route = !IPEndPoint::IsInvalid(IPEndPoint(gateway, 0)) &&
+                    route.dwForwardNextHop == gateway;
+                if (static_cast<int>(route.dwForwardIfIndex) != interface_index ||
+                    (!connected_route && !tunnel_gateway_route))
+                {
+                    continue;
+                }
+
+                if (ppp::win32::network::Router::Delete(route))
+                {
+                    fprintf(stdout, "[SetAddresses] deleted stale route idx=%d dest=%u mask=%u gateway=%u\r\n",
+                        interface_index, route.dwForwardDest, route.dwForwardMask, route.dwForwardNextHop);
+                }
+            }
+        }
+
+        static bool EnsureIPv4AddressOwnership(int interface_index, uint32_t ip,
+            uint32_t mask, uint32_t gateway) noexcept
+        {
+            ppp::vector<int> owners;
+            if (!GetIPv4AddressOwners(ip, owners))
+            {
+                return false;
+            }
+
+            bool ok = true;
+            for (int owner : owners)
+            {
+                if (owner == interface_index)
+                {
+                    continue;
+                }
+
+                if (!IsStaleVirtualAdapter(owner))
+                {
+                    // Never remove an address from a physical or unrelated
+                    // adapter merely because it collides with the tunnel.
+                    fprintf(stdout, "[SetAddresses] address conflict ip=%u owner_idx=%d is not a stale PPP/TAP adapter\r\n",
+                        ip, owner);
+                    ok = false;
+                    continue;
+                }
+
+                fprintf(stdout, "[SetAddresses] removing stale virtual address ip=%u owner_idx=%d target_idx=%d\r\n",
+                    ip, owner, interface_index);
+                DeleteStaleVirtualIPv4Routes(owner, ip, mask, gateway);
+                if (!DeleteIPv4AddressByNetsh(owner, ip))
+                {
+                    ok = false;
+                }
+            }
+
+            // netsh changes the IP configuration asynchronously from the
+            // perspective of GetAdaptersAddresses.  Give the adapter a short
+            // window to publish the new ownership before AddIPAddress runs.
+            for (int attempt = 0; attempt < 10; ++attempt)
+            {
+                ppp::vector<int> current_owners;
+                if (!GetIPv4AddressOwners(ip, current_owners))
+                {
+                    return false;
+                }
+
+                bool conflicting_owner = false;
+                for (int owner : current_owners)
+                {
+                    if (owner != interface_index)
+                    {
+                        conflicting_owner = true;
+                    }
+                }
+
+                if (!conflicting_owner)
+                {
+                    return ok;
+                }
+
+                ::Sleep(50);
+            }
+
+            fprintf(stdout, "[SetAddresses] stale address ownership was not resolved ip=%u target_idx=%d\r\n",
+                ip, interface_index);
+            return false;
+        }
 
         TapWindows::TapWindows(const std::shared_ptr<boost::asio::io_context>& context, const ppp::string& id, void* tun, uint32_t address, uint32_t gw, uint32_t mask, bool hosted_network)
             : ITap(context, id, tun, address, gw, mask, hosted_network)
@@ -153,14 +539,20 @@ namespace ppp
             DWORD address_error = ::AddIPAddress(
                 ip, mask, static_cast<DWORD>(interface_index),
                 &nte_context, &nte_instance);
-            const bool address_ok = address_error == NO_ERROR ||
-                address_error == ERROR_OBJECT_ALREADY_EXISTS ||
-                address_error == ERROR_ALREADY_EXISTS;
+            bool address_ok = address_error == NO_ERROR;
+            if (!address_ok && (address_error == ERROR_OBJECT_ALREADY_EXISTS ||
+                address_error == ERROR_ALREADY_EXISTS))
+            {
+                // ERROR_OBJECT_ALREADY_EXISTS is ambiguous here: the same
+                // address may already exist on another adapter.  It is only
+                // success when the target interface owns the address.
+                address_ok = HasIPv4Address(interface_index, ip);
+            }
             fprintf(stdout,
-                "[SetAddresses-iphlpapi] AddIPAddress idx=%d ip=%s mask=%s err=%lu ctx=%lu ok=%d\r\n",
+                "[SetAddresses-iphlpapi] AddIPAddress idx=%d ip=%s mask=%s err=%lu ctx=%lu verified=%d ok=%d\r\n",
                 interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(),
                 static_cast<unsigned long>(address_error), static_cast<unsigned long>(nte_context),
-                address_ok ? 1 : 0);
+                HasIPv4Address(interface_index, ip) ? 1 : 0, address_ok ? 1 : 0);
 
             if (!address_ok || !has_gateway)
             {
@@ -192,13 +584,18 @@ namespace ppp
 
             DWORD route_error = ::CreateIpForwardEntry(&route);
             const bool route_ok = route_error == NO_ERROR ||
-                route_error == ERROR_OBJECT_ALREADY_EXISTS ||
-                route_error == ERROR_ALREADY_EXISTS;
+                ((route_error == ERROR_OBJECT_ALREADY_EXISTS ||
+                    route_error == ERROR_ALREADY_EXISTS) &&
+                    HasIPv4Route(interface_index, route.dwForwardDest,
+                        route.dwForwardMask, route.dwForwardNextHop));
             fprintf(stdout,
-                "[SetAddresses-iphlpapi] CreateIpForwardEntry idx=%d gateway=%s metric=%lu interface_err=%lu err=%lu ok=%d\r\n",
+                "[SetAddresses-iphlpapi] CreateIpForwardEntry idx=%d gateway=%s metric=%lu interface_err=%lu err=%lu verified=%d ok=%d\r\n",
                 interface_index, gwEP.ToAddressString().data(),
                 static_cast<unsigned long>(metric), static_cast<unsigned long>(interface_error),
-                static_cast<unsigned long>(route_error), route_ok ? 1 : 0);
+                static_cast<unsigned long>(route_error),
+                HasIPv4Route(interface_index, route.dwForwardDest,
+                    route.dwForwardMask, route.dwForwardNextHop) ? 1 : 0,
+                route_ok ? 1 : 0);
             return route_ok;
         }
 
@@ -220,6 +617,14 @@ namespace ppp
 
             IPEndPoint gwEP(gw, 0);
             const bool has_gateway = !IPEndPoint::IsInvalid(gwEP);
+
+            if (!EnsureIPv4AddressOwnership(interface_index, ip, mask, gw))
+            {
+                fprintf(stdout, "[SetAddresses] FAIL: IPv4 address ownership conflict idx=%d ip=%s\r\n",
+                    interface_index, ipEP.ToAddressString().data());
+                return false;
+            }
+
             fprintf(stdout, "[SetAddresses] Using WMI: idx=%d ip=%s mask=%s gw=%s\r\n",
                 interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(),
                 has_gateway ? gwEP.ToAddressString().data() : "none");
@@ -232,14 +637,23 @@ namespace ppp
             }
             if (wmi_ok)
             {
-                return true;
+                if (WaitForIPv4Address(interface_index, ip))
+                {
+                    return true;
+                }
+                fprintf(stdout, "[SetAddresses] WMI reported success but idx=%d does not own ip=%s; continuing with fallback\r\n",
+                    interface_index, ipEP.ToAddressString().data());
             }
 
             fprintf(stdout, "[SetAddresses] WMI configuration failed; trying netsh\r\n");
-            if (SetAddressesByNetsh(interface_index, ip, mask, gw))
+            if (SetAddressesByNetsh(interface_index, ip, mask, gw) &&
+                WaitForIPv4Address(interface_index, ip))
             {
                 return true;
             }
+
+            fprintf(stdout, "[SetAddresses] netsh reported success but idx=%d does not own ip=%s; continuing with IP Helper\r\n",
+                interface_index, ipEP.ToAddressString().data());
 
             // Wintun can have a valid interface index before its friendly name
             // is exposed through the WMI adapter-configuration provider. In
@@ -247,7 +661,14 @@ namespace ppp
             // IP Helper API addresses the interface by index and works for
             // both Wintun and TAP without relying on the Control Panel name.
             fprintf(stdout, "[SetAddresses] netsh failed; trying IP Helper by interface index\r\n");
-            return SetAddressesByIpHelper(interface_index, ip, mask, gw);
+            const bool ip_helper_ok = SetAddressesByIpHelper(interface_index, ip, mask, gw);
+            if (!ip_helper_ok || !WaitForIPv4Address(interface_index, ip))
+            {
+                fprintf(stdout, "[SetAddresses] FAIL: target idx=%d does not own ip=%s after all configuration methods\r\n",
+                    interface_index, ipEP.ToAddressString().data());
+                return false;
+            }
+            return true;
         }
 
         bool TapWindows::FindAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept
@@ -373,6 +794,13 @@ namespace ppp
                     return NULLPTR;
                 }
 
+                if (!SelectAvailableIPv4Address(interface_index, ip, gw, mask))
+                {
+                    fprintf(stdout, "[TapWindows::CreateWintunAdapter] no usable IPv4 address/subnet\r\n");
+                    wintun->Stop();
+                    return NULLPTR;
+                }
+
                 if (!SetAdapterInterface(interface_index, ip, gw, mask, hosted_network, dns_addresses))
                 {
                     fprintf(stdout, "[TapWindows::CreateWintunAdapter] SetAdapterInterface failed\r\n");
@@ -464,22 +892,6 @@ namespace ppp
             ppp::win32::network::NetworkInterfacePtr tap_network_interface;
             ppp::string tap_component_id = TapWindows_FindComponentId(componentId, tap_network_interface);
             void* tun = tap_component_id.empty() ? NULLPTR : OpenDriver(tap_component_id.data());
-            if (NULLPTR == tun || tun == INVALID_HANDLE_VALUE)
-            {
-                ppp::unordered_set<ppp::string> component_ids;
-                if (FindAllComponentIds(component_ids))
-                {
-                    for (const ppp::string& candidate : component_ids)
-                    {
-                        tun = OpenDriver(candidate.data());
-                        if (NULLPTR != tun && tun != INVALID_HANDLE_VALUE)
-                        {
-                            tap_component_id = candidate;
-                            break;
-                        }
-                    }
-                }
-            }
 
             if ((NULLPTR == tun || tun == INVALID_HANDLE_VALUE) && driver_mode == DriverMode::Auto)
             {
@@ -504,6 +916,13 @@ namespace ppp
             if (interface_index < 0)
             {
                 fprintf(stdout, "[TapWindows::Create] FAIL: invalid interface index\r\n");
+                CloseHandle(tun);
+                return NULLPTR;
+            }
+
+            if (!SelectAvailableIPv4Address(interface_index, ip, gw, mask))
+            {
+                fprintf(stdout, "[TapWindows::Create] FAIL: no usable IPv4 address/subnet\r\n");
                 CloseHandle(tun);
                 return NULLPTR;
             }
@@ -913,12 +1332,24 @@ namespace ppp
                     }
 
                     ppp::string component_id = ToLower<ppp::string>(componentId);
-                    NetworkInterfacePtr suffix_match;
-                    ppp::string suffix_match_guid;
+                    auto is_tap_adapter = [](const NetworkInterfacePtr& ni) noexcept {
+                        if (NULLPTR == ni) {
+                            return false;
+                        }
+                        ppp::string description = ToLower<ppp::string>(ni->Description);
+                        return description.find("tap-windows") != ppp::string::npos ||
+                            description.find("tap0901") != ppp::string::npos;
+                    };
                     std::size_t interfaces_size = interfaces.size();
                     for (std::size_t i = 0; i < interfaces_size; i++)
                     {
                         NetworkInterfacePtr& ni = interfaces[i];
+                        // A friendly name can be shared by different virtual
+                        // drivers. In TAP mode, never return a Wintun/PPP
+                        // interface just because its connection name matches.
+                        if (!is_tap_adapter(ni)) {
+                            continue;
+                        }
                         if (component_uuid_sgen)
                         {
                             if (StringToGuid(ni->Guid) == component_uuid)
@@ -936,27 +1367,6 @@ namespace ppp
                             network_interface = ni;
                             return ni->Guid;
                         }
-
-                        // Windows appends a numeric suffix when an old TAP
-                        // adapter with the requested name is still present
-                        // (for example, "PPP 1"). Reuse only the adapter
-                        // whose name is the requested name plus a separator;
-                        // do not match arbitrary names such as "PPP-test".
-                        if (!suffix_match && connection_id.size() > component_id.size() &&
-                            connection_id.compare(0, component_id.size(), component_id) == 0 &&
-                            connection_id[component_id.size()] == ' ')
-                        {
-                            suffix_match = ni;
-                            suffix_match_guid = ni->Guid;
-                        }
-                    }
-
-                    if (suffix_match)
-                    {
-                        network_interface = suffix_match;
-                        fprintf(stdout, "[TapWindows] matched suffixed adapter name='%s' for requested='%s'\r\n",
-                            suffix_match->ConnectionId.data(), componentId.data());
-                        return suffix_match_guid;
                     }
                 }
                 return ppp::string();
@@ -980,14 +1390,18 @@ namespace ppp
 
         ppp::string TapWindows::InstallDriver(const ppp::string& path, const ppp::string& declareTapName) noexcept
         {
+            fprintf(stdout, "[TapInstall] begin path='%s' name='%s'\r\n", path.data(), declareTapName.data());
             if (path.empty() || declareTapName.empty())
             {
+                fprintf(stdout, "[TapInstall] FAIL: empty driver path or adapter name\r\n");
                 return ppp::string();
             }
 
             ppp::string installPath = ppp::io::File::RewritePath((path + "tapinstall.exe").data());
             if (!PathFileExistsA(installPath.data()))
             {
+                fprintf(stdout, "[TapInstall] FAIL: tapinstall not found path='%s' err=%lu\r\n",
+                    installPath.data(), static_cast<unsigned long>(GetLastError()));
                 return ppp::string();
             }
 
@@ -995,53 +1409,120 @@ namespace ppp
             ppp::string argumentsText = "install \"" + driverPath + "\" tap0901";
 
             ppp::unordered_set<ppp::string> olds;
-            TapWindows::FindAllComponentIds(olds);
+            const bool old_query_ok = TapWindows::FindAllComponentIds(olds);
+            fprintf(stdout, "[TapInstall] before install query ok=%d count=%zu\r\n",
+                old_query_ok ? 1 : 0, olds.size());
 
             int dwExitCode = INFINITE;
-            if (!ppp::win32::Win32Native::Execute(false, installPath.data(), argumentsText.data(), &dwExitCode))
+            const bool launched = ppp::win32::Win32Native::Execute(false, installPath.data(), argumentsText.data(), &dwExitCode);
+            const DWORD execute_error = launched ? ERROR_SUCCESS : GetLastError();
+            fprintf(stdout, "[TapInstall] execute path='%s' args='%s' launched=%d exit=%d\r\n",
+                installPath.data(), argumentsText.data(), launched ? 1 : 0, dwExitCode);
+            if (!launched)
             {
+                fprintf(stdout, "[TapInstall] FAIL: CreateProcess error=%lu\r\n",
+                    static_cast<unsigned long>(execute_error));
                 return ppp::string();
             }
 
-            if (dwExitCode != ERROR_SUCCESS)
+            // tapinstall uses 3010 when the package was installed and Windows
+            // reports that a reboot is required. The adapter can still be
+            // opened in the current process, so treat it as a successful
+            // install and validate the device below.
+            if (dwExitCode != ERROR_SUCCESS && dwExitCode != ERROR_SUCCESS_REBOOT_REQUIRED)
             {
+                fprintf(stdout, "[TapInstall] FAIL: tapinstall exit=%d\r\n", dwExitCode);
                 return ppp::string();
             }
 
             ppp::unordered_set<ppp::string> news;
-            TapWindows::FindAllComponentIds(news);
-
-            for (ppp::string key : olds)
+            bool found_new_component = false;
+            // Device installation is asynchronous. Querying WMI immediately
+            // after tapinstall can return the old device list even though the
+            // new TAP adapter is already being created.
+            for (int attempt = 0; attempt < 40; ++attempt)
             {
-                auto tail = news.find(key);
-                auto endl = news.end();
-                if (tail != endl)
+                news.clear();
+                const bool new_query_ok = TapWindows::FindAllComponentIds(news);
+                for (const ppp::string& key : olds)
                 {
-                    news.erase(tail);
+                    auto tail = news.find(key);
+                    if (tail != news.end())
+                    {
+                        news.erase(tail);
+                    }
                 }
+
+                if (!news.empty())
+                {
+                    found_new_component = true;
+                    fprintf(stdout, "[TapInstall] after install query attempt=%d ok=%d new_count=%zu\r\n",
+                        attempt + 1, new_query_ok ? 1 : 0, news.size());
+                    break;
+                }
+
+                if (attempt == 0 || attempt == 9 || attempt == 19 || attempt == 39)
+                {
+                    fprintf(stdout, "[TapInstall] waiting for device enumeration attempt=%d ok=%d total=%zu\r\n",
+                        attempt + 1, new_query_ok ? 1 : 0, news.size() + olds.size());
+                }
+                ::Sleep(250);
             }
 
-            if (news.empty())
+            if (!found_new_component || news.empty())
             {
+                fprintf(stdout, "[TapInstall] FAIL: no new TAP component after install\r\n");
                 return ppp::string();
             }
 
-            ppp::string newGuid = *news.begin();
-
-            ppp::win32::network::NetworkInterfacePtr network_interface;
-            TapWindows_FindComponentId(newGuid, network_interface);
-
-            if (NULLPTR == network_interface)
+            for (const ppp::string& newGuid : news)
             {
-                return ppp::string();
+                ppp::win32::network::NetworkInterfacePtr network_interface;
+                bool found_interface = false;
+                for (int attempt = 0; attempt < 20; ++attempt)
+                {
+                    network_interface.reset();
+                    TapWindows_FindComponentId(newGuid, network_interface);
+                    if (NULLPTR != network_interface)
+                    {
+                        found_interface = true;
+                        break;
+                    }
+                    ::Sleep(250);
+                }
+
+                if (!found_interface)
+                {
+                    fprintf(stdout, "[TapInstall] component=%s not visible through WMI after install\r\n", newGuid.data());
+                    continue;
+                }
+
+                for (int attempt = 0; attempt < 20; ++attempt)
+                {
+                    if (ppp::win32::network::SetInterfaceName(network_interface->InterfaceIndex, declareTapName))
+                    {
+                        fprintf(stdout, "[TapInstall] SUCCESS component=%s interface_index=%d name='%s'\r\n",
+                            newGuid.data(), network_interface->InterfaceIndex, declareTapName.data());
+                        return newGuid;
+                    }
+                    if (attempt == 0 || attempt == 9 || attempt == 19)
+                    {
+                        fprintf(stdout, "[TapInstall] rename pending component=%s interface_index=%d attempt=%d\r\n",
+                            newGuid.data(), network_interface->InterfaceIndex, attempt + 1);
+                    }
+                    ::Sleep(250);
+                }
+
+                // The GUID is already a unique identity for the new device.
+                // Keep going with it when only the friendly-name update was
+                // rejected; Create() opens the adapter by component ID and
+                // does not touch the other TAP/PPP interfaces.
+                fprintf(stdout, "[TapInstall] rename failed, continuing with component=%s\r\n", newGuid.data());
+                return newGuid;
             }
 
-            if (!ppp::win32::network::SetInterfaceName(network_interface->InterfaceIndex, declareTapName))
-            {
-                return ppp::string();
-            }
-
-            return newGuid;
+            fprintf(stdout, "[TapInstall] FAIL: no newly installed component became usable\r\n");
+            return ppp::string();
         }
 
         bool TapWindows::UninstallDriver(const ppp::string& path) noexcept

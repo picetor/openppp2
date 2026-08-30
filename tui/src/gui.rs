@@ -1,9 +1,8 @@
 //! Native desktop client UI.
 //!
 //! This replaces the terminal renderer with an ordinary egui window. The
-//! The front-end owns the C++ core through the in-process C ABI when the
-//! platform build provides it. External loopback RPC remains available for
-//! attaching to an already-running headless core.
+//! front-end owns its C++ core through the in-process C ABI. External loopback
+//! RPC remains available only for attaching to an already-running core.
 
 use std::fs;
 use std::io::Write;
@@ -21,7 +20,6 @@ use eframe::{App, CreationContext, Frame};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ppp_tui::core::launcher::Launcher;
 use ppp_tui::core::probe::{spawn_probe_loop, ProbeState, ProbeTable};
 use ppp_tui::core::settings::{normalize_log_level, normalize_tcp_ip_cc};
 use ppp_tui::core::traffic::{format_bytes, format_rate, TrafficHistory};
@@ -49,8 +47,6 @@ enum View {
 }
 
 enum CoreLaunch {
-    Process(Launcher),
-    #[cfg(ppp_in_process_core)]
     InProcess(CoreClient),
 }
 
@@ -128,7 +124,6 @@ pub struct StartupSettings {
     pub tui_log_file: String,
     pub rpc_address: String,
     pub rpc_token: String,
-    pub core_path: Option<String>,
     pub tun_enabled: bool,
     pub system_proxy_enabled: bool,
     #[serde(skip)]
@@ -190,7 +185,6 @@ impl Default for StartupSettings {
             tui_log_file: "./ppp-tui.log".to_string(),
             rpc_address: String::new(),
             rpc_token: String::new(),
-            core_path: None,
             tun_enabled: true,
             system_proxy_enabled: false,
             launch_direct: false,
@@ -203,7 +197,6 @@ impl StartupSettings {
         let defaults = Self::default();
         let mut rpc_address = String::new();
         let mut rpc_token = String::new();
-        let mut core_path = None;
         let mut core_args = Vec::new();
         let mut iter = std::env::args().skip(1);
 
@@ -219,19 +212,12 @@ impl StartupSettings {
                         rpc_token = value;
                     }
                 }
-                "--ppp" => {
-                    core_path = iter.next();
-                }
-                "--embedded-core" => {}
                 "--help" | "-h" => {}
                 _ if arg.starts_with("--rpc=") => {
                     rpc_address = arg[6..].to_string();
                 }
                 _ if arg.starts_with("--token=") => {
                     rpc_token = arg[8..].to_string();
-                }
-                _ if arg.starts_with("--ppp=") => {
-                    core_path = Some(arg[6..].to_string());
                 }
                 _ => core_args.push(arg),
             }
@@ -376,7 +362,6 @@ impl StartupSettings {
             tui_log_file,
             rpc_address,
             rpc_token,
-            core_path,
             tun_enabled,
             system_proxy_enabled,
             launch_direct,
@@ -442,9 +427,6 @@ impl StartupSettings {
         self.log_level = normalize_log_level(&self.log_level);
         self.tcp_ip_cc = normalize_tcp_ip_cc(&self.tcp_ip_cc);
         normalize_path_field(&mut self.tui_log_file);
-        if let Some(path) = self.core_path.as_mut() {
-            normalize_path_field(path);
-        }
     }
 }
 
@@ -456,7 +438,6 @@ pub struct DesktopApp {
     runtime_server_selection: usize,
     catalog_core: bool,
     rpc: Option<CoreClient>,
-    launcher: Option<Launcher>,
     in_process_core: bool,
     launch_rx: Option<Receiver<Result<CoreLaunch, String>>>,
     rpc_connect_rx: Option<Receiver<Result<TcpStream, String>>>,
@@ -528,7 +509,6 @@ impl DesktopApp {
             runtime_server_selection: 0,
             catalog_core: false,
             rpc: None,
-            launcher: None,
             in_process_core: false,
             launch_rx: None,
             rpc_connect_rx: None,
@@ -557,7 +537,7 @@ impl DesktopApp {
     }
 
     fn has_owned_core(&self) -> bool {
-        self.launcher.is_some() || self.in_process_core
+        self.in_process_core
     }
 
     fn needs_admin(&self) -> bool {
@@ -598,27 +578,10 @@ impl DesktopApp {
                     self.launch_rx = None;
                     self.launching = false;
                     match result {
-                        Ok(CoreLaunch::Process(launcher)) => {
-                            boot_log(&format!(
-                                "poll_core: process core launched endpoint={} catalog_core={}",
-                                launcher.endpoint, self.catalog_core
-                            ));
-                            self.status = format!("核心已启动 · RPC {}", launcher.endpoint);
-                            self.rpc = Some(CoreClient::rpc(
-                                launcher.endpoint.clone(),
-                                launcher.token.clone(),
-                            ));
-                            self.launcher = Some(launcher);
-                            self.in_process_core = false;
-                            self.error = None;
-                            self.auto_restart_count = 0;
-                        }
-                        #[cfg(ppp_in_process_core)]
                         Ok(CoreLaunch::InProcess(client)) => {
                             boot_log("poll_core: in-process core started");
                             self.status = "核心已启动 · 同进程".to_string();
                             self.rpc = Some(client);
-                            self.launcher = None;
                             self.in_process_core = true;
                             self.error = None;
                             self.auto_restart_count = 0;
@@ -626,12 +589,7 @@ impl DesktopApp {
                         Err(error) => {
                             boot_log(&format!("poll_core: core launch failed: {error}"));
                             self.status = "核心启动失败".to_string();
-                            let message = if error.contains("Repeat runs") {
-                                "检测到残留核心进程（Repeat runs）。请先在任务管理器结束 ppp-tui-core.exe / ppp.exe 再重试。".to_string()
-                            } else {
-                                error
-                            };
-                            self.error = Some(message);
+                            self.error = Some(error);
                             if let Some(error) = self.error.as_deref() {
                                 self.write_tui_log(error);
                             }
@@ -742,34 +700,21 @@ impl DesktopApp {
             self.handle_response(response);
         }
 
-        // Mature child-process handling: if the core exits on its own
-        // (crash, external kill, or the core's own --link-restart respawn),
-        // relaunch it automatically (bounded) so the TUI never silently
-        // loses its core.  An intentional stop_core() already took the
-        // launcher out of self.launcher, so this only fires on unexpected
-        // exits.
-        let process_exited = self
-            .launcher
-            .as_mut()
-            .map(|launcher| launcher.has_exited().is_some())
-            .unwrap_or(false);
-        #[cfg(ppp_in_process_core)]
+        // Restart an owned in-process core if its worker thread exits
+        // unexpectedly. An intentional stop_core() clears the ownership flag.
         let in_process_exited = self.in_process_core
             && self
                 .rpc
                 .as_ref()
                 .map(|core| !core.is_running())
                 .unwrap_or(true);
-        #[cfg(not(ppp_in_process_core))]
-        let in_process_exited = false;
-        if !self.launching && (process_exited || in_process_exited) {
+        if !self.launching && in_process_exited {
             let was_catalog = self.catalog_core;
             let view = self.view;
             boot_log("poll_core: core exited unexpectedly; scheduling auto-restart");
             self.rpc = None;
             self.rpc_connect_rx = None;
             self.rpc_connecting = false;
-            self.launcher = None;
             self.in_process_core = false;
             self.snapshot = None;
             self.traffic.reset();
@@ -783,7 +728,7 @@ impl DesktopApp {
                 if was_catalog {
                     self.start_catalog_core();
                 } else {
-                    self.start_embedded_to(view);
+                    self.start_core_to(view);
                 }
             } else {
                 self.status = "核心多次异常退出，已停止自动重启".to_string();
@@ -878,80 +823,6 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(not(ppp_in_process_core))]
-    fn catalog_core_args(&self) -> Vec<String> {
-        let mut args = normalize_core_args(split_command_line(&self.settings.command));
-        for name in [
-            "--headless",
-            "--rpc-listen",
-            "--rpc-token",
-            "--rpc-max-clients",
-            "--log-level",
-            "--tui-log",
-            "--tui-log-enabled",
-            "--lwip",
-            "--rt",
-            "--dns",
-            "--auto-restart",
-            "--firewall-rules",
-            "--config",
-            "--set-http-proxy",
-            "--nic",
-            "--ngw",
-            "--tun",
-            "--tun-driver",
-            "--tun-ip",
-            "--tun-gw",
-            "--tun-mask",
-            "--tun-host",
-            "--tun-vnet",
-            "--tun-static",
-            "--tun-flash",
-            "--block-quic",
-            "--tun-ssmt",
-            "--tun-lease-time-in-seconds",
-            "--tun-promisc",
-            "--tun-route",
-            "--tun-protect",
-            "--proxy-http-port",
-            "--proxy-socks-port",
-            "--bypass-mode",
-            "--bypass",
-            "--bypass-nic",
-            "--bypass-ngw",
-            "--bypass6",
-            "--bypass-nic6",
-            "--bypass-ngw6",
-            "--dns-rules",
-            "--geo-rules",
-            "--geosite",
-            "--geoip",
-        ] {
-            remove_command_argument(&mut args, name);
-        }
-        set_command_argument(&mut args, "--mode", "proxy");
-        set_optional_command_argument(&mut args, "--server-dir", &self.settings.server_dir);
-        set_command_argument(&mut args, "--proxy-http-port", "0");
-        set_command_argument(&mut args, "--proxy-socks-port", "0");
-        set_command_argument(&mut args, "--catalog-only", "yes");
-        set_bool_if_non_default(&mut args, "--rt", self.settings.rt, true);
-        set_optional_if_not_default(&mut args, "--tun-mux", &self.settings.tun_mux, "");
-        set_optional_if_not_default(
-            &mut args,
-            "--tun-mux-acceleration",
-            &self.settings.tun_mux_acceleration,
-            "",
-        );
-        set_optional_if_not_default(
-            &mut args,
-            "--log-file",
-            &self.settings.log_file,
-            "./ppp-core.log",
-        );
-        set_command_argument(&mut args, "--log-level", &self.settings.log_level);
-        args
-    }
-
     fn prepared_core_args(&self) -> Vec<String> {
         let mut args = normalize_core_args(split_command_line(&self.settings.command));
         let configured_mode = normalized_launch_mode(&self.settings.mode);
@@ -969,8 +840,8 @@ impl DesktopApp {
                 _ => {}
             }
         }
-        // These are owned by the Rust desktop launcher and must not be copied
-        // from a pasted command line into the child core.
+        // These are owned by the Rust desktop host and must not be copied
+        // from a pasted command line into the core.
         for name in [
             "--headless",
             "--rpc-listen",
@@ -1230,11 +1101,11 @@ impl DesktopApp {
         args
     }
 
-    fn start_embedded(&mut self) {
-        self.start_embedded_to(View::Overview);
+    fn start_core(&mut self) {
+        self.start_core_to(View::Overview);
     }
 
-    fn start_embedded_to(&mut self, view: View) {
+    fn start_core_to(&mut self, view: View) {
         if self.launching {
             return;
         }
@@ -1255,22 +1126,12 @@ impl DesktopApp {
         if self.launching || self.has_owned_core() {
             return;
         }
-        #[cfg(ppp_in_process_core)]
-        {
-            // Server discovery/probing is already implemented in Rust.  The
-            // in-process C++ core is reserved for the actual VPN runtime;
-            // starting a temporary catalog core would initialize the global
-            // C++ executor twice in one process.
-            self.catalog_core = false;
-            self.view = View::Servers;
-            self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
-            return;
-        }
-        #[cfg(not(ppp_in_process_core))]
-        {
-            let args = self.catalog_core_args();
-            self.launch_core_with_args(args, true, View::Servers, "正在准备服务器配置…");
-        }
+        // Server discovery/probing is implemented in Rust. Starting a
+        // separate catalog core would violate the single in-process-core
+        // ownership model.
+        self.catalog_core = false;
+        self.view = View::Servers;
+        self.status = "服务器配置已就绪，请选择服务器后启动核心".to_string();
     }
 
     fn launch_core_with_args(
@@ -1294,14 +1155,6 @@ impl DesktopApp {
             return;
         }
 
-        let core_path = self.settings.core_path.clone().map(|path| {
-            let path = PathBuf::from(path);
-            if path.is_relative() {
-                working_dir.join(path)
-            } else {
-                path
-            }
-        });
         let (tx, rx) = channel();
         self.launch_rx = Some(rx);
         self.launching = true;
@@ -1311,30 +1164,21 @@ impl DesktopApp {
         self.view = view;
         std::thread::spawn(move || {
             boot_log("launch worker: spawn begin");
-            let result = match core_path {
-                Some(path) => {
-                    Launcher::spawn_in(&path, &args, &working_dir).map(CoreLaunch::Process)
-                }
-                None => {
-                    #[cfg(ppp_in_process_core)]
-                    {
-                        // The C++ core must not render its legacy console
-                        // dashboard into the Rust window. Headless here
-                        // means “no core UI”, not “use RPC”.
-                        let mut in_process_args = args.clone();
-                        set_command_argument(&mut in_process_args, "--headless", "yes");
-                        CoreClient::in_process(&in_process_args).map(CoreLaunch::InProcess)
-                    }
-                    #[cfg(not(ppp_in_process_core))]
-                    {
-                        Launcher::spawn_embedded_in(&args, &working_dir).map(CoreLaunch::Process)
-                    }
-                }
-            }
-            .map_err(|error| format!("{error:#}"));
+            // The C++ core must not render its legacy console dashboard into
+            // the Rust window. Headless disables only core presentation; the
+            // engine remains in this process.
+            let mut in_process_args = args;
+            set_command_argument(&mut in_process_args, "--headless", "yes");
+            let result = CoreClient::in_process(&in_process_args)
+                .map(CoreLaunch::InProcess)
+                .map_err(|error| format!("{error:#}"));
             boot_log(&format!(
-                "launch worker: spawn end result={}",
-                if result.is_ok() { "ok" } else { "error" }
+                "launch worker: spawn end result={} detail={}",
+                if result.is_ok() { "ok" } else { "error" },
+                match &result {
+                    Ok(_) => "<none>".to_string(),
+                    Err(error) => error.clone(),
+                }
             ));
             let _ = tx.send(result);
         });
@@ -1474,7 +1318,7 @@ impl DesktopApp {
                             .unwrap_or(0)
                             .min(self.local_servers.len() - 1);
                         self.select_local_server(index);
-                        self.start_embedded_to(View::Servers);
+                        self.start_core_to(View::Servers);
                     }
                 }
                 View::Servers => {
@@ -1493,7 +1337,7 @@ impl DesktopApp {
                         }
                     }
                 }
-                View::Settings => self.start_embedded_to(View::Settings),
+                View::Settings => self.start_core_to(View::Settings),
                 _ => {}
             }
         }
@@ -1526,7 +1370,7 @@ impl DesktopApp {
             return;
         };
         let working_dir = working_directory(&self.settings);
-        self.settings.config_path = core_path_string(&working_dir, &profile.path);
+        self.settings.config_path = relative_path_string(&working_dir, &profile.path);
         self.selected_local_server = Some(index);
         self.status = format!("已选择 {}，点击启动核心进入总览", profile.name);
         self.error = None;
@@ -1625,42 +1469,30 @@ impl DesktopApp {
         }
         let view = self.view;
         self.stop_core(true);
-        self.start_embedded_to(view);
+        self.start_core_to(view);
     }
 
     fn stop_core(&mut self, shutdown: bool) {
         boot_log(&format!(
-            "stop_core: shutdown={shutdown} launcher={} rpc={} launching={}",
+            "stop_core: shutdown={shutdown} owned={} rpc={} launching={}",
             self.has_owned_core(),
             self.rpc.is_some(),
             self.launching,
         ));
         let owns_core = self.has_owned_core();
         if let Some(rpc) = self.rpc.as_mut() {
-            // Never use the live UI session as the shutdown transport. It
-            // may be unauthenticated or have an in-flight snapshot; the
-            // owned Launcher performs a fresh authenticated shutdown below.
+            // Disconnect the UI transport before stopping the owned core.
             rpc.disconnect();
         }
-        #[cfg(ppp_in_process_core)]
         if shutdown && self.in_process_core {
             if let Some(rpc) = self.rpc.as_ref() {
                 boot_log("stop_core: stopping in-process core and restoring network");
                 let _ = rpc.stop_owned();
             }
         }
-        if shutdown && owns_core {
-            if let Some(launcher) = self.launcher.as_mut() {
-                boot_log("stop_core: requesting graceful shutdown and network restore");
-                let _ = launcher.request_graceful_shutdown();
-            }
-        }
         self.rpc = None;
         self.rpc_connect_rx = None;
         self.rpc_connecting = false;
-        if let Some(mut launcher) = self.launcher.take() {
-            launcher.stop();
-        }
         self.in_process_core = false;
         self.catalog_core = false;
         self.snapshot = None;
@@ -2017,7 +1849,7 @@ impl DesktopApp {
             });
         if let Some(index) = start_clicked {
             self.select_local_server(index);
-            self.start_embedded_to(View::Overview);
+            self.start_core_to(View::Overview);
         }
     }
 
@@ -2328,7 +2160,7 @@ impl DesktopApp {
                 .add_enabled(can_start, egui::Button::new("选择并启动"))
                 .clicked()
             {
-                self.start_embedded_to(View::Servers);
+                self.start_core_to(View::Servers);
             }
             if let Some(index) = self.selected_local_server {
                 if let Some(profile) = self.local_servers.get(index) {
@@ -2476,7 +2308,7 @@ impl DesktopApp {
             self.select_local_server(index);
         }
         if start_clicked.is_some() {
-            self.start_embedded_to(View::Servers);
+            self.start_core_to(View::Servers);
         }
         if verbose {
             boot_log(&format!("frame={frame} local_servers exit"));
@@ -2815,7 +2647,7 @@ impl DesktopApp {
         let socks_proxy_hint = self.proxy_port_hint(false);
         ui.label(
             RichText::new(
-                "填写核心启动目录和参数。启动后核心仍以内嵌方式运行，日志写入 ppp-core.log；修改后可随时点击右上角保存设置。",
+                "填写核心启动目录和参数。启动后核心在当前 TUI 进程内运行，日志写入 ppp-core.log；修改后可随时点击右上角保存设置。",
             )
             .color(MUTED),
         );
@@ -2835,19 +2667,6 @@ impl DesktopApp {
         });
         ui.add_space(12.0);
         card(ui, "核心启动", |ui| {
-            let mut core_path = self.settings.core_path.clone().unwrap_or_default();
-            labeled_text(
-                ui,
-                "外部核心路径",
-                &mut core_path,
-                "可选；留空使用内置核心，例如 ./ppp.exe",
-            );
-            self.settings.core_path = if core_path.trim().is_empty() {
-                None
-            } else {
-                Some(core_path)
-            };
-            ui.add_space(8.0);
             labeled_text(
                 ui,
                 "启动目录",
@@ -3399,7 +3218,7 @@ impl DesktopApp {
                     )
                     .clicked()
                 {
-                    self.start_embedded();
+                    self.start_core();
                 }
                 if self.launching {
                     ui.spinner();
@@ -3449,7 +3268,7 @@ impl App for DesktopApp {
         let verbose = self.verbose_frame_log();
         if verbose {
             boot_log(&format!(
-                "frame={frame} begin view={:?} first_frame_rendered={} catalog_core={} launcher={} rpc={} launching={} local_servers={} snapshot={}",
+                "frame={frame} begin view={:?} first_frame_rendered={} catalog_core={} owned={} rpc={} launching={} local_servers={} snapshot={}",
                 self.view,
                 self.first_frame_rendered,
                 self.catalog_core,
@@ -3468,7 +3287,7 @@ impl App for DesktopApp {
                 self.startup_core_pending = false;
                 if self.startup_direct {
                     boot_log("startup: launching requested direct core after first frame");
-                    self.start_embedded_to(View::Overview);
+                    self.start_core_to(View::Overview);
                 } else {
                     boot_log("startup: launching catalog/probe control plane after first frame");
                     self.start_catalog_core();
@@ -4354,7 +4173,7 @@ fn resolve_from_working_dir(base: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn core_path_string(base: &Path, path: &Path) -> String {
+fn relative_path_string(base: &Path, path: &Path) -> String {
     if let Ok(relative) = path.strip_prefix(base) {
         let text = path_to_forward_slashes(relative);
         if text.is_empty() {

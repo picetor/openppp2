@@ -1422,35 +1422,57 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::OnIcmpPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept {
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR == tap) {
+                    LOG_DEBUG("DATAPLANE ICMP: drop, tap=null");
                     return false;
                 }
 
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
                 std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
                 if (NULLPTR == frame || frame->Ttl == 0) {
+                    LOG_DEBUG("DATAPLANE ICMP: drop, parse_failed=%d ttl=%u",
+                        NULLPTR == frame ? 1 : 0,
+                        NULLPTR == frame ? 0 : static_cast<unsigned int>(frame->Ttl));
                     return false;
                 }
-                elif(IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
-                    return EchoGatewayServer(exchanger_, packet, allocator);
+                LOG_DEBUG("DATAPLANE ICMP: input src=%u dst=%u type=%u code=%u ttl=%u",
+                    frame->Source, frame->Destination,
+                    static_cast<unsigned int>(frame->Type),
+                    static_cast<unsigned int>(frame->Code),
+                    static_cast<unsigned int>(frame->Ttl));
+                if (IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
+                    const bool ok = EchoGatewayServer(exchanger_, packet, allocator);
+                    LOG_DEBUG("DATAPLANE ICMP: gateway echo result=%d", ok ? 1 : 0);
+                    return ok;
                 }
-                elif(frame->Ttl == 1) {
-                    return EchoGatewayServer(exchanger_, packet, allocator);
+                else if (frame->Ttl == 1) {
+                    const bool ok = EchoGatewayServer(exchanger_, packet, allocator);
+                    LOG_DEBUG("DATAPLANE ICMP: ttl-expired gateway echo result=%d", ok ? 1 : 0);
+                    return ok;
                 }
                 else {
                     int ttl = std::max<int>(0, static_cast<int>(packet->Ttl) - 1);
                     if (packet->Ttl < 1) {
+                        LOG_DEBUG("DATAPLANE ICMP: drop, packet ttl=%u", static_cast<unsigned int>(packet->Ttl));
                         return false;
                     }
 
                     frame->Ttl = ttl;
                     packet->Ttl = ttl;
 
-                    return EchoOtherServer(GetExchanger(Ipep::ToAddress(frame->Destination)), packet, allocator);
+                    std::shared_ptr<VEthernetExchanger> exchanger =
+                        GetExchanger(Ipep::ToAddress(frame->Destination));
+                    const bool ok = EchoOtherServer(exchanger, packet, allocator);
+                    LOG_DEBUG("DATAPLANE ICMP: remote dst=%u outbound=%s result=%d",
+                        frame->Destination,
+                        exchanger ? exchanger->GetOutboundTag().data() : "none",
+                        ok ? 1 : 0);
+                    return ok;
                 }
             }
 
             bool VEthernetNetworkSwitcher::EchoOtherServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept {
                 if (NULLPTR == exchanger) {
+                    LOG_DEBUG("DATAPLANE ICMP: no outbound exchanger");
                     return false;
                 }
 
@@ -1460,6 +1482,8 @@ namespace ppp {
 
                 std::shared_ptr<BufferSegment> messages = IPFrame::ToArray(allocator, packet.get());
                 if (NULLPTR == messages) {
+                    LOG_DEBUG("DATAPLANE ICMP: packet serialization failed, outbound=%s",
+                        exchanger->GetOutboundTag().data());
                     return false;
                 }
 
@@ -1468,7 +1492,10 @@ namespace ppp {
                     return exchanger->StaticEchoPacketToRemoteExchanger(packet.get());
                 }
 
-                return exchanger->Echo(messages->Buffer.get(), messages->Length);
+                const bool ok = exchanger->Echo(messages->Buffer.get(), messages->Length);
+                LOG_DEBUG("DATAPLANE ICMP: sent remote echo, outbound=%s bytes=%d result=%d",
+                    exchanger->GetOutboundTag().data(), messages->Length, ok ? 1 : 0);
+                return ok;
             }
 
             bool VEthernetNetworkSwitcher::EchoGatewayServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept {
@@ -6482,10 +6509,32 @@ namespace ppp {
                 // plane exists, so Windows cannot fall back to a global address on
                 // the physical NIC.  A successful IPv6 assignment removes them
                 // before installing its own routes.
-                ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                const bool left = ppp::win32::network::AddIPv6Route(interface_index, "::", 1, ppp::string(), 0);
-                const bool right = ppp::win32::network::AddIPv6Route(interface_index, "8000::", 1, ppp::string(), 0);
+                //
+                // Do not use netsh here.  A stale route may have a gateway from a
+                // previous IPv6 assignment, and "netsh delete route ... <ifindex>"
+                // without that gateway does not reliably remove it.  Enumerate by
+                // interface and prefix through IP Helper, then add an on-link route
+                // with an unspecified next hop.  This is the Windows representation
+                // of a route whose only egress is the selected TUN interface.
+                const boost::asio::ip::address_v6 left_network;
+                const boost::asio::ip::address_v6 right_network =
+                    boost::asio::ip::make_address_v6("8000::");
+                ppp::vector<std::pair<boost::asio::ip::address_v6, int>> block_routes;
+                block_routes.emplace_back(left_network, 1);
+                block_routes.emplace_back(right_network, 1);
+                const int removed_block_routes =
+                    ppp::win32::network::Router::DeleteIPv6RouteEntries(block_routes, interface_index);
+                if (removed_block_routes < 0) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: cannot enumerate stale routes, ifindex=%d",
+                        interface_index);
+                }
+                const boost::asio::ip::address_v6 empty_next_hop;
+                bool left_created = false;
+                bool right_created = false;
+                const bool left = ppp::win32::network::Router::AddIPv6RouteEntry(
+                    left_network, 1, empty_next_hop, interface_index, &left_created);
+                const bool right = ppp::win32::network::Router::AddIPv6RouteEntry(
+                    right_network, 1, empty_next_hop, interface_index, &right_created);
                 ipv6_block_routes_added_ = left && right;
 
                 // A /1 sink alone is insufficient: Windows may select the physical
@@ -6515,9 +6564,10 @@ namespace ppp {
                 ppp::win32::network::Fw::SetIPv6LeakBlock(
                     "openppp2 IPv6 Leak Block", NULLPTR, false);
                 if (!ipv6_block_routes_added_) {
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "::", 1, ppp::string());
-                    ppp::win32::network::DeleteIPv6Route(interface_index, "8000::", 1, ppp::string());
-                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: failed, ifindex=%d", interface_index);
+                    ppp::win32::network::Router::DeleteIPv6RouteEntries(block_routes, interface_index);
+                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: failed, ifindex=%d, left=%d(created=%d), right=%d(created=%d), removed=%d",
+                        interface_index, left ? 1 : 0, left_created ? 1 : 0,
+                        right ? 1 : 0, right_created ? 1 : 0, removed_block_routes);
                 }
                 elif(!ipv6_physical_default_block_applied_) {
                     LOG_ERROR("VEthernetNetworkSwitcher::ApplyWindowsIPv6LeakBlockRoutes: physical default suppression failed, ifindex=%d",

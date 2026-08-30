@@ -6,6 +6,8 @@
 #include <ppp/threading/Executors.h>
 #include <ppp/collections/Dictionary.h>
 
+#include <cerrno>
+
 typedef ppp::net::Socket                        Socket;
 typedef ppp::net::native::ip_hdr                ip_hdr;
 typedef ppp::net::native::icmp_hdr              icmp_hdr;
@@ -304,16 +306,28 @@ namespace ppp {
 
                 const std::shared_ptr<BufferSegment> messages = packet->Payload;
                 if (!messages || !messages->Buffer || messages->Length < 1) {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: invalid packet payload");
                     return false;
                 }
 
+                const int ttl = packet->Ttl;
                 const int sockfd = ::socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
                 if (sockfd == -1) {
+#if defined(_WIN32)
+                    const int socket_error = ::WSAGetLastError();
+#else
+                    const int socket_error = errno;
+#endif
+                    LOG_WARN("InternetControlMessageProtocol::Echo: raw ICMP socket creation failed, error=%d",
+                        socket_error);
                     return false; /* ::socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP); */
                 }
                 else {
-                    const int TTL = packet->Ttl;
-                    if (::setsockopt(sockfd, IPPROTO_IP, IP_TTL, (char*)&TTL, sizeof(TTL))) { // SOL_SOCKET, SO_SNDTIMEO, SO_RCVTIMEO
+                    const int socket_error = ::setsockopt(sockfd, IPPROTO_IP, IP_TTL, (char*)&ttl, sizeof(ttl));
+                    if (socket_error) {
+                        LOG_WARN("InternetControlMessageProtocol::Echo: set TTL failed, destination=%u, error=%d",
+                            packet->Destination,
+                            socket_error);
                         Socket::Closesocket(sockfd);
                         return false;
                     }
@@ -322,6 +336,8 @@ namespace ppp {
                 boost::system::error_code ec;
                 const std::shared_ptr<boost::asio::ip::udp::socket> socket = make_shared_object<boost::asio::ip::udp::socket>(*executor_);
                 if (!socket) {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate raw ICMP socket wrapper failed, destination=%u",
+                        packet->Destination);
                     Socket::Closesocket(sockfd);
                     return false;
                 }
@@ -333,18 +349,24 @@ namespace ppp {
 
                 socket->assign(boost::asio::ip::udp::v4(), sockfd, ec);
                 if (ec) {
+                    LOG_WARN("InternetControlMessageProtocol::Echo: assign raw ICMP socket failed, destination=%u, ec=%s, ecv=%d",
+                        packet->Destination, ec.message().c_str(), ec.value());
                     Socket::Closesocket(sockfd);
                     return false;
                 }
 
                 UInt32 identification_nat = 0;
                 if (!InternetControlMessageProtocol_Global::GetDefault().Allocated(identification_nat)) {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate ICMP identification failed, destination=%u",
+                        packet->Destination);
                     Socket::Closesocket(socket);
                     return false;
                 }
 
                 const std::shared_ptr<EchoAsynchronousContext> context = make_shared_object<EchoAsynchronousContext>(identification_nat);
                 if (!context) {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate echo context failed, destination=%u",
+                        packet->Destination);
                     Socket::Closesocket(socket);
                     return false;
                 }
@@ -355,7 +377,14 @@ namespace ppp {
                     frame->Sequence = (UInt16)(identification_nat);
 
                     const std::shared_ptr<IPFrame> packet_nat = frame->ToIp(allocator);
-                    const std::shared_ptr<BufferSegment> messages_nat = packet_nat->Payload;
+                    const std::shared_ptr<BufferSegment> messages_nat = packet_nat
+                        ? packet_nat->Payload : NULLPTR;
+                    if (!packet_nat || !messages_nat || !messages_nat->Buffer || messages_nat->Length < 1) {
+                        LOG_WARN("InternetControlMessageProtocol::Echo: build NAT ICMP packet failed, destination=%u",
+                            packet->Destination);
+                        Socket::Closesocket(socket);
+                        return false;
+                    }
                     frame->Identification = copys[0];
                     frame->Sequence = copys[1];
 
@@ -363,9 +392,13 @@ namespace ppp {
                     socket->send_to(boost::asio::buffer(messages_nat->Buffer.get(), messages_nat->Length), remoteEP,
                         boost::asio::socket_base::message_end_of_record, ec);
                     if (ec) {
+                        LOG_WARN("InternetControlMessageProtocol::Echo: send raw ICMP failed, destination=%u, ec=%s, ecv=%d",
+                            packet->Destination, ec.message().c_str(), ec.value());
                         Socket::Closesocket(socket);
                         return false;
                     }
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: raw ICMP sent, destination=%u, bytes=%d, ttl=%d",
+                        packet->Destination, messages_nat->Length, ttl);
                 }
 
                 const std::weak_ptr<InternetControlMessageProtocol_EchoAsynchronousContext> context_weak(context);
@@ -377,6 +410,8 @@ namespace ppp {
                         }
                     });
                 if (!timeout_cb) {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate timeout callback failed, destination=%u",
+                        packet->Destination);
                     Socket::Closesocket(socket);
                     return false;
                 }
@@ -394,6 +429,8 @@ namespace ppp {
                     return true;
                 }
                 else {
+                    LOG_DEBUG("InternetControlMessageProtocol::Echo: duplicate echo context, destination=%u",
+                        packet->Destination);
                     context->Release();
                     return false;
                 }

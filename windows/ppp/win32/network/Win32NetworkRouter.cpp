@@ -1,4 +1,5 @@
 #include <ppp/net/IPEndPoint.h>
+#include <windows/ppp/win32/Win32Native.h>
 #include <windows/ppp/win32/network/Router.h>
 
 #include <boost/asio.hpp>
@@ -240,10 +241,10 @@ namespace ppp
                     return false;
                 }
 
-                if (network.is_unspecified() || next_hop.is_unspecified())
-                {
-                    return false;
-                }
+                // ::/1 is a valid IPv6 prefix.  The unspecified address is
+                // the canonical network address for the lower half of the
+                // address space, and is intentionally used by the Windows
+                // leak-block route pair (::/1 and 8000::/1).
 
                 MIB_IPFORWARD_ROW2 row;
                 memset(&row, 0, sizeof(row));
@@ -305,12 +306,21 @@ namespace ppp
                         // API is unavailable. netsh interface ipv6 is the traditional way.
                         std::string network_str = network.to_string();
                         std::string next_hop_str = next_hop.to_string();
-                        char command[1024];
-                        ::snprintf(command, sizeof(command),
-                            "netsh interface ipv6 add route %s/%d %d %s > nul 2>&1",
-                            network_str.c_str(), prefix_length, interface_index, next_hop_str.c_str());
-                        int rc = ::system(command);
-                        if (rc == 0) {
+                        char arguments[1024];
+                        if (next_hop.is_unspecified()) {
+                            ::snprintf(arguments, sizeof(arguments),
+                                "interface ipv6 add route %s/%d %d",
+                                network_str.c_str(), prefix_length, interface_index);
+                        }
+                        else {
+                            ::snprintf(arguments, sizeof(arguments),
+                                "interface ipv6 add route %s/%d %d %s",
+                                network_str.c_str(), prefix_length, interface_index, next_hop_str.c_str());
+                        }
+                        int rc = INFINITE;
+                        const bool launched = ppp::win32::Win32Native::Execute(
+                            false, "netsh.exe", arguments, &rc, 10000);
+                        if (launched && rc == ERROR_SUCCESS) {
                             if (created) {
                                 *created = true;
                             }

@@ -1,3 +1,0 @@
-This file is intentionally not an executable core.
-It is used only by the cross-platform Rust contract-test workflow; release
-builds must set PPP_TUI_CORE_PATH to a real platform-built ppp executable.

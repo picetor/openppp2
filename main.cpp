@@ -404,6 +404,11 @@ public:
     bool                                            BuildRuntimeSnapshot(Json::Value& snapshot) noexcept;
     // Execute one RPC command (methods are dispatched on the io_context thread).
     bool                                            ExecuteRpcCommand(const ppp::string& method, const Json::Value& params, Json::Value& result, ppp::string& error) noexcept;
+    // Preserve the concrete startup stage for the in-process host. The
+    // standalone executable still prints its historical messages, while the
+    // Rust TUI must not collapse every Main() failure into one generic error.
+    const ppp::string&                              GetStartupFailure() const noexcept { return startup_failure_; }
+    void                                            SetStartupFailure(const char* message) noexcept { startup_failure_ = message != NULLPTR ? message : "core startup failed"; }
 
 protected:
     // Main tick handler - called every second
@@ -471,6 +476,7 @@ private:
     ppp::string                                     server_directory_;                   // Independent server JSON directory
     std::shared_ptr<NetworkInterface>               network_interface_;                  // Network interface config
     std::shared_ptr<Timer>                          timeout_                    = 0;     // Periodic timer
+    ppp::string                                     startup_failure_;                    // Last startup-stage failure
     Stopwatch                                       stopwatch_;                          // Application uptime
     PreventReturn                                   prevent_rerun_;                      // Prevent multiple instances
     ppp::transmissions::ITransmissionStatistics     transmission_statistics_;            // Traffic statistics
@@ -2238,6 +2244,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             }
             if (NULLPTR == tap)
             {
+                SetStartupFailure("Open tun/tap driver failure");
                 fprintf(stdout, "%s\r\n", "Open tun/tap driver failure.");
                 break;
             }
@@ -2250,6 +2257,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             tap->BufferAllocator = configuration->GetBufferAllocator();
             if (!tap->Open())
             {
+                SetStartupFailure("Listen tun/tap driver failure");
                 fprintf(stdout, "%s\r\n", "Listen tun/tap driver failure.");
                 break;
             }
@@ -2262,6 +2270,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet = ppp::make_shared_object<VEthernetNetworkSwitcher>(context, network_interface->Lwip, network_interface->VNet, configuration->concurrent > 1, configuration);
             if (NULLPTR == ethernet)
             {
+                SetStartupFailure("failed to allocate VPN client");
                 break;
             }
 
@@ -2287,6 +2296,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
                 }
                 if (!ethernet->SetOutboundConfigurations(outbounds))
                 {
+                    SetStartupFailure("invalid multi-outbound configuration");
                     fprintf(stdout, "%s\r\n", "Invalid multi-outbound configuration.");
                     break;
                 }
@@ -2315,6 +2325,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             // Load bypass policy selected by --bypass-mode.
             if (network_interface->SplitMode == NetworkInterface::BypassMode::Geo) {
                 if (!ethernet->LoadGeoRules(network_interface->GeoRules, network_interface->GeoSite, network_interface->GeoIP)) {
+                    SetStartupFailure("failed to load geo bypass rules");
                     fprintf(stdout, "%s\r\n", "Failed to load geo bypass rules.");
                     break;
                 }
@@ -2374,6 +2385,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             ethernet->SetConfiguredTunDns(network_interface->DnsAddresses);
             if (!ethernet->Open(tap))
             {
+                SetStartupFailure("failed to open VPN client or no usable network interface");
                 auto ni = ethernet->GetUnderlyingNetworkInterface();
                 if (NULLPTR != ni)
                 {
@@ -2729,15 +2741,15 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     // Configure DNS settings
     ppp::net::asio::vdns::ttl = configuration->udp.dns.ttl;
     ppp::net::asio::vdns::enabled = configuration->udp.dns.turbo;
-    fprintf(stdout, "[CoreStartup] stage=arguments-prepare exit ok=1 lwip=%d tun_driver=%s\r\n",
-        network_interface->Lwip ? 1 : 0,
 #if defined(_WIN32)
+    const char* tun_driver =
         ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Wintun ? "wintun" :
-            (ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Tap ? "tap" : "auto")
+        (ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Tap ? "tap" : "auto");
 #else
-        "n/a"
+    const char* tun_driver = "n/a";
 #endif
-    );
+    fprintf(stdout, "[CoreStartup] stage=arguments-prepare exit ok=1 lwip=%d tun_driver=%s\r\n",
+        network_interface->Lwip ? 1 : 0, tun_driver);
     
     return 0;
 }
@@ -3523,6 +3535,14 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
         ni->SetHttpProxy = ppp::ToBoolean(ppp::GetCommandArgument("--set-http-proxy", argc, argv).data());
 #if defined(_WIN32)
         ni->Wintun = ppp::GetCommandArgument("--tun", argc, argv, NetworkInterface::GetDefaultTun());
+        if (ppp::tap::TapWindows::GetDriverMode() == ppp::tap::TapWindows::DriverMode::Tap &&
+            (ni->Wintun.empty() || ppp::ToLower<ppp::string>(ni->Wintun) == "ppp"))
+        {
+            // "PPP" is the Wintun default name. Keep TAP mode on the
+            // dedicated openppp2 adapter so a third-party "PPP 1" TAP is
+            // never selected by name or by suffix fallback.
+            ni->Wintun = "PPP PRIVATE NETWORK 2 TAP";
+        }
         // An explicit Wintun adapter is identified by its name, not by a TAP
         // component GUID. Do not enumerate Windows network interfaces during
         // argument preparation: WMI/IP Helper enumeration can block for many
@@ -5030,6 +5050,7 @@ bool PppApplication::AddShutdownApplicationEventHandler() noexcept
 #if defined(_WIN32)
 static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInterface>& network_interface) noexcept
 {
+    static const char* const OPENPPP2_TAP_NAME = "PPP PRIVATE NETWORK 2 TAP";
     fprintf(stdout, "[PrepEth] ComponentId='%s' Wintun='%s'\r\n", network_interface->ComponentId.data(), network_interface->Wintun.data());
 
     ppp::tap::TapWindows::DriverMode driver_mode = ppp::tap::TapWindows::GetDriverMode();
@@ -5099,10 +5120,24 @@ static bool Windows_PreparedEthernetEnvironment(const std::shared_ptr<NetworkInt
                 network_interface->ComponentId.empty(), is_guid);
             LOG_INFO("%s", "Installing TAP-Windows driver.");
 
+            // The default Windows name is also used by the Wintun adapter.
+            // If TAP mode needs to create a device, give it an explicit
+            // openppp2-owned name instead of letting Windows choose "PPP 1"
+            // or falling back to another application's TAP adapter.
+            ppp::string tap_name = network_interface->Wintun;
+            if (driver_mode == ppp::tap::TapWindows::DriverMode::Tap &&
+                (tap_name.empty() || ppp::ToLower<ppp::string>(tap_name) == "ppp"))
+            {
+                tap_name = OPENPPP2_TAP_NAME;
+                network_interface->Wintun = tap_name;
+                fprintf(stdout, "[PrepEth] TAP mode using dedicated adapter name '%s'\r\n",
+                    tap_name.data());
+            }
+
             // Install the TAP-Windows vNIC in the Windows operating system.
             ppp::string driverPath = File::GetFullPath((ppp::GetApplicationStartupPath() + "\\Driver\\").data());
             fprintf(stdout, "[PrepEth] driverPath=%s\r\n", driverPath.data());
-            ppp::string newTapGuid = ppp::tap::TapWindows::InstallDriver(driverPath.data(), network_interface->Wintun);
+            ppp::string newTapGuid = ppp::tap::TapWindows::InstallDriver(driverPath.data(), tap_name);
             if (!newTapGuid.empty())
             {
                 fprintf(stdout, "[PrepEth] InstallDriver OK, new TAP GUID: %s\r\n", newTapGuid.data());
@@ -5222,6 +5257,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // Require administrator/root privileges
     if (!proxy_mode_ && !ppp::IsUserAnAdministrator()) // $ROOT is 0.
     {
+        SetStartupFailure("administrator privileges are required");
         fprintf(stdout, "%s\r\n", "Non-administrators are not allowed to run.");
         fprintf(stdout, "[CoreStartup] FAIL stage=administrator-check\r\n");
         return -1;
@@ -5231,6 +5267,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     ppp::string rerun_name = (proxy_mode_ ? "proxy://" : (client_mode_ ? "client://" : "server://")) + configuration_path_;
     if (prevent_rerun_.Exists(rerun_name.data()))
     {
+        SetStartupFailure("another core instance is already running");
         fprintf(stdout, "%s\r\n", "Repeat runs are not allowed.");
         fprintf(stdout, "[CoreStartup] FAIL stage=repeat-run-lock exists=1\r\n");
         return -1;
@@ -5239,6 +5276,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // Create instance lock
     if (!prevent_rerun_.Open(rerun_name.data()))
     {
+        SetStartupFailure("failed to open repeat-run lock");
         fprintf(stdout, "%s\r\n", "Failed to open the repeat run lock.");
         fprintf(stdout, "[CoreStartup] FAIL stage=repeat-run-lock open=0\r\n");
         return -1;
@@ -5252,6 +5290,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
         // Prepare the environment for the virtual Ethernet network device card.
         if (!Windows_PreparedEthernetEnvironment(network_interface_))
         {
+            SetStartupFailure("Windows tunnel driver preparation failed");
             fprintf(stdout, "[CoreStartup] FAIL stage=windows-prepare\r\n");
             return -1;
         }
@@ -5269,6 +5308,10 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     // server configuration is selected.
     if (!catalog_only_ && !PreparedLoopbackEnvironment(network_interface_))
     {
+        if (startup_failure_.empty())
+        {
+            SetStartupFailure("VPN loopback environment preparation failed");
+        }
         fprintf(stdout, "[CoreStartup] FAIL stage=loopback-prepare\r\n");
         return -1;
     }
@@ -5342,6 +5385,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
                 });
         if (NULLPTR == rpc_server || !rpc_server->Open(rpc_listen_))
         {
+            SetStartupFailure("failed to open local RPC server");
             fprintf(stdout, "%s\r\n", "Failed to open the local RPC server.");
             fprintf(stdout, "[CoreStartup] FAIL stage=rpc-open listen='%s'\r\n", rpc_listen_.data());
             return -1;
@@ -5369,7 +5413,12 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     }
 
     // Start periodic updates
-    return NextTickAlwaysTimeout(false) ? 0 : -1;
+    if (!NextTickAlwaysTimeout(false))
+    {
+        SetStartupFailure("failed to create core periodic timer");
+        return -1;
+    }
+    return 0;
 }
 
 // Application runner function
@@ -5616,8 +5665,13 @@ static void CoreApiRun(
                 fprintf(stdout, "[CoreApi] stage=run begin\r\n");
                 int code = Run(APP, prepared_status, callback_argc, callback_argv);
                 fprintf(stdout, "[CoreApi] stage=run end status=%d\r\n", code);
-                CoreApiSignalStartup(handle, code == 0, code,
-                    code == 0 ? std::string() : "core startup failed");
+                std::string startup_error;
+                if (code != 0) {
+                    const ppp::string& failure = APP->GetStartupFailure();
+                    startup_error = failure.empty() ?
+                        "core startup failed" : failure.data();
+                }
+                CoreApiSignalStartup(handle, code == 0, code, startup_error);
                 return code;
             },
             argc,
@@ -6107,7 +6161,12 @@ int main(int argc, const char* argv[]) noexcept
             int result_code = Run(APP, prepared_status, argc, argv);
             fprintf(stdout, "[CoreStartup] stage=run-callback end status=%d\r\n", result_code);
 #if defined(_WIN32)
-            if (result_code != 0)
+            // The Rust TUI launches the core headlessly with stdout/stderr
+            // redirected.  Never invoke the legacy console pause in that
+            // mode: if a console is inherited from a launcher/batch file,
+            // system("pause") starts cmd.exe and appears as a flashing
+            // command window on every failed/restarted core.
+            if (result_code != 0 && !APP->IsHeadless())
             {
                 ppp::win32::Win32Native::PauseWindowsConsole();
             }

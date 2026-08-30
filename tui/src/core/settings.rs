@@ -65,7 +65,6 @@ pub struct StartupSettings {
     pub tui_log_file: String,
     pub rpc_address: String,
     pub rpc_token: String,
-    pub core_path: Option<String>,
     pub tun_enabled: bool,
     pub system_proxy_enabled: bool,
     #[serde(skip)]
@@ -127,7 +126,6 @@ impl Default for StartupSettings {
             tui_log_file: "./ppp-tui.log".to_string(),
             rpc_address: String::new(),
             rpc_token: String::new(),
-            core_path: None,
             tun_enabled: true,
             system_proxy_enabled: false,
             launch_direct: false,
@@ -136,13 +134,12 @@ impl Default for StartupSettings {
 }
 
 impl StartupSettings {
-    /// Parse the command line: `--rpc/--token/--ppp/--embedded-core` are TUI
-    /// options; everything else is a core launch command (launch_direct).
+    /// Parse `--rpc`/`--token` as attach options; everything else is a core
+    /// launch command (launch_direct).
     pub fn from_cli() -> Self {
         let defaults = Self::default();
         let mut rpc_address = String::new();
         let mut rpc_token = String::new();
-        let mut core_path = None;
         let mut core_args = Vec::new();
         let mut iter = std::env::args().skip(1);
 
@@ -158,19 +155,12 @@ impl StartupSettings {
                         rpc_token = value;
                     }
                 }
-                "--ppp" => {
-                    core_path = iter.next();
-                }
-                "--embedded-core" => {}
                 "--help" | "-h" => {}
                 _ if arg.starts_with("--rpc=") => {
                     rpc_address = arg[6..].to_string();
                 }
                 _ if arg.starts_with("--token=") => {
                     rpc_token = arg[8..].to_string();
-                }
-                _ if arg.starts_with("--ppp=") => {
-                    core_path = Some(arg[6..].to_string());
                 }
                 _ => core_args.push(arg),
             }
@@ -315,7 +305,6 @@ impl StartupSettings {
             tui_log_file,
             rpc_address,
             rpc_token,
-            core_path,
             tun_enabled,
             system_proxy_enabled,
             launch_direct,
@@ -378,9 +367,6 @@ impl StartupSettings {
         self.log_level = normalize_log_level(&self.log_level);
         self.tcp_ip_cc = normalize_tcp_ip_cc(&self.tcp_ip_cc);
         normalize_path_field(&mut self.tui_log_file);
-        if let Some(path) = self.core_path.as_mut() {
-            normalize_path_field(path);
-        }
     }
 }
 
@@ -495,7 +481,7 @@ pub fn resolve_from_working_dir(base: &Path, value: &str) -> PathBuf {
     }
 }
 
-pub fn core_path_string(base: &Path, path: &Path) -> String {
+pub fn relative_path_string(base: &Path, path: &Path) -> String {
     if let Ok(relative) = path.strip_prefix(base) {
         let text = path_to_forward_slashes(relative);
         if text.is_empty() {
