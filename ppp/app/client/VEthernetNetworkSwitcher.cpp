@@ -86,6 +86,13 @@ namespace ppp {
     namespace app {
         namespace client {
 #if defined(_WIN32)
+            static VOID WINAPI RouteChangeNotifyCallback(PVOID context, PMIB_IPFORWARD_ROW2, MIB_NOTIFICATION_TYPE) noexcept {
+                HANDLE event = reinterpret_cast<HANDLE>(context);
+                if (event != NULLPTR) {
+                    ::SetEvent(event);
+                }
+            }
+
             static std::shared_ptr<ppp::string> MakeLocalDnsServFail(const ppp::string& query) noexcept {
                 auto response = make_shared_object<ppp::string>(query);
                 if (NULLPTR == response || response->size() < 12) {
@@ -139,6 +146,9 @@ namespace ppp {
 #endif
                 static_mode_     = false;
                 block_quic_      = false;
+#if defined(_WIN32)
+                route_protector_event_ = ::CreateEventW(NULLPTR, FALSE, FALSE, NULLPTR);
+#endif
                 icmppackets_aid_ = RandomNext();
 
                 prefer_ipv4_ = (NULLPTR != configuration_ && configuration_->udp.dns.prefer_ipv4);
@@ -156,6 +166,12 @@ namespace ppp {
 
             VEthernetNetworkSwitcher::~VEthernetNetworkSwitcher() noexcept {
                 Finalize();
+#if defined(_WIN32)
+                if (route_protector_event_ != NULLPTR) {
+                    ::CloseHandle(route_protector_event_);
+                    route_protector_event_ = NULLPTR;
+                }
+#endif
             }
 
             VEthernetNetworkSwitcher::NetworkInterface::NetworkInterface() noexcept
@@ -3025,6 +3041,7 @@ namespace ppp {
                 ppp::ipv6::auxiliary::ClientContext ctx;
                 ctx.Tap = tap.get();
                 ctx.InterfaceIndex = tap->GetInterfaceIndex();
+                ctx.UnderlyingInterfaceIndex = underlying_ni_ ? underlying_ni_->Index : -1;
 
                 // Obtain interface name -- prefer tun_ni_ Name if available.
                 std::shared_ptr<NetworkInterface> tun_ni = GetTapNetworkInterface();
@@ -3223,26 +3240,27 @@ namespace ppp {
                 //    path has mature dns-rules.txt redirection via RedirectDnsServer.
                 //    To prioritize IPv4 DNS, we skip IPv6 DNS assignment on TAP so the
                 //    system falls back to IPv4 DNS (set via DHCP / SetDnsAddresses).
-                //    We still clear non-TAP NICs' IPv6 DNS to prevent DNS leaks from
-                //    physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
+                //    We clear the selected underlying uplink IPv6 DNS to prevent DNS leaks
+                //    from its physical adapter resolver (e.g., ISP RA/DHCPv6).
 #if defined(_WIN32)
                 if (!state.DnsApplied) {
                     ppp::vector<ppp::string> dns_servers; // intentionally empty - skip IPv6 DNS on TAP
                     // Clear IPv6 DNS on the TAP interface itself (in case a previous
                     // ApplyClientDns call left stale IPv6 DNS servers behind).
                     ppp::win32::network::ClearDnsAddressesV6(ctx.InterfaceIndex);
-                    // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leaks from
-                    // physical adapter IPv6 DNS servers (e.g., ISP RA/DHCPv6).
+                    // Clear IPv6 DNS only on the selected underlying uplink.  Other
+                    // WLAN, virtual, and disconnected adapters keep their settings.
                     for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
                         if (if_index != ctx.InterfaceIndex && !servers.empty()) {
+                            state.OriginalDnsV6Changed = true;
                             ppp::win32::network::ClearDnsAddressesV6(if_index);
                         }
                     }
                     state.DnsApplied = true;
                     state.DnsServers = std::move(dns_servers);
                     ppp::tap::TapWindows::DnsFlushResolverCache();
-                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + %d non-TAP NICs IPv6 DNS (prefer IPv4)",
-                        (int)state.OriginalAllDnsServers.size());
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + selected uplink IPv6 DNS (prefer IPv4), ifIndex=%d",
+                        state.OriginalDnsInterfaceIndex);
                 }
 #else
                 if (!state.DnsApplied) {
@@ -5245,68 +5263,119 @@ namespace ppp {
                     }
                     int tap_if_index = tun_ni->Index;
                     int dns_if_index = tap_if_index;
-                    // Snapshot the original IPv4 DNS of every CONNECTED NIC so
-                    // shutdown can restore them.  Only adapters with OperStatus Up
-                    // are captured (disconnected adapters keep their own stale DNS
-                    // and are never touched).  The TUN entry is kept authoritative
-                    // for the tunnel itself.
+                    // Snapshot the original DNS only for the selected underlying NIC.  The
+                    // WMI-backed NetworkInterface::DnsAddresses list contains the configured
+                    // DNS search order: empty means automatic DNS, non-empty means static DNS.
+                    const int managed_dns_if_index =
+                        underlying_ni_ && underlying_ni_->Index >= 0 && underlying_ni_->Index != tap_if_index
+                            ? underlying_ni_->Index : -1;
+                    ni_dns_interface_index_ = managed_dns_if_index;
+                    ni_dns_ipv4_auto_ = true;
+                    ni_dns_ipv6_auto_ = true;
+                    ni_dns_ipv4_touched_ = false;
+                    ni_dns_ipv6_touched_ = false;
+
                     ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v4;
                     ppp::win32::network::GetAllNicsDnsAddresses(all_dns_v4);
                     ni_dns_servers_.clear();
-                    for (auto&& [if_index, servers] : all_dns_v4) {
-                        ppp::vector<boost::asio::ip::address> addrs;
-                        for (const auto& s : servers) {
-                            boost::system::error_code ec;
-                            boost::asio::ip::address ip = StringToAddress(s.data(), ec);
-                            if (!ec) {
-                                addrs.emplace_back(ip);
+
+                    ppp::vector<boost::asio::ip::address> original_dns_v4;
+                    ppp::vector<ppp::string> original_dns_v6;
+                    if (underlying_ni_ && managed_dns_if_index >= 0 &&
+                        managed_dns_if_index != tap_if_index) {
+                        for (const auto& address : underlying_ni_->DnsAddresses) {
+                            if (address.is_v4() && !address.is_unspecified() &&
+                                !IPEndPoint::IsInvalid(address)) {
+                                original_dns_v4.emplace_back(address);
                             }
-                        }
-                        if (!addrs.empty()) {
-                            ni_dns_servers_[if_index] = std::move(addrs);
-                        }
-                    }
-                    ni_dns_servers_[tap_if_index] = tun_ni->DnsAddresses;
-                    bool need_loopback_v4 = false;
-                    for (const auto& [if_index, servers] : all_dns_v4) {
-                        if (if_index != tap_if_index && !servers.empty()) {
-                            need_loopback_v4 = true;
-                            break;
+                            else if (address.is_v6() && !address.is_unspecified() &&
+                                !IPEndPoint::IsInvalid(address)) {
+                                original_dns_v6.emplace_back(address.to_string());
+                            }
                         }
                     }
 
-                    // Snapshot IPv6 DNS before changing any adapter. A Wintun
-                    // interface may have no IPv6 DNS at all; that is a valid
-                    // IPv4-only Windows configuration and must not prevent the
-                    // IPv4 DNS proxy from starting.
+                    if (!original_dns_v4.empty()) {
+                        ni_dns_ipv4_auto_ = false;
+                        ni_dns_servers_[managed_dns_if_index] = original_dns_v4;
+                    }
+                    if (!original_dns_v6.empty()) {
+                        ni_dns_ipv6_auto_ = false;
+                    }
+                    ni_dns_servers_[tap_if_index] = tun_ni->DnsAddresses;
+
+                    const auto target_dns_v4 = all_dns_v4.find(managed_dns_if_index);
+                    const bool target_has_dns_v4 =
+                        !original_dns_v4.empty() ||
+                        (target_dns_v4 != all_dns_v4.end() && !target_dns_v4->second.empty());
+                    const bool need_loopback_v4 =
+                        managed_dns_if_index >= 0 && managed_dns_if_index != tap_if_index && target_has_dns_v4;
+
+                    // Snapshot the effective IPv6 DNS only for the selected NIC and TUN.
                     ni_dns_servers_v6_.clear();
                     ni_router_discovery_disabled_v6_.clear();
                     ppp::unordered_map<int, ppp::vector<ppp::string>> all_dns_v6;
-                    const bool have_ipv6_dns_snapshot =
-                        ppp::win32::network::GetAllNicsDnsAddressesV6(all_dns_v6) > 0;
-                    bool need_loopback_v6 = false;
-                    if (have_ipv6_dns_snapshot) {
-                        ni_dns_servers_v6_ = all_dns_v6;
-                        for (const auto& [if_index, servers] : all_dns_v6) {
-                            if (if_index != tap_if_index && !servers.empty()) {
-                                need_loopback_v6 = true;
-                                break;
-                            }
-                        }
+                    ppp::win32::network::GetAllNicsDnsAddressesV6(all_dns_v6);
+                    if (auto tap_dns_v6 = all_dns_v6.find(tap_if_index);
+                        tap_dns_v6 != all_dns_v6.end() && !tap_dns_v6->second.empty()) {
+                        ni_dns_servers_v6_[tap_if_index] = tap_dns_v6->second;
                     }
+                    if (!original_dns_v6.empty()) {
+                        ni_dns_servers_v6_[managed_dns_if_index] = original_dns_v6;
+                    }
+
+                    const auto target_dns_v6 = all_dns_v6.find(managed_dns_if_index);
+                    const bool target_has_dns_v6 =
+                        !original_dns_v6.empty() ||
+                        (target_dns_v6 != all_dns_v6.end() && !target_dns_v6->second.empty());
+                    const bool need_loopback_v6 =
+                        managed_dns_if_index >= 0 && managed_dns_if_index != tap_if_index && target_has_dns_v6;
 
                     auto rollback_dns_takeover = [this]() noexcept {
                         DeleteRoute();
-                        if (!ni_dns_servers_v6_.empty()) {
-                            auto restore_dns6 = ni_dns_servers_v6_;
+                        const int managed_if_index = ni_dns_interface_index_;
+
+                        auto restore_dns6 = ni_dns_servers_v6_;
+                        restore_dns6.erase(managed_if_index);
+                        if (!restore_dns6.empty()) {
                             ppp::win32::network::SetAllNicsDnsAddressesV6(restore_dns6);
                         }
-                        if (!ni_dns_servers_.empty()) {
-                            auto restore_dns = ni_dns_servers_;
+                        if (managed_if_index >= 0 && ni_dns_ipv6_touched_) {
+                            if (ni_dns_ipv6_auto_) {
+                                ppp::win32::network::ClearDnsAddressesV6(managed_if_index);
+                            }
+                            else if (auto it = ni_dns_servers_v6_.find(managed_if_index);
+                                it != ni_dns_servers_v6_.end() && !it->second.empty()) {
+                                ppp::win32::network::SetDnsAddressesV6(managed_if_index, it->second);
+                            }
+                        }
+
+                        auto restore_dns = ni_dns_servers_;
+                        restore_dns.erase(managed_if_index);
+                        if (!restore_dns.empty()) {
                             ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
                         }
+                        if (managed_if_index >= 0 && ni_dns_ipv4_touched_) {
+                            if (ni_dns_ipv4_auto_) {
+                                ppp::win32::network::ClearDnsAddresses(managed_if_index);
+                            }
+                            else if (auto it = ni_dns_servers_.find(managed_if_index);
+                                it != ni_dns_servers_.end() && !it->second.empty()) {
+                                ppp::vector<ppp::string> servers;
+                                for (const auto& address : it->second) {
+                                    servers.emplace_back(address.to_string());
+                                }
+                                ppp::win32::network::SetDnsAddresses(managed_if_index, servers);
+                            }
+                        }
+
                         ni_dns_servers_v6_.clear();
                         ni_dns_servers_.clear();
+                        ni_dns_interface_index_ = -1;
+                        ni_dns_ipv4_auto_ = true;
+                        ni_dns_ipv6_auto_ = true;
+                        ni_dns_ipv4_touched_ = false;
+                        ni_dns_ipv6_touched_ = false;
                         StopLocalDnsProxy();
                         route_added_.store(false);
                     };
@@ -5319,16 +5388,15 @@ namespace ppp {
                         LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot set TUN DNS");
                         return false;
                     }
-                    // Pin every other connected NIC's IPv4 resolver to the local
+                    // Pin the selected underlying NIC's IPv4 resolver to the local
                     // loopback proxy 127.0.0.1.  The Windows DNS Client queries
-                    // every NIC's resolvers in parallel and accepts the first
-                    // answer; a physical NIC still pointing at the ISP resolver
+                    // the resolver list in parallel and accepts the first
+                    // answer; an unmodified physical NIC pointing at the ISP resolver
                     // would answer instantly with GFW-polluted records and steal
-                    // the answer from the tunnel DNS.  Disconnected adapters are
-                    // already excluded by the snapshot above and are not touched.
+                    // the answer from the tunnel DNS.  Other adapters are not touched.
                     ppp::vector<int> non_tap_v4_indexes;
                     ppp::vector<int> non_tap_v6_indexes;
-                    // Bring up the loopback DNS proxy first so every NIC can
+                    // Bring up the loopback DNS proxy first so the selected NIC can
                     // point at 127.0.0.1/[::1] and its queries are funneled into
                     // the tunnel instead of racing the ISP resolver.
                     if (need_loopback_v4 || need_loopback_v6) {
@@ -5346,48 +5414,28 @@ namespace ppp {
                             return false;
                         }
 
-                        // Pin every connected non-TAP IPv4 DNS only after the
-                        // IPv4 listener has been verified.
-                        for (auto&& [if_index, servers] : all_dns_v4) {
-                            if (if_index != tap_if_index && !servers.empty()) {
-                                if (ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" })) {
-                                    non_tap_v4_indexes.emplace_back(if_index);
-                                }
-                                else {
-                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv4 DNS to 127.0.0.1, ifIndex=%d", if_index);
-                                    rollback_dns_takeover();
-                                    return false;
-                                }
+                        // Pin only the selected underlying NIC to the local DNS proxy.
+                        if (need_loopback_v4) {
+                            if (ppp::win32::network::SetDnsAddresses(managed_dns_if_index, { "127.0.0.1" })) {
+                                non_tap_v4_indexes.emplace_back(managed_dns_if_index);
+                                ni_dns_ipv4_touched_ = true;
+                            }
+                            else {
+                                LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv4 DNS to 127.0.0.1, ifIndex=%d", managed_dns_if_index);
+                                rollback_dns_takeover();
+                                return false;
                             }
                         }
 
-                        // Snapshot the original IPv6 DNS of every NIC so shutdown can
-                        // restore them.  The Windows DNS Client queries every NIC's
-                        // resolvers in parallel and accepts the first answer.  A
-                        // physical NIC (e.g. the Hyper-V vSwitch carrying the host
-                        // LAN) whose IPv6 DNS still points at the ISP resolver
-                        // answers instantly with GFW-polluted records and steals the
-                        // answer from the tunnel DNS.  Instead of clearing (which RA
-                        // RDNSS may re-inject) we pin every non-TAP NIC to the local
-                        // proxy ::1, a static value RA never overwrites.
-                        for (const auto& [if_index, servers] : all_dns_v6) {
-                            if (if_index != tap_if_index && !servers.empty()) {
-                                // Pin the resolver to the local proxy ::1 only.  Do NOT
-                                // disable IPv6 router discovery (RA) on the underlying
-                                // NICs: RA is what keeps SLAAC public IPv6 addresses
-                                // alive on the host (e.g. vEthernet (Debian)).  Killing
-                                // it silently removes the host's public IPv6 and breaks
-                                // IPv6-only server connectivity.  RDNSS re-injection of
-                                // the ISP resolver is instead defeated by re-pinning
-                                // ::1 every 30s via the DNS guard timer below.
-                                if (ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" })) {
-                                    non_tap_v6_indexes.emplace_back(if_index);
-                                }
-                                else {
-                                    LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv6 DNS to ::1, ifIndex=%d", if_index);
-                                    rollback_dns_takeover();
-                                    return false;
-                                }
+                        if (need_loopback_v6) {
+                            if (ppp::win32::network::SetDnsAddressesV6(managed_dns_if_index, { "::1" })) {
+                                non_tap_v6_indexes.emplace_back(managed_dns_if_index);
+                                ni_dns_ipv6_touched_ = true;
+                            }
+                            else {
+                                LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv6 DNS to ::1, ifIndex=%d", managed_dns_if_index);
+                                rollback_dns_takeover();
+                                return false;
                             }
                         }
                     }
@@ -5414,15 +5462,15 @@ namespace ppp {
 
                                         HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
                                         if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
-                                            // DHCP may re-inject ISP IPv4 DNS after
-                                            // takeover; keep every connected non-TAP
+                                            // DHCP may re-inject IPv4 DNS after
+                                            // takeover; keep the selected underlying
                                             // NIC pinned to the local proxy so the
                                             // tunnel resolver always wins the race.
                                             for (int if_index : non_tap_v4_indexes) {
                                                 ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" });
                                             }
-                                            // DHCPv6/RA may re-inject ISP IPv6 DNS after
-                                            // takeover; keep every non-TAP NIC pinned to
+                                            // DHCPv6/RA may re-inject IPv6 DNS after
+                                            // takeover; keep the selected NIC pinned to
                                             // the local proxy so the tunnel resolver
                                             // always wins the parallel race.
                                             for (int if_index : non_tap_v6_indexes) {
@@ -5569,12 +5617,18 @@ namespace ppp {
                 AddRouteWithDnsServers();
             }
 
-            bool VEthernetNetworkSwitcher::DeleteAllDefaultRoute() noexcept {
+            bool VEthernetNetworkSwitcher::DeleteAllDefaultRoute(bool* deleted) noexcept {
+                if (deleted != nullptr) {
+                    *deleted = false;
+                }
                 if (auto tap = GetTap(); NULLPTR != tap) {
 #if defined(_WIN32)
                     // Find and delete all disallowed windows gateway routes.
                     ppp::vector<MIB_IPFORWARDROW> default_routes;
-                    ppp::win32::network::DeleteAllDefaultGatewayRoutes(default_routes, { tap->GatewayServer });
+                    const bool changed = ppp::win32::network::DeleteAllDefaultGatewayRoutes(default_routes, { tap->GatewayServer });
+                    if (deleted != nullptr) {
+                        *deleted = changed;
+                    }
                     return true;
 #else
 #if defined(_MACOS)
@@ -7032,6 +7086,25 @@ namespace ppp {
                         return true;
                         };
 
+#if defined(_WIN32)
+                        HANDLE route_change_notification = NULLPTR;
+                        bool route_notifications_registered = false;
+                        HANDLE route_change_event = route_protector_event_;
+                        if (route_change_event != NULLPTR) {
+                            DWORD status = ::NotifyRouteChange2(
+                                AF_INET,
+                                &RouteChangeNotifyCallback,
+                                route_change_event,
+                                FALSE,
+                                &route_change_notification);
+                            route_notifications_registered = status == NO_ERROR;
+                            if (!route_notifications_registered) {
+                                LOG_WARN("VEthernetNetworkSwitcher::ProtectDefaultRoute: NotifyRouteChange2 failed, error=%lu",
+                                    static_cast<unsigned long>(status));
+                            }
+                        }
+#endif
+
                         ppp::SetThreadName("protector");
                         for (;;) {
                         // Gets the current process processing start time.
@@ -7044,10 +7117,13 @@ namespace ppp {
                         }
 
                         // Try to get the lock, if you can't get the lock, do not deal with it and wait for the next execution.
+                        bool deleted = false;
                         if (prdr_.try_lock()) {
                             ok = prepare();
                             if (ok) {
-                                ok = DeleteAllDefaultRoute();
+                                // A clean table is still a successful check. The
+                                // deleted flag controls the Windows backoff below.
+                                ok = DeleteAllDefaultRoute(&deleted);
                             }
 
                             // Release the obtained prdr lock and decide whether to exit the process.
@@ -7057,16 +7133,42 @@ namespace ppp {
                             }
                         }
 
-                        // Calculate how much time the thread has to wait for sleep.
+#if defined(_WIN32)
+                        if (route_notifications_registered) {
+                            const DWORD wait_result = ::WaitForSingleObject(route_change_event, INFINITE);
+                            if (wait_result != WAIT_OBJECT_0) {
+                                ::CancelMibChangeNotify2(route_change_notification);
+                                route_change_notification = NULLPTR;
+                                route_notifications_registered = false;
+                            }
+                        }
+
+                        if (!route_notifications_registered) {
+                            // Registration failure falls back to a low-frequency
+                            // watchdog so route protection remains available.
+                            const uint64_t interval = deleted ? 1000 : 10000;
+                            uint64_t now = ppp::GetTickCount();
+                            uint64_t delta = 0;
+                            if (now >= start) {
+                                delta = interval - std::min<uint64_t>(interval, now - start);
+                            }
+                            ppp::Sleep(delta);
+                        }
+#else
+                        const uint64_t interval = 1000;
                         uint64_t now = ppp::GetTickCount();
                         uint64_t delta = 0;
                         if (now >= start) {
-                            delta = 1000 - std::min<uint64_t>(1000, now - start);
+                            delta = interval - std::min<uint64_t>(interval, now - start);
                         }
-
-                        // Check whether the default gateway route is faulty every second.
                         ppp::Sleep(delta);
+#endif
                         }
+#if defined(_WIN32)
+                        if (route_change_notification != NULLPTR) {
+                            ::CancelMibChangeNotify2(route_change_notification);
+                        }
+#endif
                         route_protector_running_.store(false);
                     }).detach();
                 }
@@ -7341,7 +7443,13 @@ namespace ppp {
                 }
 #endif
 
-                if (!route_added_.exchange(false)) {
+                const bool had_routes = route_added_.exchange(false);
+#if defined(_WIN32)
+                if (route_protector_event_ != NULLPTR) {
+                    ::SetEvent(route_protector_event_);
+                }
+#endif
+                if (!had_routes) {
                     if (restore_ipv6) {
                         RestoreIPv6Assignment();
                     }
@@ -7360,8 +7468,49 @@ namespace ppp {
                 DeleteRoute();
 
 #if defined(_WIN32)
-                ppp::win32::network::SetAllNicsDnsAddressesV6(ni_dns_servers_v6_);
-                ppp::win32::network::SetAllNicsDnsAddresses(ni_dns_servers_);
+                const int managed_if_index = ni_dns_interface_index_;
+
+                auto restore_dns6 = ni_dns_servers_v6_;
+                restore_dns6.erase(managed_if_index);
+                if (!restore_dns6.empty()) {
+                    ppp::win32::network::SetAllNicsDnsAddressesV6(restore_dns6);
+                }
+                if (managed_if_index >= 0 && ni_dns_ipv6_touched_) {
+                    if (ni_dns_ipv6_auto_) {
+                        ppp::win32::network::ClearDnsAddressesV6(managed_if_index);
+                    }
+                    else if (auto it = ni_dns_servers_v6_.find(managed_if_index);
+                        it != ni_dns_servers_v6_.end() && !it->second.empty()) {
+                        ppp::win32::network::SetDnsAddressesV6(managed_if_index, it->second);
+                    }
+                }
+
+                auto restore_dns = ni_dns_servers_;
+                restore_dns.erase(managed_if_index);
+                if (!restore_dns.empty()) {
+                    ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
+                }
+                if (managed_if_index >= 0 && ni_dns_ipv4_touched_) {
+                    if (ni_dns_ipv4_auto_) {
+                        ppp::win32::network::ClearDnsAddresses(managed_if_index);
+                    }
+                    else if (auto it = ni_dns_servers_.find(managed_if_index);
+                        it != ni_dns_servers_.end() && !it->second.empty()) {
+                        ppp::vector<ppp::string> servers;
+                        for (const auto& address : it->second) {
+                            servers.emplace_back(address.to_string());
+                        }
+                        ppp::win32::network::SetDnsAddresses(managed_if_index, servers);
+                    }
+                }
+
+                ni_dns_servers_v6_.clear();
+                ni_dns_servers_.clear();
+                ni_dns_interface_index_ = -1;
+                ni_dns_ipv4_auto_ = true;
+                ni_dns_ipv6_auto_ = true;
+                ni_dns_ipv4_touched_ = false;
+                ni_dns_ipv6_touched_ = false;
                 ppp::tap::TapWindows::DnsFlushResolverCache();
                 // Router discovery is no longer disabled during takeover (see
                 // ApplyNetworkTakeover), so there is nothing to re-enable here.

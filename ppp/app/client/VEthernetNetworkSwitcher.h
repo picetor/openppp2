@@ -331,7 +331,7 @@ namespace ppp {
             private:    
 #if !defined(_ANDROID) && !defined(_IPHONE) 
                 bool                                                                FixUnderlyingNgw() noexcept;
-                bool                                                                DeleteAllDefaultRoute() noexcept;
+                bool                                                                DeleteAllDefaultRoute(bool* deleted = nullptr) noexcept;
 #else   
                 bool                                                                AddAllRoute(const std::shared_ptr<ITap>& tap) noexcept;
 #endif  
@@ -548,6 +548,9 @@ namespace ppp {
                 std::atomic<bool>                                                   network_takeover_worker_ = false;
                 std::atomic<bool>                                                   network_takeover_stopping_ = false;
                 std::atomic<bool>                                                   route_protector_running_ = false;
+#if defined(_WIN32)
+                HANDLE                                                              route_protector_event_ = NULLPTR;
+#endif
                 std::atomic<uint64_t>                                               main_outbound_unavailable_since_ = 0;
                 LoadIPListFileVectorPtr                                             ribs_;
                 LoadIPv6ListFileVectorPtr                                           ribs6_;
@@ -614,6 +617,11 @@ namespace ppp {
                 ppp::vector<IPv6ServerRoute>                                        ipv6_server_routes_;
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
+                int                                                                 ni_dns_interface_index_ = -1;
+                bool                                                                ni_dns_ipv4_auto_ = true;
+                bool                                                                ni_dns_ipv6_auto_ = true;
+                bool                                                                ni_dns_ipv4_touched_ = false;
+                bool                                                                ni_dns_ipv6_touched_ = false;
                 ppp::unordered_set<int>                                             ni_router_discovery_disabled_v6_;
                 std::shared_ptr<ppp::threading::Timer>                              dns_guard_timer_;
                 std::atomic<bool>                                                   dns_guard_active_ = false;

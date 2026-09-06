@@ -305,40 +305,39 @@ namespace ppp {
                         state.OriginalDnsServers = current_ni->DnsAddresses;
                     }
 
-                    // Capture IPv6 DNS servers from ALL interfaces to prevent DNS leak.
-                    // When VPN is active, non-TAP NICs' IPv6 DNS must be cleared so that
-                    // Windows multi-homed DNS resolution does not query them in parallel.
-                    ULONG bufLen = 15000;
-                    ppp::vector<BYTE> buffer(bufLen);
-                    PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
-                    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
-                    DWORD ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
-                    if (ret == ERROR_BUFFER_OVERFLOW) {
-                        buffer.resize(bufLen);
-                        pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
-                        ret = ::GetAdaptersAddresses(AF_UNSPEC, flags, NULLPTR, pAddresses, &bufLen);
+                    // Capture IPv6 DNS only for the current IPv6 uplink.  The WMI
+                    // DNSServerSearchOrder tells us whether the interface was using
+                    // manually configured DNS; an empty list means automatic DNS.
+                    state.OriginalDnsInterfaceIndex = -1;
+                    state.OriginalDnsV6Auto = true;
+                    state.OriginalDnsV6Changed = false;
+                    state.OriginalDnsV6Servers.clear();
+                    state.OriginalAllDnsServers.clear();
+
+                    boost::asio::ip::address default_gateway;
+                    int uplink_index = context.UnderlyingInterfaceIndex;
+                    if (uplink_index < 0) {
+                        ppp::win32::network::GetIPv6DefaultGateway(default_gateway, uplink_index);
                     }
+                    if (uplink_index >= 0 && uplink_index != context.InterfaceIndex) {
+                        state.OriginalDnsInterfaceIndex = uplink_index;
 
-                    if (ret == NO_ERROR) {
-                        for (PIP_ADAPTER_ADDRESSES p = pAddresses; p != NULLPTR; p = p->Next) {
-                            if (p->OperStatus != IfOperStatusUp) {
-                                continue;
-                            }
-
-                            ppp::vector<ppp::string> dns_v6_list;
-                            for (PIP_ADAPTER_DNS_SERVER_ADDRESS dns = p->FirstDnsServerAddress; dns != NULLPTR; dns = dns->Next) {
-                                if (dns->Address.lpSockaddr->sa_family == AF_INET6) {
-                                    SOCKADDR_IN6* addr6 = reinterpret_cast<SOCKADDR_IN6*>(dns->Address.lpSockaddr);
-                                    char buf[INET6_ADDRSTRLEN];
-                                    if (NULLPTR != ::inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf))) {
-                                        dns_v6_list.emplace_back(ppp::string(buf));
-                                    }
+                        if (auto uplink_ni = ppp::win32::network::GetNetworkInterfaceByInterfaceIndex(uplink_index);
+                            NULLPTR != uplink_ni) {
+                            for (const ppp::string& dns : uplink_ni->DnsAddresses) {
+                                IN6_ADDR parsed;
+                                if (::inet_pton(AF_INET6, dns.c_str(), &parsed) == 1) {
+                                    state.OriginalDnsV6Servers.emplace_back(dns);
                                 }
                             }
+                        }
+                        state.OriginalDnsV6Auto = state.OriginalDnsV6Servers.empty();
 
-                            if (!dns_v6_list.empty()) {
-                                state.OriginalAllDnsServers[(int)p->IfIndex] = std::move(dns_v6_list);
-                            }
+                        ppp::unordered_map<int, ppp::vector<ppp::string>> effective_dns;
+                        ppp::win32::network::GetAllNicsDnsAddressesV6(effective_dns);
+                        auto it = effective_dns.find(uplink_index);
+                        if (it != effective_dns.end() && !it->second.empty()) {
+                            state.OriginalAllDnsServers[uplink_index] = it->second;
                         }
                     }
                 }
@@ -558,15 +557,14 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ClientDnsApplyFailed);
                     }
 
-                    // Clear IPv6 DNS on all non-TAP NICs to prevent DNS leak.
-                    // Windows multi-homed DNS queries ALL configured DNS servers on ALL NICs in parallel.
-                    // Leaving the physical NIC's IPv6 DNS (from RA/DHCPv6) would leak AAAA queries to the ISP.
+                    // Clear IPv6 DNS only on the selected underlying uplink.  Other
+                    // WLAN and virtual adapters keep their original configuration.
                     for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
-                        if (if_index != context.InterfaceIndex) {
+                        if (if_index != context.InterfaceIndex && !servers.empty()) {
+                            state.OriginalDnsV6Changed = true;
                             ppp::win32::network::ClearDnsAddressesV6(if_index);
                         }
                     }
-
                     state.DnsApplied = true;
                     state.DnsServers = dns_servers;
                     ppp::tap::TapWindows::DnsFlushResolverCache();
@@ -676,16 +674,21 @@ namespace ppp {
                     if (state.DnsApplied) {
                         ppp::win32::network::SetDnsAddressesV6(context.InterfaceIndex, state.OriginalDnsServers);
 
-                        // Restore IPv6 DNS on all non-TAP NICs that were cleared during ApplyClientDns.
-                        for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
-                            if (if_index != context.InterfaceIndex && !servers.empty()) {
-                                ppp::win32::network::SetDnsAddressesV6(if_index, servers);
+                        if (state.OriginalDnsV6Changed &&
+                            state.OriginalDnsInterfaceIndex >= 0 &&
+                            state.OriginalDnsInterfaceIndex != context.InterfaceIndex) {
+                            if (state.OriginalDnsV6Auto) {
+                                ppp::win32::network::ClearDnsAddressesV6(state.OriginalDnsInterfaceIndex);
+                            }
+                            elif(!state.OriginalDnsV6Servers.empty()) {
+                                ppp::win32::network::SetDnsAddressesV6(
+                                    state.OriginalDnsInterfaceIndex,
+                                    state.OriginalDnsV6Servers);
                             }
                         }
 
                         ppp::tap::TapWindows::DnsFlushResolverCache();
                     }
-
                     if (state.PrefixPolicyApplied) {
                         // Remove the fd00::/8 prefix policy entry that was added during connection.
                         // This restores the original RFC 6724 behavior where physical NIC global

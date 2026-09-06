@@ -18,6 +18,7 @@ namespace ppp {
             struct ClientContext {
                 ppp::tap::ITap*                                               Tap = NULLPTR;
                 int                                                           InterfaceIndex = -1;
+                int                                                           UnderlyingInterfaceIndex = -1;
                 ppp::string                                                   InterfaceName;
             };
 
@@ -42,6 +43,10 @@ namespace ppp {
                 ppp::vector<ppp::string>                                      DnsServers;
                 ppp::vector<ppp::string>                                      OriginalDnsServers;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>              OriginalAllDnsServers;
+                int                                                           OriginalDnsInterfaceIndex = -1;
+                bool                                                          OriginalDnsV6Auto = true;
+                bool                                                          OriginalDnsV6Changed = false;
+                ppp::vector<ppp::string>                                      OriginalDnsV6Servers;
                 ppp::vector<ppp::string>                                      OriginalDefaultRoutes;
                 ppp::string                                                   OriginalDnsConfiguration;
                 ppp::string                                                   OriginalDefaultRoute;
@@ -67,6 +72,10 @@ namespace ppp {
                     DnsServers.clear();
                     OriginalDnsServers.clear();
                     OriginalAllDnsServers.clear();
+                    OriginalDnsInterfaceIndex = -1;
+                    OriginalDnsV6Auto = true;
+                    OriginalDnsV6Changed = false;
+                    OriginalDnsV6Servers.clear();
                     OriginalDefaultRoutes.clear();
                     OriginalDnsConfiguration.clear();
                     OriginalDefaultRoute.clear();
