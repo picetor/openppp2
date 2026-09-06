@@ -59,8 +59,7 @@ namespace ppp {
 
             private:
                 bool                                                            disposed_ = false;
-                boost::asio::ip::udp::endpoint                                  ep_;
-                std::shared_ptr<Byte>                                           buffer_;
+
                 std::shared_ptr<boost::asio::io_context>                        executor_;
                 TimeoutEventHandlerTable                                        timeouts_;
             };

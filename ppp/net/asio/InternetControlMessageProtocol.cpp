@@ -27,8 +27,7 @@ namespace ppp {
             InternetControlMessageProtocol::InternetControlMessageProtocol(const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator, const std::shared_ptr<boost::asio::io_context>& context) noexcept
                 : BufferAllocator(allocator)
                 , disposed_(false)
-                , executor_(context)
-                , buffer_(Executors::GetCachedBuffer(context)) {
+                , executor_(context) {
 
             }
 
@@ -165,6 +164,8 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::udp::socket>           socket_;
                 std::shared_ptr<InternetControlMessageProtocol>         owner_;
                 std::shared_ptr<Timer>                                  timeout_;
+                std::shared_ptr<Byte>                                   buffer_;
+                boost::asio::ip::udp::endpoint                           endpoint_;
                 IPEndPoint                                              destinationEP_;
                 UInt32                                                  identification_;
 
@@ -182,14 +183,32 @@ namespace ppp {
 
             public:
                 void                                                    RunOnce() noexcept {
-                    socket_->async_receive_from(boost::asio::buffer(owner_->buffer_.get(), PPP_BUFFER_SIZE), owner_->ep_,
+                    if (!owner_ || !socket_ || !socket_->is_open()) {
+                        Release();
+                        return;
+                    }
+
+                    // Each raw ICMP request must own its receive buffer and
+                    // endpoint. The old implementation reused one parent
+                    // buffer/endpoint for every outstanding echo, so replies
+                    // could race while parsing and corrupt state.
+                    if (!buffer_) {
+                        buffer_ = ppp::threading::BufferswapAllocator::MakeByteArray(
+                            owner_->BufferAllocator, PPP_BUFFER_SIZE);
+                        if (!buffer_) {
+                            Release();
+                            return;
+                        }
+                    }
+
+                    socket_->async_receive_from(boost::asio::buffer(buffer_.get(), PPP_BUFFER_SIZE), endpoint_,
                         std::bind(&InternetControlMessageProtocol_EchoAsynchronousContext::Process, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
                 }
                 int                                                     Process(const boost::system::error_code& ec, size_t bytes_transferred) noexcept {
                     if (ec == boost::system::errc::success || ec == boost::system::errc::resource_unavailable_try_again) {
                         while (bytes_transferred > 0) {
                             const std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = owner_->BufferAllocator;
-                            const std::shared_ptr<IPFrame> response_packet = IPFrame::Parse(allocator, owner_->buffer_.get(), static_cast<int>(bytes_transferred));
+                            const std::shared_ptr<IPFrame> response_packet = IPFrame::Parse(allocator, buffer_.get(), static_cast<int>(bytes_transferred));
                             if (NULLPTR == response_packet) {
                                 break;
                             }
@@ -388,52 +407,62 @@ namespace ppp {
                     frame->Identification = copys[0];
                     frame->Sequence = copys[1];
 
+                    // A synchronous send_to here could block the Asio
+                    // executor and delay every other tunnel read/write. Keep
+                    // the packet alive until async_send_to completes and only
+                    // start receiving after the request was accepted.
                     boost::asio::ip::udp::endpoint remoteEP = IPEndPoint::WrapAddressV4<boost::asio::ip::udp>(packet->Destination, IPEndPoint::MaxPort);
-                    socket->send_to(boost::asio::buffer(messages_nat->Buffer.get(), messages_nat->Length), remoteEP,
-                        boost::asio::socket_base::message_end_of_record, ec);
-                    if (ec) {
-                        LOG_WARN("InternetControlMessageProtocol::Echo: send raw ICMP failed, destination=%u, ec=%s, ecv=%d",
-                            packet->Destination, ec.message().c_str(), ec.value());
-                        Socket::Closesocket(socket);
+
+                    context->owner_ = shared_from_this();
+                    context->socket_ = socket;
+                    context->destinationEP_ = destinationEP;
+                    context->request_.frame = frame;
+                    context->request_.packet = packet;
+
+                    const std::weak_ptr<EchoAsynchronousContext> context_weak(context);
+                    const std::shared_ptr<TimeoutEventHandler> timeout_cb = make_shared_object<TimeoutEventHandler>(
+                        [context_weak](Timer*) noexcept {
+                            const std::shared_ptr<EchoAsynchronousContext> context = context_weak.lock();
+                            if (context) {
+                                context->Release();
+                            }
+                        });
+                    if (!timeout_cb) {
+                        LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate timeout callback failed, destination=%u",
+                            packet->Destination);
+                        context->Release();
                         return false;
                     }
-                    LOG_DEBUG("InternetControlMessageProtocol::Echo: raw ICMP sent, destination=%u, bytes=%d, ttl=%d",
-                        packet->Destination, messages_nat->Length, ttl);
+
+                    context->timeout_ = Timer::Timeout(executor_, MAX_ICMP_TIMEOUT, *timeout_cb);
+                    auto r = timeouts_.emplace(context.get(), timeout_cb);
+                    if (!r.second) {
+                        LOG_DEBUG("InternetControlMessageProtocol::Echo: duplicate echo context, destination=%u",
+                            packet->Destination);
+                        context->Release();
+                        return false;
+                    }
+
+                    socket->async_send_to(
+                        boost::asio::buffer(messages_nat->Buffer.get(), messages_nat->Length),
+                        remoteEP,
+                        boost::asio::socket_base::message_end_of_record,
+                        [context, messages_nat, destination = packet->Destination, ttl](
+                            const boost::system::error_code& send_ec, std::size_t) noexcept {
+                            if (send_ec) {
+                                LOG_WARN("InternetControlMessageProtocol::Echo: send raw ICMP failed, destination=%u, ec=%s, ecv=%d",
+                                    destination, send_ec.message().c_str(), send_ec.value());
+                                context->Release();
+                                return;
+                            }
+
+                            LOG_DEBUG("InternetControlMessageProtocol::Echo: raw ICMP sent, destination=%u, ttl=%d",
+                                destination, ttl);
+                            context->RunOnce();
+                        });
                 }
 
-                const std::weak_ptr<InternetControlMessageProtocol_EchoAsynchronousContext> context_weak(context);
-                const std::shared_ptr<TimeoutEventHandler> timeout_cb = make_shared_object<TimeoutEventHandler>(
-                    [context_weak](Timer*) noexcept {
-                        const std::shared_ptr<EchoAsynchronousContext> context = context_weak.lock();
-                        if (context) {
-                            context->Release();
-                        }
-                    });
-                if (!timeout_cb) {
-                    LOG_DEBUG("InternetControlMessageProtocol::Echo: allocate timeout callback failed, destination=%u",
-                        packet->Destination);
-                    Socket::Closesocket(socket);
-                    return false;
-                }
-
-                context->timeout_ = Timer::Timeout(executor_, MAX_ICMP_TIMEOUT, *timeout_cb);
-                context->owner_ = shared_from_this();
-                context->socket_ = socket;
-                context->destinationEP_ = destinationEP;
-                context->request_.frame = frame;
-                context->request_.packet = packet;
-                context->RunOnce();
-
-                auto r = timeouts_.emplace(context.get(), timeout_cb);
-                if (r.second) {
-                    return true;
-                }
-                else {
-                    LOG_DEBUG("InternetControlMessageProtocol::Echo: duplicate echo context, destination=%u",
-                        packet->Destination);
-                    context->Release();
-                    return false;
-                }
+                return true;
             }
 
             std::shared_ptr<IPFrame> InternetControlMessageProtocol::ER(const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<IcmpFrame>& frame, int ttl, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept {
