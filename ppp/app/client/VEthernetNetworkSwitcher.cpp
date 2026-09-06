@@ -1504,7 +1504,11 @@ namespace ppp {
                 }
 
                 auto& static_ = configuration_->udp.static_;
-                if ((static_mode_ && static_.icmp) && exchanger->StaticEchoAllocated()) {
+                // ICMP static echo is an independent UDP control path. It is
+                // intentionally usable without enabling static transport for
+                // all data protocols, so gateway/public ping is not serialized
+                // behind the main TCP FIFO.
+                if (static_.icmp && exchanger->StaticEchoAllocated()) {
                     return exchanger->StaticEchoPacketToRemoteExchanger(packet.get());
                 }
 
@@ -1551,7 +1555,11 @@ namespace ppp {
                         }
 
                         auto& static_ = configuration_->udp.static_;
-                        if ((static_mode_ && static_.icmp) && exchanger->StaticEchoAllocated()) {
+                        // ICMP static echo is an independent UDP control path. It is
+                        // intentionally usable without enabling static transport for
+                        // all data protocols, so gateway/public ping is not serialized
+                        // behind the main TCP FIFO.
+                        if (static_.icmp && exchanger->StaticEchoAllocated()) {
                             static_exchange = true;
                             break;
                         }

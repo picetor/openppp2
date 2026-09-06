@@ -3211,8 +3211,12 @@ namespace ppp {
                     return false;
                 }
 
-                bool static_mode = switcher_->StaticMode(NULLPTR);
-                if (!static_mode) {
+                // ICMP can use the independent UDP echo path without enabling
+                // static transport for the whole data plane. Keeping this
+                // separate avoids putting gateway probes behind the main TCP
+                // FIFO while leaving ordinary UDP/TCP forwarding unchanged.
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration || !configuration->udp.static_.icmp) {
                     return true;
                 }
 
