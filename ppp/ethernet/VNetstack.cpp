@@ -1135,7 +1135,7 @@ namespace ppp {
 
             LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: writing delayed SYN back, this=%p, tap=%p, len=%d, state=%u",
                 this, tap.get(), packet_length, sync_ack_state_.load());
-            return tap->OutputWithTrace(packet, packet_length, "REMOTE_RX");
+            return tap->OutputWithTrace(packet.get(), packet_length, "REMOTE_RX");
         }
     }
 }
