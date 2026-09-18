@@ -7472,6 +7472,7 @@ namespace ppp {
                 return true;
             }
 #endif
+#endif
 
 #if defined(_ANDROID) || defined(_IPHONE)
             bool VEthernetNetworkSwitcher::RefreshDirectDnsServers() noexcept {
