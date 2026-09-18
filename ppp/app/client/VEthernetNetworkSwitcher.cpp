@@ -7400,6 +7400,7 @@ namespace ppp {
                 return true;
             }
 
+#if defined(_WIN32)
             bool VEthernetNetworkSwitcher::ProtectWindowsSocket(
                 intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
                 if (socket_handle == (intptr_t)INVALID_SOCKET ||
