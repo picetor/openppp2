@@ -561,7 +561,7 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         tap_interface = read("ppp/tap/ITap.h")
         self.assertIn("OutputWithTrace", tap_interface)
         self.assertIn('OutputWithTrace(packet, packet_length, "REMOTE_RX")', read("ppp/ethernet/VEthernet.cpp"))
-        self.assertIn('OutputWithTrace(packet, packet_length, "REMOTE_RX")', read("ppp/ethernet/VNetstack.cpp"))
+        self.assertIn('OutputWithTrace(packet.get(), packet_length, "REMOTE_RX")', read("ppp/ethernet/VNetstack.cpp"))
 
     def test_log_secret_scanner_redacts_findings_and_honors_offset(self) -> None:
         module_path = ROOT / "tests/tools/scan_log_secrets.py"
