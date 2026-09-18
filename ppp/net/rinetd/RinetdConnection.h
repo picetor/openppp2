@@ -15,6 +15,8 @@ namespace ppp {
         namespace rinetd {
             class RinetdConnection : public std::enable_shared_from_this<RinetdConnection> {
             public:
+                typedef ppp::function<bool(intptr_t, const boost::asio::ip::address&)>     ProtectSocketHandler;
+                ProtectSocketHandler                                                       ProtectSocket;
 #if defined(_LINUX)
                 typedef std::shared_ptr<ppp::net::ProtectorNetwork>                     ProtectorNetworkPtr;
 
@@ -33,6 +35,7 @@ namespace ppp {
             public:
                 std::shared_ptr<RinetdConnection>                                       GetReference()     noexcept { return shared_from_this(); }
                 bool                                                                    IsLinked()         noexcept { return !disposed_ && connected_; }
+                bool                                                                    WasSocketProtectionRejected() const noexcept { return socket_protection_rejected_; }
                 std::shared_ptr<boost::asio::io_context>                                GetContext()       noexcept { return context_; }
                 std::shared_ptr<boost::asio::ip::tcp::socket>                           GetLocalSocket()   noexcept { return local_socket_; }
                 std::shared_ptr<boost::asio::ip::tcp::socket>                           GetRemoteSocket()  noexcept { return remote_socket_; }
@@ -59,6 +62,7 @@ namespace ppp {
                     bool                                                                disposed_  : 1;
                     bool                                                                connected_ : 7;
                 };
+                bool                                                                    socket_protection_rejected_ = false;
                 UInt64                                                                  timeout_   = 0; 
                 std::shared_ptr<boost::asio::io_context>                                context_;
                 ppp::threading::Executors::StrandPtr                                    strand_;

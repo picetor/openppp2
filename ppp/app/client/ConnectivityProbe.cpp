@@ -77,7 +77,7 @@ namespace ppp {
                 }
 
                 if (protect) {
-                    if (!protect(socket->native_handle())) {
+                    if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
                         return false;
@@ -159,7 +159,7 @@ namespace ppp {
                 }
 
                 if (protect) {
-                    if (!protect(socket->native_handle())) {
+                    if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
                         return false;
@@ -226,7 +226,7 @@ namespace ppp {
                 }
 
                 if (protect) {
-                    if (!protect(socket->native_handle())) {
+                    if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
                         return false;
@@ -325,7 +325,7 @@ namespace ppp {
                 }
 
                 if (protect) {
-                    if (!protect(socket->native_handle())) {
+                    if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
                         return false;

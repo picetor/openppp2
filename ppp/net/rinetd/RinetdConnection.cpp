@@ -66,6 +66,7 @@ namespace ppp {
             }
  
             bool RinetdConnection::Open(const boost::asio::ip::tcp::endpoint& remoteEP, ppp::coroutines::YieldContext& y) noexcept {
+                socket_protection_rejected_ = false;
                 if (disposed_) {
                     return false;
                 }
@@ -105,6 +106,14 @@ namespace ppp {
                 if (!opened) {
                     LOG_DEBUG("RinetdConnection::Open: async_open failed, remote=%s:%d, ec=%d, category=%s, message=%s",
                         remoteIP.to_string().data(), remotePort, open_ec.value(), open_ec.category().name(), open_ec.message().data());
+                    return false;
+                }
+
+                if (ProtectSocket && !remoteIP.is_loopback() &&
+                    !ProtectSocket((intptr_t)socket->native_handle(), remoteIP)) {
+                    socket_protection_rejected_ = true;
+                    LOG_ERROR("RinetdConnection::Open: socket protection failed, remote=%s:%d",
+                        remoteIP.to_string().c_str(), remotePort);
                     return false;
                 }
 

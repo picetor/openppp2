@@ -1284,6 +1284,8 @@ namespace ppp { namespace diagnostics {
         std::deque<DesktopLogRecord> g_log_queue;
         bool g_log_worker_started = false;
         bool g_log_processing = false;
+        std::chrono::steady_clock::time_point g_log_next_flush =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
 
         void WriteDesktopLog(const char* tag, const char* file, int line, const char* text) noexcept {
             std::lock_guard<std::mutex> lock(g_log_output_mutex);
@@ -1303,6 +1305,11 @@ namespace ppp { namespace diagnostics {
                     NULLPTR != file ? file : "?",
                     line,
                     NULLPTR != text ? text : "");
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= g_log_next_flush) {
+                    fflush(ppp::g_log_stream);
+                    g_log_next_flush = now + std::chrono::seconds(1);
+                }
             }
         }
 
@@ -1311,7 +1318,16 @@ namespace ppp { namespace diagnostics {
                 DesktopLogRecord record;
                 {
                     std::unique_lock<std::mutex> lock(g_log_queue_mutex);
-                    g_log_not_empty.wait(lock, []() noexcept { return !g_log_queue.empty(); });
+                    if (!g_log_not_empty.wait_for(lock, std::chrono::seconds(1),
+                        []() noexcept { return !g_log_queue.empty(); })) {
+                        lock.unlock();
+                        std::lock_guard<std::mutex> output_lock(g_log_output_mutex);
+                        if (NULLPTR != ppp::g_log_stream) {
+                            fflush(ppp::g_log_stream);
+                        }
+                        g_log_next_flush = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                        continue;
+                    }
                     record = std::move(g_log_queue.front());
                     g_log_queue.pop_front();
                     g_log_processing = true;
@@ -1380,8 +1396,31 @@ namespace ppp { namespace diagnostics {
     }
 
     void SetLogStream(FILE* stream) noexcept {
+        ExchangeLogStream(stream);
+    }
+
+    FILE* ExchangeLogStream(FILE* stream) noexcept {
         std::lock_guard<std::mutex> lock(g_log_output_mutex);
+        FILE* previous = ppp::g_log_stream;
         ppp::g_log_stream = stream;
+        g_log_next_flush = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        return previous;
+    }
+
+    FILE* TransformLogStream(const LogStreamTransformHandler& handler) noexcept {
+        if (NULLPTR == handler) return NULLPTR;
+        std::lock_guard<std::mutex> lock(g_log_output_mutex);
+        FILE* replacement = NULLPTR;
+        try {
+            replacement = handler(ppp::g_log_stream);
+        }
+        catch (...) {
+            replacement = NULLPTR;
+        }
+        if (NULLPTR == replacement) replacement = stdout;
+        ppp::g_log_stream = replacement;
+        g_log_next_flush = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        return replacement;
     }
 
     void LogPrintDesktop(const char* tag, const char* file, int line, const char* format, ...) noexcept {

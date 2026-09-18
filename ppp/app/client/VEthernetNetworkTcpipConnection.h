@@ -112,11 +112,18 @@ namespace ppp {
 
 #if defined(_LINUX)
                     connection_rinetd->ProtectorNetwork = switcher->GetProtectorNetwork();
+#elif defined(_WIN32)
+                    connection_rinetd->ProtectSocket = [switcher](intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
+                        return switcher->ProtectWindowsSocket(socket_handle, address);
+                    };
 #endif
 
                     bool run_ok = connection_rinetd->Open(remoteEP, y);
                     if (!run_ok) {
-                        return -1;
+                        // Protection rejection means the OS route could not be
+                        // proven to bypass the TUN. Do not attempt the unsafe
+                        // direct connect; tell the caller to use the tunnel.
+                        return connection_rinetd->WasSocketProtectionRejected() ? 1 : -1;
                     }
 
                     out = std::move(connection_rinetd);

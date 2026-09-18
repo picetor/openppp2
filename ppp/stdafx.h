@@ -963,6 +963,9 @@ namespace ppp {
         extern LogSinkHandler                           g_log_sink;
         void                                            SetLogSink(LogSinkHandler sink) noexcept;
         void                                            SetLogStream(FILE* stream) noexcept;
+        FILE*                                           ExchangeLogStream(FILE* stream) noexcept;
+        typedef FILE* (*LogStreamTransformHandler)(FILE* previous);
+        FILE*                                           TransformLogStream(const LogStreamTransformHandler& handler) noexcept;
         // Format and dispatch one desktop log line (time-prefixed output to
         // g_log_stream plus the g_log_sink hook).
         void                                            LogPrintDesktop(const char* tag, const char* file, int line, const char* format, ...) noexcept;

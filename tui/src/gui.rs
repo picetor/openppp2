@@ -4,7 +4,7 @@
 //! front-end owns its C++ core through the in-process C ABI. External loopback
 //! RPC remains available only for attaching to an already-running core.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
@@ -1091,12 +1091,11 @@ impl DesktopApp {
                 remove_command_argument(&mut args, "--bypass-nic6");
             }
         }
-        set_optional_if_not_default(
-            &mut args,
-            "--log-file",
-            &self.settings.log_file,
-            "./ppp-core.log",
-        );
+        remove_command_argument(&mut args, "--log-file");
+        if normalize_log_level(&self.settings.log_level) != "none" &&
+            !self.settings.log_file.trim().is_empty() {
+            set_command_argument(&mut args, "--log-file", self.settings.log_file.trim());
+        }
         set_command_argument(&mut args, "--log-level", &self.settings.log_level);
         args
     }
@@ -1136,7 +1135,7 @@ impl DesktopApp {
 
     fn launch_core_with_args(
         &mut self,
-        args: Vec<String>,
+        mut args: Vec<String>,
         catalog_core: bool,
         view: View,
         status: &str,
@@ -1153,6 +1152,19 @@ impl DesktopApp {
                 display_path_string(&working_dir)
             ));
             return;
+        }
+
+        match validate_core_log_path(&self.settings) {
+            Ok(Some(path)) => {
+                let absolute = display_path_string(&path);
+                self.settings.log_file = absolute.clone();
+                set_command_argument(&mut args, "--log-file", &absolute);
+            }
+            Ok(None) => remove_command_argument(&mut args, "--log-file"),
+            Err(error) => {
+                self.error = Some(format!("核心日志路径校验失败: {error:#}"));
+                return;
+            }
         }
 
         let (tx, rx) = channel();
@@ -4173,6 +4185,36 @@ fn resolve_from_working_dir(base: &Path, value: &str) -> PathBuf {
     }
 }
 
+fn validate_core_log_path(settings: &StartupSettings) -> anyhow::Result<Option<PathBuf>> {
+    if normalize_log_level(&settings.log_level) == "none" {
+        return Ok(None);
+    }
+
+    let configured = settings.log_file.trim();
+    if configured.is_empty() {
+        anyhow::bail!("核心日志已启用，但日志文件路径为空");
+    }
+
+    let candidate = resolve_from_working_dir(&working_directory(settings), configured);
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("核心日志路径没有文件名: {}", candidate.display()))?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("核心日志路径没有父目录: {}", candidate.display()))?;
+    if !parent.is_dir() {
+        anyhow::bail!("核心日志父目录不存在: {}", parent.display());
+    }
+
+    let absolute = fs::canonicalize(parent)?.join(file_name);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&absolute)
+        .map_err(|error| anyhow::anyhow!("核心日志文件不可写 {}: {error}", absolute.display()))?;
+    Ok(Some(absolute))
+}
+
 fn relative_path_string(base: &Path, path: &Path) -> String {
     if let Ok(relative) = path.strip_prefix(base) {
         let text = path_to_forward_slashes(relative);
@@ -4790,6 +4832,22 @@ mod tests {
         assert_eq!(
             command_value(&args, "--log-level").as_deref(),
             Some("debug")
+        );
+    }
+
+    #[test]
+    fn default_core_log_file_is_always_forwarded() {
+        let settings = StartupSettings::default();
+        let mut args = Vec::new();
+        let core_log_file = if settings.log_file.trim().is_empty() {
+            "./ppp-core.log"
+        } else {
+            settings.log_file.trim()
+        };
+        set_command_argument(&mut args, "--log-file", core_log_file);
+        assert_eq!(
+            command_value(&args, "--log-file").as_deref(),
+            Some("./ppp-core.log")
         );
     }
 

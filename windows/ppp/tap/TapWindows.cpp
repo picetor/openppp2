@@ -5,9 +5,16 @@
 #include <windows/ppp/tap/tap-windows.h>
 
 #include <ppp/io/File.h>
+#include <ppp/ipv6/IPv6Packet.h>
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
+#include <ppp/net/native/checksum.h>
+#include <ppp/net/native/icmp.h>
+#include <ppp/net/native/ip.h>
+#include <ppp/net/native/tcp.h>
+#include <ppp/net/native/udp.h>
 #include <ppp/text/Encoding.h>
+#include <ppp/threading/Executors.h>
 
 #include <windows/ppp/tap/WintunAdapter.h>
 
@@ -31,6 +38,521 @@ namespace ppp
     {
         static ppp::string TapWindows_FindComponentId(const ppp::string& key, ppp::win32::network::NetworkInterfacePtr& network_interface) noexcept;
         static std::atomic<TapWindows::DriverMode> TAP_WINDOWS_DRIVER_MODE(TapWindows::DriverMode::Auto);
+        static std::atomic<bool> TAP_WINDOWS_DATAPLANE_TRACE(false);
+
+        struct TapWindowsInputTrace final
+        {
+            TapWindows* owner = NULLPTR;
+            const void* packet = NULLPTR;
+            int packet_size = 0;
+            uint64_t flow_id = 0;
+            uint64_t started_at = 0;
+        };
+
+        static thread_local TapWindowsInputTrace TAP_WINDOWS_INPUT_TRACE;
+
+        struct WintunIpv6TransportView final
+        {
+            const Byte* payload = NULLPTR;
+            int payload_length = 0;
+            int offset = 0;
+            Byte protocol = 0;
+            bool checksum_verifiable = false;
+            unsigned int fragment_flags = 0;
+        };
+
+        static bool LocateWintunIpv6Transport(const Byte* packet, int packet_size,
+            WintunIpv6TransportView& view) noexcept
+        {
+            if (NULLPTR == packet || packet_size < 40 || (packet[0] >> 4) != 6)
+            {
+                return false;
+            }
+
+            int cursor = 40;
+            Byte next_header = packet[6];
+            int extension_count = 0;
+            bool fragmented = false;
+            bool fragment_seen = false;
+            unsigned int fragment_flags = 0;
+            for (;;)
+            {
+                if (next_header == 0 || next_header == 43 || next_header == 60 || next_header == 51)
+                {
+                    if (++extension_count > 8 || cursor + 2 > packet_size)
+                    {
+                        return false;
+                    }
+                    const int extension_length = next_header == 51 ?
+                        (static_cast<int>(packet[cursor + 1]) + 2) * 4 :
+                        (static_cast<int>(packet[cursor + 1]) + 1) * 8;
+                    if (extension_length < 8 || cursor + extension_length > packet_size)
+                    {
+                        return false;
+                    }
+                    next_header = packet[cursor];
+                    cursor += extension_length;
+                    continue;
+                }
+                if (next_header == 44)
+                {
+                    if (fragment_seen || ++extension_count > 8 || cursor + 8 > packet_size)
+                    {
+                        return false;
+                    }
+                    fragment_seen = true;
+                    fragment_flags =
+                        (static_cast<unsigned int>(packet[cursor + 2]) << 8) |
+                        static_cast<unsigned int>(packet[cursor + 3]);
+                    if ((fragment_flags & 0x0006U) != 0)
+                    {
+                        return false;
+                    }
+                    fragmented = (fragment_flags & 0xfff9U) != 0;
+                    next_header = packet[cursor];
+                    cursor += 8;
+                    continue;
+                }
+                break;
+            }
+
+            if (cursor > packet_size)
+            {
+                return false;
+            }
+            view.payload = packet + cursor;
+            view.payload_length = packet_size - cursor;
+            view.offset = cursor;
+            view.protocol = next_header;
+            view.checksum_verifiable = !fragmented &&
+                (next_header == IPPROTO_UDP || next_header == IPPROTO_TCP || next_header == IPPROTO_ICMPV6);
+            view.fragment_flags = fragment_flags;
+            return true;
+        }
+
+        static ppp::string BuildWintunCorrelationKey(const void* packet, int packet_size) noexcept
+        {
+            if (NULLPTR == packet || packet_size < 1)
+            {
+                return ppp::string();
+            }
+            const Byte* bytes = static_cast<const Byte*>(packet);
+            const int version = bytes[0] >> 4;
+            try
+            {
+                if (version == 4 && packet_size >= ppp::net::native::ip_hdr::IP_HLEN)
+                {
+                    const ppp::net::native::ip_hdr* ip =
+                        reinterpret_cast<const ppp::net::native::ip_hdr*>(packet);
+                    const int header_length = (ip->v_hl & 0x0f) << 2;
+                    if (header_length < ppp::net::native::ip_hdr::IP_HLEN ||
+                        header_length > packet_size || ntohs(ip->len) != packet_size ||
+                        (ntohs(ip->flags) & (ppp::net::native::ip_hdr::IP_MF |
+                            ppp::net::native::ip_hdr::IP_OFFMASK)) != 0)
+                    {
+                        return ppp::string();
+                    }
+                    const Byte* transport = bytes + header_length;
+                    const int transport_length = packet_size - header_length;
+                    uint32_t source = ip->src;
+                    uint32_t destination = ip->dest;
+                    char key[256];
+                    if (ip->proto == IPPROTO_ICMP && transport_length >= 8 &&
+                        (transport[0] == 0 || transport[0] == 8))
+                    {
+                        if (transport[0] == 0)
+                        {
+                            std::swap(source, destination);
+                        }
+                        uint16_t identifier = 0;
+                        uint16_t sequence = 0;
+                        memcpy(&identifier, transport + 4, sizeof(identifier));
+                        memcpy(&sequence, transport + 6, sizeof(sequence));
+                        snprintf(key, sizeof(key), "icmp|4|%u|%u|%u|%u",
+                            (unsigned int)source, (unsigned int)destination,
+                            (unsigned int)ntohs(identifier), (unsigned int)ntohs(sequence));
+                        return key;
+                    }
+                    if (ip->proto == IPPROTO_UDP && transport_length >= 20)
+                    {
+                        uint16_t source_port = 0;
+                        uint16_t destination_port = 0;
+                        uint16_t transaction_id = 0;
+                        uint16_t dns_flags = 0;
+                        memcpy(&source_port, transport, sizeof(source_port));
+                        memcpy(&destination_port, transport + 2, sizeof(destination_port));
+                        if (ntohs(source_port) != PPP_DNS_SYS_PORT &&
+                            ntohs(destination_port) != PPP_DNS_SYS_PORT)
+                        {
+                            return ppp::string();
+                        }
+                        memcpy(&transaction_id, transport + 8, sizeof(transaction_id));
+                        memcpy(&dns_flags, transport + 10, sizeof(dns_flags));
+                        if ((ntohs(dns_flags) & 0x8000U) != 0)
+                        {
+                            std::swap(source, destination);
+                            std::swap(source_port, destination_port);
+                        }
+                        snprintf(key, sizeof(key), "dns|4|%u|%u|%u|%u|%u",
+                            (unsigned int)source, (unsigned int)ntohs(source_port),
+                            (unsigned int)destination, (unsigned int)ntohs(destination_port),
+                            (unsigned int)ntohs(transaction_id));
+                        return key;
+                    }
+                    return ppp::string();
+                }
+                if (version == 6 && packet_size >= 40)
+                {
+                    uint16_t payload_length = 0;
+                    memcpy(&payload_length, bytes + 4, sizeof(payload_length));
+                    if (40 + ntohs(payload_length) != packet_size)
+                    {
+                        return ppp::string();
+                    }
+                    WintunIpv6TransportView view;
+                    if (!LocateWintunIpv6Transport(bytes, packet_size, view) ||
+                        !view.checksum_verifiable)
+                    {
+                        return ppp::string();
+                    }
+                    boost::asio::ip::address_v6::bytes_type source_bytes;
+                    boost::asio::ip::address_v6::bytes_type destination_bytes;
+                    memcpy(source_bytes.data(), bytes + 8, source_bytes.size());
+                    memcpy(destination_bytes.data(), bytes + 24, destination_bytes.size());
+                    boost::asio::ip::address_v6 source(source_bytes);
+                    boost::asio::ip::address_v6 destination(destination_bytes);
+                    const Byte* transport = view.payload;
+                    char key[512];
+                    if (view.protocol == IPPROTO_ICMPV6 && view.payload_length >= 8 &&
+                        (transport[0] == 128 || transport[0] == 129))
+                    {
+                        if (transport[0] == 129)
+                        {
+                            std::swap(source, destination);
+                        }
+                        uint16_t identifier = 0;
+                        uint16_t sequence = 0;
+                        memcpy(&identifier, transport + 4, sizeof(identifier));
+                        memcpy(&sequence, transport + 6, sizeof(sequence));
+                        snprintf(key, sizeof(key), "icmp|6|%s|%s|%u|%u",
+                            source.to_string().c_str(), destination.to_string().c_str(),
+                            (unsigned int)ntohs(identifier), (unsigned int)ntohs(sequence));
+                        return key;
+                    }
+                    if (view.protocol == IPPROTO_UDP && view.payload_length >= 20)
+                    {
+                        uint16_t source_port = 0;
+                        uint16_t destination_port = 0;
+                        uint16_t transaction_id = 0;
+                        uint16_t dns_flags = 0;
+                        memcpy(&source_port, transport, sizeof(source_port));
+                        memcpy(&destination_port, transport + 2, sizeof(destination_port));
+                        if (ntohs(source_port) != PPP_DNS_SYS_PORT &&
+                            ntohs(destination_port) != PPP_DNS_SYS_PORT)
+                        {
+                            return ppp::string();
+                        }
+                        memcpy(&transaction_id, transport + 8, sizeof(transaction_id));
+                        memcpy(&dns_flags, transport + 10, sizeof(dns_flags));
+                        if ((ntohs(dns_flags) & 0x8000U) != 0)
+                        {
+                            std::swap(source, destination);
+                            std::swap(source_port, destination_port);
+                        }
+                        snprintf(key, sizeof(key), "dns|6|%s|%u|%s|%u|%u",
+                            source.to_string().c_str(), (unsigned int)ntohs(source_port),
+                            destination.to_string().c_str(), (unsigned int)ntohs(destination_port),
+                            (unsigned int)ntohs(transaction_id));
+                        return key;
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+            return ppp::string();
+        }
+
+        static void LogWintunTraceStage(const char* stage, uint64_t flow_id,
+            const void* packet, int packet_size, int interface_index, int mtu,
+            uint64_t started_at, uint64_t stage_count, int error_code = 0,
+            const char* route_origin = "remote", const char* route_action = "inject",
+            int outbound = 0) noexcept
+        {
+            if (NULLPTR == stage || NULLPTR == packet || packet_size < 1)
+            {
+                return;
+            }
+
+            const Byte* bytes = static_cast<const Byte*>(packet);
+            const int version = bytes[0] >> 4;
+            int protocol = 0;
+            int ip_header_length = 0;
+            int ttl = 0;
+            unsigned int flags = 0;
+            unsigned int ip_checksum = 0;
+            unsigned int transport_checksum = 0;
+            unsigned int src_port = 0;
+            unsigned int dst_port = 0;
+            int dns_transaction_id = -1;
+            int icmp_type = -1;
+            int icmp_code = -1;
+            int icmp_identifier = -1;
+            int icmp_sequence = -1;
+            bool transport_fields_available = true;
+            std::string src_ip = "<invalid>";
+            std::string dst_ip = "<invalid>";
+
+            try
+            {
+                if (version == 4 && packet_size >= ppp::net::native::ip_hdr::IP_HLEN)
+                {
+                    const ppp::net::native::ip_hdr* ip =
+                        reinterpret_cast<const ppp::net::native::ip_hdr*>(packet);
+                    protocol = ip->proto;
+                    ip_header_length = (ip->v_hl & 0x0f) << 2;
+                    ttl = ip->ttl;
+                    flags = ntohs(ip->flags);
+                    transport_fields_available =
+                        (flags & (ppp::net::native::ip_hdr::IP_MF |
+                            ppp::net::native::ip_hdr::IP_OFFMASK)) == 0;
+                    ip_checksum = ntohs(ip->chksum);
+                    src_ip = boost::asio::ip::address_v4(ntohl(ip->src)).to_string();
+                    dst_ip = boost::asio::ip::address_v4(ntohl(ip->dest)).to_string();
+                }
+                elif(version == 6 && packet_size >= 40)
+                {
+                    boost::asio::ip::address_v6::bytes_type source_bytes;
+                    boost::asio::ip::address_v6::bytes_type destination_bytes;
+                    memcpy(source_bytes.data(), bytes + 8, source_bytes.size());
+                    memcpy(destination_bytes.data(), bytes + 24, destination_bytes.size());
+                    WintunIpv6TransportView transport_view;
+                    if (LocateWintunIpv6Transport(bytes, packet_size, transport_view))
+                    {
+                        protocol = transport_view.protocol;
+                        ip_header_length = transport_view.offset;
+                        flags = transport_view.fragment_flags;
+                        transport_fields_available = transport_view.checksum_verifiable;
+                    }
+                    else
+                    {
+                        protocol = bytes[6];
+                        ip_header_length = 40;
+                    }
+                    ttl = bytes[7];
+                    src_ip = boost::asio::ip::address_v6(source_bytes).to_string();
+                    dst_ip = boost::asio::ip::address_v6(destination_bytes).to_string();
+                }
+            }
+            catch (...)
+            {
+                src_ip = "<invalid>";
+                dst_ip = "<invalid>";
+            }
+
+            if (transport_fields_available && ip_header_length > 0 &&
+                packet_size >= ip_header_length + 4)
+            {
+                const Byte* transport = bytes + ip_header_length;
+                const int transport_length = packet_size - ip_header_length;
+                if (protocol == IPPROTO_UDP || protocol == IPPROTO_TCP)
+                {
+                    uint16_t source = 0;
+                    uint16_t destination = 0;
+                    memcpy(&source, transport, sizeof(source));
+                    memcpy(&destination, transport + 2, sizeof(destination));
+                    src_port = ntohs(source);
+                    dst_port = ntohs(destination);
+                    const int checksum_offset = protocol == IPPROTO_UDP ? 6 : 16;
+                    if (transport_length >= checksum_offset + 2)
+                    {
+                        uint16_t checksum = 0;
+                        memcpy(&checksum, transport + checksum_offset, sizeof(checksum));
+                        transport_checksum = ntohs(checksum);
+                    }
+                    if (protocol == IPPROTO_UDP && transport_length >= 10 &&
+                        (src_port == PPP_DNS_SYS_PORT || dst_port == PPP_DNS_SYS_PORT))
+                    {
+                        uint16_t transaction_id = 0;
+                        memcpy(&transaction_id, transport + 8, sizeof(transaction_id));
+                        dns_transaction_id = ntohs(transaction_id);
+                    }
+                }
+                elif(protocol == IPPROTO_ICMP || protocol == IPPROTO_ICMPV6)
+                {
+                    icmp_type = transport[0];
+                    icmp_code = transport[1];
+                    uint16_t checksum = 0;
+                    memcpy(&checksum, transport + 2, sizeof(checksum));
+                    transport_checksum = ntohs(checksum);
+                    const bool echo = protocol == IPPROTO_ICMP ?
+                        (icmp_type == 0 || icmp_type == 8) :
+                        (icmp_type == 128 || icmp_type == 129);
+                    if (echo && transport_length >= 8)
+                    {
+                        uint16_t identifier = 0;
+                        uint16_t sequence = 0;
+                        memcpy(&identifier, transport + 4, sizeof(identifier));
+                        memcpy(&sequence, transport + 6, sizeof(sequence));
+                        icmp_identifier = ntohs(identifier);
+                        icmp_sequence = ntohs(sequence);
+                    }
+                }
+            }
+
+            NET_LUID luid = {};
+            const DWORD luid_error = interface_index < 0 ? ERROR_INVALID_PARAMETER :
+                ::ConvertInterfaceIndexToLuid((NET_IFINDEX)interface_index, &luid);
+            const uint64_t elapsed = ppp::threading::Executors::GetTickCount() - started_at;
+            LOG_DEBUG("DATAPLANE %s flow_id=%llu protocol=%d address_family=%d src_ip=%s src_port=%u dst_ip=%s dst_port=%u packet_length=%d ip_header_length=%d ttl=%d flags=0x%x ip_checksum=0x%04x transport_checksum=0x%04x dns_transaction_id=%d icmp_type=%d icmp_code=%d icmp_identifier=%d icmp_sequence=%d interface_index=%d interface_luid=%llu luid_error=%lu route_origin=%s route_action=%s outbound=%d error_code=%d elapsed_ms=%llu mtu=%d stage_count=%llu",
+                stage, (unsigned long long)flow_id, protocol, version,
+                src_ip.c_str(), src_port, dst_ip.c_str(), dst_port,
+                packet_size, ip_header_length, ttl, flags, ip_checksum,
+                transport_checksum, dns_transaction_id, icmp_type, icmp_code,
+                icmp_identifier, icmp_sequence, interface_index,
+                luid_error == NO_ERROR ? (unsigned long long)luid.Value : 0ULL,
+                (unsigned long)luid_error,
+                NULLPTR != route_origin ? route_origin : "unknown",
+                NULLPTR != route_action ? route_action : "unknown",
+                outbound, error_code, (unsigned long long)elapsed,
+                mtu, (unsigned long long)stage_count);
+        }
+
+        static bool ValidateWintunInjectionPacket(const void* packet, int packet_size, int mtu,
+            uint32_t expected_ipv4, const boost::asio::ip::address& expected_ipv6) noexcept
+        {
+            if (NULLPTR == packet || packet_size < 1 || packet_size > mtu)
+            {
+                return false;
+            }
+
+            const Byte* bytes = static_cast<const Byte*>(packet);
+            const int version = bytes[0] >> 4;
+            if (version == 4)
+            {
+                if (packet_size < ppp::net::native::ip_hdr::IP_HLEN)
+                {
+                    return false;
+                }
+                const ppp::net::native::ip_hdr* ip =
+                    reinterpret_cast<const ppp::net::native::ip_hdr*>(packet);
+                const int header_length = (ip->v_hl & 0x0f) << 2;
+                const int total_length = ntohs(ip->len);
+                if (header_length < ppp::net::native::ip_hdr::IP_HLEN ||
+                    header_length > packet_size || total_length != packet_size ||
+                    ppp::net::native::inet_chksum(const_cast<void*>(packet), header_length) != 0 ||
+                    expected_ipv4 == IPEndPoint::AnyAddress || ip->dest != expected_ipv4)
+                {
+                    return false;
+                }
+
+                Byte* transport = const_cast<Byte*>(bytes + header_length);
+                const int transport_length = packet_size - header_length;
+                const unsigned int fragment_flags = ntohs(ip->flags);
+                if ((fragment_flags &
+                    (ppp::net::native::ip_hdr::IP_MF | ppp::net::native::ip_hdr::IP_OFFMASK)) != 0)
+                {
+                    // A single fragment cannot validate a checksum covering the
+                    // reassembled transport segment. The IP header, length,
+                    // destination and MTU checks above still apply.
+                    return true;
+                }
+                if (ip->proto == ppp::net::native::ip_hdr::IP_PROTO_UDP)
+                {
+                    if (transport_length < (int)sizeof(ppp::net::native::udp_hdr))
+                    {
+                        return false;
+                    }
+                    ppp::net::native::udp_hdr* udp =
+                        reinterpret_cast<ppp::net::native::udp_hdr*>(transport);
+                    return ntohs(udp->len) == transport_length &&
+                        (udp->chksum == 0 ||
+                            ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_UDP,
+                                transport_length, ip->src, ip->dest) == 0);
+                }
+                if (ip->proto == ppp::net::native::ip_hdr::IP_PROTO_ICMP)
+                {
+                    return transport_length >= (int)sizeof(ppp::net::native::icmp_hdr) &&
+                        ppp::net::native::inet_chksum(transport, transport_length) == 0;
+                }
+                if (ip->proto == ppp::net::native::ip_hdr::IP_PROTO_TCP)
+                {
+                    return transport_length >= ppp::net::native::tcp_hdr::TCP_HLEN &&
+                        ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_TCP,
+                            transport_length, ip->src, ip->dest) == 0;
+                }
+                return true;
+            }
+            if (version == 6)
+            {
+                if (packet_size < 40)
+                {
+                    return false;
+                }
+                uint16_t payload_length = 0;
+                memcpy(&payload_length, bytes + 4, sizeof(payload_length));
+                if (40 + ntohs(payload_length) != packet_size ||
+                    !expected_ipv6.is_v6() || expected_ipv6.is_unspecified())
+                {
+                    return false;
+                }
+                const boost::asio::ip::address_v6::bytes_type expected =
+                    expected_ipv6.to_v6().to_bytes();
+                if (0 != memcmp(bytes + 24, expected.data(), expected.size()))
+                {
+                    return false;
+                }
+
+                WintunIpv6TransportView transport_view;
+                if (!LocateWintunIpv6Transport(bytes, packet_size, transport_view))
+                {
+                    return false;
+                }
+                const int transport_length = transport_view.payload_length;
+                const Byte next_header = transport_view.protocol;
+                if (next_header != IPPROTO_UDP && next_header != IPPROTO_TCP &&
+                    next_header != IPPROTO_ICMPV6)
+                {
+                    // Unknown upper-layer protocols are structurally valid but
+                    // do not have a checksum rule in this validator.
+                    return true;
+                }
+
+                if (!transport_view.checksum_verifiable)
+                {
+                    // A fragmented upper-layer packet requires reassembly before
+                    // its checksum can be checked. The extension chain and base
+                    // IPv6 invariants have already been validated.
+                    return true;
+                }
+                const int minimum = next_header == IPPROTO_UDP ? 8 :
+                    (next_header == IPPROTO_TCP ? 20 : 4);
+                if (transport_length < minimum)
+                {
+                    return false;
+                }
+                if (next_header == IPPROTO_UDP)
+                {
+                    uint16_t udp_length = 0;
+                    uint16_t udp_checksum = 0;
+                    memcpy(&udp_length, transport_view.payload + 4, sizeof(udp_length));
+                    memcpy(&udp_checksum, transport_view.payload + 6, sizeof(udp_checksum));
+                    if (ntohs(udp_length) != transport_length || udp_checksum == 0)
+                    {
+                        return false;
+                    }
+                }
+
+                boost::asio::ip::address_v6::bytes_type source_bytes;
+                memcpy(source_bytes.data(), bytes + 8, source_bytes.size());
+                const boost::asio::ip::address_v6 source(source_bytes);
+                const boost::asio::ip::address_v6 destination(expected);
+                return ppp::ipv6::ComputePseudoChecksum(
+                    const_cast<Byte*>(transport_view.payload), static_cast<unsigned int>(transport_length),
+                    source, destination, next_header) == 0;
+            }
+            return false;
+        }
 
         // Wintun creates a new interface while a previous TAP instance may
         // still retain the old IPv4 address.  AddIPAddress() reports
@@ -1057,39 +1579,315 @@ namespace ppp
         {
             if (wintun_)
             {
-                if (NULLPTR == packet || packet_size < 1)
-                {
-                    return true;
-                }
-
-                WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
-                if (!wintun->IsOpen())
-                {
-                    return false;
-                }
-
-                return wintun->SendPacket((uint8_t*)packet, packet_size);
+                const uint64_t flow_id = wintun_flow_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+                const uint64_t trace_started = ppp::threading::Executors::GetTickCount();
+                return OutputWintun(packet, packet_size, flow_id, trace_started);
             }
 
             return ITap::Output(packet, packet_size);
+        }
+
+        bool TapWindows::OutputWithTrace(const void* packet, int packet_size, const char* stage) noexcept
+        {
+            if (!wintun_)
+            {
+                return Output(packet, packet_size);
+            }
+
+            const uint64_t now = ppp::threading::Executors::GetTickCount();
+            TraceContext context;
+            const bool trace_enabled = GetDataplaneTrace();
+            bool correlated = false;
+            if (trace_enabled)
+            {
+                const ppp::string correlation_key = BuildWintunCorrelationKey(packet, packet_size);
+                correlated = !correlation_key.empty() && TakeWintunTrace(correlation_key, context);
+            }
+            const uint64_t flow_id = correlated ? context.flow_id :
+                wintun_flow_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t trace_started = correlated ? context.started_at : now;
+            const bool remote_rx = NULLPTR != stage && 0 == strcmp(stage, "REMOTE_RX");
+            const bool local_rx = NULLPTR != stage && 0 == strcmp(stage, "LOCAL_RX");
+            const uint64_t rx_count = remote_rx ?
+                wintun_remote_rx_packets_.fetch_add(1, std::memory_order_relaxed) + 1 :
+                (local_rx ? wintun_local_rx_packets_.fetch_add(1, std::memory_order_relaxed) + 1 : 0);
+            if (correlated && remote_rx)
+            {
+                wintun_correlated_remote_rx_packets_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (trace_enabled && NULLPTR != stage && *stage != '\0')
+            {
+                LogWintunTraceStage(stage, flow_id, packet, packet_size,
+                    GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                    trace_started, rx_count);
+            }
+            return OutputWintun(packet, packet_size, flow_id, trace_started);
+        }
+
+        bool TapWindows::TraceInputStage(const char* stage, const char* route_origin,
+            const char* route_action, int outbound, int error_code) noexcept
+        {
+            if (!wintun_ || NULLPTR == stage || *stage == '\0')
+            {
+                return false;
+            }
+
+            uint64_t count = 0;
+            if (0 == strcmp(stage, "POLICY_SELECTED"))
+            {
+                count = wintun_policy_selected_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+            }
+            elif(0 == strcmp(stage, "REMOTE_TX"))
+            {
+                count = wintun_remote_tx_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+            }
+            else
+            {
+                return false;
+            }
+
+            const TapWindowsInputTrace& trace = TAP_WINDOWS_INPUT_TRACE;
+            if (GetDataplaneTrace() && trace.owner == this && trace.flow_id != 0 &&
+                NULLPTR != trace.packet && trace.packet_size > 0)
+            {
+                LogWintunTraceStage(stage, trace.flow_id, trace.packet, trace.packet_size,
+                    GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                    trace.started_at, count, error_code, route_origin, route_action, outbound);
+            }
+            return true;
+        }
+
+        bool TapWindows::TracePacketStage(const void* packet, int packet_size,
+            const char* stage, const char* route_origin, const char* route_action,
+            int outbound, int error_code) noexcept
+        {
+            if (!wintun_ || NULLPTR == packet || packet_size < 1 ||
+                NULLPTR == stage || *stage == '\0')
+            {
+                return false;
+            }
+
+            uint64_t count = 0;
+            if (0 == strcmp(stage, "POLICY_SELECTED"))
+            {
+                count = wintun_policy_selected_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+            }
+            elif(0 == strcmp(stage, "REMOTE_TX"))
+            {
+                count = wintun_remote_tx_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+            }
+            else
+            {
+                return false;
+            }
+
+            if (!GetDataplaneTrace())
+            {
+                return true;
+            }
+            const ppp::string key = BuildWintunCorrelationKey(packet, packet_size);
+            TraceContext context;
+            if (key.empty() || !PeekWintunTrace(key, context))
+            {
+                return false;
+            }
+            LogWintunTraceStage(stage, context.flow_id, packet, packet_size,
+                GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                context.started_at, count, error_code, route_origin, route_action, outbound);
+            return true;
+        }
+
+        void TapWindows::OnInput(PacketInputEventArgs& e) noexcept
+        {
+            TapWindowsInputTrace previous_trace = TAP_WINDOWS_INPUT_TRACE;
+            bool trace_active = false;
+            if (wintun_)
+            {
+                const uint64_t count = wintun_tun_rx_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (GetDataplaneTrace() && NULLPTR != e.Packet && e.PacketLength > 0)
+                {
+                    const uint64_t flow_id = wintun_flow_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+                    const uint64_t now = ppp::threading::Executors::GetTickCount();
+                    const ppp::string key = BuildWintunCorrelationKey(e.Packet, e.PacketLength);
+                    if (!key.empty())
+                    {
+                        RememberWintunTrace(key, TraceContext{ flow_id, now, now + 60000 });
+                    }
+                    LogWintunTraceStage("TUN_RX", flow_id, e.Packet, e.PacketLength,
+                        GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                        now, count, 0, "local", "tunnel", 1);
+                    TAP_WINDOWS_INPUT_TRACE = TapWindowsInputTrace{
+                        this, e.Packet, e.PacketLength, flow_id, now };
+                    trace_active = true;
+                }
+            }
+            ITap::OnInput(e);
+            if (trace_active)
+            {
+                TAP_WINDOWS_INPUT_TRACE = previous_trace;
+            }
+        }
+
+        void TapWindows::RememberWintunTrace(const ppp::string& key,
+            const TraceContext& context) noexcept
+        {
+            if (key.empty() || context.flow_id == 0)
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> guard(wintun_trace_mutex_);
+            if (wintun_trace_contexts_.size() >= 8192)
+            {
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                for (auto iterator = wintun_trace_contexts_.begin(); iterator != wintun_trace_contexts_.end();)
+                {
+                    if (iterator->second.expires_at <= now)
+                    {
+                        iterator = wintun_trace_contexts_.erase(iterator);
+                    }
+                    else
+                    {
+                        ++iterator;
+                    }
+                }
+                if (wintun_trace_contexts_.size() >= 8192)
+                {
+                    wintun_trace_contexts_.erase(wintun_trace_contexts_.begin());
+                }
+            }
+            wintun_trace_contexts_[key] = context;
+        }
+
+        bool TapWindows::PeekWintunTrace(const ppp::string& key, TraceContext& context) noexcept
+        {
+            if (key.empty())
+            {
+                return false;
+            }
+            const uint64_t now = ppp::threading::Executors::GetTickCount();
+            std::lock_guard<std::mutex> guard(wintun_trace_mutex_);
+            auto iterator = wintun_trace_contexts_.find(key);
+            if (iterator == wintun_trace_contexts_.end())
+            {
+                return false;
+            }
+            if (iterator->second.expires_at <= now)
+            {
+                wintun_trace_contexts_.erase(iterator);
+                return false;
+            }
+            context = iterator->second;
+            return true;
+        }
+
+        bool TapWindows::TakeWintunTrace(const ppp::string& key, TraceContext& context) noexcept
+        {
+            if (key.empty())
+            {
+                return false;
+            }
+            const uint64_t now = ppp::threading::Executors::GetTickCount();
+            std::lock_guard<std::mutex> guard(wintun_trace_mutex_);
+            auto iterator = wintun_trace_contexts_.find(key);
+            if (iterator == wintun_trace_contexts_.end())
+            {
+                return false;
+            }
+            context = iterator->second;
+            wintun_trace_contexts_.erase(iterator);
+            return context.expires_at > now;
+        }
+
+        bool TapWindows::OutputWintun(const void* packet, int packet_size,
+            uint64_t flow_id, uint64_t trace_started) noexcept
+        {
+            if (NULLPTR == packet || packet_size < 1)
+            {
+                wintun_validate_failures_.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+
+            if (!ValidateWintunInjectionPacket(packet, packet_size,
+                    interface_mtu_.load(std::memory_order_relaxed), IPAddress, IPv6Address))
+            {
+                wintun_validate_failures_.fetch_add(1, std::memory_order_relaxed);
+                LogWintunFailure("WINTUN_VALIDATE_FAIL", flow_id, packet_size);
+                return false;
+            }
+
+            const uint64_t built_count =
+                wintun_built_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (GetDataplaneTrace())
+            {
+                LogWintunTraceStage("PACKET_BUILT", flow_id, packet, packet_size,
+                    GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                    trace_started, built_count);
+            }
+
+            WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
+            if (!wintun->IsOpen())
+            {
+                wintun_submit_failures_.fetch_add(1, std::memory_order_relaxed);
+                LogWintunFailure("WINTUN_SUBMIT_CLOSED", flow_id, packet_size);
+                return false;
+            }
+
+            bool allocated = false;
+            const bool submitted = wintun->SendPacket((uint8_t*)packet, packet_size, &allocated);
+            if (allocated)
+            {
+                const uint64_t allocated_count = wintun_allocated_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (GetDataplaneTrace())
+                {
+                    LogWintunTraceStage("WINTUN_ALLOCATED", flow_id, packet, packet_size,
+                        GetInterfaceIndex(), interface_mtu_.load(std::memory_order_relaxed),
+                        trace_started, allocated_count);
+                }
+            }
+            if (submitted)
+            {
+                const uint64_t count = wintun_submit_successes_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (GetDataplaneTrace())
+                {
+                    LogWintunTraceStage("WINTUN_SUBMITTED WINTUN_SUBMIT_OK", flow_id,
+                        packet, packet_size, GetInterfaceIndex(),
+                        interface_mtu_.load(std::memory_order_relaxed), trace_started, count);
+                }
+            }
+            else
+            {
+                wintun_submit_failures_.fetch_add(1, std::memory_order_relaxed);
+                LogWintunFailure("WINTUN_SUBMIT_FAIL", flow_id, packet_size);
+            }
+            return submitted;
+        }
+
+        void TapWindows::LogWintunFailure(const char* stage, uint64_t flow_id, int packet_size) noexcept
+        {
+            const uint64_t now = ppp::threading::Executors::GetTickCount();
+            uint64_t previous = wintun_error_log_last_ms_.load(std::memory_order_relaxed);
+            if (now >= previous + 1000 &&
+                wintun_error_log_last_ms_.compare_exchange_strong(previous, now, std::memory_order_relaxed))
+            {
+                const uint64_t suppressed = wintun_error_log_suppressed_.exchange(0, std::memory_order_relaxed);
+                LOG_ERROR("DATAPLANE %s flow_id=%llu bytes=%d mtu=%d suppressed=%llu",
+                    NULLPTR != stage ? stage : "WINTUN_FAILURE",
+                    (unsigned long long)flow_id,
+                    packet_size,
+                    interface_mtu_.load(std::memory_order_relaxed),
+                    (unsigned long long)suppressed);
+            }
+            else
+            {
+                wintun_error_log_suppressed_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         bool TapWindows::Output(const std::shared_ptr<Byte>& packet, int packet_size) noexcept
         {
             if (wintun_)
             {
-                if (NULLPTR == packet || packet_size < 1)
-                {
-                    return true;
-                }
-
-                WintunAdapter* wintun = static_cast<WintunAdapter*>(GetHandle());
-                if (!wintun->IsOpen())
-                {
-                    return false;
-                }
-
-                return wintun->SendPacket((uint8_t*)packet.get(), packet_size);
+                return Output(packet.get(), packet_size);
             }
 
             return ITap::Output(packet, packet_size);
@@ -1285,6 +2083,16 @@ namespace ppp
         TapWindows::DriverMode TapWindows::GetDriverMode() noexcept
         {
             return TAP_WINDOWS_DRIVER_MODE.load(std::memory_order_acquire);
+        }
+
+        void TapWindows::SetDataplaneTrace(bool value) noexcept
+        {
+            TAP_WINDOWS_DATAPLANE_TRACE.store(value, std::memory_order_release);
+        }
+
+        bool TapWindows::GetDataplaneTrace() noexcept
+        {
+            return TAP_WINDOWS_DATAPLANE_TRACE.load(std::memory_order_acquire);
         }
 
         ppp::string TapWindows::FindComponentId() noexcept
@@ -1555,7 +2363,12 @@ namespace ppp
                 return false;
             }
 
-            return ppp::win32::network::SetInterfaceMtuIpSubInterface(interface_index, mtu);
+            const bool result = ppp::win32::network::SetInterfaceMtuIpSubInterface(interface_index, mtu);
+            if (result)
+            {
+                interface_mtu_.store(ppp::net::native::ip_hdr::Mtu(mtu, false), std::memory_order_relaxed);
+            }
+            return result;
         }
 
         void TapWindows::Dispose() noexcept

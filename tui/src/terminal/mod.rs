@@ -32,7 +32,8 @@ use crate::core::command::{
 use crate::core::probe::{spawn_probe_loop, ProbeState, ProbeTable};
 use crate::core::server_catalog::{load_server_catalog, LocalServerProfile};
 use crate::core::settings::{
-    normalize_log_level, normalize_tcp_ip_cc, normalized_launch_mode, StartupSettings,
+    normalize_log_level, normalize_tcp_ip_cc, normalized_launch_mode, validate_core_log_path,
+    StartupSettings,
 };
 use crate::core::traffic::{format_bytes, format_rate, TrafficHistory};
 use crate::rpc::schema::{Outbound, Snapshot};
@@ -219,7 +220,19 @@ impl TerminalApp {
         self.launch_core_with_args(args, View::Overview, false);
     }
 
-    fn launch_core_with_args(&mut self, args: Vec<String>, view: View, catalog_core: bool) {
+    fn launch_core_with_args(&mut self, mut args: Vec<String>, view: View, catalog_core: bool) {
+        match validate_core_log_path(&self.settings) {
+            Ok(Some(path)) => {
+                let absolute = crate::core::settings::display_path_string(&path);
+                self.settings.log_file = absolute.clone();
+                set_command_argument(&mut args, "--log-file", &absolute);
+            }
+            Ok(None) => remove_command_argument(&mut args, "--log-file"),
+            Err(error) => {
+                self.error = Some(format!("核心日志路径校验失败: {error:#}"));
+                return;
+            }
+        }
         let (tx, rx) = channel();
         self.launch_rx = Some(rx);
         self.launching = true;
@@ -1254,12 +1267,10 @@ fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
             remove_command_argument(&mut args, "--bypass-nic6");
         }
     }
-    set_optional_if_not_default(
-        &mut args,
-        "--log-file",
-        &settings.log_file,
-        "./ppp-core.log",
-    );
+    remove_command_argument(&mut args, "--log-file");
+    if normalize_log_level(&settings.log_level) != "none" && !settings.log_file.trim().is_empty() {
+        set_command_argument(&mut args, "--log-file", settings.log_file.trim());
+    }
     set_command_argument(&mut args, "--log-level", &settings.log_level);
     args
 }
@@ -2227,6 +2238,13 @@ mod tests {
         assert!(has_arg(&args, "--proxy-socks-port=0"));
         assert!(!args.iter().any(|arg| arg.starts_with("--tun-ip")));
         assert!(!has_arg(&args, "--headless"));
+    }
+
+    #[test]
+    fn default_core_log_file_is_forwarded() {
+        let settings = StartupSettings::default();
+        let args = prepared_core_args(&settings);
+        assert!(has_arg(&args, "--log-file=./ppp-core.log"));
     }
 
     #[test]

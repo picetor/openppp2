@@ -7,6 +7,7 @@
 #include <ppp/auxiliary/StringAuxiliary.h>
 #include <ppp/transmissions/ITransmission.h>
 #include <ppp/transmissions/IWebsocketTransmission.h>
+#include <openssl/sha.h>
 
 #if !defined(_WIN32)
 #include <common/unix/UnixAfx.h>
@@ -156,10 +157,21 @@ namespace ppp {
             }
 
             static ppp::string LOGGER_GUID(Int128 guid) noexcept {
-                ppp::string s = "{";
-                s += ToUpper(ppp::auxiliary::StringAuxiliary::Int128ToGuidString(guid));
-                s += "}";
-                return s;
+                const ppp::string raw = ppp::auxiliary::StringAuxiliary::Int128ToGuidString(guid);
+                unsigned char digest[SHA256_DIGEST_LENGTH];
+                if (NULLPTR == SHA256(reinterpret_cast<const unsigned char*>(raw.data()), raw.size(), digest)) {
+                    return "{SESSION-REDACTED}";
+                }
+                static const char hex[] = "0123456789ABCDEF";
+                ppp::string pseudonym = "{SESSION-SHA256-";
+                // 96 bits keeps collision risk negligible for audit correlation
+                // without persisting the original session GUID.
+                for (int i = 0; i < 12; ++i) {
+                    pseudonym.push_back(hex[digest[i] >> 4]);
+                    pseudonym.push_back(hex[digest[i] & 0x0f]);
+                }
+                pseudonym += "}";
+                return pseudonym;
             }
 
             static ppp::string GetXForwardedFor(const std::shared_ptr<ppp::transmissions::ITransmission>& transmission, ppp::string* protocol) noexcept {

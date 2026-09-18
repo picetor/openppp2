@@ -379,6 +379,10 @@ namespace ppp {
             config.client.socks_proxy.port = PPP_DEFAULT_SOCKS_PROXY_PORT;
             config.client.socks_proxy.password = "";
             config.client.socks_proxy.username = "";
+            config.client.tun.mtu = 1400;
+            config.client.tun.mss_clamp = true;
+            config.client.tun.mss_v4 = 1360;
+            config.client.tun.mss_v6 = 1340;
 #if defined(_WIN32)
             config.client.paper_airplane.tcp = true;
 #endif
@@ -387,6 +391,7 @@ namespace ppp {
             config.client.log = "";
             config.client.proxy_only = false;
             config.client.routing.configured = false;
+            config.client.routing.route_origin_policy = true;
             config.client.routing.bypass.clear();
             config.client.routing.routes.clear();
             config.client.routing.dns_rules.clear();
@@ -1069,6 +1074,16 @@ namespace ppp {
             config.key.sb = std::min<int>(std::max<int>(0, PPP_BUFFER_SIZE - PPP_BUFFER_SIZE_SKATEBOARDING), std::max<int>(0, config.key.sb));
 
             config.client.bandwidth = std::max<int64_t>(0, config.client.bandwidth);
+            const int configured_tun_mtu = config.client.tun.mtu;
+            config.client.tun.mtu = std::max<int>(1280, std::min<int>(1500, config.client.tun.mtu));
+            if (configured_tun_mtu != config.client.tun.mtu) {
+                LOG_WARN("AppConfiguration::Loaded: client.tun.mtu=%d is unsafe; clamped to %d",
+                    configured_tun_mtu, config.client.tun.mtu);
+            }
+            config.client.tun.mss_v4 = std::max<int>(536,
+                std::min<int>(config.client.tun.mtu - 40, config.client.tun.mss_v4));
+            config.client.tun.mss_v6 = std::max<int>(1220,
+                std::min<int>(config.client.tun.mtu - 60, config.client.tun.mss_v6));
 
 
 
@@ -1616,6 +1631,27 @@ namespace ppp {
             config.client.socks_proxy.bind = JsonAuxiliary::AsValue<ppp::string>(json["client"]["socks-proxy"]["bind"]);
             config.client.socks_proxy.username = JsonAuxiliary::AsValue<ppp::string>(json["client"]["socks-proxy"]["username"]);
             config.client.socks_proxy.password = JsonAuxiliary::AsValue<ppp::string>(json["client"]["socks-proxy"]["password"]);
+            {
+                const Json::Value& tun_json = json["client"]["tun"];
+                if (tun_json.isObject()) {
+                    const bool mtu_present = !tun_json["mtu"].isNull();
+                    const bool mss_v4_present = !tun_json["mss-v4"].isNull();
+                    const bool mss_v6_present = !tun_json["mss-v6"].isNull();
+                    AssignIfPresent(config.client.tun.mtu, tun_json["mtu"]);
+                    AssignBoolIfPresent(config.client.tun.mss_clamp, tun_json["mss-clamp"]);
+                    AssignIfPresent(config.client.tun.mss_v4, tun_json["mss-v4"]);
+                    AssignIfPresent(config.client.tun.mss_v6, tun_json["mss-v6"]);
+                    // When MTU is supplied without an explicit MSS, derive the
+                    // ceiling from that MTU. Explicit MSS values remain valid
+                    // as lower user-selected ceilings and are normalized later.
+                    if (mtu_present && !mss_v4_present) {
+                        config.client.tun.mss_v4 = config.client.tun.mtu - 40;
+                    }
+                    if (mtu_present && !mss_v6_present) {
+                        config.client.tun.mss_v6 = config.client.tun.mtu - 60;
+                    }
+                }
+            }
 #if defined(_WIN32)
             AssignBoolIfPresent(config.client.paper_airplane.tcp, json["client"]["paper-airplane"]["tcp"]);
 #endif
@@ -1630,6 +1666,8 @@ namespace ppp {
                 const Json::Value& routing_json = json["client"]["routing"];
                 if (routing_json.isObject()) {
                     config.client.routing.configured = true;
+                    AssignBoolIfPresent(config.client.routing.route_origin_policy,
+                        routing_json["route-origin-policy"]);
                     config.client.routing.bypass.clear();
                     config.client.routing.routes.clear();
                     config.client.routing.dns_rules.clear();
@@ -1920,6 +1958,10 @@ namespace ppp {
             client["socks-proxy"]["port"] = config.client.socks_proxy.port;
             client["socks-proxy"]["password"] = config.client.socks_proxy.password;
             client["socks-proxy"]["username"] = config.client.socks_proxy.username;
+            client["tun"]["mtu"] = config.client.tun.mtu;
+            client["tun"]["mss-clamp"] = config.client.tun.mss_clamp;
+            client["tun"]["mss-v4"] = config.client.tun.mss_v4;
+            client["tun"]["mss-v6"] = config.client.tun.mss_v6;
             client["reconnections"]["timeout"] = config.client.reconnections.timeout;
             client["guid"] = config.client.guid;
             client["server"] = config.client.server;
@@ -1934,6 +1976,7 @@ namespace ppp {
             client["proxy-only"] = config.client.proxy_only;
             if (config.client.routing.configured) {
                 Json::Value routing(Json::objectValue);
+                routing["route-origin-policy"] = config.client.routing.route_origin_policy;
                 if (!config.client.routing.bypass.empty()) {
                     Json::Value bypass(Json::arrayValue);
                     for (const ppp::string& source : config.client.routing.bypass) {

@@ -666,10 +666,17 @@ namespace ppp {
                 if (NULLPTR != switcher_) {
                     std::shared_ptr<ppp::net::ProtectorNetwork> protector_network = switcher_->GetProtectorNetwork();
                     if (NULLPTR != protector_network) {
-                        protector = [protector_network](int sockfd) noexcept {
-                            return protector_network->Protect(sockfd);
+                        protector = [protector_network](intptr_t socket_handle, const boost::asio::ip::address&) noexcept {
+                            return protector_network->Protect((int)socket_handle);
                         };
                     }
+                }
+#elif defined(_WIN32)
+                if (NULLPTR != switcher_) {
+                    std::shared_ptr<VEthernetNetworkSwitcher> protector_switcher = switcher_;
+                    protector = [protector_switcher](intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
+                        return protector_switcher->ProtectWindowsSocket(socket_handle, address);
+                    };
                 }
 #endif
 
@@ -1323,10 +1330,17 @@ namespace ppp {
                     }
                 }
 #elif defined(_WIN32)
-                // Windows 不绑定物理网卡接口索引，依赖路由表防止环路。
-                // 原版 openppp2_main 没有 IP_UNICAST_IF 也能正常工作，
-                // 因为 AddRoute() 机制已经将 VPN 服务器 IP 通过物理网卡添加了特定路由。
-                // 移除 IP_UNICAST_IF 避免物理网卡索引变化（WiFi 重连、睡眠唤醒等）导致断流。
+                // A host route alone is not sufficient after Wi-Fi reconnect,
+                // sleep/resume or a stale route-table update. Bind the socket to
+                // the current physical interface and verify GetBestInterfaceEx
+                // before connect; fail closed rather than feeding the transport
+                // back into the TUN.
+                if (!remoteIP.is_loopback() && (NULLPTR == switcher_ ||
+                    !switcher_->ProtectWindowsSocket((intptr_t)socket->native_handle(), remoteIP))) {
+                    LOG_ERROR("VEthernetExchanger::OpenTransmission: Windows socket protection failed, remote=%s",
+                        remoteIP.to_string().c_str());
+                    return NULLPTR;
+                }
 #endif
 
                 boost::system::error_code connect_ec;
@@ -1656,6 +1670,8 @@ namespace ppp {
                                 reason == vmux::vmux_net::close_reason_m4_retransmit_exhausted;
 
                             if (integrity_rebuild) {
+                                mux_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+                                mux_generation_resets_.fetch_add(1, std::memory_order_relaxed);
                                 static constexpr uint64_t MUX_FAILURE_WINDOW_MS = 60 * 1000ULL;
                                 ppp::string failed_entry;
                                 int streak = 0;
@@ -1721,6 +1737,8 @@ namespace ppp {
                                 breaking = false;
                             }
                             else {
+                                 mux_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+                                 mux_generation_resets_.fetch_add(1, std::memory_order_relaxed);
                                  {
                                      SynchronizedObjectScope scope(syncobj_);
                                      mux_failure_entry_.clear();
@@ -2029,9 +2047,11 @@ namespace ppp {
 
                                     if (slot_ok) {
                                         ok_slots->fetch_add(1, std::memory_order_release);
+                                        mux_channel_opened_.fetch_add(1, std::memory_order_relaxed);
                                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d connected", i + 1, max_connections);
                                     }
                                     else {
+                                        mux_channel_open_failures_.fetch_add(1, std::memory_order_relaxed);
                                         LOG_DEBUG("VEthernetExchanger::MuxConnectAllLinklayers: linklayer %d/%d failed after %d attempts, closing mux", i + 1, max_connections, LINKLAYER_MAX_ATTEMPTS);
                                     }
 
@@ -2145,8 +2165,10 @@ namespace ppp {
                                     return true;
                                 });
                             if (!added) {
+                                mux_channel_open_failures_.fetch_add(1, std::memory_order_relaxed);
                                 break;
                             }
+                            mux_channel_opened_.fetch_add(1, std::memory_order_relaxed);
                         }
 
                         // Runtime growth is best-effort. The established base pool
@@ -2381,6 +2403,7 @@ namespace ppp {
             }
 
             void VEthernetExchanger::ResetMuxDataPlane() noexcept {
+                mux_generation_resets_.fetch_add(1, std::memory_order_relaxed);
                 std::shared_ptr<vmux::vmux_net> mux;
                 {
                     SynchronizedObjectScope scope(syncobj_);
@@ -3078,6 +3101,14 @@ namespace ppp {
                 static_echo_timeout_     = UINT64_MAX;
                 static_echo_session_id_  = 0;
                 static_echo_remote_port_ = IPEndPoint::MinPort;
+                static_echo_consecutive_failures_.store(0, std::memory_order_relaxed);
+                static_echo_degraded_until_.store(0, std::memory_order_relaxed);
+
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    static_echo_server_ep_balances_.clear();
+                    static_echo_server_ep_set_.clear();
+                }
 
                 static_echo_protocol_    = NULLPTR;
                 static_echo_transport_   = NULLPTR;
@@ -3093,6 +3124,11 @@ namespace ppp {
                     return false;
                 }
 
+                if (ppp::threading::Executors::GetTickCount() <
+                    static_echo_degraded_until_.load(std::memory_order_relaxed)) {
+                    return false;
+                }
+
                 return socket->is_open() && static_echo_timeout_ != 0 && static_echo_session_id_ != 0 && static_echo_remote_port_ != 0;
             }
 
@@ -3101,12 +3137,28 @@ namespace ppp {
                     return false;
                 }
 
-                if (static_echo_timeout_ != UINT64_MAX && switcher_->StaticMode(NULLPTR)) {
+                const AppConfigurationPtr configuration = GetConfiguration();
+                const bool static_echo_enabled = NULLPTR != configuration &&
+                    (switcher_->StaticMode(NULLPTR) || configuration->udp.static_.icmp);
+                if (static_echo_timeout_ != UINT64_MAX && static_echo_enabled) {
                     UInt64 now = ppp::threading::Executors::GetTickCount();
                     if (now >= static_echo_timeout_) {
                         if (static_echo_input_) {
                             static_echo_input_ = false;
                             return StaticEchoNextTimeout();
+                        }
+
+                        static_echo_response_timeouts_.fetch_add(1, std::memory_order_relaxed);
+                        const uint32_t failures =
+                            static_echo_consecutive_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (failures >= 3) {
+                            uint64_t degraded_until = static_echo_degraded_until_.load(std::memory_order_relaxed);
+                            if (now >= degraded_until &&
+                                static_echo_degraded_until_.compare_exchange_strong(
+                                    degraded_until, now + 30000, std::memory_order_relaxed)) {
+                                LOG_WARN("VEthernetExchanger::StaticEchoSwapAsynchronousSocket: channel degraded for 30000ms after %u consecutive send/response failures",
+                                    failures);
+                            }
                         }
 
                         std::shared_ptr<StaticEchoDatagarmSocket> socket = std::move(static_echo_sockets_[0]);
@@ -3159,7 +3211,6 @@ namespace ppp {
                             return false;
                         }
 
-                        auto configuration = GetConfiguration();
                         auto allocator = configuration->GetBufferAllocator();
                         static_echo_sockets_[1] = socket;
 
@@ -3394,19 +3445,48 @@ namespace ppp {
                     }
                 }
                 if (int serverPort = serverEP.port(); serverPort > IPEndPoint::MinPort && serverPort <= IPEndPoint::MaxPort) {
+                    // Accept responses only from endpoints to which this
+                    // session actually sent. This also covers dynamically
+                    // selected aggligator endpoints.
+                    {
+                        SynchronizedObjectScope scope(syncobj_);
+                        static_echo_server_ep_set_.emplace(Ipep::V4ToV6(serverEP));
+                    }
                     std::shared_ptr<ppp::transmissions::ITransmissionStatistics> statistics = switcher_->GetStatistics();
-                    boost::asio::post(socket->get_executor(),
-                        [statistics, socket, packet, packet_length, serverEP]() noexcept {
-                            boost::system::error_code ec;
-                            socket->send_to(boost::asio::buffer(packet.get(), packet_length), serverEP,
-                                boost::asio::socket_base::message_end_of_record, ec);
+                    boost::system::error_code ec;
+                    std::size_t sent = 0;
+                    {
+                        SynchronizedObjectScope scope(static_echo_send_syncobj_);
+                        if (!socket->is_open()) {
+                            static_echo_send_errors_.fetch_add(1, std::memory_order_relaxed);
+                            return false;
+                        }
+                        sent = socket->send_to(boost::asio::buffer(packet.get(), packet_length), serverEP,
+                            boost::asio::socket_base::message_end_of_record, ec);
+                    }
 
-                            if (ec == boost::system::errc::success) {
-                                if (NULLPTR != statistics) {
-                                    statistics->AddOutgoingTraffic(packet_length);
-                                }
+                    if (ec || sent != (std::size_t)packet_length) {
+                        static_echo_send_errors_.fetch_add(1, std::memory_order_relaxed);
+                        const uint32_t failures = static_echo_consecutive_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (failures >= 3) {
+                            const uint64_t now = ppp::threading::Executors::GetTickCount();
+                            uint64_t degraded_until = static_echo_degraded_until_.load(std::memory_order_relaxed);
+                            if (now >= degraded_until &&
+                                static_echo_degraded_until_.compare_exchange_strong(
+                                    degraded_until, now + 30000, std::memory_order_relaxed)) {
+                                LOG_WARN("VEthernetExchanger::StaticEchoPacketToRemoteExchanger: channel degraded for 30000ms after %u failures",
+                                    failures);
                             }
-                        });
+                        }
+                        return false;
+                    }
+
+                    static_echo_send_packets_.fetch_add(1, std::memory_order_relaxed);
+                    // A successful send is not proof of channel recovery.
+                    // Only a validated response below may clear degraded.
+                    if (NULLPTR != statistics) {
+                        statistics->AddOutgoingTraffic(packet_length);
+                    }
                     return true;
                 }
 
@@ -3447,8 +3527,6 @@ namespace ppp {
                 }
 
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = configuration->GetBufferAllocator();
-                static_echo_input_ = true;
-
                 if (packet->Protocol == ppp::net::native::ip_hdr::IP_PROTO_UDP) {
                     auto tap = switcher_->GetTap();
                     if (NULLPTR == tap) {
@@ -3497,8 +3575,12 @@ namespace ppp {
                     if (frame->ProtocolType == ppp::net::native::ip_hdr::IP_PROTO_ICMP) {
                         if (frame->Source == IPEndPoint::LoopbackAddress) {
                             int ack_id = ntohl(frame->Destination);
-                            if (ack_id == 0 || ack_id == STATIC_ECHO_KEEP_ALIVED_ID) {
+                            if (ack_id == 0) {
                                 return false;
+                            }
+
+                            if (ack_id == STATIC_ECHO_KEEP_ALIVED_ID) {
+                                return true;
                             }
 
                             return switcher_->ERORTE(ack_id);
@@ -3512,12 +3594,44 @@ namespace ppp {
                 }
             }
 
-            int VEthernetExchanger::StaticEchoYieldReceiveForm(Byte* incoming_packet, int incoming_traffic) noexcept {
-                std::shared_ptr<VirtualEthernetPacket> packet = StaticEchoReadPacket(incoming_packet, incoming_traffic);
-                if (NULLPTR != packet) {
-                    StaticEchoPacketInput(packet);
+            int VEthernetExchanger::StaticEchoYieldReceiveForm(
+                const boost::asio::ip::udp::endpoint& source_ep,
+                Byte* incoming_packet, int incoming_traffic) noexcept {
+                const boost::asio::ip::udp::endpoint normalized_source = Ipep::V4ToV6(source_ep);
+                {
+                    SynchronizedObjectScope scope(syncobj_);
+                    if (static_echo_server_ep_set_.find(normalized_source) == static_echo_server_ep_set_.end()) {
+                        static_echo_source_rejected_.fetch_add(1, std::memory_order_relaxed);
+                        return 0;
+                    }
                 }
 
+                std::shared_ptr<VirtualEthernetPacket> packet = StaticEchoReadPacket(incoming_packet, incoming_traffic);
+                if (NULLPTR == packet) {
+                    static_echo_unpack_errors_.fetch_add(1, std::memory_order_relaxed);
+                    return 0;
+                }
+
+                if (packet->Id != static_echo_session_id_) {
+                    static_echo_session_mismatch_.fetch_add(1, std::memory_order_relaxed);
+                    return 0;
+                }
+
+                if (packet->Protocol != ppp::net::native::ip_hdr::IP_PROTO_UDP &&
+                    packet->Protocol != ppp::net::native::ip_hdr::IP_PROTO_IP) {
+                    static_echo_unpack_errors_.fetch_add(1, std::memory_order_relaxed);
+                    return 0;
+                }
+
+                if (!StaticEchoPacketInput(packet)) {
+                    static_echo_output_failed_.fetch_add(1, std::memory_order_relaxed);
+                    return 0;
+                }
+
+                static_echo_input_ = true;
+                static_echo_receive_packets_.fetch_add(1, std::memory_order_relaxed);
+                static_echo_consecutive_failures_.store(0, std::memory_order_relaxed);
+                static_echo_degraded_until_.store(0, std::memory_order_relaxed);
                 auto statistics = switcher_->GetStatistics(); 
                 if (NULLPTR != statistics) {
                     statistics->AddIncomingTraffic(incoming_traffic);
@@ -3561,15 +3675,33 @@ namespace ppp {
                     return false;
                 }
 
+                auto configuration = GetConfiguration();
+                if (NULLPTR == configuration) {
+                    return false;
+                }
+
+                std::shared_ptr<Byte> receive_buffer = ppp::threading::BufferswapAllocator::MakeByteArray(
+                    configuration->GetBufferAllocator(), PPP_BUFFER_SIZE);
+                std::shared_ptr<boost::asio::ip::udp::endpoint> source_ep =
+                    ppp::make_shared_object<boost::asio::ip::udp::endpoint>();
+                if (NULLPTR == receive_buffer || NULLPTR == source_ep) {
+                    static_echo_receive_errors_.fetch_add(1, std::memory_order_relaxed);
+                    return false;
+                }
+
                 auto self = shared_from_this();
                 if (std::shared_ptr<ppp::transmissions::ITransmissionQoS> qos = switcher_->GetQoS(); NULLPTR != qos) {
                     return qos->BeginRead(
-                        [self, this, socket, qos]() noexcept {
-                            socket->async_receive_from(boost::asio::buffer(buffer_.get(), PPP_BUFFER_SIZE), static_echo_source_ep_,
-                                [self, this, qos, socket](const boost::system::error_code& ec, std::size_t sz) noexcept {
+                        [self, this, socket, qos, receive_buffer, source_ep]() noexcept {
+                            socket->async_receive_from(boost::asio::buffer(receive_buffer.get(), PPP_BUFFER_SIZE), *source_ep,
+                                [self, this, qos, socket, receive_buffer, source_ep](const boost::system::error_code& ec, std::size_t sz) noexcept {
                                     int bytes_transferred = std::max<int>(-1, ec ? -1 : (int)sz);
-                                    if (bytes_transferred > 0) { 
-                                        qos->EndRead(StaticEchoYieldReceiveForm(buffer_.get(), bytes_transferred));
+                                    if (bytes_transferred > 0) {
+                                        qos->EndRead(StaticEchoYieldReceiveForm(*source_ep, receive_buffer.get(), bytes_transferred));
+                                    }
+                                    else {
+                                        static_echo_receive_errors_.fetch_add(1, std::memory_order_relaxed);
+                                        qos->EndRead(0);
                                     }
 
                                     StaticEchoLoopbackSocket(socket);
@@ -3577,11 +3709,14 @@ namespace ppp {
                         });
                 }
                 else {
-                    socket->async_receive_from(boost::asio::buffer(buffer_.get(), PPP_BUFFER_SIZE), static_echo_source_ep_,
-                        [self, this, qos, socket](const boost::system::error_code& ec, std::size_t sz) noexcept {
+                    socket->async_receive_from(boost::asio::buffer(receive_buffer.get(), PPP_BUFFER_SIZE), *source_ep,
+                        [self, this, socket, receive_buffer, source_ep](const boost::system::error_code& ec, std::size_t sz) noexcept {
                             int bytes_transferred = std::max<int>(-1, ec ? -1 : (int)sz);
                             if (bytes_transferred > 0) {
-                                StaticEchoYieldReceiveForm(buffer_.get(), bytes_transferred);
+                                StaticEchoYieldReceiveForm(*source_ep, receive_buffer.get(), bytes_transferred);
+                            }
+                            else {
+                                static_echo_receive_errors_.fetch_add(1, std::memory_order_relaxed);
                             }
 
                             StaticEchoLoopbackSocket(socket);

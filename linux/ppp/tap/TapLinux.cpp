@@ -1873,7 +1873,9 @@ namespace ppp {
                     }
 
                     int prefix_mask = IPEndPoint::NetmaskToPrefix(mask); // cidr
-                    any |= rib->AddRoute(ip, prefix_mask, gw);
+                    any |= rib->AddRoute(ip, prefix_mask, gw,
+                        ppp::net::native::RouteOrigin::PhysicalSystem,
+                        ppp::net::native::RouteAction::Direct);
                     return false;
                 });
             return any ? rib : NULLPTR;

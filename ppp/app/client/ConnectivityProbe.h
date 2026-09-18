@@ -32,7 +32,7 @@ namespace ppp {
                     ProbeType_WebSocketSSL = 2,  ///< TLS WebSocket tunnel (scheme wss/https).
                     ProbeType_Udp          = 3,  ///< Static UDP channel (udp.static.servers).
                 }                                       ProbeType;
-                typedef ppp::function<bool(int)>                                ProtectSocketHandler;
+                typedef ppp::function<bool(intptr_t, const boost::asio::ip::address&)> ProtectSocketHandler;
 
             public:
                 /**

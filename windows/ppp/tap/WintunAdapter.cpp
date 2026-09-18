@@ -345,7 +345,8 @@ void WintunAdapter::Stop() noexcept {
     running_flag_.store(WINTUN_RUNING_STATE_STOP, std::memory_order_release);
 }
 
-bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len) noexcept {
+bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len, bool* allocated) noexcept {
+    if (allocated) *allocated = false;
     if (!session_handle_) return false;
 
     // Atomically increment the in‑flight counter and check the stop flag
@@ -362,10 +363,27 @@ bool WintunAdapter::SendPacket(const uint8_t* data, uint32_t len) noexcept {
     if (len > 0 && len <= WINTUN_MAX_IP_PACKET_SIZE) {
         BYTE* buf = WintunAllocateSendPacket(session_handle_, len);
         if (buf) {
+            if (allocated) *allocated = true;
             memcpy(buf, data, len);
             WintunSendPacket(session_handle_, buf);
 
             success = true;
+        }
+        else {
+            const DWORD error = GetLastError();
+            const uint64_t failures = send_alloc_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t now = ppp::threading::Executors::GetTickCount();
+            uint64_t previous = send_alloc_last_log_ms_.load(std::memory_order_relaxed);
+            if (now >= previous + 1000 &&
+                send_alloc_last_log_ms_.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+                const uint64_t suppressed = send_alloc_suppressed_.exchange(0, std::memory_order_relaxed);
+                fprintf(stderr, "[Wintun] AllocateSendPacket failed len=%lu error=%lu failures=%llu suppressed=%llu\r\n",
+                    (unsigned long)len, (unsigned long)error, (unsigned long long)failures,
+                    (unsigned long long)suppressed);
+            }
+            else {
+                send_alloc_suppressed_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 

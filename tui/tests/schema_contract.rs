@@ -51,6 +51,25 @@ fn connected_fixture_phase() {
     assert_eq!(snapshot.transport, "wss");
     assert_eq!(snapshot.traffic.rx_bytes, 10_485_760);
     assert_eq!(snapshot.mux_active_links, 2);
+    assert_eq!(snapshot.dataplane.wintun.interface_mtu, 1400);
+    assert_eq!(snapshot.dataplane.wintun.remote_rx_packets, 195);
+    assert_eq!(snapshot.dataplane.wintun.local_rx_packets, 5);
+    assert_eq!(snapshot.dataplane.wintun.tun_rx_packets, 200);
+    assert_eq!(snapshot.dataplane.wintun.policy_selected_packets, 198);
+    assert_eq!(snapshot.dataplane.wintun.remote_tx_packets, 190);
+    assert_eq!(snapshot.dataplane.wintun.correlated_remote_rx_packets, 150);
+    assert_eq!(snapshot.dataplane.wintun.built_packets, 200);
+    assert_eq!(snapshot.dataplane.wintun.submit_successes, 200);
+    assert_eq!(snapshot.dataplane.static_echo.receive_errors, 0);
+    assert_eq!(snapshot.dataplane.static_echo.response_timeouts, 0);
+    assert_eq!(snapshot.dataplane.mux.channel_opened, 2);
+    assert_eq!(snapshot.dataplane.mux.streams_active, 4);
+    assert_eq!(snapshot.dataplane.mux.queue_bytes, 0);
+    assert_eq!(snapshot.dataplane.mux.stream_open_samples, 40);
+    assert_eq!(snapshot.dataplane.mux.stream_open_failures, 1);
+    assert_eq!(snapshot.dataplane.mux.stream_open_p50_ms, 25);
+    assert_eq!(snapshot.dataplane.mux.stream_open_p95_ms, 50);
+    assert_eq!(snapshot.dataplane.mux.stream_open_p99_ms, 74);
     assert_eq!(snapshot.effective_mux_mode, "flow");
 }
 

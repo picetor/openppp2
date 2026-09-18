@@ -1,6 +1,6 @@
 //! Persistent startup settings shared by the window and terminal front-ends.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ impl Default for StartupSettings {
             geo_rules_file: "./geo-rules.yaml".to_string(),
             geosite_file: "./geosite.dat".to_string(),
             geoip_file: "./geoip.dat".to_string(),
-            log_file: String::new(),
+            log_file: "./ppp-core.log".to_string(),
             log_level: "error".to_string(),
             tcp_ip_cc: "auto".to_string(),
             rt: true,
@@ -479,6 +479,39 @@ pub fn resolve_from_working_dir(base: &Path, value: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+/// Resolve and verify the core log target before starting the in-process core.
+/// Opening in append mode is intentional: metadata-only checks do not prove
+/// that the current token passes Windows ACLs. The core reopens the same path.
+pub fn validate_core_log_path(settings: &StartupSettings) -> anyhow::Result<Option<PathBuf>> {
+    if normalize_log_level(&settings.log_level) == "none" {
+        return Ok(None);
+    }
+
+    let configured = settings.log_file.trim();
+    if configured.is_empty() {
+        anyhow::bail!("核心日志已启用，但日志文件路径为空");
+    }
+
+    let candidate = resolve_from_working_dir(&working_directory(settings), configured);
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("核心日志路径没有文件名: {}", candidate.display()))?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("核心日志路径没有父目录: {}", candidate.display()))?;
+    if !parent.is_dir() {
+        anyhow::bail!("核心日志父目录不存在: {}", parent.display());
+    }
+
+    let absolute = fs::canonicalize(parent)?.join(file_name);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&absolute)
+        .map_err(|error| anyhow::anyhow!("核心日志文件不可写 {}: {error}", absolute.display()))?;
+    Ok(Some(absolute))
 }
 
 pub fn relative_path_string(base: &Path, path: &Path) -> String {

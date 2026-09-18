@@ -179,9 +179,8 @@ namespace ppp {
                         return rinetd_status == 0;
                     }
                     if (force_direct) {
-                        LOG_DEBUG("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, selected_outbound=direct, reason=direct_connect_failed",
+                        LOG_WARN("VEthernetNetworkTcpipConnection::ConnectToPeer: source=tap, trace=%p, destination=%s, selected_outbound=tunnel, reason=direct_socket_protection_rejected",
                             this, remote_host.data());
-                        return false;
                     }
 
                     int mux_status = Mux(self, exchanger, "tap", this, remoteEP, socket, connection_mux_, y);

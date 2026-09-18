@@ -87,8 +87,7 @@ namespace ppp {
             }
 
             void VirtualEthernetExchanger::Finalize() noexcept {
-                LOG_DEBUG("VirtualEthernetExchanger::Finalize: session ending, session_id=%s, tcp_connections_count=%u, disposed=%d",
-                    ppp::auxiliary::StringAuxiliary::Int128ToGuidString(GetId()).data(),
+                LOG_DEBUG("VirtualEthernetExchanger::Finalize: session ending, tcp_connections_count=%u, disposed=%d",
                     (unsigned int)tcp_connections_.size(),
                     (int)disposed_);
                 static_echo_source_ep_ = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4::any(), 0);
@@ -1285,8 +1284,7 @@ namespace ppp {
                     return true;
                 }
 
-                LOG_DEBUG("VirtualEthernetExchanger::DoKeepAlived: liveness check failed, disposing session, session_id=%s",
-                    ppp::auxiliary::StringAuxiliary::Int128ToGuidString(GetId()).data());
+                LOG_DEBUG("VirtualEthernetExchanger::DoKeepAlived: liveness check failed, disposing session");
                 Dispose();
                 return false;
             }

@@ -152,6 +152,7 @@ namespace ppp {
             virtual bool                                                    Input(ip_hdr* ip, tcp_hdr* tcp, int tcp_len) noexcept;
             virtual bool                                                    Update(uint64_t now) noexcept;
             void                                                            GetDebugConnectionCounts(size_t& lan2wan, size_t& wan2lan) noexcept;
+            uint64_t                                                        GetDuplicateSynCount() const noexcept { return duplicate_syn_count_.load(std::memory_order_relaxed); }
 
         protected:
             virtual std::shared_ptr<TapTcpClient>                           BeginAcceptClient(const boost::asio::ip::tcp::endpoint& localEP, const boost::asio::ip::tcp::endpoint& remoteEP) noexcept = 0;
@@ -184,6 +185,7 @@ namespace ppp {
             SynchronizedObject                                              syncobj_;
             int                                                             ap_     = 0;
             bool                                                            lwip_   = false;
+            std::atomic<uint64_t>                                           duplicate_syn_count_ = 0;
 #ifdef SYSNAT
             bool                                                            sysnat_ = false;
             ppp::string                                                     sysnat_interface_name_;

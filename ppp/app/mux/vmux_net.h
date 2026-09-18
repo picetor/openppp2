@@ -412,6 +412,19 @@ namespace vmux {
         int                                                                         retire_linklayers_of_entry(const ppp::string& entry) noexcept;
         /** @brief Count live (non-retiring) carrier links. Thread-safe via syncobj_. */
         int                                                                         get_live_linklayer_count() noexcept;
+        /** @brief Count active logical streams. Thread-safe via syncobj_. */
+        size_t                                                                      get_active_stream_count() noexcept;
+        /** @brief Sum queued data/control payload bytes. Thread-safe via syncobj_. */
+        uint64_t                                                                    get_tx_queue_bytes() noexcept;
+        /** @brief Current high-water backlog duration, or zero when not stalled. */
+        uint64_t                                                                    get_head_of_line_stall_ms(uint64_t now) noexcept;
+        uint64_t                                                                    get_stream_open_samples() noexcept;
+        uint64_t                                                                    get_stream_open_failures() noexcept;
+        uint64_t                                                                    get_stream_open_mean_ms() noexcept;
+        uint64_t                                                                    get_stream_open_p50_ms() noexcept;
+        uint64_t                                                                    get_stream_open_p95_ms() noexcept;
+        uint64_t                                                                    get_stream_open_p99_ms() noexcept;
+        uint64_t                                                                    get_stream_open_max_ms() noexcept;
         /**
          * @brief Turbo pool controller step (C-B5). Strand-affine; called from update().
          * @param now Current tick.
@@ -632,6 +645,8 @@ namespace vmux {
             const std::shared_ptr<boost::asio::ip::tcp::socket>&                    sk, 
             const template_string&                                                  host, 
             int                                                                     port) noexcept;
+        void                                                                        record_stream_open_latency(uint64_t elapsed_ms, bool success) noexcept;
+        uint64_t                                                                    get_stream_open_percentile_ms(uint64_t percentile) noexcept;
 
         /** @brief Perform protocol handshake on specified link-layer. */
         bool                                                                        handshake(const vmux_linklayer_ptr& linklayer, uint16_t connection_id, ppp::coroutines::YieldContext& y) noexcept;
@@ -720,6 +735,18 @@ namespace vmux {
         size_t                                                                      flow_reorder_cap_bytes_ = 0; ///< Per-connection reorder buffer byte cap (from config).
         uint64_t                                                                    flow_reorder_timeout_   = 0; ///< Per-connection gap wait timeout in ms (from config).
         uint64_t                                                                    tx_backlog_since_       = 0; ///< Tick the data tx queue first stayed at/over high-water (0 = not backlogged); drives the D11 stall watchdog.
+        std::atomic<uint64_t>                                                       stream_open_samples_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_failures_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_total_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_max_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_10_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_25_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_50_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_100_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_250_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_500_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_le_1000_ms_{ 0 };
+        std::atomic<uint64_t>                                                       stream_open_gt_1000_ms_{ 0 };
         size_t                                                                      tx_queue_high_water_    = (size_t)PPP_MUX_TX_QUEUE_HIGH_WATER; ///< Data tx-queue high-water depth (from config; D11 backpressure).
         uint64_t                                                                    tx_backlog_stall_ms_    = (uint64_t)PPP_MUX_TX_BACKLOG_STALL_TIMEOUT; ///< Backlog stall timeout in ms (from config; D11 watchdog).
         bool                                                                        turbo_                  = false; ///< flow-mode turbo enabled (from config; best-link-first first packet).

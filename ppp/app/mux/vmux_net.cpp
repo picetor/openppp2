@@ -2537,6 +2537,111 @@ namespace vmux {
         return live;
     }
 
+    size_t vmux_net::get_active_stream_count() noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        return skts_.size();
+    }
+
+    uint64_t vmux_net::get_tx_queue_bytes() noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        uint64_t bytes = 0;
+        for (const tx_packet& packet : tx_queue_) {
+            bytes += (uint64_t)std::max<int>(0, packet.length);
+        }
+        for (const tx_packet& packet : tx_ctrl_queue_) {
+            bytes += (uint64_t)std::max<int>(0, packet.length);
+        }
+        return bytes;
+    }
+
+    uint64_t vmux_net::get_head_of_line_stall_ms(uint64_t now) noexcept {
+        SynchronizationObjectScope __SCOPE__(syncobj_);
+        return tx_backlog_since_ == 0 || now <= tx_backlog_since_ ?
+            0 : now - tx_backlog_since_;
+    }
+
+    uint64_t vmux_net::get_stream_open_samples() noexcept {
+        return stream_open_samples_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t vmux_net::get_stream_open_failures() noexcept {
+        return stream_open_failures_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t vmux_net::get_stream_open_mean_ms() noexcept {
+        const uint64_t samples = stream_open_samples_.load(std::memory_order_relaxed);
+        return samples == 0 ? 0 :
+            stream_open_total_ms_.load(std::memory_order_relaxed) / samples;
+    }
+
+    uint64_t vmux_net::get_stream_open_max_ms() noexcept {
+        return stream_open_max_ms_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t vmux_net::get_stream_open_percentile_ms(uint64_t percentile) noexcept {
+        const uint64_t samples = stream_open_samples_.load(std::memory_order_relaxed);
+        if (samples == 0) {
+            return 0;
+        }
+        percentile = std::max<uint64_t>(1, std::min<uint64_t>(percentile, 100));
+        // Avoid overflowing samples * percentile while preserving ceil(N*p/100).
+        const uint64_t target = (samples / 100) * percentile +
+            (((samples % 100) * percentile + 99) / 100);
+        const uint64_t observed_max = stream_open_max_ms_.load(std::memory_order_relaxed);
+        const auto bucket_upper_bound = [observed_max](uint64_t upper_bound) noexcept {
+            return std::min<uint64_t>(upper_bound, observed_max);
+        };
+        uint64_t cumulative = stream_open_le_10_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(10);
+        cumulative += stream_open_le_25_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(25);
+        cumulative += stream_open_le_50_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(50);
+        cumulative += stream_open_le_100_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(100);
+        cumulative += stream_open_le_250_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(250);
+        cumulative += stream_open_le_500_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(500);
+        cumulative += stream_open_le_1000_ms_.load(std::memory_order_relaxed);
+        if (cumulative >= target) return bucket_upper_bound(1000);
+        return observed_max;
+    }
+
+    uint64_t vmux_net::get_stream_open_p50_ms() noexcept {
+        return get_stream_open_percentile_ms(50);
+    }
+
+    uint64_t vmux_net::get_stream_open_p95_ms() noexcept {
+        return get_stream_open_percentile_ms(95);
+    }
+
+    uint64_t vmux_net::get_stream_open_p99_ms() noexcept {
+        return get_stream_open_percentile_ms(99);
+    }
+
+    void vmux_net::record_stream_open_latency(uint64_t elapsed_ms, bool success) noexcept {
+        if (!success) {
+            stream_open_failures_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        stream_open_samples_.fetch_add(1, std::memory_order_relaxed);
+        stream_open_total_ms_.fetch_add(elapsed_ms, std::memory_order_relaxed);
+        uint64_t current_max = stream_open_max_ms_.load(std::memory_order_relaxed);
+        while (elapsed_ms > current_max &&
+            !stream_open_max_ms_.compare_exchange_weak(
+                current_max, elapsed_ms, std::memory_order_relaxed)) {
+        }
+        std::atomic<uint64_t>* bucket = elapsed_ms <= 10 ? &stream_open_le_10_ms_ :
+            (elapsed_ms <= 25 ? &stream_open_le_25_ms_ :
+            (elapsed_ms <= 50 ? &stream_open_le_50_ms_ :
+            (elapsed_ms <= 100 ? &stream_open_le_100_ms_ :
+            (elapsed_ms <= 250 ? &stream_open_le_250_ms_ :
+            (elapsed_ms <= 500 ? &stream_open_le_500_ms_ :
+            (elapsed_ms <= 1000 ? &stream_open_le_1000_ms_ : &stream_open_gt_1000_ms_))))));
+        bucket->fetch_add(1, std::memory_order_relaxed);
+    }
+
     /**
      * @brief Turbo pool controller step (C-B5): derive a quality target and move
      *        the live pool one step toward it, rate-limited by a cooldown.
@@ -2860,9 +2965,12 @@ namespace vmux {
             return false;
         }
 
+        const uint64_t stream_open_started = now_tick();
+
         std::shared_ptr<vmux_net::atomic_int> status = ppp::make_shared_object<vmux_net::atomic_int>(-1);
         if (NULLPTR == status) {
             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::VmuxNetConnectYieldStatusAllocFailed);
+            record_stream_open_latency(now_tick() - stream_open_started, false);
             return false;
         }
 
@@ -2888,11 +2996,14 @@ namespace vmux {
 
         if (!posted) {
             ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::RuntimeTaskPostFailed);
+            record_stream_open_latency(now_tick() - stream_open_started, false);
             return false;
         }
 
         y.Suspend();
-        return status->load() > 0;
+        const bool success = status->load() > 0;
+        record_stream_open_latency(now_tick() - stream_open_started, success);
+        return success;
     }
 
     /**

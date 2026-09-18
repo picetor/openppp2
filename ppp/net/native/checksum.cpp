@@ -418,7 +418,7 @@ namespace ppp
             }
 #endif
 
-            bool RouteInformationTable::AddAllRoutesByIPList(const ppp::string& path, uint32_t gw) noexcept
+            bool RouteInformationTable::AddAllRoutesByIPList(const ppp::string& path, uint32_t gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 if (path.empty())
                 {
@@ -436,10 +436,10 @@ namespace ppp
                     return true;
                 }
 
-                return AddAllRoutes(cidrs, gw);
+                return AddAllRoutes(cidrs, gw, origin, action);
             }
 
-            bool RouteInformationTable::AddAllRoutes(const ppp::string& cidrs, uint32_t gw) noexcept
+            bool RouteInformationTable::AddAllRoutes(const ppp::string& cidrs, uint32_t gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 if (cidrs.empty())
                 {
@@ -455,12 +455,12 @@ namespace ppp
                 bool any = false;
                 for (ppp::string& route : routes)
                 {
-                    any |= AddRoute(route, gw);
+                    any |= AddRoute(route, gw, origin, action);
                 }
                 return any;
             }
 
-            bool RouteInformationTable::AddRoute(const ppp::string& cidr, uint32_t gw) noexcept
+            bool RouteInformationTable::AddRoute(const ppp::string& cidr, uint32_t gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 if (cidr.empty())
                 {
@@ -512,10 +512,10 @@ namespace ppp
                 }
 
                 boost::asio::ip::address_v4 in = ip.to_v4();
-                return AddRoute(htonl(in.to_uint()), prefix, gw);
+                return AddRoute(htonl(in.to_uint()), prefix, gw, origin, action);
             }
 
-            bool RouteInformationTable::AddRoute(uint32_t ip, int prefix, uint32_t gw) noexcept
+            bool RouteInformationTable::AddRoute(uint32_t ip, int prefix, uint32_t gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 if (prefix < MIN_PREFIX_VALUE || prefix > MAX_PREFIX_VALUE)
                 {
@@ -547,6 +547,8 @@ namespace ppp
                 if (tail != entries.end())
                 {
                     tail->NextHop = gw;
+                    tail->Origin = origin;
+                    tail->Action = action;
                 }
                 else
                 {
@@ -554,6 +556,8 @@ namespace ppp
                     entry.NextHop = gw;
                     entry.Destination = ip;
                     entry.Prefix = prefix;
+                    entry.Origin = origin;
+                    entry.Action = action;
                     entries.emplace_back(entry);
                 }
                 return true;
@@ -650,6 +654,18 @@ namespace ppp
 
             uint32_t ForwardInformationTable::GetNextHop(uint32_t ip, int min_prefix_value, int max_prefix_value, RouteEntriesTable& routes) noexcept
             {
+                RouteEntry route;
+                return TryGetBestRoute(ip, min_prefix_value, max_prefix_value, routes, route) ?
+                    route.NextHop : IPEndPoint::NoneAddress;
+            }
+
+            bool ForwardInformationTable::TryGetBestRoute(uint32_t ip, RouteEntriesTable& routes, RouteEntry& route) noexcept
+            {
+                return TryGetBestRoute(ip, MIN_PREFIX_VALUE, MAX_PREFIX_VALUE, routes, route);
+            }
+
+            bool ForwardInformationTable::TryGetBestRoute(uint32_t ip, int min_prefix_value, int max_prefix_value, RouteEntriesTable& routes, RouteEntry& route) noexcept
+            {
                 for (int prefix = max_prefix_value; prefix >= min_prefix_value; prefix--)
                 {
                     uint32_t mask = IPEndPoint::PrefixToNetmask(prefix);
@@ -663,14 +679,19 @@ namespace ppp
 
                     for (auto&& entry : tail->second)
                     {
-                        if (prefix >= entry.Prefix)
+                        // The lookup key was masked with this exact prefix.
+                        // Accepting a shorter entry here makes insertion order
+                        // win over longest-prefix match when /0 and /1 share
+                        // the same destination key (for example 0.0.0.0).
+                        if (prefix == entry.Prefix)
                         {
-                            return entry.NextHop;
+                            route = entry;
+                            return true;
                         }
                     }
                 }
 
-                return IPEndPoint::NoneAddress;
+                return false;
             }
 
             uint32_t ForwardInformationTable::GetNextHop(uint32_t ip) noexcept
@@ -716,7 +737,7 @@ namespace ppp
                 return boost::asio::ip::address_v6(bytes);
             }
 
-            bool RouteInformationTable6::AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw) noexcept
+            bool RouteInformationTable6::AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 if (prefix < MIN_PREFIX_VALUE || prefix > MAX_PREFIX_VALUE_V6) {
                     return false;
@@ -747,18 +768,22 @@ namespace ppp
                     });
                 if (tail != routes.end()) {
                     tail->NextHop = gw;
+                    tail->Origin = origin;
+                    tail->Action = action;
                 }
                 else {
                     RouteEntry6 entry;
                     entry.Destination = ip;
                     entry.Prefix = prefix;
                     entry.NextHop = gw;
+                    entry.Origin = origin;
+                    entry.Action = action;
                     routes.emplace_back(entry);
                 }
                 return true;
             }
 
-            bool RouteInformationTable6::AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw) noexcept
+            bool RouteInformationTable6::AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw, RouteOrigin origin, RouteAction action) noexcept
             {
                 std::string host;
                 int prefix = -1;
@@ -789,7 +814,30 @@ namespace ppp
                 if (prefix > MAX_PREFIX_VALUE_V6) {
                     return false;
                 }
-                return AddRoute(ip, prefix, gw);
+                return AddRoute(ip, prefix, gw, origin, action);
+            }
+
+            bool RouteInformationTable6::AddAllRoutesByIPList(const ppp::string& path, const boost::asio::ip::address& gw, RouteOrigin origin, RouteAction action) noexcept
+            {
+                if (path.empty() || !ppp::io::File::Exists(path.data())) {
+                    return false;
+                }
+
+                ppp::string cidrs = ppp::io::File::ReadAllText(path.data());
+                if (cidrs.empty()) {
+                    return true;
+                }
+
+                ppp::vector<ppp::string> entries;
+                if (Tokenize<ppp::string>(cidrs, entries, "\r\n") < 1) {
+                    return false;
+                }
+
+                bool any = false;
+                for (ppp::string& entry : entries) {
+                    any |= AddRoute(entry, gw, origin, action);
+                }
+                return any;
             }
 
             ForwardInformationTable6::ForwardInformationTable6(RouteInformationTable6& rib) noexcept

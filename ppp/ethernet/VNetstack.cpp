@@ -365,8 +365,10 @@ namespace ppp {
                     else {
                         c = link->socket;
                         if (NULLPTR != c) {
+                            const uint64_t duplicate_syn_count = duplicate_syn_count_.fetch_add(1, std::memory_order_relaxed) + 1;
                             rst = c->IsDisposed();
-                            LOG_DEBUG("DATAPLANE VNetstack::Input: SYN loop existing client, disposed=%d", (int)rst);
+                            LOG_DEBUG("DATAPLANE VNetstack::Input: repeated SYN on existing flow, disposed=%d, duplicate_syn_count=%llu",
+                                (int)rst, (unsigned long long)duplicate_syn_count);
                             break;
                         }
                     }
@@ -618,7 +620,7 @@ namespace ppp {
 
             int ippkg_len = ((char*)tcp + tcp_len) - (char*)ip;
             if (NULLPTR == c) {
-                bool ok = tap->Output(ip, ippkg_len);
+                bool ok = tap->OutputWithTrace(ip, ippkg_len, "REMOTE_RX");
                 LOG_DEBUG("DATAPLANE VNetstack::Output: direct tap->Output, len=%d, result=%d, src=%u:%u, dest=%u:%u",
                     ippkg_len, (int)ok,
                     (unsigned)ip->src, (unsigned)ntohs(tcp->src),
@@ -1133,7 +1135,7 @@ namespace ppp {
 
             LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: writing delayed SYN back, this=%p, tap=%p, len=%d, state=%u",
                 this, tap.get(), packet_length, sync_ack_state_.load());
-            return tap->Output(packet, packet_length);
+            return tap->OutputWithTrace(packet, packet_length, "REMOTE_RX");
         }
     }
 }

@@ -65,6 +65,8 @@ namespace ppp {
                     boost::asio::ip::address_v6                                    Network;
                     int                                                             Prefix;
                     boost::asio::ip::address_v6                                    NextHop;
+                    ppp::net::native::RouteOrigin                                   Origin = ppp::net::native::RouteOrigin::Unknown;
+                    ppp::net::native::RouteAction                                   Action = ppp::net::native::RouteAction::Unspecified;
                 };
                 typedef ppp::vector<IPv6RouteEntry>                                 IPv6RouteTable;
                 typedef std::shared_ptr<IPv6RouteTable>                             IPv6RouteTablePtr;
@@ -280,6 +282,10 @@ namespace ppp {
                 // Keep the VPN's own IPv6 transport reachable after the physical
                 // interface default route has been suppressed for leak prevention.
                 bool                                                                EnsureWindowsIPv6ServerRoute(const boost::asio::ip::address& address) noexcept;
+                // Pin a socket to the physical interface and verify the selected
+                // route before connect/send. Fails closed when the route cannot
+                // be proven to bypass the TUN adapter.
+                bool                                                                ProtectWindowsSocket(intptr_t socket_handle, const boost::asio::ip::address& address) noexcept;
 #endif
 
             protected:  
@@ -318,7 +324,7 @@ namespace ppp {
 #elif defined(_LINUX)   
                 virtual ProtectorNetworkPtr                                         NewProtectorNetwork() noexcept;
 #endif  
-                virtual bool                                                        DatagramOutput(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, void* packet, int packet_size, bool caching = true) noexcept;
+                virtual bool                                                        DatagramOutput(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, void* packet, int packet_size, bool caching = true, const char* trace_stage = "REMOTE_RX") noexcept;
 
             protected:  
 #if !defined(_ANDROID) && !defined(_IPHONE)     
@@ -343,6 +349,7 @@ namespace ppp {
                     const std::shared_ptr<boost::asio::ip::udp::socket>&            socket,
                     const std::shared_ptr<Byte>&                                    buffer,
                     const boost::asio::ip::address&                                 serverIP,
+                    const std::shared_ptr<IPFrame>&                                 original_packet,
                     const std::shared_ptr<UdpFrame>&                                frame,
                     const std::shared_ptr<ppp::net::packet::BufferSegment>&         messages,
                     const std::shared_ptr<boost::asio::io_context>&                 context,
@@ -373,13 +380,15 @@ namespace ppp {
                 void                                                                AcceptLocalDnsTcp(const std::shared_ptr<boost::asio::ip::tcp::acceptor>& acceptor) noexcept;
                 void                                                                ReadLocalDnsTcp(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) noexcept;
                 void                                                                DispatchLocalDnsQuery(const std::shared_ptr<ppp::string>& query, bool tcp,
-                    const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback) noexcept;
+                    const ppp::function<void(const std::shared_ptr<ppp::string>&, bool)>& callback,
+                    const std::shared_ptr<IPFrame>& trace_packet = NULLPTR) noexcept;
                 ppp::vector<boost::asio::ip::address>                              SelectLocalDnsServers(const void* packet, int packet_size) noexcept;
                 struct LocalDnsUpstream;
                 bool                                                                RegisterTunnelDnsHandler(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
                 bool                                                                SendLocalDnsUdp(const boost::asio::ip::address& server,
                     const std::shared_ptr<ppp::string>& query,
                     const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
+                    const ppp::function<void()>& on_sent,
                     bool through_tunnel, ppp::string& upstream_key, uint16_t& upstream_id) noexcept;
                 void                                                                ReceiveLocalDnsUpstream(const std::shared_ptr<LocalDnsUpstream>& upstream) noexcept;
                 void                                                                CancelLocalDnsUdp(const ppp::vector<std::pair<ppp::string, uint16_t>>& requests) noexcept;
@@ -633,7 +642,11 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
                 struct LocalDnsWaiter final {
                     uint16_t                                                        transaction_id = 0;
-                    ppp::function<void(const std::shared_ptr<ppp::string>&)>        callback;
+                    ppp::function<void(const std::shared_ptr<ppp::string>&, bool)>  callback;
+                    // Only the first waiter owns the physical upstream request.
+                    // Coalesced waiters receive a locally reused response and must
+                    // not be reported as having performed REMOTE_TX/REMOTE_RX.
+                    bool                                                            upstream_owner = false;
                 };
                 ppp::unordered_map<ppp::string, ppp::vector<LocalDnsWaiter>>       local_dns_pending_;
                 struct LocalDnsUpstream final {

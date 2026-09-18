@@ -60,6 +60,8 @@ namespace ppp
             bool                                                            Output(IPFrame* packet) noexcept;
             virtual bool                                                    Output(const void* packet, int packet_length) noexcept;
             virtual bool                                                    Output(const std::shared_ptr<Byte>& packet, int packet_length) noexcept;
+            bool                                                            OutputWithTrace(IPFrame* packet, const char* stage) noexcept;
+            bool                                                            OutputWithTrace(const void* packet, int packet_length, const char* stage) noexcept;
 
         protected:
             virtual std::shared_ptr<IPFragment>                             NewFragment() noexcept;

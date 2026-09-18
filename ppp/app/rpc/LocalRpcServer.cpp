@@ -208,7 +208,7 @@ namespace ppp {
                     ppp::string token = ppp::auxiliary::JsonAuxiliary::AsString(params.get("token", Json::Value()));
                     if (server_->token_.size() == 0 || token != server_->token_)
                     {
-                        LOG_DEBUG("LocalRpcServer::Session::HandleHello: token mismatch, got='%s'", token.data());
+                        LOG_DEBUG("LocalRpcServer::Session::HandleHello: authentication mismatch");
                         SendError(id, 403, "invalid token");
                         Dispose();
                         return;
@@ -315,10 +315,10 @@ namespace ppp {
                 local_endpoint_ = acceptor_->local_endpoint(ec);
                 if (ec) { acceptor_.reset(); return false; }
 
-                LOG_INFO("LocalRpcServer: listening on %s:%d, token=%s",
+                LOG_INFO("LocalRpcServer: listening on %s:%d, authentication=%s",
                     local_endpoint_.address().to_string().data(),
                     (int)local_endpoint_.port(),
-                    token_.empty() ? "<empty>" : "***");
+                    token_.empty() ? "disabled" : "enabled");
 
                 AcceptLoop();
                 return true;

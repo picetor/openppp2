@@ -60,6 +60,14 @@ namespace ppp
             virtual void                                                    Dispose() noexcept;
             virtual bool                                                    Output(const std::shared_ptr<Byte>& packet, int packet_size) noexcept;
             virtual bool                                                    Output(const void* packet, int packet_size) noexcept;
+            virtual bool                                                    OutputWithTrace(const void* packet, int packet_size, const char* stage) noexcept;
+            virtual bool                                                    TraceInputStage(const char* stage, const char* route_origin,
+                                                                                const char* route_action, int outbound,
+                                                                                int error_code = 0) noexcept;
+            virtual bool                                                    TracePacketStage(const void* packet, int packet_size,
+                                                                                const char* stage, const char* route_origin,
+                                                                                const char* route_action, int outbound,
+                                                                                int error_code = 0) noexcept;
 
         public:
             const ppp::string&                                              GetId() noexcept             { return _id; }

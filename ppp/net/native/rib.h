@@ -9,11 +9,32 @@ namespace ppp
     {
         namespace native
         {
+            enum class RouteOrigin : uint8_t
+            {
+                Unknown = 0,
+                TunnelDefault,
+                TunnelPolicy,
+                PhysicalSystem,
+                Bypass,
+                GeoDirect,
+                ServerPin
+            };
+
+            enum class RouteAction : uint8_t
+            {
+                Unspecified = 0,
+                Tunnel,
+                Direct,
+                Reject
+            };
+
             typedef struct
             {
                 uint32_t                                                Destination;
                 int                                                     Prefix;
                 uint32_t                                                NextHop;
+                RouteOrigin                                             Origin = RouteOrigin::Unknown;
+                RouteAction                                             Action = RouteAction::Unspecified;
             }                                                           RouteEntry;
 
             typedef ppp::vector<RouteEntry>                             RouteEntries;
@@ -28,10 +49,10 @@ namespace ppp
             class RouteInformationTable
             {
             public:
-                bool                                                    AddRoute(uint32_t ip, int prefix, uint32_t gw) noexcept;
-                bool                                                    AddRoute(const ppp::string& cidr, uint32_t gw) noexcept;
-                bool                                                    AddAllRoutes(const ppp::string& cidrs, uint32_t gw) noexcept;
-                bool                                                    AddAllRoutesByIPList(const ppp::string& path, uint32_t gw) noexcept;
+                bool                                                    AddRoute(uint32_t ip, int prefix, uint32_t gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
+                bool                                                    AddRoute(const ppp::string& cidr, uint32_t gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
+                bool                                                    AddAllRoutes(const ppp::string& cidrs, uint32_t gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
+                bool                                                    AddAllRoutesByIPList(const ppp::string& path, uint32_t gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
                 bool                                                    IsAvailable() noexcept { return routes.begin() != routes.end(); }
 
             public:
@@ -53,6 +74,8 @@ namespace ppp
                 boost::asio::ip::address                                   Destination;
                 int                                                        Prefix;
                 boost::asio::ip::address                                   NextHop;
+                RouteOrigin                                                Origin = RouteOrigin::Unknown;
+                RouteAction                                                Action = RouteAction::Unspecified;
             }                                                              RouteEntry6;
 
             typedef ppp::vector<RouteEntry6>                               RouteEntries6;
@@ -62,9 +85,9 @@ namespace ppp
             class RouteInformationTable6
             {
             public:
-                bool                                                       AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw) noexcept;
-                bool                                                       AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw) noexcept;
-                bool                                                       AddAllRoutesByIPList(const ppp::string& path, const boost::asio::ip::address& gw) noexcept;
+                bool                                                       AddRoute(const boost::asio::ip::address& ip, int prefix, const boost::asio::ip::address& gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
+                bool                                                       AddRoute(const ppp::string& cidr, const boost::asio::ip::address& gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
+                bool                                                       AddAllRoutesByIPList(const ppp::string& path, const boost::asio::ip::address& gw, RouteOrigin origin = RouteOrigin::Unknown, RouteAction action = RouteAction::Unspecified) noexcept;
                 bool                                                       IsAvailable() noexcept { return routes.begin() != routes.end(); }
 
             public:
@@ -86,6 +109,8 @@ namespace ppp
                 uint32_t                                                GetNextHop(uint32_t ip) noexcept;
                 static uint32_t                                         GetNextHop(uint32_t ip, RouteEntriesTable& routes) noexcept;
                 static uint32_t                                         GetNextHop(uint32_t ip, int min_prefix_value, int max_prefix_value, RouteEntriesTable& routes) noexcept;
+                static bool                                             TryGetBestRoute(uint32_t ip, RouteEntriesTable& routes, RouteEntry& route) noexcept;
+                static bool                                             TryGetBestRoute(uint32_t ip, int min_prefix_value, int max_prefix_value, RouteEntriesTable& routes, RouteEntry& route) noexcept;
                 void                                                    Fill(RouteInformationTable& rib) noexcept;
                 void                                                    Clear() noexcept;
                 RouteEntriesTable&                                      GetAllRoutes() noexcept;

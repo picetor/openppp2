@@ -73,6 +73,28 @@ namespace ppp {
                     NetworkState_Reconnecting,
                 }                                                                       NetworkState;
 
+                struct StaticEchoDiagnostics final {
+                    uint64_t receive_packets;
+                    uint64_t receive_errors;
+                    uint64_t response_timeouts;
+                    uint64_t source_rejected;
+                    uint64_t unpack_errors;
+                    uint64_t session_mismatch;
+                    uint64_t output_failed;
+                    uint64_t send_queued;
+                    uint64_t send_packets;
+                    uint64_t send_errors;
+                    uint32_t consecutive_failures;
+                    uint64_t degraded_until;
+                };
+
+                struct MuxDiagnostics final {
+                    uint64_t channel_opened;
+                    uint64_t channel_open_failures;
+                    uint64_t generation_resets;
+                    uint64_t fallbacks;
+                };
+
             public:
                 NetworkState                                                            GetNetworkState()       noexcept { return network_state_.load(); }
                 const ppp::string&                                                      GetOutboundTag()        const noexcept { return outbound_tag_; }
@@ -132,6 +154,28 @@ namespace ppp {
                 void                                                                    ResetMuxDataPlane() noexcept;
                 void                                                                    ResetDataChannels() noexcept;
                 bool                                                                    StaticEchoAllocated() noexcept;
+                StaticEchoDiagnostics                                                   GetStaticEchoDiagnostics() const noexcept {
+                    return StaticEchoDiagnostics{
+                        static_echo_receive_packets_.load(std::memory_order_relaxed),
+                        static_echo_receive_errors_.load(std::memory_order_relaxed),
+                        static_echo_response_timeouts_.load(std::memory_order_relaxed),
+                        static_echo_source_rejected_.load(std::memory_order_relaxed),
+                        static_echo_unpack_errors_.load(std::memory_order_relaxed),
+                        static_echo_session_mismatch_.load(std::memory_order_relaxed),
+                        static_echo_output_failed_.load(std::memory_order_relaxed),
+                        static_echo_send_queued_.load(std::memory_order_relaxed),
+                        static_echo_send_packets_.load(std::memory_order_relaxed),
+                        static_echo_send_errors_.load(std::memory_order_relaxed),
+                        static_echo_consecutive_failures_.load(std::memory_order_relaxed),
+                        static_echo_degraded_until_.load(std::memory_order_relaxed) };
+                }
+                MuxDiagnostics                                                          GetMuxDiagnostics() const noexcept {
+                    return MuxDiagnostics{
+                        mux_channel_opened_.load(std::memory_order_relaxed),
+                        mux_channel_open_failures_.load(std::memory_order_relaxed),
+                        mux_generation_resets_.load(std::memory_order_relaxed),
+                        mux_fallbacks_.load(std::memory_order_relaxed) };
+                }
                 virtual bool                                                            GetRemoteEndPoint(YieldContext* y, ppp::string& hostname, ppp::string& address, ppp::string& path, int& port, ProtocolType& protocol_type, ppp::string& server, boost::asio::ip::tcp::endpoint& remoteEP, const ppp::string* entry = NULLPTR) noexcept;
 
             public:
@@ -291,7 +335,7 @@ namespace ppp {
                 bool                                                                    StaticEchoNextTimeout() noexcept;
                 bool                                                                    StaticEchoSwapAsynchronousSocket() noexcept;
                 bool                                                                    StaticEchoGatewayServer(int ack_id) noexcept;
-                int                                                                     StaticEchoYieldReceiveForm(Byte* incoming_packet, int incoming_traffic) noexcept;
+                int                                                                     StaticEchoYieldReceiveForm(const boost::asio::ip::udp::endpoint& source_ep, Byte* incoming_packet, int incoming_traffic) noexcept;
                 bool                                                                    StaticEchoLoopbackSocket(const std::shared_ptr<StaticEchoDatagarmSocket>& socket) noexcept;
                 bool                                                                    StaticEchoOpenAsynchronousSocket(StaticEchoDatagarmSocket& socket, YieldContext& y) noexcept;
                 bool                                                                    StaticEchoAllocatedToRemoteExchanger(YieldContext& y) noexcept;
@@ -309,6 +353,7 @@ namespace ppp {
 
             private:
                 SynchronizedObject                                                      syncobj_;
+                SynchronizedObject                                                      static_echo_send_syncobj_;
 
                 std::atomic<bool>                                                       disposed_ = false;
                 bool                                                                    static_echo_input_ = false;
@@ -340,6 +385,10 @@ namespace ppp {
                 int                                                                     mux_failure_streak_ = 0;
                 uint64_t                                                                mux_retry_not_before_ = 0; ///< Do not create another MUX before this tick.
                 uint32_t                                                                mux_retry_backoff_ms_ = 0; ///< Bounded MUX-only retry backoff.
+                std::atomic<uint64_t>                                                   mux_channel_opened_ = 0;
+                std::atomic<uint64_t>                                                   mux_channel_open_failures_ = 0;
+                std::atomic<uint64_t>                                                   mux_generation_resets_ = 0;
+                std::atomic<uint64_t>                                                   mux_fallbacks_ = 0;
                 
                 int                                                                     reconnection_count_ = 0;
 
@@ -363,9 +412,22 @@ namespace ppp {
                 CiphertextPtr                                                           static_echo_protocol_;
                 CiphertextPtr                                                           static_echo_transport_;
                 std::shared_ptr<StaticEchoDatagarmSocket>                               static_echo_sockets_[2];
-                boost::asio::ip::udp::endpoint                                          static_echo_source_ep_;
                 ppp::list<boost::asio::ip::udp::endpoint>                               static_echo_server_ep_balances_;
                 ppp::unordered_set<boost::asio::ip::udp::endpoint>                      static_echo_server_ep_set_;
+                std::atomic<uint64_t>                                                   static_echo_receive_packets_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_receive_errors_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_response_timeouts_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_source_rejected_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_unpack_errors_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_session_mismatch_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_output_failed_ = 0;
+                // The implementation uses synchronous send_to completion, so
+                // this remains zero unless an asynchronous queue is added.
+                std::atomic<uint64_t>                                                   static_echo_send_queued_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_send_packets_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_send_errors_ = 0;
+                std::atomic<uint32_t>                                                   static_echo_consecutive_failures_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_degraded_until_ = 0;
                 
                 uint64_t                                                                static_echo_timeout_     = 0;
                 int                                                                     static_echo_session_id_  = 0;

@@ -786,6 +786,11 @@ namespace ppp
 
         bool VEthernet::Output(IPFrame* packet) noexcept
         {
+            return OutputWithTrace(packet, "REMOTE_RX");
+        }
+
+        bool VEthernet::OutputWithTrace(IPFrame* packet, const char* stage) noexcept
+        {
             if (NULLPTR == packet)
             {
                 return false;
@@ -803,7 +808,7 @@ namespace ppp
                 return false;
             }
 
-            return Output(messages->Buffer, messages->Length);
+            return OutputWithTrace(messages->Buffer.get(), messages->Length, stage);
         }
 
         bool VEthernet::Output(const void* packet, int packet_length) noexcept
@@ -824,7 +829,17 @@ namespace ppp
                 return false;
             }
 
-            return tap->Output(packet, packet_length);
+            return tap->OutputWithTrace(packet, packet_length, "REMOTE_RX");
+        }
+
+        bool VEthernet::OutputWithTrace(const void* packet, int packet_length, const char* stage) noexcept
+        {
+            if (NULLPTR == packet || packet_length < 1 || disposed_)
+            {
+                return false;
+            }
+            std::shared_ptr<ITap> tap = GetTap();
+            return NULLPTR != tap && tap->OutputWithTrace(packet, packet_length, stage);
         }
 
         bool VEthernet::Output(const std::shared_ptr<Byte>& packet, int packet_length) noexcept
@@ -845,7 +860,7 @@ namespace ppp
                 return false;   
             }
 
-            return tap->Output(packet, packet_length);
+            return tap->OutputWithTrace(packet.get(), packet_length, "REMOTE_RX");
         }
     }
 }

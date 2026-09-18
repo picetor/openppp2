@@ -1223,7 +1223,7 @@ namespace ppp {
             InternalHandshakeTimeoutClear();
 
             if (sid) {
-                LOG_DEBUG("ITransmission::HandshakeClient: success, sid=%s, mux=%d", stl::to_string<ppp::string>(sid, 32).data(), mux);
+                LOG_DEBUG("ITransmission::HandshakeClient: success, mux=%d", mux);
             }
             else {
                 LOG_DEBUG("ITransmission::HandshakeClient: failed");
@@ -1245,8 +1245,8 @@ namespace ppp {
             bool ok = InternalHandshakeServer(y, session_id, mux);
             InternalHandshakeTimeoutClear();
 
-            LOG_DEBUG("ITransmission::HandshakeServer: %s, session_id=%s, mux=%d",
-                ok ? "success" : "failed", stl::to_string<ppp::string>(session_id, 32).data(), mux);
+            LOG_DEBUG("ITransmission::HandshakeServer: %s, mux=%d",
+                ok ? "success" : "failed", mux);
             return ok;
         }
 

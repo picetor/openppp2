@@ -479,5 +479,20 @@ namespace ppp
         {
             return WritePacketToKernelNio::Invoke(this, packet, packet_size);
         }
+
+        bool ITap::OutputWithTrace(const void* packet, int packet_size, const char*) noexcept
+        {
+            return Output(packet, packet_size);
+        }
+
+        bool ITap::TraceInputStage(const char*, const char*, const char*, int, int) noexcept
+        {
+            return false;
+        }
+
+        bool ITap::TracePacketStage(const void*, int, const char*, const char*, const char*, int, int) noexcept
+        {
+            return false;
+        }
     }
 }

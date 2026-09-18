@@ -39,6 +39,7 @@ pub struct Snapshot {
     pub mux_active_links: u32,
     pub mux_fallback_reason: String,
     pub connected_monotonic_ms: u64,
+    pub dataplane: Dataplane,
     pub traffic: Traffic,
     pub network: Network,
     pub routes: RouteInfo,
@@ -46,6 +47,71 @@ pub struct Snapshot {
     pub outbounds: Vec<Outbound>,
     pub last_error: LastError,
     pub log_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Dataplane {
+    pub duplicate_syn_count: u64,
+    pub static_echo: StaticEchoDiagnostics,
+    pub mux: MuxDiagnostics,
+    pub wintun: WintunDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StaticEchoDiagnostics {
+    pub receive_packets: u64,
+    pub receive_errors: u64,
+    pub response_timeouts: u64,
+    pub source_rejected: u64,
+    pub unpack_errors: u64,
+    pub session_mismatch: u64,
+    pub output_failed: u64,
+    pub tx_queued: u64,
+    pub tx_completed: u64,
+    pub tx_failed: u64,
+    pub send_packets: u64,
+    pub send_errors: u64,
+    pub consecutive_failures: u32,
+    pub degraded_until_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MuxDiagnostics {
+    pub channel_opened: u64,
+    pub channel_open_failures: u64,
+    pub generation_resets: u64,
+    pub fallbacks: u64,
+    pub streams_active: u64,
+    pub queue_bytes: u64,
+    pub head_of_line_stall_ms: u64,
+    pub stream_open_samples: u64,
+    pub stream_open_failures: u64,
+    pub stream_open_mean_ms: u64,
+    pub stream_open_p50_ms: u64,
+    pub stream_open_p95_ms: u64,
+    pub stream_open_p99_ms: u64,
+    pub stream_open_max_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WintunDiagnostics {
+    pub flow_id: u64,
+    pub tun_rx_packets: u64,
+    pub policy_selected_packets: u64,
+    pub remote_tx_packets: u64,
+    pub remote_rx_packets: u64,
+    pub local_rx_packets: u64,
+    pub correlated_remote_rx_packets: u64,
+    pub validate_failures: u64,
+    pub built_packets: u64,
+    pub allocated_packets: u64,
+    pub submit_successes: u64,
+    pub submit_failures: u64,
+    pub interface_mtu: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

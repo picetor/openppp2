@@ -75,6 +75,14 @@ namespace ppp {
                 }
 
                 int ip_header_length = (iphdr->v_hl & 0x0f) << 2;
+                const unsigned short fragment = ntohs(iphdr->flags);
+                if ((fragment & (ppp::net::native::ip_hdr::IP_MF |
+                    ppp::net::native::ip_hdr::IP_OFFMASK)) != 0) {
+                    // Rewriting a TCP header that belongs to an IPv4 fragment
+                    // would invalidate the checksum after reassembly. Clamp
+                    // only complete, unfragmented SYN packets.
+                    return false;
+                }
                 int tcp_length = ip_length - ip_header_length;
                 if (tcp_length < ppp::net::native::tcp_hdr::TCP_HLEN) {
                     return false;

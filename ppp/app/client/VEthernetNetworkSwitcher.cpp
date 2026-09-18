@@ -2,6 +2,7 @@
 #include <ppp/app/client/VEthernetNetworkSwitcher.h>
 #include <ppp/app/client/VEthernetExchanger.h>
 #include <ppp/app/client/ConnectivityProbe.h>
+#include <ppp/app/protocol/VirtualEthernetTcpMss.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxyConnection.h>
 #include <ppp/IDisposable.h>
@@ -650,10 +651,18 @@ namespace ppp {
                 {
                     std::shared_ptr<ppp::net::ProtectorNetwork> protector_network = GetProtectorNetwork();
                     if (NULLPTR != protector_network) {
-                        protector = [protector_network](int sockfd) noexcept {
-                            return protector_network->Protect(sockfd);
+                        protector = [protector_network](intptr_t socket_handle, const boost::asio::ip::address&) noexcept {
+                            return protector_network->Protect((int)socket_handle);
                         };
                     }
+                }
+#elif defined(_WIN32)
+                {
+                    std::shared_ptr<VEthernetNetworkSwitcher> protector_switcher =
+                        std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
+                    protector = [protector_switcher](intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
+                        return protector_switcher->ProtectWindowsSocket(socket_handle, address);
+                    };
                 }
 #endif
 
@@ -783,9 +792,19 @@ namespace ppp {
                     }
                 }
 
+                if (proto == ppp::net::native::ip_hdr::IP_PROTO_TCP &&
+                    configuration_ && configuration_->client.tun.mss_clamp) {
+                    ppp::app::protocol::ClampTcpMssIPv4(reinterpret_cast<Byte*>(packet), packet_length,
+                        (unsigned short)configuration_->client.tun.mss_v4);
+                }
+
                 std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(Ipep::ToAddress(destination));
                 if (NULLPTR == exchanger) return false;
-                exchanger->Nat(packet, packet_length);
+                tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                const bool sent = exchanger->Nat(packet, packet_length);
+                if (sent) {
+                    tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                }
                 return true;
             }
 
@@ -826,13 +845,25 @@ namespace ppp {
 
                 // TCP (6): forward blindly via NAT (same as existing behavior)
                 if (next_header == IPPROTO_TCP) {
+                    if (configuration_ && configuration_->client.tun.mss_clamp) {
+                        ppp::app::protocol::ClampTcpMssIPv6(packet, packet_length,
+                            (unsigned short)configuration_->client.tun.mss_v6);
+                    }
                     boost::asio::ip::address_v6::bytes_type destination_bytes;
                     memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
                     std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(boost::asio::ip::address_v6(destination_bytes));
                     if (NULLPTR == exchanger) {
                         return false;
                     }
-                    exchanger->Nat(packet, packet_length);
+                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                        tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                        if (exchanger->Nat(packet, packet_length)) {
+                            tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                        }
+                    }
+                    else {
+                        exchanger->Nat(packet, packet_length);
+                    }
                     return true;
                 }
 
@@ -853,7 +884,15 @@ namespace ppp {
                 if (NULLPTR == exchanger) {
                     return false;
                 }
-                exchanger->Nat(packet, packet_length);
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                    if (exchanger->Nat(packet, packet_length)) {
+                        tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                    }
+                }
+                else {
+                    exchanger->Nat(packet, packet_length);
+                }
                 return true;
             }
 
@@ -1146,11 +1185,25 @@ namespace ppp {
                                                         protector_network->Protect(handle);
                                                     }
                                                 }
+#elif defined(_WIN32)
+                                                if (!redirect_server.is_loopback() &&
+                                                    !ProtectWindowsSocket((intptr_t)socket->native_handle(), redirect_server)) {
+                                                    LOG_ERROR("DirectDNS IPv6 path: Windows socket protection failed, server=%s, port=%u",
+                                                        redirect_server.to_string().c_str(), (uint32_t)PPP_DNS_SYS_PORT);
+                                                    ppp::net::Socket::Closesocket(socket);
+                                                    return false;
+                                                }
 #endif
 
+                                                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                                                    tap->TraceInputStage("POLICY_SELECTED", "dns", "direct", 1);
+                                                }
                                                 socket->send_to(boost::asio::buffer(packet + UDP_PAYLOAD_OFFSET, udp_payload_len),
                                                     serverEP, 0, ec);
                                                 if (!ec) {
+                                                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                                                        tap->TraceInputStage("REMOTE_TX", "dns", "direct", 1);
+                                                    }
                                                     const auto self = shared_from_this();
                                                     const auto cb = make_shared_object<Timer::TimeoutEventHandler>(
                                                         [self, socket](Timer*) noexcept {
@@ -1227,7 +1280,15 @@ namespace ppp {
                 if (NULLPTR == exchanger) {
                     return false;
                 }
-                exchanger->Nat(packet, packet_length);
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                    if (exchanger->Nat(packet, packet_length)) {
+                        tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                    }
+                }
+                else {
+                    exchanger->Nat(packet, packet_length);
+                }
                 return true;
             }
 
@@ -1268,7 +1329,10 @@ namespace ppp {
                         if (NULLPTR == exchanger) {
                             return false;
                         }
-                        exchanger->Nat(packet, packet_length);
+                        tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                        if (exchanger->Nat(packet, packet_length)) {
+                            tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                        }
                         return true;
                     }
 
@@ -1307,7 +1371,8 @@ namespace ppp {
                     icmp_start[3] = static_cast<Byte>(cksum_be & 0xFF);
 
                     // Output the modified echo reply back to TAP
-                    return Output(packet, packet_length);
+                    tap->TraceInputStage("POLICY_SELECTED", "local", "local_reply", 0);
+                    return OutputWithTrace(packet, packet_length, "LOCAL_RX");
                 }
 
                 // Other ICMPv6 types: forward via NAT
@@ -1317,7 +1382,15 @@ namespace ppp {
                 if (NULLPTR == exchanger) {
                     return false;
                 }
-                exchanger->Nat(packet, packet_length);
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                    if (exchanger->Nat(packet, packet_length)) {
+                        tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                    }
+                }
+                else {
+                    exchanger->Nat(packet, packet_length);
+                }
                 return true;
             }
 
@@ -1351,6 +1424,9 @@ namespace ppp {
                 // simple and rough processing, if the remote sensing of all UDP port traffic, 
                 // it will produce unnecessary burden and overhead on the performance of the program itself.
                 if (block_quic_ && destinationPort == PPP_HTTPS_SYS_PORT) {
+                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                        tap->TraceInputStage("POLICY_SELECTED", "configuration", "drop", 0);
+                    }
                     return false;
                 }
 
@@ -1359,20 +1435,49 @@ namespace ppp {
                     auto& static_ = configuration_->udp.static_;
                     if (static_.quic && destinationPort == PPP_HTTPS_SYS_PORT) {
                         if (exchanger->StaticEchoAllocated()) {
-                            return exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                            const bool sent = exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                            if (sent) {
+                                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                                    tap->TraceInputStage("POLICY_SELECTED", "configuration", "static_echo", 1);
+                                    tap->TraceInputStage("REMOTE_TX", "configuration", "static_echo", 1);
+                                }
+                            }
+                            return sent;
                         }
                     }
                     elif(static_.dns && destinationPort == PPP_DNS_SYS_PORT) {
                         if (exchanger->StaticEchoAllocated()) {
-                            return exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                            const bool sent = exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                            if (sent) {
+                                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                                    tap->TraceInputStage("POLICY_SELECTED", "configuration", "static_echo", 1);
+                                    tap->TraceInputStage("REMOTE_TX", "configuration", "static_echo", 1);
+                                }
+                            }
+                            return sent;
                         }
                     }
                     elif(exchanger->StaticEchoAllocated()) {
-                        return exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                        const bool sent = exchanger->StaticEchoPacketToRemoteExchanger(frame);
+                        if (sent) {
+                            if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                                tap->TraceInputStage("POLICY_SELECTED", "configuration", "static_echo", 1);
+                                tap->TraceInputStage("REMOTE_TX", "configuration", "static_echo", 1);
+                            }
+                        }
+                        return sent;
                     }
                 }
 
                 boost::asio::ip::udp::endpoint sourceEP = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Source);
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                    const bool sent = exchanger->SendTo(sourceEP, destinationEP, messages->Buffer.get(), messages->Length);
+                    if (sent) {
+                        tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                    }
+                    return sent;
+                }
                 return exchanger->SendTo(sourceEP, destinationEP, messages->Buffer.get(), messages->Length);
             }
 
@@ -1382,7 +1487,10 @@ namespace ppp {
                     return false;
                 }
                 else {
-                    return Output(reply.get());
+                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                        tap->TraceInputStage("POLICY_SELECTED", "local", "local_reply", 0);
+                    }
+                    return OutputWithTrace(reply.get(), "LOCAL_RX");
                 }
             }
 
@@ -1392,7 +1500,10 @@ namespace ppp {
                     return false;
                 }
                 else {
-                    return Output(reply.get());
+                    if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                        tap->TraceInputStage("POLICY_SELECTED", "local", "local_reply", 0);
+                    }
+                    return OutputWithTrace(reply.get(), "LOCAL_RX");
                 }
             }
 
@@ -1509,10 +1620,25 @@ namespace ppp {
                 // all data protocols, so gateway/public ping is not serialized
                 // behind the main TCP FIFO.
                 if (static_.icmp && exchanger->StaticEchoAllocated()) {
-                    return exchanger->StaticEchoPacketToRemoteExchanger(packet.get());
+                    if (exchanger->StaticEchoPacketToRemoteExchanger(packet.get())) {
+                        if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                            tap->TraceInputStage("POLICY_SELECTED", "configuration", "static_echo", 1);
+                            tap->TraceInputStage("REMOTE_TX", "configuration", "static_echo", 1);
+                        }
+                        return true;
+                    }
+                    LOG_WARN("DATAPLANE ICMP: static echo send failed, falling back to main tunnel, outbound=%s",
+                        exchanger->GetOutboundTag().data());
                 }
 
+                std::shared_ptr<ITap> tap = GetTap();
+                if (NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
+                }
                 const bool ok = exchanger->Echo(messages->Buffer.get(), messages->Length);
+                if (ok && NULLPTR != tap) {
+                    tap->TraceInputStage("REMOTE_TX", "route", "tunnel", 1);
+                }
                 LOG_DEBUG("DATAPLANE ICMP: sent remote echo, outbound=%s bytes=%d result=%d",
                     exchanger->GetOutboundTag().data(), messages->Length, ok ? 1 : 0);
                 return ok;
@@ -1579,6 +1705,10 @@ namespace ppp {
                 }
 
                 if (exchanger->StaticEchoGatewayServer(ack_id)) {
+                    return true;
+                }
+                elif(exchanger->Echo(ack_id)) {
+                    LOG_WARN("DATAPLANE ICMP: static gateway echo failed, fell back to main tunnel, ack_id=%d", ack_id);
                     return true;
                 }
                 else {
@@ -2723,15 +2853,23 @@ namespace ppp {
                     return false;
                 }
                 if (!geo_rules_) {
+                    const bool route_origin_policy = !configuration_ ||
+                        configuration_->client.routing.route_origin_policy;
                     if (address.is_v4() && rib_) {
                         const uint32_t nip = htonl(address.to_v4().to_uint());
-                        return ppp::net::native::ForwardInformationTable::GetNextHop(
-                            nip, rib_->GetAllRoutes()) != ppp::net::IPEndPoint::NoneAddress;
+                        ppp::net::native::RouteEntry route;
+                        const bool matched = ppp::net::native::ForwardInformationTable::TryGetBestRoute(
+                            nip, rib_->GetAllRoutes(), route);
+                        return matched && (!route_origin_policy ||
+                            route.Action == ppp::net::native::RouteAction::Direct);
                     }
                     if (address.is_v6() && rib6_) {
                         const auto target = address.to_v6().to_bytes();
+                        int best_prefix = -1;
+                        ppp::net::native::RouteAction best_action =
+                            ppp::net::native::RouteAction::Unspecified;
                         for (const auto& route : *rib6_) {
-                            if (route.Prefix < 0 || route.Prefix > 128) {
+                            if (route.Prefix < 0 || route.Prefix > 128 || route.Prefix <= best_prefix) {
                                 continue;
                             }
                             const auto network = route.Network.to_bytes();
@@ -2746,8 +2884,12 @@ namespace ppp {
                                     continue;
                                 }
                             }
-                            return true;
+                            best_prefix = route.Prefix;
+                            best_action = route.Action;
                         }
+                        return best_prefix >= 0 &&
+                            (!route_origin_policy ||
+                                best_action == ppp::net::native::RouteAction::Direct);
                     }
                     return false;
                 }
@@ -2803,7 +2945,7 @@ namespace ppp {
                 return configuration_->GetBufferAllocator();
             }
 
-            bool VEthernetNetworkSwitcher::DatagramOutput(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, void* packet, int packet_size, bool caching) noexcept {
+            bool VEthernetNetworkSwitcher::DatagramOutput(const boost::asio::ip::udp::endpoint& sourceEP, const boost::asio::ip::udp::endpoint& destinationEP, void* packet, int packet_size, bool caching, const char* trace_stage) noexcept {
                 if (NULLPTR == packet || packet_size < 1) {
                     return false;
                 }
@@ -2871,7 +3013,7 @@ namespace ppp {
 
                     std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
                     std::shared_ptr<IPFrame> ip = UdpFrame::ToIp(allocator, frame.get());
-                    return Output(ip.get());
+                    return OutputWithTrace(ip.get(), trace_stage);
                 }
                 elif (address.is_v6()) {
                     boost::asio::ip::address_v6 dst_v6 = sourceEP.address().to_v6();
@@ -2933,7 +3075,7 @@ namespace ppp {
 
                     std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
                     std::shared_ptr<BufferSegment> ip6 = UdpFrame::ToIp6(allocator, frame.get());
-                    return Output(ip6->Buffer.get(), ip6->Length);
+                    return OutputWithTrace(ip6->Buffer.get(), ip6->Length, trace_stage);
                 }
 
                 return false;
@@ -3729,7 +3871,7 @@ namespace ppp {
                 }
 
                 DispatchLocalDnsQuery(query, false,
-                    [state, &y, hostname](const std::shared_ptr<ppp::string>& response) noexcept {
+                    [state, &y, hostname](const std::shared_ptr<ppp::string>& response, bool) noexcept {
                         boost::asio::ip::address address;
                         if (response && !response->empty()) {
                             ::dns::Message answer;
@@ -3978,6 +4120,7 @@ namespace ppp {
                 const boost::asio::ip::address& server,
                 const std::shared_ptr<ppp::string>& query,
                 const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback,
+                const ppp::function<void()>& on_sent,
                 bool through_tunnel, ppp::string& upstream_key, uint16_t& upstream_id) noexcept {
                 if (NULLPTR == query || query->size() < 2 || !callback ||
                     IPEndPoint::IsInvalid(server) || server.is_loopback()) {
@@ -4102,18 +4245,25 @@ namespace ppp {
                         LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: tunnel send failed, server=%s, outbound=main",
                             server.to_string().data());
                     }
+                    elif(on_sent) {
+                        on_sent();
+                    }
                     return sent;
                 }
                 upstream->socket->async_send(boost::asio::buffer(*request),
-                    [this, upstream_key, upstream_id, request](boost::system::error_code ec, std::size_t) noexcept {
-                        if (!ec) return;
+                    [this, upstream_key, upstream_id, request, on_sent](boost::system::error_code ec, std::size_t transferred) noexcept {
+                        if (!ec && transferred == request->size()) {
+                            if (on_sent) on_sent();
+                            return;
+                        }
                         SynchronizedObjectScope scope(GetSynchronizedObject());
                         auto current = local_dns_upstreams_.find(upstream_key);
                         if (current != local_dns_upstreams_.end()) {
                             current->second->requests.erase(upstream_id);
                         }
-                        LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: direct send failed, upstream=%s, error=%s",
-                            upstream_key.data(), ec.message().data());
+                        LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: direct send failed, upstream=%s, transferred=%llu, expected=%llu, error=%s",
+                            upstream_key.data(), (unsigned long long)transferred,
+                            (unsigned long long)request->size(), ec.message().data());
                     });
                 return true;
             }
@@ -4171,10 +4321,25 @@ namespace ppp {
 
             void VEthernetNetworkSwitcher::DispatchLocalDnsQuery(
                 const std::shared_ptr<ppp::string>& query, bool tcp,
-                const ppp::function<void(const std::shared_ptr<ppp::string>&)>& callback) noexcept {
+                const ppp::function<void(const std::shared_ptr<ppp::string>&, bool)>& callback,
+                const std::shared_ptr<IPFrame>& trace_packet) noexcept {
                 if (NULLPTR == query || query->empty() || !callback) {
                     return;
                 }
+
+                std::shared_ptr<BufferSegment> trace_bytes;
+                std::shared_ptr<ITap> trace_tap;
+                if (NULLPTR != trace_packet) {
+                    trace_bytes = IPFrame::ToArray(GetBufferAllocator(), trace_packet.get());
+                    trace_tap = GetTap();
+                }
+                const auto trace_stage = [trace_tap, trace_bytes](const char* stage,
+                    const char* action, int outbound) noexcept {
+                    if (NULLPTR != trace_tap && NULLPTR != trace_bytes) {
+                        trace_tap->TracePacketStage(trace_bytes->Buffer.get(), trace_bytes->Length,
+                            stage, "dns", action, outbound);
+                    }
+                };
 
                 ::dns::Message cached;
                 bool policy_direct_query = false;
@@ -4207,11 +4372,15 @@ namespace ppp {
                         std::size_t length = 0;
                         if (cached.encode(&(*response)[0], response->size(), length) == ::dns::BufferResult::NoError && length > 0) {
                             response->resize(length);
-                            callback(response);
+                            trace_stage("POLICY_SELECTED", "cache", 0);
+                            callback(response, true);
                             return;
                         }
                     }
                 }
+
+                trace_stage("POLICY_SELECTED",
+                    policy_direct_query ? "resolver_direct" : "resolver_tunnel", 1);
 
                 // Windows may issue the same DNS question concurrently through
                 // several adapters and through both 127.0.0.1 and ::1. Coalesce
@@ -4231,13 +4400,14 @@ namespace ppp {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     auto pending = local_dns_pending_.find(pending_key);
                     if (pending != local_dns_pending_.end()) {
-                        pending->second.emplace_back(LocalDnsWaiter{ transaction_id, callback });
+                        pending->second.emplace_back(LocalDnsWaiter{ transaction_id, callback, false });
                         return;
                     }
-                    local_dns_pending_[pending_key].emplace_back(LocalDnsWaiter{ transaction_id, callback });
+                    local_dns_pending_[pending_key].emplace_back(LocalDnsWaiter{ transaction_id, callback, true });
                 }
 
-                auto complete_pending = [this, pending_key](const std::shared_ptr<ppp::string>& response) noexcept {
+                auto complete_pending = [this, pending_key](const std::shared_ptr<ppp::string>& response,
+                    bool local_response) noexcept {
                     ppp::vector<LocalDnsWaiter> waiters;
                     {
                         SynchronizedObjectScope scope(GetSynchronizedObject());
@@ -4257,10 +4427,10 @@ namespace ppp {
                             auto individualized = make_shared_object<ppp::string>(*response);
                             (*individualized)[0] = static_cast<char>(waiter.transaction_id >> 8);
                             (*individualized)[1] = static_cast<char>(waiter.transaction_id & 0xff);
-                            waiter.callback(individualized);
+                            waiter.callback(individualized, local_response || !waiter.upstream_owner);
                         }
                         else {
-                            waiter.callback(response);
+                            waiter.callback(response, local_response || !waiter.upstream_owner);
                         }
                     }
                 };
@@ -4279,7 +4449,7 @@ namespace ppp {
                 }
                 auto context = GetContext();
                 if (NULLPTR == context || servers.empty()) {
-                    complete_pending(MakeLocalDnsServFail(*query));
+                    complete_pending(MakeLocalDnsServFail(*query), true);
                     return;
                 }
 
@@ -4359,13 +4529,13 @@ namespace ppp {
                             ppp::net::asio::vdns::AddCache(reinterpret_cast<Byte*>(const_cast<char*>(processed->data())),
                                 static_cast<int>(processed->size()));
                         }
-                        complete_pending(processed);
+                        complete_pending(processed, false);
                     }
                     else {
                         LOG_WARN("VEthernetNetworkSwitcher::DispatchLocalDnsQuery: timeout host=%s, direct=%d, elapsed_ms=%llu",
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
-                        complete_pending(MakeLocalDnsServFail(*query));
+                        complete_pending(MakeLocalDnsServFail(*query), true);
                     }
                 };
 
@@ -4374,8 +4544,10 @@ namespace ppp {
                 // otherwise every local retry creates new VPN transmissions.
                 (void)tcp;
                 {
+                    const auto remote_tx_traced = make_shared_object<std::atomic<bool>>(false);
                     auto send_udp_server = [this, query, query_host, query_started, finish, completed, udp_requests,
-                        udp_requests_lock, direct_query, valid_response](const boost::asio::ip::address& server) noexcept {
+                        udp_requests_lock, direct_query, valid_response, trace_stage,
+                        remote_tx_traced](const boost::asio::ip::address& server) noexcept {
                         ppp::string upstream_key;
                         uint16_t upstream_id = 0;
                         auto upstream_finish = [finish, query_host, query_started, server, direct_query, valid_response](const std::shared_ptr<ppp::string>& response) noexcept {
@@ -4389,7 +4561,14 @@ namespace ppp {
                                 (unsigned long long)(Executors::GetTickCount() - query_started));
                             finish(response);
                         };
-                        if (!SendLocalDnsUdp(server, query, upstream_finish, !direct_query, upstream_key, upstream_id)) {
+                        const auto on_sent = [trace_stage, remote_tx_traced, direct_query]() noexcept {
+                            if (NULLPTR != remote_tx_traced && !remote_tx_traced->exchange(true)) {
+                                trace_stage("REMOTE_TX",
+                                    direct_query ? "resolver_direct" : "resolver_tunnel", 1);
+                            }
+                        };
+                        if (!SendLocalDnsUdp(server, query, upstream_finish, on_sent,
+                            !direct_query, upstream_key, upstream_id)) {
                             return false;
                         }
                         bool cancel_immediately = false;
@@ -4465,7 +4644,7 @@ namespace ppp {
                         if (!ec && size > 0) {
                             auto query = make_shared_object<ppp::string>(reinterpret_cast<const char*>(packet->data()), size);
                             self->DispatchLocalDnsQuery(query, false,
-                                [socket, source](const std::shared_ptr<ppp::string>& response) noexcept {
+                                [socket, source](const std::shared_ptr<ppp::string>& response, bool) noexcept {
                                     if (response && socket->is_open()) {
                                         socket->async_send_to(boost::asio::buffer(*response), *source,
                                             [response](boost::system::error_code, std::size_t) noexcept {});
@@ -4492,7 +4671,7 @@ namespace ppp {
                             [self, socket, query](boost::system::error_code ec, std::size_t) noexcept {
                                 if (ec) { return; }
                                 self->DispatchLocalDnsQuery(query, true,
-                                    [self, socket](const std::shared_ptr<ppp::string>& response) noexcept {
+                                    [self, socket](const std::shared_ptr<ppp::string>& response, bool) noexcept {
                                         if (!response || !socket->is_open()) { return; }
                                         auto framed = make_shared_object<ppp::string>();
                                         framed->resize(response->size() + 2);
@@ -4636,7 +4815,9 @@ namespace ppp {
                 uint32_t cidr = ntohl(tap->SubmaskAddress);
                 cidr = cidr & ntohl(tap->IPAddress);
                 cidr = htonl(cidr);
-                rib->AddRoute(cidr, IPEndPoint::NetmaskToPrefix(tap->SubmaskAddress), tap->GatewayServer);
+                rib->AddRoute(cidr, IPEndPoint::NetmaskToPrefix(tap->SubmaskAddress), tap->GatewayServer,
+                    ppp::net::native::RouteOrigin::TunnelPolicy,
+                    ppp::net::native::RouteAction::Tunnel);
 
                 // Why does Android/APPLE-IOS load routing table information? 
                 // This is to implement the IP diversion function of the HTTP proxy to prevent all traffic from going to the VPN server, 
@@ -4644,7 +4825,9 @@ namespace ppp {
                 if (ppp::string bypass_ip_list = std::move(bypass_ip_list_); bypass_ip_list.size() > 0) {
                     // IP address of the virtual network card is used here to make it inconsistent with the condition of determining
                     // The next hop gateway of the route in the IsBypassIpAddress function.
-                    rib->AddAllRoutes(bypass_ip_list, IPEndPoint::LoopbackAddress);
+                    rib->AddAllRoutes(bypass_ip_list, IPEndPoint::LoopbackAddress,
+                        ppp::net::native::RouteOrigin::Bypass,
+                        ppp::net::native::RouteAction::Direct);
 
                     // AddAllRoutes() rejects IPv6 lines (AddRoute() only accepts
                     // v4), so parse the IPv6 bypass entries manually into rib6_.
@@ -4701,6 +4884,8 @@ namespace ppp {
                             entry.Network = ip.to_v6();
                             entry.Prefix = prefix;
                             entry.NextHop = ngw6;
+                            entry.Origin = ppp::net::native::RouteOrigin::Bypass;
+                            entry.Action = ppp::net::native::RouteAction::Direct;
                             rib6->emplace_back(entry);
                         }
 
@@ -4735,7 +4920,9 @@ namespace ppp {
                 for (int i = 0; i < arraysizeof(gws); i++) {
                     uint32_t gw = gws[i];
                     for (auto& ip : dns_serverss_[i]) {
-                        rib->AddRoute(ip, 32, gw);
+                        rib->AddRoute(ip, 32, gw,
+                            i == 0 ? ppp::net::native::RouteOrigin::TunnelPolicy : ppp::net::native::RouteOrigin::Bypass,
+                            i == 0 ? ppp::net::native::RouteAction::Tunnel : ppp::net::native::RouteAction::Direct);
                     }
                 }
 
@@ -4854,6 +5041,21 @@ namespace ppp {
                 }
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
 #if defined(_WIN32)
+                const int configured_mtu = configuration_->client.tun.mtu;
+                if (!tap->SetInterfaceMtu(configured_mtu)) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: failed to set TAP MTU=%d", configured_mtu);
+                    return false;
+                }
+                const int effective_mtu = ppp::win32::network::GetInterfaceMtu(tap->GetInterfaceIndex());
+                if (effective_mtu != configured_mtu) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: TAP MTU verification failed, configured=%d, effective=%d",
+                        configured_mtu, effective_mtu);
+                    return false;
+                }
+                LOG_INFO("VEthernetNetworkSwitcher::Open: TAP MTU=%d, MSSv4=%d, MSSv6=%d, clamp=%d",
+                    effective_mtu, configuration_->client.tun.mss_v4,
+                    configuration_->client.tun.mss_v6, (int)configuration_->client.tun.mss_clamp);
+
                 // The peer has not advertised an IPv6 data plane yet. Fail
                 // closed until its Information extension is received; a client
                 // profile's server.ipv6 section is not a remote capability signal.
@@ -5080,7 +5282,7 @@ namespace ppp {
                         for (const IPv6RouteEntry& entry : *rib6) {
                             boost::asio::ip::address dst(entry.Network);
                             boost::asio::ip::address nh(entry.NextHop);
-                            rib6_fib->AddRoute(dst, entry.Prefix, nh);
+                            rib6_fib->AddRoute(dst, entry.Prefix, nh, entry.Origin, entry.Action);
                         }
 
                         ForwardInformationTable6Ptr fib6 = make_shared_object<ForwardInformationTable6>();
@@ -5921,7 +6123,9 @@ namespace ppp {
                                 for (auto&& kv : *ribs) {
                                     const ppp::string& path = kv.first;
                                     const uint32_t ngw = kv.second != IPEndPoint::AnyAddress ? kv.second : next_hop;
-                                    any |= rib->AddAllRoutesByIPList(path, ngw);
+                                    any |= rib->AddAllRoutesByIPList(path, ngw,
+                                        ppp::net::native::RouteOrigin::Bypass,
+                                        ppp::net::native::RouteAction::Direct);
                                 }
 
                                 // Loading is considered valid only if any route is added.
@@ -6028,6 +6232,8 @@ namespace ppp {
                                 entry.Network = ip.to_v6();
                                 entry.Prefix = prefix;
                                 entry.NextHop = ngw6;
+                                entry.Origin = ppp::net::native::RouteOrigin::Bypass;
+                                entry.Action = ppp::net::native::RouteAction::Direct;
                                 rib6->emplace_back(entry);
                                 any = true;
                             }
@@ -6207,7 +6413,10 @@ namespace ppp {
                         uint32_t ip = htonl(network.address.to_v4().to_uint());
                         uint32_t gateway = network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct ?
                             direct_gw : tunnel_gw;
-                        if (rib_->AddRoute(ip, network.prefix, gateway)) applied++;
+                        const bool direct = network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                        if (rib_->AddRoute(ip, network.prefix, gateway,
+                            direct ? ppp::net::native::RouteOrigin::GeoDirect : ppp::net::native::RouteOrigin::TunnelPolicy,
+                            direct ? ppp::net::native::RouteAction::Direct : ppp::net::native::RouteAction::Tunnel)) applied++;
                     }
                     else if (network.address.is_v6()) {
                         boost::asio::ip::address_v6 gateway;
@@ -6227,6 +6436,9 @@ namespace ppp {
                                 entry.Network = network.address.to_v6();
                                 entry.Prefix = network.prefix;
                                 entry.NextHop = gateway;
+                                const bool direct = network.action == ppp::app::client::geo::GeoRuleEngine::Action::Direct;
+                                entry.Origin = direct ? ppp::net::native::RouteOrigin::GeoDirect : ppp::net::native::RouteOrigin::TunnelPolicy;
+                                entry.Action = direct ? ppp::net::native::RouteAction::Direct : ppp::net::native::RouteAction::Tunnel;
                                 rib6_->emplace_back(std::move(entry));
                                 applied++;
                             }
@@ -7187,6 +7399,77 @@ namespace ppp {
                 }
                 return true;
             }
+
+            bool VEthernetNetworkSwitcher::ProtectWindowsSocket(
+                intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
+                if (socket_handle == (intptr_t)INVALID_SOCKET ||
+                    ppp::net::IPEndPoint::IsInvalid(address) || address.is_unspecified()) {
+                    return false;
+                }
+                if (address.is_loopback()) {
+                    return true;
+                }
+
+                std::shared_ptr<NetworkInterface> underlying = GetUnderlyingNetworkInterface();
+                if (NULLPTR == underlying || underlying->Index < 0) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: physical interface unavailable, remote=%s",
+                        address.to_string().c_str());
+                    return false;
+                }
+
+                const bool route_ok = address.is_v4() ?
+                    EnsureWindowsIPv4ServerRoute(address) : EnsureWindowsIPv6ServerRoute(address);
+                if (!route_ok) {
+                    return false;
+                }
+
+                const SOCKET socket = (SOCKET)socket_handle;
+                int option_result = SOCKET_ERROR;
+                if (address.is_v4()) {
+                    DWORD interface_index = htonl((DWORD)underlying->Index);
+                    option_result = ::setsockopt(socket, IPPROTO_IP, IP_UNICAST_IF,
+                        reinterpret_cast<const char*>(&interface_index), sizeof(interface_index));
+                }
+                else {
+                    DWORD interface_index = (DWORD)underlying->Index;
+                    option_result = ::setsockopt(socket, IPPROTO_IPV6, IPV6_UNICAST_IF,
+                        reinterpret_cast<const char*>(&interface_index), sizeof(interface_index));
+                }
+                if (option_result == SOCKET_ERROR) {
+                    const int error = ::WSAGetLastError();
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: interface bind failed, remote=%s, ifindex=%d, error=%d",
+                        address.to_string().c_str(), underlying->Index, error);
+                    return false;
+                }
+
+                sockaddr_storage destination = {};
+                if (address.is_v4()) {
+                    sockaddr_in* endpoint = reinterpret_cast<sockaddr_in*>(&destination);
+                    endpoint->sin_family = AF_INET;
+                    endpoint->sin_addr.s_addr = htonl(address.to_v4().to_uint());
+                }
+                else {
+                    sockaddr_in6* endpoint = reinterpret_cast<sockaddr_in6*>(&destination);
+                    endpoint->sin6_family = AF_INET6;
+                    const boost::asio::ip::address_v6::bytes_type bytes = address.to_v6().to_bytes();
+                    memcpy(&endpoint->sin6_addr, bytes.data(), bytes.size());
+                    endpoint->sin6_scope_id = address.to_v6().scope_id();
+                }
+
+                DWORD selected_interface = 0;
+                const DWORD route_result = ::GetBestInterfaceEx(
+                    reinterpret_cast<sockaddr*>(&destination), &selected_interface);
+                std::shared_ptr<ITap> tap = GetTap();
+                const int tap_index = NULLPTR == tap ? -1 : tap->GetInterfaceIndex();
+                if (route_result != NO_ERROR || selected_interface != (DWORD)underlying->Index ||
+                    (tap_index >= 0 && selected_interface == (DWORD)tap_index)) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: route verification failed, remote=%s, result=%lu, selected=%lu, physical=%d, tap=%d",
+                        address.to_string().c_str(), (unsigned long)route_result,
+                        (unsigned long)selected_interface, underlying->Index, tap_index);
+                    return false;
+                }
+                return true;
+            }
 #endif
 
 #if defined(_ANDROID) || defined(_IPHONE)
@@ -7325,11 +7608,15 @@ namespace ppp {
 
                 return false;
 #elif defined(_WIN32)
-                DWORD dwInterfaceIndex;
-                if (!::GetBestInterface((IPAddr)nip, &dwInterfaceIndex)) {
+                DWORD dwInterfaceIndex = 0;
+                const DWORD result = ::GetBestInterface((IPAddr)nip, &dwInterfaceIndex);
+                if (result != NO_ERROR) {
+                    LOG_WARN("VEthernetNetworkSwitcher::IsBypassIpAddress: GetBestInterface failed, error=%lu",
+                        (unsigned long)result);
                     return false;
                 }
-                return dwInterfaceIndex != (DWORD)tap->GetInterfaceIndex();
+                const int tapInterfaceIndex = tap->GetInterfaceIndex();
+                return tapInterfaceIndex >= 0 && dwInterfaceIndex != (DWORD)tapInterfaceIndex;
 #else
                 // OS X provides basic routing table processing so that the HTTP proxy provided by the VPN can route 
                 // The traffic instead of having to deliver it to the VPN server for processing.
@@ -7841,9 +8128,15 @@ namespace ppp {
                 // CIDR: 0.0.0.0/0; 0.0.0.0/1; 128.0.0.0/1
                 if (NULLPTR != rib) {
                     if (auto tap = GetTap(); NULLPTR != tap) {
-                        rib->AddRoute(IPEndPoint::AnyAddress, 0, tap->GatewayServer);
-                        rib->AddRoute(IPEndPoint::AnyAddress, 1, tap->GatewayServer);
-                        rib->AddRoute(inet_addr("128.0.0.0"), 1, tap->GatewayServer);
+                        rib->AddRoute(IPEndPoint::AnyAddress, 0, tap->GatewayServer,
+                            ppp::net::native::RouteOrigin::TunnelDefault,
+                            ppp::net::native::RouteAction::Tunnel);
+                        rib->AddRoute(IPEndPoint::AnyAddress, 1, tap->GatewayServer,
+                            ppp::net::native::RouteOrigin::TunnelDefault,
+                            ppp::net::native::RouteAction::Tunnel);
+                        rib->AddRoute(inet_addr("128.0.0.0"), 1, tap->GatewayServer,
+                            ppp::net::native::RouteOrigin::TunnelDefault,
+                            ppp::net::native::RouteAction::Tunnel);
                     }
                 }
 
@@ -7876,7 +8169,9 @@ namespace ppp {
                         uint32_t nx = htonl(gw.to_v4().to_uint());
 
                         // Add route information to rib!
-                        return rib->AddRoute(ip, 32, nx);
+                        return rib->AddRoute(ip, 32, nx,
+                            ppp::net::native::RouteOrigin::ServerPin,
+                            ppp::net::native::RouteAction::Direct);
                     };
 
                 // Check whether the static tunnel specifies an IP address endpoint (required for transit).
@@ -7955,6 +8250,8 @@ namespace ppp {
                             entry.Network = remoteIP.to_v6();
                             entry.Prefix = 128;
                             entry.NextHop = ngw6;
+                            entry.Origin = ppp::net::native::RouteOrigin::ServerPin;
+                            entry.Action = ppp::net::native::RouteAction::Direct;
                             rib6_->emplace_back(entry);
                         }
                     }
@@ -8008,6 +8305,8 @@ namespace ppp {
                         entry6.Network = secondary_ip.to_v6();
                         entry6.Prefix = 128;
                         entry6.NextHop = ngw6_addr.to_v6();
+                        entry6.Origin = ppp::net::native::RouteOrigin::ServerPin;
+                        entry6.Action = ppp::net::native::RouteAction::Direct;
                         rib6_->emplace_back(std::move(entry6));
                     }
                 }
@@ -8020,6 +8319,7 @@ namespace ppp {
                 const std::shared_ptr<boost::asio::ip::udp::socket>&        socket,
                 const std::shared_ptr<Byte>&                                buffer,
                 const boost::asio::ip::address&                             serverIP,
+                const std::shared_ptr<IPFrame>&                             original_packet,
                 const std::shared_ptr<UdpFrame>&                            frame,
                 const std::shared_ptr<ppp::net::packet::BufferSegment>&     messages,
                 const std::shared_ptr<boost::asio::io_context>&             context,
@@ -8062,12 +8362,31 @@ namespace ppp {
                         }
                     }
                 }
+#elif defined(_WIN32)
+                // UDP does not call connect(), so protect the socket immediately
+                // before send_to(). The same fail-closed route verification used
+                // by tunnel TCP/WebSocket sockets also applies to direct DNS.
+                if (!serverIP.is_loopback() &&
+                    !ProtectWindowsSocket((intptr_t)socket->native_handle(), serverIP)) {
+                    LOG_ERROR("DirectDNS protect: Windows socket protection failed, server=%s, port=%u",
+                        serverIP.to_string().c_str(), (uint32_t)frame->Destination.Port);
+                    return false;
+                }
 #endif
 
                 socket->send_to(boost::asio::buffer(messages->Buffer.get(), messages->Length), serverEP,
                     boost::asio::socket_base::message_end_of_record, ec);
                 if (ec) {
                     return false;
+                }
+
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap && NULLPTR != original_packet) {
+                    std::shared_ptr<BufferSegment> original_bytes =
+                        IPFrame::ToArray(GetBufferAllocator(), original_packet.get());
+                    if (NULLPTR != original_bytes) {
+                        tap->TracePacketStage(original_bytes->Buffer.get(), original_bytes->Length,
+                            "REMOTE_TX", "dns", "direct", 1);
+                    }
                 }
 
                 const std::weak_ptr<boost::asio::ip::udp::socket> socket_weak(socket);
@@ -8188,17 +8507,19 @@ namespace ppp {
                     const boost::asio::ip::udp::endpoint destinationEP(destinationIP, frame->Destination.Port);
                     auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
                     DispatchLocalDnsQuery(query, false,
-                        [self, sourceEP, destinationEP](const std::shared_ptr<ppp::string>& response) noexcept {
+                        [self, sourceEP, destinationEP](const std::shared_ptr<ppp::string>& response,
+                            bool local_response) noexcept {
                             if (!response || response->empty()) {
                                 return;
                             }
                             const bool output = self->DatagramOutput(sourceEP, destinationEP,
-                                const_cast<char*>(response->data()), static_cast<int>(response->size()), false);
+                                const_cast<char*>(response->data()), static_cast<int>(response->size()), false,
+                                local_response ? "LOCAL_RX" : "REMOTE_RX");
                             LOG_DEBUG("DNS pipeline: inject source=%s:%u, dns=%s:%u, bytes=%llu, output=%d",
                                 sourceEP.address().to_string().data(), sourceEP.port(),
                                 destinationEP.address().to_string().data(), destinationEP.port(),
                                 (unsigned long long)response->size(), (int)output);
-                        });
+                        }, packet);
                     return true;
                 }
 #endif
@@ -8225,9 +8546,13 @@ namespace ppp {
                     char dns_packet[PPP_MAX_DNS_PACKET_BUFFER_SIZE]; 
 
                     if (m.encode(dns_packet, PPP_MAX_DNS_PACKET_BUFFER_SIZE, dns_size) == ::dns::BufferResult::NoError && dns_size > 0) {
+                        if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                            tap->TraceInputStage("POLICY_SELECTED", "dns", "cache", 0);
+                        }
                         return DatagramOutput(
                             IPEndPoint::ToEndPoint<boost::asio::ip::udp>(frame->Source), 
-                            boost::asio::ip::udp::endpoint(destinationIP, PPP_DNS_SYS_PORT), dns_packet, dns_size, false);
+                            boost::asio::ip::udp::endpoint(destinationIP, PPP_DNS_SYS_PORT),
+                            dns_packet, dns_size, false, "LOCAL_RX");
                     }
                 }
 
@@ -8284,9 +8609,12 @@ namespace ppp {
                 const auto allocator = configuration_->GetBufferAllocator();
 
                 LOG_INFO("DirectDNS spawn: host=%s server=%s context=OK buffer=OK socket=OK alloc=%s", qs.mName.data(), serverIP.to_string().c_str(), (NULLPTR != allocator) ? "OK" : "NO");
+                if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
+                    tap->TraceInputStage("POLICY_SELECTED", "dns", "direct", 1);
+                }
                 return ppp::coroutines::YieldContext::Spawn(allocator.get(), *context,
-                    [self, this, socket, buffer, frame, messages, context, serverIP, destinationIP](ppp::coroutines::YieldContext& y) noexcept {
-                        return RedirectDnsServer(y, socket, buffer, serverIP, frame, messages, context, destinationIP);
+                    [self, this, socket, buffer, packet, frame, messages, context, serverIP, destinationIP](ppp::coroutines::YieldContext& y) noexcept {
+                        return RedirectDnsServer(y, socket, buffer, serverIP, packet, frame, messages, context, destinationIP);
                     });
             }
 

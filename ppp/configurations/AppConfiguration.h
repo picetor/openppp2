@@ -59,6 +59,7 @@ namespace ppp {
              */
             struct ClientRoutingConfiguration final {
                 bool                                                        configured;  ///< True when client.routing was supplied as a JSON object.
+                bool                                                        route_origin_policy; ///< Require explicit Direct action for proxy bypass; false is emergency legacy fallback.
                 ppp::vector<ppp::string>                                    bypass;      ///< IP bypass source files or inline text.
                 ppp::vector<RouteConfiguration>                             routes;      ///< Canonical IP route sources.
                 ppp::vector<ppp::string>                                    dns_rules;   ///< DNS rule source files or inline text.
@@ -299,6 +300,12 @@ namespace ppp {
                     ppp::string                                             username;       ///< SOCKS5 authentication username; empty = no authentication.
                     ppp::string                                             password;       ///< SOCKS5 authentication password; empty = no authentication.
                 }                                                           socks_proxy;
+                struct {
+                    int                                                     mtu;            ///< Effective TUN MTU; normalized to 1280..1500 for dual-stack operation.
+                    bool                                                    mss_clamp;      ///< Clamp TCP SYN MSS before tunnel encapsulation.
+                    int                                                     mss_v4;         ///< IPv4 MSS ceiling; never exceeds mtu - 40.
+                    int                                                     mss_v6;         ///< IPv6 MSS ceiling; never exceeds mtu - 60.
+                }                                                           tun;
                 bool                                                        proxy_only;     ///< Local HTTP/SOCKS runtime; suppresses host TUN routes/DNS takeover while native policy remains active (also implied by --mode=proxy).
             }                                                               client;         ///< Client-mode specific parameters.
             struct {

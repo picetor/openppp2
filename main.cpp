@@ -523,6 +523,35 @@ static std::atomic<bool>                               g_core_api_instance_activ
 // same process, so those services must be initialized exactly once.
 static std::once_flag                                 g_core_runtime_initializer;
 static FILE*                                          g_core_log_file = nullptr;
+static uint64_t                                       g_core_log_next_rotation_check = 0;
+static constexpr int                                  CORE_LOG_ROTATE_BYTES = 64 * 1024 * 1024;
+static constexpr int                                  CORE_LOG_MAX_FILES = 4;
+
+static ppp::string CoreLogGenerationPath(int generation) noexcept
+{
+    return generation <= 0 ? LOG_FILE_PATH_ :
+        LOG_FILE_PATH_ + "." + stl::to_string<ppp::string>(generation);
+}
+
+static void RotateCoreLogFiles() noexcept
+{
+    for (int generation = CORE_LOG_MAX_FILES - 1; generation >= 1; --generation)
+    {
+        const ppp::string source = CoreLogGenerationPath(generation - 1);
+        const ppp::string destination = CoreLogGenerationPath(generation);
+        if (!File::Exists(source.data()))
+        {
+            continue;
+        }
+        File::Delete(destination.data());
+        if (0 != ::rename(source.data(), destination.data()))
+        {
+            const int rotate_error = errno;
+            fprintf(stderr, "[CoreLog] stage=rotate failed source='%s' destination='%s' errno=%d error='%s'\r\n",
+                source.data(), destination.data(), rotate_error, strerror(rotate_error));
+        }
+    }
+}
 
 // A Rust TUI launches the compatibility core with stdout connected to a
 // pipe. CRT stdout is then fully buffered, which can hide the exact startup
@@ -542,31 +571,92 @@ static void CloseCoreLogFile() noexcept
     // closed. Otherwise a detached log worker from the previous in-process
     // core can write into a closed FILE* during the next TUI restart.
     ppp::diagnostics::FlushLogs();
-    if (NULLPTR != g_core_log_file)
+    FILE* previous = ppp::diagnostics::ExchangeLogStream(stdout);
+    if (NULLPTR != previous && previous == g_core_log_file)
     {
-        fclose(g_core_log_file);
-        g_core_log_file = NULLPTR;
+        fclose(previous);
     }
-    ppp::diagnostics::SetLogStream(stdout);
+    g_core_log_file = NULLPTR;
+    g_core_log_next_rotation_check = 0;
 }
 
-static void OpenCoreLogFile() noexcept
+static bool OpenCoreLogFile(ppp::string* error_message = NULLPTR) noexcept
 {
     if (LOG_FILE_PATH_.empty())
     {
-        return;
+        return true;
+    }
+
+    if (File::GetLength(LOG_FILE_PATH_.data()) >= CORE_LOG_ROTATE_BYTES)
+    {
+        RotateCoreLogFiles();
     }
 
     FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
     if (NULLPTR == log_file)
     {
+        const int open_error = errno;
+        fprintf(stderr, "[CoreStartup] stage=log-open failed path='%s' errno=%d error='%s'\r\n",
+            LOG_FILE_PATH_.data(), open_error, strerror(open_error));
+        LOG_ERROR("OpenCoreLogFile: cannot open '%s', errno=%d, error=%s",
+            LOG_FILE_PATH_.data(), open_error, strerror(open_error));
+        if (NULLPTR != error_message)
+        {
+            char message[1024];
+            snprintf(message, sizeof(message), "cannot open core log '%s': errno=%d (%s)",
+                LOG_FILE_PATH_.data(), open_error, strerror(open_error));
+            *error_message = message;
+        }
+        return false;
+    }
+
+    setvbuf(log_file, NULLPTR, _IOFBF, 64 * 1024);
+    g_core_log_file = log_file;
+    ppp::diagnostics::ExchangeLogStream(log_file);
+    g_core_log_next_rotation_check = Executors::GetTickCount() + 1000;
+    fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
+    return true;
+}
+
+static void MaintainCoreLogFile(uint64_t now) noexcept
+{
+    if (NULLPTR == g_core_log_file || LOG_FILE_PATH_.empty() ||
+        now < g_core_log_next_rotation_check)
+    {
+        return;
+    }
+    g_core_log_next_rotation_check = now + 1000;
+    if (File::GetLength(LOG_FILE_PATH_.data()) < CORE_LOG_ROTATE_BYTES)
+    {
         return;
     }
 
-    setvbuf(log_file, NULLPTR, _IONBF, 0);
-    g_core_log_file = log_file;
-    ppp::diagnostics::SetLogStream(log_file);
-    fprintf(stdout, "Log file opened: %s\r\n", LOG_FILE_PATH_.data());
+    // Transform the output stream under the logger's output mutex. The log
+    // worker may wait briefly, but producers continue enqueueing and the
+    // data-plane tick never waits for the whole debug queue to drain.
+    FILE* replacement = ppp::diagnostics::TransformLogStream(
+        [](FILE* previous) noexcept -> FILE* {
+            if (NULLPTR == previous || previous != g_core_log_file)
+            {
+                return previous;
+            }
+            fflush(previous);
+            fclose(previous);
+            g_core_log_file = NULLPTR;
+            RotateCoreLogFiles();
+
+            FILE* log_file = fopen(LOG_FILE_PATH_.data(), "a");
+            if (NULLPTR == log_file)
+            {
+                const int open_error = errno;
+                fprintf(stderr, "[CoreLog] stage=reopen failed path='%s' errno=%d error='%s'\r\n",
+                    LOG_FILE_PATH_.data(), open_error, strerror(open_error));
+                return stdout;
+            }
+            setvbuf(log_file, NULLPTR, _IOFBF, 64 * 1024);
+            return log_file;
+        });
+    g_core_log_file = replacement == stdout ? NULLPTR : replacement;
 }
 
 static void RpcLogSink(const char* tag, const char* text) noexcept {
@@ -3011,6 +3101,10 @@ void PppApplication::PrintHelpInformation() noexcept
         col_option_width, "--tun-driver=<mode>",
         col_description_width, "Adapter driver: auto, wintun, or tap",
         col_default_width, "auto");
+    printf("│ %-*s │ %-*s │ %-*s │\n",
+        col_option_width, "--dataplane-trace=[yes|no]",
+        col_description_width, "Per-packet Wintun success tracing",
+        col_default_width, "no");
 #endif
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
@@ -3405,6 +3499,10 @@ std::shared_ptr<NetworkInterface> PppApplication::GetNetworkInterface(int argc, 
             }
             ppp::tap::TapWindows::SetDriverMode(ppp::tap::TapWindows::DriverMode::Auto);
         }
+        const bool dataplane_trace = ppp::ToBoolean(
+            ppp::GetCommandArgument("--dataplane-trace", argc, argv, "no").data());
+        ppp::tap::TapWindows::SetDataplaneTrace(dataplane_trace);
+        fprintf(stdout, "[CoreStartup] dataplane-trace=%d\r\n", dataplane_trace ? 1 : 0);
 
         // Keep the platform default on the reliable C/TCP path. The Windows
         // TAP + lwIP path remains available through an explicit --lwip=yes,
@@ -3761,6 +3859,48 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
     snapshot["mux_active_links"] = 0;
     snapshot["mux_fallback_reason"] = "";
     snapshot["connected_monotonic_ms"] = 0;
+    snapshot["dataplane"]["duplicate_syn_count"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["receive_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["receive_errors"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["response_timeouts"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["source_rejected"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["unpack_errors"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["session_mismatch"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["output_failed"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["tx_queued"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["tx_completed"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["tx_failed"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["send_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["send_errors"] = (Json::UInt64)0;
+    snapshot["dataplane"]["static_echo"]["consecutive_failures"] = 0;
+    snapshot["dataplane"]["static_echo"]["degraded_until_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["channel_opened"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["channel_open_failures"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["generation_resets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["fallbacks"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["streams_active"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["queue_bytes"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["head_of_line_stall_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_samples"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_failures"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_mean_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_p50_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_p95_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_p99_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["mux"]["stream_open_max_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["flow_id"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["tun_rx_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["policy_selected_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["remote_tx_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["remote_rx_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["local_rx_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["correlated_remote_rx_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["validate_failures"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["built_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["allocated_packets"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["submit_successes"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["submit_failures"] = (Json::UInt64)0;
+    snapshot["dataplane"]["wintun"]["interface_mtu"] = 0;
 
     Json::Value capabilities(Json::arrayValue);
     capabilities.append("mux.compat");
@@ -3899,8 +4039,80 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
                 snapshot["mux_receiver_ordering"] =
                     mux->get_ordering_mode() == vmux::vmux_net::ordering_flow_v2 ? "flow_v2" : "compat";
                 snapshot["mux_active_links"] = mux->get_live_linklayer_count();
+                snapshot["dataplane"]["mux"]["streams_active"] =
+                    (Json::UInt64)mux->get_active_stream_count();
+                snapshot["dataplane"]["mux"]["queue_bytes"] =
+                    (Json::UInt64)mux->get_tx_queue_bytes();
+                snapshot["dataplane"]["mux"]["head_of_line_stall_ms"] =
+                    (Json::UInt64)mux->get_head_of_line_stall_ms(Executors::GetTickCount());
+                snapshot["dataplane"]["mux"]["stream_open_samples"] =
+                    (Json::UInt64)mux->get_stream_open_samples();
+                snapshot["dataplane"]["mux"]["stream_open_failures"] =
+                    (Json::UInt64)mux->get_stream_open_failures();
+                snapshot["dataplane"]["mux"]["stream_open_mean_ms"] =
+                    (Json::UInt64)mux->get_stream_open_mean_ms();
+                snapshot["dataplane"]["mux"]["stream_open_p50_ms"] =
+                    (Json::UInt64)mux->get_stream_open_p50_ms();
+                snapshot["dataplane"]["mux"]["stream_open_p95_ms"] =
+                    (Json::UInt64)mux->get_stream_open_p95_ms();
+                snapshot["dataplane"]["mux"]["stream_open_p99_ms"] =
+                    (Json::UInt64)mux->get_stream_open_p99_ms();
+                snapshot["dataplane"]["mux"]["stream_open_max_ms"] =
+                    (Json::UInt64)mux->get_stream_open_max_ms();
+            }
+
+            const VEthernetExchanger::StaticEchoDiagnostics static_echo =
+                exchanger->GetStaticEchoDiagnostics();
+            snapshot["dataplane"]["static_echo"]["receive_packets"] = (Json::UInt64)static_echo.receive_packets;
+            snapshot["dataplane"]["static_echo"]["receive_errors"] = (Json::UInt64)static_echo.receive_errors;
+            snapshot["dataplane"]["static_echo"]["response_timeouts"] = (Json::UInt64)static_echo.response_timeouts;
+            snapshot["dataplane"]["static_echo"]["source_rejected"] = (Json::UInt64)static_echo.source_rejected;
+            snapshot["dataplane"]["static_echo"]["unpack_errors"] = (Json::UInt64)static_echo.unpack_errors;
+            snapshot["dataplane"]["static_echo"]["session_mismatch"] = (Json::UInt64)static_echo.session_mismatch;
+            snapshot["dataplane"]["static_echo"]["output_failed"] = (Json::UInt64)static_echo.output_failed;
+            snapshot["dataplane"]["static_echo"]["tx_queued"] = (Json::UInt64)static_echo.send_queued;
+            snapshot["dataplane"]["static_echo"]["tx_completed"] = (Json::UInt64)static_echo.send_packets;
+            snapshot["dataplane"]["static_echo"]["tx_failed"] = (Json::UInt64)static_echo.send_errors;
+            snapshot["dataplane"]["static_echo"]["send_packets"] = (Json::UInt64)static_echo.send_packets;
+            snapshot["dataplane"]["static_echo"]["send_errors"] = (Json::UInt64)static_echo.send_errors;
+            snapshot["dataplane"]["static_echo"]["consecutive_failures"] = static_echo.consecutive_failures;
+            snapshot["dataplane"]["static_echo"]["degraded_until_ms"] = (Json::UInt64)static_echo.degraded_until;
+
+            const VEthernetExchanger::MuxDiagnostics mux_diagnostics = exchanger->GetMuxDiagnostics();
+            snapshot["dataplane"]["mux"]["channel_opened"] = (Json::UInt64)mux_diagnostics.channel_opened;
+            snapshot["dataplane"]["mux"]["channel_open_failures"] = (Json::UInt64)mux_diagnostics.channel_open_failures;
+            snapshot["dataplane"]["mux"]["generation_resets"] = (Json::UInt64)mux_diagnostics.generation_resets;
+            snapshot["dataplane"]["mux"]["fallbacks"] = (Json::UInt64)mux_diagnostics.fallbacks;
+        }
+
+        if (std::shared_ptr<ppp::ethernet::VNetstack> netstack = client->GetNetstack(); NULLPTR != netstack)
+        {
+            snapshot["dataplane"]["duplicate_syn_count"] = (Json::UInt64)netstack->GetDuplicateSynCount();
+        }
+
+#if defined(_WIN32)
+        if (std::shared_ptr<ITap> tap = client->GetTap(); NULLPTR != tap)
+        {
+            if (std::shared_ptr<ppp::tap::TapWindows> windows_tap =
+                std::dynamic_pointer_cast<ppp::tap::TapWindows>(tap); NULLPTR != windows_tap)
+            {
+                const ppp::tap::TapWindows::WintunDiagnostics wintun = windows_tap->GetWintunDiagnostics();
+                snapshot["dataplane"]["wintun"]["flow_id"] = (Json::UInt64)wintun.flow_id;
+                snapshot["dataplane"]["wintun"]["tun_rx_packets"] = (Json::UInt64)wintun.tun_rx_packets;
+                snapshot["dataplane"]["wintun"]["policy_selected_packets"] = (Json::UInt64)wintun.policy_selected_packets;
+                snapshot["dataplane"]["wintun"]["remote_tx_packets"] = (Json::UInt64)wintun.remote_tx_packets;
+                snapshot["dataplane"]["wintun"]["remote_rx_packets"] = (Json::UInt64)wintun.remote_rx_packets;
+                snapshot["dataplane"]["wintun"]["local_rx_packets"] = (Json::UInt64)wintun.local_rx_packets;
+                snapshot["dataplane"]["wintun"]["correlated_remote_rx_packets"] = (Json::UInt64)wintun.correlated_remote_rx_packets;
+                snapshot["dataplane"]["wintun"]["validate_failures"] = (Json::UInt64)wintun.validate_failures;
+                snapshot["dataplane"]["wintun"]["built_packets"] = (Json::UInt64)wintun.built_packets;
+                snapshot["dataplane"]["wintun"]["allocated_packets"] = (Json::UInt64)wintun.allocated_packets;
+                snapshot["dataplane"]["wintun"]["submit_successes"] = (Json::UInt64)wintun.submit_successes;
+                snapshot["dataplane"]["wintun"]["submit_failures"] = (Json::UInt64)wintun.submit_failures;
+                snapshot["dataplane"]["wintun"]["interface_mtu"] = wintun.interface_mtu;
             }
         }
+#endif
 
         // Traffic statistics: rx/tx are the last OnTick period deltas (they
         // ARE the current rates, mirroring the built-in TUI's TX/RX rows);
@@ -4263,6 +4475,8 @@ bool PppApplication::OnTick(uint64_t now) noexcept
 {
     using RouteIPListTablePtr = VEthernetNetworkSwitcher::RouteIPListTablePtr;
     using NetworkState        = VEthernetExchanger::NetworkState;
+
+    MaintainCoreLogFile(now);
 
 #if defined(_WIN32)
     CONSOLE_SELECTION_INFO selection{};
@@ -5631,7 +5845,16 @@ static void CoreApiRun(
         }
 #endif
 
-        OpenCoreLogFile();
+        ppp::string log_open_error;
+        if (!OpenCoreLogFile(&log_open_error))
+        {
+            g_core_in_process_host.store(false, std::memory_order_release);
+            CoreApiSignalStartup(handle, false, -1, log_open_error.data());
+            APP->Release();
+            DEFAULT_.reset();
+            CoreApiSignalFinished(handle, -1);
+            return;
+        }
         fprintf(stdout, "[CoreApi] stage=log-open ok\r\n");
 
         // The direct host receives logs through the same sink used by the
@@ -6143,7 +6366,12 @@ int main(int argc, const char* argv[]) noexcept
 
     // When --log-file is specified, redirect core LOG_* output to file in all
     // builds.  The dashboard UI (fprintf to stdout) stays on console.
-    OpenCoreLogFile();
+    ppp::string log_open_error;
+    if (!OpenCoreLogFile(&log_open_error))
+    {
+        APP->Release();
+        return -1;
+    }
     fprintf(stdout, "[CoreStartup] stage=log-open ok\r\n");
 
 #if defined(_MACOS)
