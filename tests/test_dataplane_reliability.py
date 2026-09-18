@@ -226,6 +226,8 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         switcher = read("ppp/app/client/VEthernetNetworkSwitcher.cpp")
         self.assertIn("enum class RouteOrigin", header)
         self.assertIn("enum class RouteAction", header)
+        self.assertIn("typedef struct RouteEntry", header)
+        self.assertIn("typedef struct RouteEntry6", header)
         self.assertIn("if (prefix == entry.Prefix)", implementation)
         self.assertRegex(
             switcher,

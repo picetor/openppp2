@@ -28,7 +28,7 @@ namespace ppp
                 Reject
             };
 
-            typedef struct
+            typedef struct RouteEntry
             {
                 uint32_t                                                Destination;
                 int                                                     Prefix;
@@ -69,7 +69,7 @@ namespace ppp
             };
 
             // RouteEntry6: IPv6 route entry storing addresses as boost::asio::ip::address
-            typedef struct
+            typedef struct RouteEntry6
             {
                 boost::asio::ip::address                                   Destination;
                 int                                                        Prefix;
