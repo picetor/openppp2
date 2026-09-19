@@ -4933,11 +4933,15 @@ mod tests {
     fn owned_core_rpc_settings_are_forwarded_and_token_is_optional() {
         let mut args = vec!["--rpc-token=stale".to_string()];
         set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "");
-        assert!(has_arg(&args, "--rpc-listen=127.0.0.1:39100"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--rpc-listen=127.0.0.1:39100"));
         assert!(!args.iter().any(|arg| arg.starts_with("--rpc-token")));
 
         set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "local-secret");
-        assert!(has_arg(&args, "--rpc-token=local-secret"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--rpc-token=local-secret"));
     }
 
     #[test]
