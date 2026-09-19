@@ -636,7 +636,7 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn('result["read_only"] = true', core)
         self.assertIn('result["safety"]["secrets_in_responses"] = false', core)
         self.assertIn('snapshot["network"]["tun"]', core)
-        self.assertNotIn("client->GetTapNetworkInterface()", core)
+        self.assertNotIn("const auto tun_interface = client->", core)
         self.assertIn("ppp_core_api_version(void)", header)
         self.assertIn('Self::DescribeApi => "describe_api"', rust_rpc)
         self.assertIn('Self::GetHealth => "get_health"', rust_rpc)
