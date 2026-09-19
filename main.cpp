@@ -4430,7 +4430,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
             ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("phase", Json::Value("idle")));
         const ppp::string role =
             ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("role", Json::Value()));
-        const Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
+        const ppp::Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
             snapshot["last_error"].get("code", Json::Value((Json::Int64)0)));
         const bool ready = role == "client" ? phase == "connected" : phase != "failed";
         const bool healthy = last_error == 0 && phase != "failed";
@@ -4489,7 +4489,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
 
         add_check("runtime.snapshot", "pass", "runtime snapshot generated");
 
-        const Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
+        const ppp::Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
             snapshot["last_error"].get("code", Json::Value((Json::Int64)0)));
         add_check("runtime.last_error", last_error == 0 ? "pass" : "fail",
             last_error == 0 ? "no core error recorded" :
