@@ -40,7 +40,10 @@
 | `get_snapshot` | 只读 | 完整运行快照 |
 | `get_logs` | 只读 | 增量结构化日志 |
 | `get_outbounds` | 只读 | 出口状态 |
+| `get_settings` | 只读 | 完整启动命令（机密脱敏）和可热更新设置 |
 | `set_log_level` | 控制 | 动态调整日志等级 |
+| `update_settings` | 控制 | 批量调整可热更新设置 |
+| `configure_api` | 控制 | 由 core 自行启停、改绑和调整 API 鉴权 |
 | `switch_server` | 控制 | 切换主出口 |
 | `switch_rank1` | 控制 | 切换至探测排名第一入口 |
 | `shutdown` | 生命周期 | 停止或请求重启，必须带确认字段 |
@@ -55,6 +58,9 @@ ppp-tui-cli api --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli health --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli diagnose quick --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli snapshot --rpc 127.0.0.1:39100 --token <token> --json
+ppp-tui-cli settings --rpc 127.0.0.1:39100 --token <token> --json
+ppp-tui-cli set '{"block_quic":true,"mux":2}' --rpc 127.0.0.1:39100 --token <token> --json
+ppp-tui-cli call get_health '{}' --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli stop --rpc 127.0.0.1:39100 --token <token>
 ```
 

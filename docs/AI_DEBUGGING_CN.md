@@ -68,6 +68,10 @@ ppp-tui-cli health --rpc 127.0.0.1:39100 --token my-local-token --json
 6. 先解释证据，再执行 `set_log_level`、`switch_server` 等变更操作。
 7. 只有用户明确要求时才发送 `shutdown`。
 
+AI 不应把方法名限制在 CLI 预置子命令中。先通过 `describe_api` 发现当前 core 的
+全部方法，再用通用 `call <method> [params-json]` 调用；这样新增 core 命令无需同步
+增加一个专用 CLI 子命令。
+
 常用命令：
 
 ```text
@@ -75,6 +79,9 @@ ppp-tui-cli api --rpc 127.0.0.1:39100 --json
 ppp-tui-cli health --rpc 127.0.0.1:39100 --json
 ppp-tui-cli diagnose quick --rpc 127.0.0.1:39100 --json
 ppp-tui-cli snapshot --rpc 127.0.0.1:39100 --json
+ppp-tui-cli settings --rpc 127.0.0.1:39100 --json
+ppp-tui-cli set '{"block_quic":true,"static_mode":false,"mux":2}' --rpc 127.0.0.1:39100 --json
+ppp-tui-cli call run_diagnostics '{"scope":"full"}' --rpc 127.0.0.1:39100 --json
 ```
 
 设置了 token 时，在每条命令中追加 `--token <token>`。
@@ -89,12 +96,35 @@ ppp-tui-cli snapshot --rpc 127.0.0.1:39100 --json
 | `get_snapshot` | 完整运行快照和 `control_api` 状态 | 否 |
 | `get_logs` | 增量读取结构化日志 | 否 |
 | `get_outbounds` | 出口列表、连接状态和当前选择 | 否 |
+| `get_settings` | 全部启动参数（token/密码/私钥脱敏）与运行设置 | 否 |
 | `set_log_level` | 动态修改日志等级 | 是 |
+| `update_settings` | 修改 `log_level`、`block_quic`、`static_mode`、`mux`、`mux_acceleration` | 是 |
+| `configure_api` | 启用/关闭 API，修改监听、token、客户端上限 | 是，需确认字段 |
 | `switch_server` | 切换指定服务器/出口 | 是 |
 | `switch_rank1` | 切换至探测排名第一的入口 | 是 |
 | `shutdown` | 停止或请求重启 core | 是，需确认字段 |
 
 诊断接口本身不发送测试流量、不修改路由或 DNS，也不会自动切换服务器。
+
+### core 自行开关 API
+
+`configure_api` 必须包含 `confirm: "configure_api"`。专用 CLI 会自动添加确认：
+
+```text
+# 改为固定端口并设置 token
+ppp-tui-cli api-config '{"enabled":true,"listen":"39100","token":"new-token","max_clients":4}' --rpc 127.0.0.1:39000 --token old-token --json
+
+# 关闭 TCP API；成功响应发出后当前连接会断开
+ppp-tui-cli api-config '{"enabled":false}' --rpc 127.0.0.1:39100 --token new-token --json
+```
+
+通过进程内 C ABI 调用时，即使 TCP API 已关闭，宿主仍可使用 `configure_api` 重新
+开启。修改监听地址时 core 会先打开新监听，再延迟关闭旧监听，响应中的 `listen`
+是新连接应使用的实际端点。端口为 `0` 时尤其应读取该返回值。
+
+启动参数会完整列在 `get_settings.command.arguments` 中，但 token、密码、secret 和
+私钥值会脱敏。当前不能热更新的 `--...` 项由 `update_settings` 放入
+`restart_required`；调用方必须交给宿主以新参数重启，不能把它误报为已生效。
 
 ## 故障定位
 

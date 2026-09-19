@@ -41,6 +41,10 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
             | "diagnose"
             | "status"
             | "snapshot"
+            | "settings"
+            | "set"
+            | "api-config"
+            | "call"
             | "logs"
             | "switch"
             | "switch-rank1"
@@ -124,6 +128,38 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
             require_no_positional(name, &positional)?;
             CoreCommand::GetSnapshot
         }
+        "settings" => {
+            require_no_positional(name, &positional)?;
+            CoreCommand::GetSettings
+        }
+        "set" => {
+            let text = one_positional(name, &positional)?;
+            let settings: Value = serde_json::from_str(&text)
+                .context("set requires one JSON object")?;
+            if !settings.is_object() {
+                bail!("set requires one JSON object")
+            }
+            CoreCommand::UpdateSettings { settings }
+        }
+        "api-config" => {
+            let text = one_positional(name, &positional)?;
+            let settings: Value = serde_json::from_str(&text)
+                .context("api-config requires one JSON object")?;
+            if !settings.is_object() {
+                bail!("api-config requires one JSON object")
+            }
+            CoreCommand::ConfigureApi { settings }
+        }
+        "call" => {
+            if positional.is_empty() || positional.len() > 2 {
+                bail!("call requires a method and optional JSON parameters")
+            }
+            let params = positional.get(1)
+                .map(|text| serde_json::from_str(text).context("invalid call parameters JSON"))
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!({}));
+            CoreCommand::Raw { method: positional[0].clone(), params }
+        }
         "logs" => {
             require_no_positional(name, &positional)?;
             CoreCommand::GetLogs { since_seq }
@@ -196,9 +232,9 @@ pub fn execute_once(address: &str, token: &str, command: CoreCommand) -> Result<
         bail!("core RPC authentication failed")
     }
 
-    let method = command.method();
+    let method = command.method().to_string();
     rpc.request_command(command)?;
-    wait_for_response(&mut rpc, method, COMMAND_TIMEOUT)
+    wait_for_response(&mut rpc, &method, COMMAND_TIMEOUT)
 }
 
 fn wait_for_response(rpc: &mut RpcClient, method: &str, timeout: Duration) -> Result<Value> {
@@ -272,6 +308,11 @@ pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
+        CoreCommand::GetSettings
+        | CoreCommand::UpdateSettings { .. }
+        | CoreCommand::ConfigureApi { .. }
+        | CoreCommand::Raw { .. } => serde_json::to_string_pretty(value)
+            .unwrap_or_else(|_| value.to_string()),
         CoreCommand::GetLogs { .. } => value
             .get("logs")
             .and_then(Value::as_array)
@@ -353,6 +394,39 @@ mod tests {
         .unwrap();
         assert_eq!(request.command, CoreCommand::GetHealth);
         assert_eq!(request.token, "");
+    }
+
+    #[test]
+    fn parses_settings_and_raw_control_commands() {
+        let settings = parse_cli_control(&args(&[
+            "set",
+            r#"{"block_quic":true,"mux":2}"#,
+            "--rpc=127.0.0.1:39100",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            settings.command,
+            CoreCommand::UpdateSettings {
+                settings: serde_json::json!({"block_quic": true, "mux": 2}),
+            }
+        );
+
+        let raw = parse_cli_control(&args(&[
+            "call",
+            "switch_server",
+            r#"{"tag":"main"}"#,
+            "--rpc=127.0.0.1:39100",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            raw.command,
+            CoreCommand::Raw {
+                method: "switch_server".to_string(),
+                params: serde_json::json!({"tag": "main"}),
+            }
+        );
     }
 
     #[test]

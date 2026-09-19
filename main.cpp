@@ -478,6 +478,7 @@ private:
     std::shared_ptr<NetworkInterface>               network_interface_;                  // Network interface config
     std::shared_ptr<Timer>                          timeout_                    = 0;     // Periodic timer
     ppp::string                                     startup_failure_;                    // Last startup-stage failure
+    ppp::vector<ppp::string>                        command_arguments_;                  // Original argv[1..] for AI inspection
     Stopwatch                                       stopwatch_;                          // Application uptime
     PreventReturn                                   prevent_rerun_;                      // Prevent multiple instances
     ppp::transmissions::ITransmissionStatistics     transmission_statistics_;            // Traffic statistics
@@ -2610,6 +2611,11 @@ std::shared_ptr<BufferswapAllocator> PppApplication::GetBufferAllocator() noexce
 int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) noexcept
 {
     fprintf(stdout, "[CoreStartup] stage=arguments-prepare enter argc=%d\r\n", argc);
+    command_arguments_.clear();
+    for (int i = 1; i < argc; ++i)
+    {
+        command_arguments_.emplace_back(argv[i] != NULLPTR ? argv[i] : "");
+    }
     // Parse runtime logging before any configuration or RPC startup so early
     // startup failures also obey the selected level.  Release and Debug use
     // the same log implementation; the default is intentionally error-only.
@@ -4405,7 +4411,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
     if (method == "describe_api")
     {
         result["name"] = "openppp2-core-control";
-        result["api_version"] = 1;
+        result["api_version"] = 2;
         result["snapshot_schema_version"] = 1;
         result["core_version"] = PPP_APPLICATION_VERSION;
         result["transport"] = "length-prefixed-json";
@@ -4436,7 +4442,10 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         add_method("get_log_level", "read", "{}", "Current core log level.", false);
         add_method("get_logs", "read", "{since_seq?: uint64}", "Buffered structured logs.", false);
         add_method("get_outbounds", "read", "{}", "Outbound status list.", false);
+        add_method("get_settings", "read", "{}", "All startup inputs (secrets redacted) and runtime-adjustable settings.", false);
         add_method("set_log_level", "control", "{level: string}", "Change runtime log verbosity.", false);
+        add_method("update_settings", "control", "{settings: object}", "Apply runtime settings; unknown/startup-only keys are reported.", false);
+        add_method("configure_api", "control", "{enabled?: bool, listen?: string, token?: string, max_clients?: int}", "Enable, disable or reconfigure the core control API.", true);
         add_method("switch_server", "control", "{tag: string}", "Switch the primary outbound.", false);
         add_method("switch_rank1", "control", "{tag: string}", "Switch an outbound to its ranked-first entry.", false);
         add_method("shutdown", "lifecycle", "{confirm: shutdown, restart?: bool}", "Stop the core with network cleanup.", true);
@@ -4452,6 +4461,66 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         result["safety"]["secrets_in_responses"] = false;
         result["safety"]["loopback_only"] = true;
         result["safety"]["authentication_optional"] = true;
+        result["safety"]["startup_secrets_redacted"] = true;
+        return true;
+    }
+
+    if (method == "get_settings")
+    {
+        Json::Value arguments(Json::arrayValue);
+        bool redact_next = false;
+        for (const ppp::string& argument : command_arguments_)
+        {
+            if (redact_next)
+            {
+                arguments.append("<redacted>");
+                redact_next = false;
+                continue;
+            }
+            ppp::string lower = ppp::ToLower<ppp::string>(argument);
+            const bool secret = lower.find("token") != ppp::string::npos ||
+                lower.find("password") != ppp::string::npos ||
+                lower.find("secret") != ppp::string::npos ||
+                lower.find("private-key") != ppp::string::npos;
+            if (!secret)
+            {
+                arguments.append(argument);
+                continue;
+            }
+
+            std::size_t equals = argument.find('=');
+            if (equals == ppp::string::npos)
+            {
+                arguments.append(argument);
+                redact_next = true;
+            }
+            else
+            {
+                arguments.append(argument.substr(0, equals + 1) + "<redacted>");
+            }
+        }
+
+        result["command"]["arguments"] = arguments;
+        result["command"]["complete"] = true;
+        result["command"]["secrets_redacted"] = true;
+        result["runtime"]["log_level"] = LOG_LEVEL_;
+        result["runtime"]["block_quic"] = NULLPTR != client_ && client_->IsBlockQUIC();
+        result["runtime"]["static_mode"] = NULLPTR != client_ && client_->StaticMode(NULLPTR);
+        result["runtime"]["mux"] = NULLPTR != client_ ? (Json::UInt)client_->Mux(NULLPTR) : 0;
+        result["runtime"]["mux_acceleration"] = NULLPTR != client_ ? (Json::UInt)client_->MuxAcceleration(NULLPTR) : 0;
+        result["runtime"]["api_enabled"] = NULLPTR != rpc_server_;
+        result["runtime"]["api_listen"] = rpc_listen_;
+        result["runtime"]["api_token_configured"] = !rpc_token_.empty();
+        result["runtime"]["api_max_clients"] = rpc_max_clients_;
+
+        Json::Value adjustable(Json::arrayValue);
+        adjustable.append("log_level");
+        adjustable.append("block_quic");
+        adjustable.append("static_mode");
+        adjustable.append("mux");
+        adjustable.append("mux_acceleration");
+        result["runtime_adjustable"] = adjustable;
+        result["startup_only_policy"] = "readable through command.arguments; change requires host restart";
         return true;
     }
 
@@ -4625,8 +4694,157 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
 
         ppp::diagnostics::SetLogLevel(static_cast<int>(
             ppp::diagnostics::ParseLogLevel(value.data())));
+        LOG_LEVEL_ = ppp::diagnostics::LogLevelName(
+            static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
         result["level"] = ppp::diagnostics::LogLevelName(
             static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
+        return true;
+    }
+
+    if (method == "update_settings")
+    {
+        const Json::Value& settings = params["settings"];
+        if (!settings.isObject())
+        {
+            error = "settings must be an object";
+            return false;
+        }
+
+        Json::Value applied(Json::objectValue);
+        Json::Value restart_required(Json::arrayValue);
+        Json::Value unsupported(Json::arrayValue);
+        std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
+        for (const std::string& key : settings.getMemberNames())
+        {
+            const Json::Value& value = settings[key];
+            if (key == "log_level" && value.isString())
+            {
+                ppp::string level = value.asString();
+                ppp::diagnostics::SetLogLevel(static_cast<int>(
+                    ppp::diagnostics::ParseLogLevel(level.data())));
+                LOG_LEVEL_ = ppp::diagnostics::LogLevelName(
+                    static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
+                applied[key] = LOG_LEVEL_;
+            }
+            else if (key == "block_quic" && value.isBool() && NULLPTR != client)
+            {
+                client->BlockQUIC(value.asBool());
+                applied[key] = client->IsBlockQUIC();
+            }
+            else if (key == "static_mode" && value.isBool() && NULLPTR != client)
+            {
+                bool setting = value.asBool();
+                client->StaticMode(&setting);
+                applied[key] = client->StaticMode(NULLPTR);
+            }
+            else if (key == "mux" && value.isUInt() && value.asUInt() <= 65535 && NULLPTR != client)
+            {
+                uint16_t setting = static_cast<uint16_t>(value.asUInt());
+                client->Mux(&setting);
+                applied[key] = (Json::UInt)client->Mux(NULLPTR);
+            }
+            else if (key == "mux_acceleration" && value.isUInt() && value.asUInt() <= 255 && NULLPTR != client)
+            {
+                uint8_t setting = static_cast<uint8_t>(value.asUInt());
+                client->MuxAcceleration(&setting);
+                applied[key] = (Json::UInt)client->MuxAcceleration(NULLPTR);
+            }
+            else if (key.size() > 2 && key[0] == '-' && key[1] == '-')
+            {
+                restart_required.append(key);
+            }
+            else
+            {
+                unsupported.append(key);
+            }
+        }
+
+        result["applied"] = applied;
+        result["restart_required"] = restart_required;
+        result["unsupported"] = unsupported;
+        result["ok"] = unsupported.empty();
+        return true;
+    }
+
+    if (method == "configure_api")
+    {
+        ppp::string confirm = ppp::auxiliary::JsonAuxiliary::AsString(
+            params.get("confirm", Json::Value()));
+        if (confirm != "configure_api")
+        {
+            error = "confirm=configure_api required";
+            return false;
+        }
+
+        const bool enabled = ppp::auxiliary::JsonAuxiliary::AsBoolean(
+            params.get("enabled", Json::Value(NULLPTR != rpc_server_)));
+        ppp::string listen = ppp::auxiliary::JsonAuxiliary::AsString(
+            params.get("listen", Json::Value(rpc_listen_)));
+        ppp::string token = params.isMember("token") ?
+            ppp::auxiliary::JsonAuxiliary::AsString(params["token"]) : rpc_token_;
+        int max_clients = params.isMember("max_clients") ?
+            params["max_clients"].asInt() : rpc_max_clients_;
+        max_clients = std::max<int>(1, std::min<int>(64, max_clients));
+        if (enabled && listen.empty()) listen = "127.0.0.1:0";
+
+        std::shared_ptr<ppp::app::rpc::LocalRpcServer> previous = rpc_server_;
+        if (!enabled)
+        {
+            rpc_server_.reset();
+            rpc_listen_.clear();
+            rpc_token_ = token;
+            rpc_max_clients_ = max_clients;
+            result["enabled"] = false;
+            result["disconnect_expected"] = NULLPTR != previous;
+            if (NULLPTR != previous)
+            {
+                Timer::Timeout(Executors::GetDefault(), 250,
+                    [previous](Timer*) noexcept { previous->Dispose(); });
+            }
+            return true;
+        }
+
+        if (NULLPTR != previous && listen == rpc_listen_)
+        {
+            previous->Configure(token, max_clients);
+        }
+        else
+        {
+            std::shared_ptr<PppApplication> self = shared_from_this();
+            std::shared_ptr<ppp::app::rpc::LocalRpcServer> replacement =
+                ppp::make_shared_object<ppp::app::rpc::LocalRpcServer>(
+                    Executors::GetDefault(), token, max_clients,
+                    [self](const ppp::string& request_method, const Json::Value& request_params,
+                        Json::Value& request_result, ppp::string& request_error) noexcept -> bool
+                    {
+                        return NULLPTR != self && self->ExecuteRpcCommand(
+                            request_method, request_params, request_result, request_error);
+                    });
+            if (NULLPTR == replacement || !replacement->Open(listen))
+            {
+                error = "failed to open replacement local RPC server";
+                return false;
+            }
+            rpc_server_ = replacement;
+            if (NULLPTR != previous)
+            {
+                Timer::Timeout(Executors::GetDefault(), 250,
+                    [previous](Timer*) noexcept { previous->Dispose(); });
+            }
+        }
+
+        rpc_listen_ = listen;
+        rpc_token_ = token;
+        rpc_max_clients_ = max_clients;
+        boost::asio::ip::tcp::endpoint endpoint = rpc_server_->GetLocalEndPoint();
+        result["enabled"] = true;
+        ppp::string endpoint_address = ppp::net::Ipep::ToAddressString<ppp::string>(endpoint.address());
+        result["listen"] = endpoint.address().is_v6() ?
+            "[" + endpoint_address + "]:" + stl::to_string<ppp::string>(endpoint.port()) :
+            endpoint_address + ":" + stl::to_string<ppp::string>(endpoint.port());
+        result["token_configured"] = !token.empty();
+        result["max_clients"] = max_clients;
+        result["disconnect_expected"] = NULLPTR != previous && previous != rpc_server_;
         return true;
     }
 
@@ -6395,7 +6613,7 @@ extern "C" ppp_core_handle* ppp_core_start(
 
 extern "C" unsigned int ppp_core_api_version(void)
 {
-    return 1u;
+    return 2u;
 }
 
 extern "C" int ppp_core_command(

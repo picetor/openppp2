@@ -266,6 +266,12 @@ namespace ppp {
                 Dispose();
             }
 
+            void LocalRpcServer::Configure(const ppp::string& token, int max_clients) noexcept
+            {
+                token_ = token;
+                max_clients_ = std::max<int>(1, std::min<int>(64, max_clients));
+            }
+
             bool LocalRpcServer::Open(const ppp::string& listen) noexcept
             {
                 if (NULLPTR == context_ || disposed_.load() || listen.empty()) return false;

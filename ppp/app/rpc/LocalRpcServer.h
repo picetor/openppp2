@@ -43,9 +43,12 @@ namespace ppp {
                 ~LocalRpcServer() noexcept;
 
             public:
-                // Bind/listen/accept. `listen` is "ip:port" or "[ipv6]:port";
-                // port 0 picks a random free port (see GetLocalEndPoint).
+                // Bind/listen/accept. `listen` is "port", "ip:port" or
+                // "[ipv6]:port"; port 0 picks a random free port.
                 bool                                                            Open(const ppp::string& listen) noexcept;
+                // Apply authentication/client-limit changes without dropping
+                // the listener. Existing authenticated sessions stay valid.
+                void                                                            Configure(const ppp::string& token, int max_clients) noexcept;
                 void                                                            Dispose() noexcept;
                 bool                                                            IsDisposed() const noexcept { return disposed_.load(); }
                 // Actual bound endpoint (valid after Open; random port resolved).

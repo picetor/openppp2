@@ -32,20 +32,27 @@ pub enum CoreCommand {
     GetHealth,
     RunDiagnostics { scope: String },
     GetSnapshot,
+    GetSettings,
     GetLogs { since_seq: u64 },
+    UpdateSettings { settings: Value },
+    ConfigureApi { settings: Value },
     Switch { tag: String, ranked_first: bool },
     SetLogLevel { level: String },
     Shutdown { restart: bool },
+    Raw { method: String, params: Value },
 }
 
 impl CoreCommand {
-    pub fn method(&self) -> &'static str {
+    pub fn method(&self) -> &str {
         match self {
             Self::DescribeApi => "describe_api",
             Self::GetHealth => "get_health",
             Self::RunDiagnostics { .. } => "run_diagnostics",
             Self::GetSnapshot => "get_snapshot",
+            Self::GetSettings => "get_settings",
             Self::GetLogs { .. } => "get_logs",
+            Self::UpdateSettings { .. } => "update_settings",
+            Self::ConfigureApi { .. } => "configure_api",
             Self::Switch {
                 ranked_first: true, ..
             } => "switch_rank1",
@@ -55,21 +62,31 @@ impl CoreCommand {
             } => "switch_server",
             Self::SetLogLevel { .. } => "set_log_level",
             Self::Shutdown { .. } => "shutdown",
+            Self::Raw { method, .. } => method.as_str(),
         }
     }
 
     pub fn params(&self) -> Value {
         match self {
-            Self::DescribeApi | Self::GetHealth => json!({}),
+            Self::DescribeApi | Self::GetHealth | Self::GetSettings => json!({}),
             Self::RunDiagnostics { scope } => json!({ "scope": scope }),
             Self::GetSnapshot => json!({}),
             Self::GetLogs { since_seq } => json!({ "since_seq": since_seq }),
+            Self::UpdateSettings { settings } => json!({ "settings": settings }),
+            Self::ConfigureApi { settings } => {
+                let mut params = settings.clone();
+                if let Value::Object(ref mut object) = params {
+                    object.insert("confirm".to_string(), Value::String("configure_api".to_string()));
+                }
+                params
+            }
             Self::Switch { tag, .. } => json!({ "tag": tag }),
             Self::SetLogLevel { level } => json!({ "level": level }),
             Self::Shutdown { restart } => json!({
                 "restart": restart,
                 "confirm": "shutdown",
             }),
+            Self::Raw { params, .. } => params.clone(),
         }
     }
 }
