@@ -11,9 +11,12 @@
 
 1. 进程内 C ABI：宿主用 `ppp_core_start` 启动，用
    `ppp_core_command` 调用方法，用 `ppp_core_stop` 停止。
-2. 本机 RPC：core 使用 `--rpc-listen=127.0.0.1:<port>` 启动，可选
+2. 本机 RPC：core 使用 `--rpc-listen=<port|ip:port>` 启动，可选
    `--rpc-token=<token>`。协议为“四字节大端长度 + UTF-8 JSON”，并且只允许
    loopback 地址。token 非空时必须匹配；token 为空时允许本机无鉴权连接。
+
+监听地址可写成 `39100`（等价于 `127.0.0.1:39100`）、`0`（自动选择本机
+端口）、`127.0.0.1:39100` 或 `[::1]:39100`。空值表示不启动 TCP API。
 
 `ppp_core_api_version()` 可在 core 启动前查询命令 ABI 版本。
 

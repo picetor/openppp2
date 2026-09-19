@@ -651,6 +651,11 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn("serde_json::to_string_pretty", cli_entry)
         rpc = read("ppp/app/rpc/LocalRpcServer.cpp")
         self.assertIn("!server_->token_.empty() && token != server_->token_", rpc)
+        self.assertIn('ip_text = "127.0.0.1"', rpc)
+        self.assertIn("port_text = listen", rpc)
+        self.assertIn("*port_end != '\\x0'", rpc)
+        self.assertIn("std::chrono::seconds(120)", core)
+        self.assertNotIn("core did not finish startup within 20 seconds", core)
 
     def test_performance_summary_uses_nearest_rank_and_throughput(self) -> None:
         module_path = ROOT / "tests/tools/summarize_dataplane_performance.py"

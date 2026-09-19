@@ -270,8 +270,10 @@ namespace ppp {
             {
                 if (NULLPTR == context_ || disposed_.load() || listen.empty()) return false;
 
-                // Parse "ip:port" or "[ipv6]:port".  Only loopback addresses are
-                // accepted; everything else is rejected.
+                // Parse "port", "ip:port" or "[ipv6]:port". A bare port is a
+                // convenience spelling for 127.0.0.1:<port>; in particular,
+                // "0" requests an ephemeral loopback port. Only loopback
+                // addresses are accepted; everything else is rejected.
                 boost::asio::ip::address address;
                 uint16_t port = 0;
                 ppp::string ip_text;
@@ -287,9 +289,17 @@ namespace ppp {
                 else
                 {
                     std::size_t colon = listen.rfind(':');
-                    if (colon == ppp::string::npos || colon == 0 || colon + 1 >= listen.size()) return false;
-                    ip_text = listen.substr(0, colon);
-                    port_text = listen.substr(colon + 1);
+                    if (colon == ppp::string::npos)
+                    {
+                        ip_text = "127.0.0.1";
+                        port_text = listen;
+                    }
+                    else
+                    {
+                        if (colon == 0 || colon + 1 >= listen.size()) return false;
+                        ip_text = listen.substr(0, colon);
+                        port_text = listen.substr(colon + 1);
+                    }
                 }
 
                 boost::system::error_code ec;
@@ -297,7 +307,9 @@ namespace ppp {
                 if (ec) return false;
                 if (!address.is_loopback()) return false;
 
-                long parsed_port = strtol(port_text.data(), NULLPTR, 10);
+                char* port_end = NULLPTR;
+                long parsed_port = strtol(port_text.data(), &port_end, 10);
+                if (port_end == port_text.data() || NULLPTR == port_end || *port_end != '\x0') return false;
                 if (parsed_port < ppp::net::IPEndPoint::MinPort || parsed_port > ppp::net::IPEndPoint::MaxPort) return false;
                 port = (uint16_t)parsed_port;
 

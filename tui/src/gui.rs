@@ -2798,7 +2798,7 @@ impl DesktopApp {
                 "--rpc-listen",
                 "仅允许本机回环地址；留空关闭 TCP API",
                 &mut self.settings.rpc_listen,
-                "例如 127.0.0.1:39100；端口 0 表示自动分配",
+                "0 = 自动端口；39100 = 127.0.0.1:39100；留空关闭",
             );
             labeled_cli_text(
                 ui,

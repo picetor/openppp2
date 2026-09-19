@@ -3047,8 +3047,8 @@ void PppApplication::PrintHelpInformation() noexcept
         col_default_width, "off");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
-        col_option_width, "--rpc-listen=<ip:port>",
-        col_description_width, "Local loopback JSON-RPC server",
+        col_option_width, "--rpc-listen=<port|ip:port>",
+        col_description_width, "Loopback JSON-RPC; 0 = random port",
         col_default_width, "disabled");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
@@ -6329,13 +6329,17 @@ extern "C" ppp_core_handle* ppp_core_start(
         handle->thread = std::thread(CoreApiRun, handle, arguments);
 
         std::unique_lock<std::mutex> lock(handle->state_mutex);
-        if (!handle->state_cv.wait_for(lock, std::chrono::seconds(20),
+        // Windows adapter discovery and route setup can legitimately take
+        // longer than 20 seconds on a busy machine. The caller already runs
+        // this blocking ABI on a worker thread, so allow slow but healthy
+        // startup to finish instead of stopping a core that is nearly ready.
+        if (!handle->state_cv.wait_for(lock, std::chrono::seconds(120),
             [handle]() noexcept { return handle->startup_completed; })) {
             lock.unlock();
             ppp_core_stop(handle, error_buffer, error_buffer_size);
             ppp_core_destroy(handle);
             CoreApiSetError(error_buffer, error_buffer_size,
-                "core did not finish startup within 20 seconds");
+                "core did not finish startup within 120 seconds");
             return NULLPTR;
         }
 
