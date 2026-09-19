@@ -659,6 +659,8 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn("!server_->token_.empty() && token != server_->token_", rpc)
         self.assertIn("server_->RemoveSession(shared_from_this())", rpc)
         self.assertIn("client_count_.fetch_sub(1)", rpc)
+        self.assertIn("RPC_MAX_QUEUED_FRAMES", rpc)
+        self.assertNotIn("Session::EnqueueWrite: queued", rpc)
         self.assertIn('ip_text = "127.0.0.1"', rpc)
         self.assertIn("port_text = listen", rpc)
         self.assertIn("*port_end != '\\x0'", rpc)

@@ -14,6 +14,7 @@ namespace ppp {
 
             namespace {
                 static constexpr int  RPC_MAX_FRAME_SIZE    = 4 * 1024 * 1024; // 4 MiB body cap
+                static constexpr int  RPC_MAX_QUEUED_FRAMES = 256;              // disconnect slow/non-reading clients
                 static constexpr int  RPC_PROTOCOL_SCHEMA   = 1;
                 static constexpr int  RPC_HANDSHAKE_TIMEOUT = 10000;            // ms
             }
@@ -66,6 +67,13 @@ namespace ppp {
                 void EnqueueWrite(const Json::Value& frame) noexcept {
                     ppp::string json = ppp::auxiliary::JsonAuxiliary::ToString(frame);
                     if (json.size() > RPC_MAX_FRAME_SIZE) return;
+                    if (write_queue_.size() >= RPC_MAX_QUEUED_FRAMES)
+                    {
+                        // Never let a client that stopped reading retain an
+                        // unbounded log/event queue inside the VPN process.
+                        Dispose();
+                        return;
+                    }
 
                     // NOTE: make_shared_object<Byte>(N) would allocate only
                     // sizeof(Byte) and corrupt the heap on the memcpy below;
@@ -82,8 +90,6 @@ namespace ppp {
                     std::memcpy(buffer.get() + 4, json.data(), json.size());
 
                     write_queue_.push_back(FrameBuffer{ buffer, 4 + (int)json.size() });
-                    LOG_DEBUG("LocalRpcServer::Session::EnqueueWrite: queued, size=%d, queue=%zu, writing=%d",
-                        (int)json.size(), write_queue_.size(), (int)writing_);
                     if (!writing_)
                     {
                         WriteNext();
@@ -99,15 +105,11 @@ namespace ppp {
                     writing_ = true;
 
                     FrameBuffer frame = write_queue_.front();
-                    LOG_DEBUG("LocalRpcServer::Session::WriteNext: begin, size=%d, queue=%zu",
-                        frame.size, write_queue_.size());
                     boost::asio::async_write(*socket_,
                         boost::asio::buffer(frame.data.get(), frame.size),
                         boost::asio::bind_executor(strand_,
-                            [self = shared_from_this(), frame](const boost::system::error_code& ec, std::size_t written) noexcept
+                            [self = shared_from_this(), frame](const boost::system::error_code& ec, std::size_t) noexcept
                             {
-                                LOG_DEBUG("LocalRpcServer::Session::WriteNext: done, written=%zu, ec=%s, queue=%zu",
-                                    written, ec.message().data(), self->write_queue_.size());
                                 self->write_queue_.pop_front();
                                 if (ec)
                                 {
