@@ -220,6 +220,29 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn("config.client.tun.mtu - 40", configuration)
         self.assertIn("config.client.tun.mtu - 60", configuration)
 
+        network_interface = read("windows/ppp/win32/network/NetworkInterface.cpp")
+        mtu_reader = re.search(
+            r"int GetInterfaceMtu\(int interface_index\) noexcept([\s\S]*?)"
+            r"static bool SetInterfaceMtuIpInterfaceEntry",
+            network_interface,
+        )
+        self.assertIsNotNone(mtu_reader)
+        self.assertIn("GetIpInterfaceEntry", mtu_reader.group(1))
+        self.assertIn("ipInterfaceRow.NlMtu", mtu_reader.group(1))
+        self.assertLess(
+            mtu_reader.group(1).index("GetIpInterfaceEntry"),
+            mtu_reader.group(1).index("GetIfEntry"),
+        )
+        windows_tap = read("windows/ppp/tap/TapWindows.cpp")
+        set_mtu = re.search(
+            r"bool TapWindows::SetInterfaceMtu\(int mtu\) noexcept([\s\S]*?)"
+            r"void TapWindows::Dispose",
+            windows_tap,
+        )
+        self.assertIsNotNone(set_mtu)
+        self.assertIn("network::SetInterfaceMtu(interface_index, mtu)", set_mtu.group(1))
+        self.assertNotIn("SetInterfaceMtuIpSubInterface", set_mtu.group(1))
+
     def test_proxy_direct_policy_uses_explicit_route_action(self) -> None:
         header = read("ppp/net/native/rib.h")
         implementation = read("ppp/net/native/checksum.cpp")
@@ -599,6 +622,31 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertNotIn("session_id=%s", server_exchanger)
         self.assertIn("SESSION-SHA256-", traffic_logger)
         self.assertIn("SHA256(", traffic_logger)
+
+    def test_ai_control_api_is_core_owned_and_read_only_diagnostics(self) -> None:
+        core = read("main.cpp")
+        header = read("ppp/core/CoreApi.h")
+        rust_rpc = read("tui/src/rpc/mod.rs")
+        cli = read("tui/src/core/control.rs")
+        cli_entry = read("tui/src/bin/ppp-tui-cli.rs")
+
+        self.assertIn('method == "describe_api"', core)
+        self.assertIn('method == "get_health"', core)
+        self.assertIn('method == "run_diagnostics"', core)
+        self.assertIn('result["read_only"] = true', core)
+        self.assertIn('result["safety"]["secrets_in_responses"] = false', core)
+        self.assertIn("client->GetTapNetworkInterface()", core)
+        self.assertNotIn('snapshot["network"]["tun"]', core)
+        self.assertIn("ppp_core_api_version(void)", header)
+        self.assertIn('Self::DescribeApi => "describe_api"', rust_rpc)
+        self.assertIn('Self::GetHealth => "get_health"', rust_rpc)
+        self.assertIn('Self::RunDiagnostics { .. } => "run_diagnostics"', rust_rpc)
+        self.assertIn('"api"', cli)
+        self.assertIn('"health"', cli)
+        self.assertIn('"diagnose"', cli)
+        self.assertIn("parse_cli_control(&args)", cli_entry)
+        self.assertIn("execute_once(&request.address", cli_entry)
+        self.assertIn("serde_json::to_string_pretty", cli_entry)
 
     def test_performance_summary_uses_nearest_rank_and_throughput(self) -> None:
         module_path = ROOT / "tests/tools/summarize_dataplane_performance.py"

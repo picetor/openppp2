@@ -2062,6 +2062,22 @@ namespace ppp
 
             int GetInterfaceMtu(int interface_index) noexcept
             {
+                // MIB_IFROW::dwMtu describes the data-link interface and stays
+                // at 65535 for Wintun even after the IPv4 interface MTU has
+                // been configured. The forwarding stack uses NlMtu from the
+                // IP interface row, which is also what Get-NetIPInterface
+                // reports, so prefer that value for startup verification.
+                MIB_IPINTERFACE_ROW ipInterfaceRow;
+                InitializeIpInterfaceEntry(&ipInterfaceRow);
+                ipInterfaceRow.InterfaceIndex = interface_index;
+                ipInterfaceRow.Family = AF_INET;
+                if (GetIpInterfaceEntry(&ipInterfaceRow) == NO_ERROR)
+                {
+                    return static_cast<int>(ipInterfaceRow.NlMtu);
+                }
+
+                // Retain the legacy query as a fallback for adapters or older
+                // systems where an IPv4 IP-interface row is not available.
                 std::shared_ptr<MIB_IFROW> ifRow = GetIfEntry(interface_index);
                 if (NULLPTR == ifRow)
                 {

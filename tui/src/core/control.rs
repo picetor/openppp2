@@ -36,7 +36,10 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
 
     let recognized = matches!(
         name,
-        "status"
+        "api"
+            | "health"
+            | "diagnose"
+            | "status"
             | "snapshot"
             | "logs"
             | "switch"
@@ -96,6 +99,27 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
     }
 
     let command = match name {
+        "api" => {
+            require_no_positional(name, &positional)?;
+            CoreCommand::DescribeApi
+        }
+        "health" => {
+            require_no_positional(name, &positional)?;
+            CoreCommand::GetHealth
+        }
+        "diagnose" => {
+            if positional.len() > 1 {
+                bail!("diagnose accepts at most one scope: quick or full")
+            }
+            let scope = positional
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "quick".to_string());
+            if scope != "quick" && scope != "full" {
+                bail!("diagnose scope must be quick or full")
+            }
+            CoreCommand::RunDiagnostics { scope }
+        }
         "status" | "snapshot" => {
             require_no_positional(name, &positional)?;
             CoreCommand::GetSnapshot
@@ -203,6 +227,33 @@ fn wait_for_response(rpc: &mut RpcClient, method: &str, timeout: Duration) -> Re
 /// callers can serialize the returned value directly instead.
 pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
     match command {
+        CoreCommand::DescribeApi => {
+            let name = value.get("name").and_then(Value::as_str).unwrap_or("");
+            let version = value.get("api_version").and_then(Value::as_u64).unwrap_or(0);
+            let methods = value
+                .get("methods")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("name       {name}\nversion    {version}\nmethods    {methods}")
+        }
+        CoreCommand::GetHealth => format!(
+            "status     {}\nrunning    {}\nready      {}\nphase      {}",
+            value.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+            value.get("running").and_then(Value::as_bool).unwrap_or(false),
+            value.get("ready").and_then(Value::as_bool).unwrap_or(false),
+            value.get("phase").and_then(Value::as_str).unwrap_or("")
+        ),
+        CoreCommand::RunDiagnostics { .. } => {
+            let summary = value.get("summary").unwrap_or(&Value::Null);
+            format!(
+                "status     {}\npassed     {}\nwarnings   {}\nfailed     {}",
+                summary.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                summary.get("passed").and_then(Value::as_i64).unwrap_or(0),
+                summary.get("warnings").and_then(Value::as_i64).unwrap_or(0),
+                summary.get("failed").and_then(Value::as_i64).unwrap_or(0)
+            )
+        }
         CoreCommand::GetSnapshot => {
             let fields = [
                 ("phase", value.get("phase").and_then(Value::as_str)),
@@ -289,6 +340,43 @@ mod tests {
         .unwrap();
         assert_eq!(request.command, CoreCommand::GetSnapshot);
         assert!(request.json);
+    }
+
+    #[test]
+    fn parses_ai_control_commands() {
+        let api = parse_cli_control(&args(&[
+            "api",
+            "--rpc=127.0.0.1:39100",
+            "--token=t",
+            "--json",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(api.command, CoreCommand::DescribeApi);
+
+        let health = parse_cli_control(&args(&[
+            "health",
+            "--rpc=127.0.0.1:39100",
+            "--token=t",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(health.command, CoreCommand::GetHealth);
+
+        let diagnose = parse_cli_control(&args(&[
+            "diagnose",
+            "full",
+            "--rpc=127.0.0.1:39100",
+            "--token=t",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            diagnose.command,
+            CoreCommand::RunDiagnostics {
+                scope: "full".to_string()
+            }
+        );
     }
 
     #[test]

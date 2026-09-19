@@ -28,6 +28,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// names and parameter objects in the GUI and terminal front-ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreCommand {
+    DescribeApi,
+    GetHealth,
+    RunDiagnostics { scope: String },
     GetSnapshot,
     GetLogs { since_seq: u64 },
     Switch { tag: String, ranked_first: bool },
@@ -38,6 +41,9 @@ pub enum CoreCommand {
 impl CoreCommand {
     pub fn method(&self) -> &'static str {
         match self {
+            Self::DescribeApi => "describe_api",
+            Self::GetHealth => "get_health",
+            Self::RunDiagnostics { .. } => "run_diagnostics",
             Self::GetSnapshot => "get_snapshot",
             Self::GetLogs { .. } => "get_logs",
             Self::Switch {
@@ -54,6 +60,8 @@ impl CoreCommand {
 
     pub fn params(&self) -> Value {
         match self {
+            Self::DescribeApi | Self::GetHealth => json!({}),
+            Self::RunDiagnostics { scope } => json!({ "scope": scope }),
             Self::GetSnapshot => json!({}),
             Self::GetLogs { since_seq } => json!({ "since_seq": since_seq }),
             Self::Switch { tag, .. } => json!({ "tag": tag }),

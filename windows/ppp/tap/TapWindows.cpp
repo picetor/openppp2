@@ -2363,7 +2363,10 @@ namespace ppp
                 return false;
             }
 
-            const bool result = ppp::win32::network::SetInterfaceMtuIpSubInterface(interface_index, mtu);
+            // Use the native IP-interface API and verify the effective NlMtu.
+            // The netsh fallback only checked for non-empty command output,
+            // which also treated localized error text as success.
+            const bool result = ppp::win32::network::SetInterfaceMtu(interface_index, mtu);
             if (result)
             {
                 interface_mtu_.store(ppp::net::native::ip_hdr::Mtu(mtu, false), std::memory_order_relaxed);

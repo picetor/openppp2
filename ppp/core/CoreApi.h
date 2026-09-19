@@ -25,6 +25,10 @@ typedef void (*ppp_core_log_callback)(
     const char* level,
     const char* line);
 
+// Version of the generic command/control ABI implemented by
+// ppp_core_command(). This function is safe to call before starting a core.
+PPP_CORE_API unsigned int ppp_core_api_version(void);
+
 // Starts one core runtime on its own internal C++ executor thread.  argv uses
 // the normal argc/argv convention, including argv[0] as the program name;
 // argv is copied before this function returns and may be released by the

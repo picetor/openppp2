@@ -4366,6 +4366,199 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         return true;
     }
 
+    if (method == "describe_api")
+    {
+        result["name"] = "openppp2-core-control";
+        result["api_version"] = 1;
+        result["snapshot_schema_version"] = 1;
+        result["core_version"] = PPP_APPLICATION_VERSION;
+        result["transport"] = "length-prefixed-json";
+        result["network_scope"] = "loopback-only";
+        result["authentication"] = "token";
+
+        Json::Value methods(Json::arrayValue);
+        auto add_method = [&methods](
+            const char* name,
+            const char* access,
+            const char* params_schema,
+            const char* description,
+            bool confirmation_required) noexcept
+        {
+            Json::Value item(Json::objectValue);
+            item["name"] = name;
+            item["access"] = access;
+            item["params"] = params_schema;
+            item["description"] = description;
+            item["confirmation_required"] = confirmation_required;
+            methods.append(item);
+        };
+        add_method("ping", "read", "{}", "Liveness check.", false);
+        add_method("describe_api", "read", "{}", "Machine-readable API manifest.", false);
+        add_method("get_health", "read", "{}", "Concise runtime health for automation.", false);
+        add_method("run_diagnostics", "read", "{scope?: quick|full}", "Read-only diagnostic checks.", false);
+        add_method("get_snapshot", "read", "{}", "Complete runtime snapshot.", false);
+        add_method("get_log_level", "read", "{}", "Current core log level.", false);
+        add_method("get_logs", "read", "{since_seq?: uint64}", "Buffered structured logs.", false);
+        add_method("get_outbounds", "read", "{}", "Outbound status list.", false);
+        add_method("set_log_level", "control", "{level: string}", "Change runtime log verbosity.", false);
+        add_method("switch_server", "control", "{tag: string}", "Switch the primary outbound.", false);
+        add_method("switch_rank1", "control", "{tag: string}", "Switch an outbound to its ranked-first entry.", false);
+        add_method("shutdown", "lifecycle", "{confirm: shutdown, restart?: bool}", "Stop the core with network cleanup.", true);
+        result["methods"] = methods;
+
+        result["lifecycle"]["start"]["rpc"] = false;
+        result["lifecycle"]["start"]["c_abi"] = "ppp_core_start";
+        result["lifecycle"]["start"]["process"] = "launch ppp with --rpc-listen and --rpc-token";
+        result["lifecycle"]["stop"]["rpc"] = "shutdown";
+        result["lifecycle"]["stop"]["c_abi"] = "ppp_core_stop";
+        result["safety"]["mutations_are_explicit"] = true;
+        result["safety"]["diagnostics_are_read_only"] = true;
+        result["safety"]["secrets_in_responses"] = false;
+        return true;
+    }
+
+    if (method == "get_health")
+    {
+        Json::Value snapshot;
+        if (!BuildRuntimeSnapshot(snapshot))
+        {
+            error = "failed to build runtime snapshot";
+            return false;
+        }
+
+        const ppp::string phase =
+            ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("phase", Json::Value("idle")));
+        const ppp::string role =
+            ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("role", Json::Value()));
+        const Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
+            snapshot["last_error"].get("code", Json::Value((Json::Int64)0)));
+        const bool ready = role == "client" ? phase == "connected" : phase != "failed";
+        const bool healthy = last_error == 0 && phase != "failed";
+
+        result["running"] = true;
+        result["ready"] = ready;
+        result["healthy"] = healthy;
+        result["status"] = !healthy ? "unhealthy" :
+            (ready ? "healthy" : (phase == "connecting" || phase == "reconnecting" ? "starting" : "degraded"));
+        result["phase"] = phase;
+        result["role"] = role;
+        result["server"] = snapshot.get("server", Json::Value(""));
+        result["generation"] = snapshot.get("generation", Json::Value((Json::UInt64)0));
+        result["monotonic_ms"] = snapshot.get("monotonic_ms", Json::Value((Json::UInt64)0));
+        result["last_error"] = snapshot.get("last_error", Json::Value(Json::objectValue));
+        result["rpc_clients"] = NULLPTR != rpc_server_ ? rpc_server_->GetClientCount() : 0;
+        return true;
+    }
+
+    if (method == "run_diagnostics")
+    {
+        ppp::string scope = ppp::auxiliary::JsonAuxiliary::AsString(
+            params.get("scope", Json::Value("quick")));
+        if (scope.empty()) scope = "quick";
+        if (scope != "quick" && scope != "full")
+        {
+            error = "scope must be quick or full";
+            return false;
+        }
+
+        Json::Value snapshot;
+        if (!BuildRuntimeSnapshot(snapshot))
+        {
+            error = "failed to build runtime snapshot";
+            return false;
+        }
+
+        Json::Value checks(Json::arrayValue);
+        int passed = 0;
+        int warnings = 0;
+        int failed = 0;
+        auto add_check = [&checks, &passed, &warnings, &failed](
+            const char* name,
+            const char* status,
+            const ppp::string& detail) noexcept
+        {
+            Json::Value check(Json::objectValue);
+            check["name"] = name;
+            check["status"] = status;
+            check["detail"] = detail;
+            checks.append(check);
+            if (strcmp(status, "pass") == 0) ++passed;
+            elif(strcmp(status, "warn") == 0) ++warnings;
+            else ++failed;
+        };
+
+        add_check("runtime.snapshot", "pass", "runtime snapshot generated");
+
+        const Int64 last_error = ppp::auxiliary::JsonAuxiliary::AsInt64(
+            snapshot["last_error"].get("code", Json::Value((Json::Int64)0)));
+        add_check("runtime.last_error", last_error == 0 ? "pass" : "fail",
+            last_error == 0 ? "no core error recorded" :
+            ppp::auxiliary::JsonAuxiliary::AsString(
+                snapshot["last_error"].get("diagnostic_detail", Json::Value("core error recorded"))));
+
+        const ppp::string role =
+            ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("role", Json::Value()));
+        const ppp::string phase =
+            ppp::auxiliary::JsonAuxiliary::AsString(snapshot.get("phase", Json::Value()));
+        if (role == "client")
+        {
+            add_check("client.runtime", NULLPTR != client_ ? "pass" : "fail",
+                NULLPTR != client_ ? "client runtime is available" : "client runtime is unavailable");
+            const char* connection_status = phase == "connected" ? "pass" :
+                (phase == "connecting" || phase == "reconnecting" ? "warn" : "fail");
+            add_check("client.connection", connection_status, "phase=" + phase);
+
+            const auto tun_interface = client->GetTapNetworkInterface();
+            const bool tun_available = NULLPTR != tun_interface && tun_interface->Index >= 0;
+            const char* tun_status = tun_available ? "pass" :
+                (phase == "connecting" || phase == "reconnecting" ? "warn" : "fail");
+            add_check("network.tun", tun_status,
+                tun_available ? "TUN interface is present" : "TUN interface is unavailable");
+
+            const int configured_mtu = NULLPTR != configuration_ ? configuration_->client.tun.mtu : 0;
+            const int effective_mtu = (int)ppp::auxiliary::JsonAuxiliary::AsInt64(
+                snapshot["dataplane"]["wintun"].get("interface_mtu", Json::Value(0)));
+            ppp::string mtu_detail = "configured=" + std::to_string(configured_mtu) +
+                ", effective=" + std::to_string(effective_mtu);
+            const char* mtu_status = effective_mtu < 1 ? "warn" :
+                (configured_mtu == effective_mtu ? "pass" : "fail");
+            add_check("network.mtu", mtu_status, mtu_detail);
+
+            const Json::Value& outbounds = snapshot["outbounds"];
+            bool active_outbound = false;
+            if (outbounds.isArray())
+            {
+                for (const Json::Value& outbound : outbounds)
+                {
+                    if (ppp::auxiliary::JsonAuxiliary::AsBoolean(
+                        outbound.get("active", Json::Value(false))))
+                    {
+                        active_outbound = true;
+                        break;
+                    }
+                }
+            }
+            add_check("client.outbound", active_outbound ? "pass" : "warn",
+                active_outbound ? "an active outbound is selected" : "no active outbound is selected");
+        }
+        else
+        {
+            add_check("runtime.role", role.empty() ? "warn" : "pass",
+                role.empty() ? "runtime role is unavailable" : "role=" + role);
+        }
+
+        result["scope"] = scope;
+        result["read_only"] = true;
+        result["checks"] = checks;
+        result["summary"]["passed"] = passed;
+        result["summary"]["warnings"] = warnings;
+        result["summary"]["failed"] = failed;
+        result["summary"]["status"] = failed > 0 ? "fail" : (warnings > 0 ? "warn" : "pass");
+        result["ok"] = failed == 0;
+        result["snapshot_generation"] = snapshot.get("generation", Json::Value((Json::UInt64)0));
+        return true;
+    }
+
     if (method == "get_snapshot")
     {
         return BuildRuntimeSnapshot(result);
@@ -6152,6 +6345,11 @@ extern "C" ppp_core_handle* ppp_core_start(
         CoreApiSetError(error_buffer, error_buffer_size, "failed to start core runtime");
         return NULLPTR;
     }
+}
+
+extern "C" unsigned int ppp_core_api_version(void)
+{
+    return 1u;
 }
 
 extern "C" int ppp_core_command(
