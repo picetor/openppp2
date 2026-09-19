@@ -4518,8 +4518,10 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
             const int configured_mtu = NULLPTR != configuration_ ? configuration_->client.tun.mtu : 0;
             const int effective_mtu = (int)ppp::auxiliary::JsonAuxiliary::AsInt64(
                 snapshot["dataplane"]["wintun"].get("interface_mtu", Json::Value(0)));
-            ppp::string mtu_detail = "configured=" + std::to_string(configured_mtu) +
-                ", effective=" + std::to_string(effective_mtu);
+            ppp::string mtu_detail = "configured=";
+            mtu_detail += stl::to_string<ppp::string>(configured_mtu);
+            mtu_detail += ", effective=";
+            mtu_detail += stl::to_string<ppp::string>(effective_mtu);
             const char* mtu_status = effective_mtu < 1 ? "warn" :
                 (configured_mtu == effective_mtu ? "pass" : "fail");
             add_check("network.mtu", mtu_status, mtu_detail);
