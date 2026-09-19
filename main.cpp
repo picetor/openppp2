@@ -4714,48 +4714,48 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         Json::Value restart_required(Json::arrayValue);
         Json::Value unsupported(Json::arrayValue);
         std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
-        for (const std::string& key : settings.getMemberNames())
+        for (const Json::String& key : settings.getMemberNames())
         {
-            const Json::Value& value = settings[key];
+            const Json::Value& value = settings[key.c_str()];
             if (key == "log_level" && value.isString())
             {
-                ppp::string level = value.asString();
+                ppp::string level = ppp::auxiliary::JsonAuxiliary::AsString(value);
                 ppp::diagnostics::SetLogLevel(static_cast<int>(
                     ppp::diagnostics::ParseLogLevel(level.data())));
                 LOG_LEVEL_ = ppp::diagnostics::LogLevelName(
                     static_cast<ppp::diagnostics::LogLevel>(ppp::diagnostics::GetLogLevel()));
-                applied[key] = LOG_LEVEL_;
+                applied[key.c_str()] = LOG_LEVEL_;
             }
             else if (key == "block_quic" && value.isBool() && NULLPTR != client)
             {
                 client->BlockQUIC(value.asBool());
-                applied[key] = client->IsBlockQUIC();
+                applied[key.c_str()] = client->IsBlockQUIC();
             }
             else if (key == "static_mode" && value.isBool() && NULLPTR != client)
             {
                 bool setting = value.asBool();
                 client->StaticMode(&setting);
-                applied[key] = client->StaticMode(NULLPTR);
+                applied[key.c_str()] = client->StaticMode(NULLPTR);
             }
             else if (key == "mux" && value.isUInt() && value.asUInt() <= 65535 && NULLPTR != client)
             {
                 uint16_t setting = static_cast<uint16_t>(value.asUInt());
                 client->Mux(&setting);
-                applied[key] = (Json::UInt)client->Mux(NULLPTR);
+                applied[key.c_str()] = (Json::UInt)client->Mux(NULLPTR);
             }
             else if (key == "mux_acceleration" && value.isUInt() && value.asUInt() <= 255 && NULLPTR != client)
             {
                 uint8_t setting = static_cast<uint8_t>(value.asUInt());
                 client->MuxAcceleration(&setting);
-                applied[key] = (Json::UInt)client->MuxAcceleration(NULLPTR);
+                applied[key.c_str()] = (Json::UInt)client->MuxAcceleration(NULLPTR);
             }
             else if (key.size() > 2 && key[0] == '-' && key[1] == '-')
             {
-                restart_required.append(key);
+                restart_required.append(Json::Value(key.c_str()));
             }
             else
             {
-                unsupported.append(key);
+                unsupported.append(Json::Value(key.c_str()));
             }
         }
 
