@@ -4509,8 +4509,10 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
                 (phase == "connecting" || phase == "reconnecting" ? "warn" : "fail");
             add_check("client.connection", connection_status, "phase=" + phase);
 
-            const auto tun_interface = client->GetTapNetworkInterface();
-            const bool tun_available = NULLPTR != tun_interface && tun_interface->Index >= 0;
+            const Json::Value& tun = snapshot["network"]["tun"];
+            const bool tun_available = tun.isObject() &&
+                ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    tun.get("index", Json::Value(-1))) >= 0;
             const char* tun_status = tun_available ? "pass" :
                 (phase == "connecting" || phase == "reconnecting" ? "warn" : "fail");
             add_check("network.tun", tun_status,
