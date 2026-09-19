@@ -635,6 +635,8 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn('method == "run_diagnostics"', core)
         self.assertIn('result["read_only"] = true', core)
         self.assertIn('result["safety"]["secrets_in_responses"] = false', core)
+        self.assertIn('result["safety"]["authentication_optional"] = true', core)
+        self.assertIn('snapshot["control_api"] = control_api', core)
         self.assertIn('snapshot["network"]["tun"]', core)
         self.assertNotIn("const auto tun_interface = client->", core)
         self.assertIn("ppp_core_api_version(void)", header)
@@ -647,6 +649,8 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn("parse_cli_control(&args)", cli_entry)
         self.assertIn("execute_once(&request.address", cli_entry)
         self.assertIn("serde_json::to_string_pretty", cli_entry)
+        rpc = read("ppp/app/rpc/LocalRpcServer.cpp")
+        self.assertIn("!server_->token_.empty() && token != server_->token_", rpc)
 
     def test_performance_summary_uses_nearest_rank_and_throughput(self) -> None:
         module_path = ROOT / "tests/tools/summarize_dataplane_performance.py"

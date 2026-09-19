@@ -122,6 +122,10 @@ pub struct StartupSettings {
     #[serde(default = "default_tui_log_enabled")]
     pub tui_log_enabled: bool,
     pub tui_log_file: String,
+    /// Loopback address exposed by a core started by this front-end.
+    /// Empty disables socket RPC while retaining the in-process C ABI.
+    pub rpc_listen: String,
+    /// Address of an already-running core to attach to.
     pub rpc_address: String,
     pub rpc_token: String,
     pub tun_enabled: bool,
@@ -183,6 +187,7 @@ impl Default for StartupSettings {
             tun_protect: true,
             tui_log_enabled: true,
             tui_log_file: "./ppp-tui.log".to_string(),
+            rpc_listen: String::new(),
             rpc_address: String::new(),
             rpc_token: String::new(),
             tun_enabled: true,
@@ -224,6 +229,10 @@ impl StartupSettings {
         }
 
         let core_args = normalize_core_args(core_args);
+        let rpc_listen = command_value(&core_args, "--rpc-listen").unwrap_or_default();
+        if rpc_token.is_empty() {
+            rpc_token = command_value(&core_args, "--rpc-token").unwrap_or_default();
+        }
         let launch_direct = !core_args.is_empty();
         let command = join_command_args(&core_args);
         let config_path = ["--config", "-c", "--c", "-config"]
@@ -360,6 +369,7 @@ impl StartupSettings {
             tun_protect,
             tui_log_enabled,
             tui_log_file,
+            rpc_listen,
             rpc_address,
             rpc_token,
             tun_enabled,
@@ -840,8 +850,8 @@ impl DesktopApp {
                 _ => {}
             }
         }
-        // These are owned by the Rust desktop host and must not be copied
-        // from a pasted command line into the core.
+        // Normalize host-owned options before applying their structured
+        // values below. RPC is still served by the C++ core itself.
         for name in [
             "--headless",
             "--rpc-listen",
@@ -854,6 +864,11 @@ impl DesktopApp {
         ] {
             remove_command_argument(&mut args, name);
         }
+        set_owned_rpc_arguments(
+            &mut args,
+            &self.settings.rpc_listen,
+            &self.settings.rpc_token,
+        );
         set_command_argument(&mut args, "--mode", mode);
         remove_command_argument(&mut args, "--set-http-proxy");
         if self.settings.system_proxy_enabled && (mode == "client" || mode == "proxy") {
@@ -1198,15 +1213,15 @@ impl DesktopApp {
 
     fn attach_existing(&mut self) {
         let address = self.settings.rpc_address.trim().to_string();
-        if address.is_empty() || self.settings.rpc_token.trim().is_empty() {
-            self.error = Some("连接已有核心需要填写 RPC 地址和 Token".to_string());
+        if address.is_empty() {
+            self.error = Some("连接已有核心需要填写 RPC 地址".to_string());
             return;
         }
         self.save_settings();
         self.stop_core(false);
         self.rpc = Some(CoreClient::rpc(
             address,
-            self.settings.rpc_token.trim().to_string(),
+            self.settings.rpc_token.clone(),
         ));
         self.in_process_core = false;
         self.status = "准备连接已有核心".to_string();
@@ -1429,6 +1444,8 @@ impl DesktopApp {
         import_text(&args, "--geosite", &mut self.settings.geosite_file);
         import_text(&args, "--geoip", &mut self.settings.geoip_file);
         import_text(&args, "--log-file", &mut self.settings.log_file);
+        import_text(&args, "--rpc-listen", &mut self.settings.rpc_listen);
+        import_text(&args, "--rpc-token", &mut self.settings.rpc_token);
         if let Some(value) = command_value(&args, "--log-level") {
             self.settings.log_level = normalize_log_level(&value);
         }
@@ -1791,6 +1808,37 @@ impl DesktopApp {
                             format_bytes(snapshot.traffic.in_bytes),
                             format_bytes(snapshot.traffic.out_bytes)
                         ),
+                    ),
+                ],
+            );
+        });
+        ui.add_space(12.0);
+        wide_info_section(ui, "AI / API 控制", |ui| {
+            let api = &snapshot.control_api;
+            let endpoint = if api.enabled && !api.listen.is_empty() {
+                api.listen.clone()
+            } else {
+                "未启用".to_string()
+            };
+            info_grid_owned(
+                ui,
+                vec![
+                    ("RPC Listen".to_string(), endpoint),
+                    (
+                        "Authentication".to_string(),
+                        if api.token_configured { "Token" } else { "None" }.to_string(),
+                    ),
+                    (
+                        "Configured Token".to_string(),
+                        if self.settings.rpc_token.is_empty() {
+                            "(empty)".to_string()
+                        } else {
+                            self.settings.rpc_token.clone()
+                        },
+                    ),
+                    (
+                        "Clients".to_string(),
+                        format!("{}/{}", api.clients, api.max_clients),
                     ),
                 ],
             );
@@ -2743,6 +2791,43 @@ impl DesktopApp {
             );
         });
         ui.add_space(12.0);
+        card(ui, "AI / API 控制", |ui| {
+            labeled_cli_text(
+                ui,
+                "RPC 监听",
+                "--rpc-listen",
+                "仅允许本机回环地址；留空关闭 TCP API",
+                &mut self.settings.rpc_listen,
+                "例如 127.0.0.1:39100；端口 0 表示自动分配",
+            );
+            labeled_cli_text(
+                ui,
+                "RPC Token",
+                "--rpc-token",
+                "可设置或留空；留空表示本机连接无需鉴权",
+                &mut self.settings.rpc_token,
+                "留空 = 无鉴权；设置后客户端必须使用相同 token",
+            );
+            if let Some(snapshot) = &self.snapshot {
+                let api = &snapshot.control_api;
+                let endpoint = if api.enabled && !api.listen.is_empty() {
+                    api.listen.as_str()
+                } else {
+                    "未启用"
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "运行端点：{endpoint} · 鉴权：{} · 客户端：{}/{}",
+                        if api.token_configured { "Token" } else { "无" },
+                        api.clients,
+                        api.max_clients
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
+            }
+        });
+        ui.add_space(12.0);
         card(ui, "启动命令接口", |ui| {
             ui.label(
                 RichText::new(
@@ -3249,7 +3334,7 @@ impl DesktopApp {
                 ui,
                 "RPC Token",
                 &mut self.settings.rpc_token,
-                "核心启动时的 --rpc-token",
+                "可留空；需与已有核心配置一致",
             );
             if ui.button("连接已有核心").clicked() {
                 self.attach_existing();
@@ -4460,6 +4545,15 @@ fn set_optional_command_argument(args: &mut Vec<String>, name: &str, value: &str
     }
 }
 
+fn set_owned_rpc_arguments(args: &mut Vec<String>, listen: &str, token: &str) {
+    set_optional_command_argument(args, "--rpc-listen", listen);
+    if listen.trim().is_empty() || token.is_empty() {
+        remove_command_argument(args, "--rpc-token");
+    } else {
+        set_command_argument(args, "--rpc-token", token);
+    }
+}
+
 fn set_bool_if_non_default(args: &mut Vec<String>, name: &str, value: bool, default: bool) {
     remove_command_argument(args, name);
     if value != default {
@@ -4833,6 +4927,17 @@ mod tests {
             command_value(&args, "--log-level").as_deref(),
             Some("debug")
         );
+    }
+
+    #[test]
+    fn owned_core_rpc_settings_are_forwarded_and_token_is_optional() {
+        let mut args = vec!["--rpc-token=stale".to_string()];
+        set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "");
+        assert!(has_arg(&args, "--rpc-listen=127.0.0.1:39100"));
+        assert!(!args.iter().any(|arg| arg.starts_with("--rpc-token")));
+
+        set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "local-secret");
+        assert!(has_arg(&args, "--rpc-token=local-secret"));
     }
 
     #[test]

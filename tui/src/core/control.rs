@@ -152,9 +152,10 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
     let address = address
         .filter(|value| !value.trim().is_empty())
         .context("control commands require --rpc <address>")?;
-    let token = token
-        .filter(|value| !value.trim().is_empty())
-        .context("control commands require --token <token>")?;
+    // The core accepts an empty token when its loopback-only listener is
+    // configured without authentication. Keep --token compatible, but do not
+    // require it for local no-auth deployments.
+    let token = token.unwrap_or_default();
 
     Ok(Some(CliControlRequest {
         address,
@@ -340,6 +341,18 @@ mod tests {
         .unwrap();
         assert_eq!(request.command, CoreCommand::GetSnapshot);
         assert!(request.json);
+    }
+
+    #[test]
+    fn parses_control_command_without_token() {
+        let request = parse_cli_control(&args(&[
+            "health",
+            "--rpc=127.0.0.1:39100",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(request.command, CoreCommand::GetHealth);
+        assert_eq!(request.token, "");
     }
 
     #[test]

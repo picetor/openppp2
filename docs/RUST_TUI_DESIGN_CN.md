@@ -130,7 +130,7 @@ openppp2 桌面端的用户界面是**内嵌在 `main.cpp` 里的字符仪表盘
 |---|---|---|
 | `--headless` | 无 | 客户端/服务端模式下**不渲染仪表盘、不监听键盘**（跳过 `HandleConsoleInput` / `PrintEnvironmentInformation` 两个调用点），stdout 只留日志 |
 | `--rpc-listen=<ip:port>` | 空（禁用） | 监听本地 RPC；仅允许回环地址（`127.0.0.1` / `::1`），拒绝其它绑定 |
-| `--rpc-token=<token>` | 空 | 客户端必须携带此 token 完成握手；空 = 拒绝所有连接（即 `--rpc-listen` 必须配合 token） |
+| `--rpc-token=<token>` | 空 | 可选鉴权 token；非空时客户端必须匹配，空时允许 loopback 本机无鉴权连接 |
 | `--rpc-max-clients=<n>` | 1 | 最大并发 RPC 连接（默认 1，防多开互踩） |
 
 解析位置：`PppApplication::PreparedArgumentEnvironment`（main.cpp:2285）之后、
@@ -459,7 +459,7 @@ tui/                          # 仓库新增目录（独立 cargo workspace）
 
 | 风险 | 对策 |
 |---|---|
-| 任意本地进程控制 VPN | `--rpc-listen` 强制回环；`--rpc-token` 必填（默认拒绝）；token 仅存内存 |
+| 任意本地进程控制 VPN | `--rpc-listen` 强制回环；`--rpc-token` 可选，非空时鉴权，空时仅允许本机无鉴权连接 |
 | 中间人/窃听 | 本地回环 + token；如需更强可后续升级 Unix socket 权限或 TLS（非 v1 目标） |
 | 命令误操作 | `shutdown` 需 `confirm` 字段；`switch_*` 响应携带目标 tag 回显 |
 | 快照敏感信息（GUID/密钥） | 快照**不包含**密钥类字段；GUID 按现有 SERVERS 页显示惯例输出 |

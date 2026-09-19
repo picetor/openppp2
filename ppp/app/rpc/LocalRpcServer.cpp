@@ -206,7 +206,11 @@ namespace ppp {
 
                 void HandleHello(const Json::Value& id, const Json::Value& params) noexcept {
                     ppp::string token = ppp::auxiliary::JsonAuxiliary::AsString(params.get("token", Json::Value()));
-                    if (server_->token_.size() == 0 || token != server_->token_)
+                    // An empty configured token intentionally disables
+                    // authentication. The listener is still restricted to a
+                    // loopback address by Open(), so this is useful for local
+                    // automation without exposing the control plane remotely.
+                    if (!server_->token_.empty() && token != server_->token_)
                     {
                         LOG_DEBUG("LocalRpcServer::Session::HandleHello: authentication mismatch");
                         SendError(id, 403, "invalid token");

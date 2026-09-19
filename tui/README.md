@@ -63,6 +63,8 @@ x64/Debug/ppp.exe --mode=client --config=./appsettings.json `
     --headless --rpc-listen=127.0.0.1:39100 --rpc-token=你的令牌
 ```
 
+`--rpc-token` 可省略或留空，此时只允许回环地址上的本机客户端无鉴权连接。
+
 （headless 且端口为 0 时，核心会在 stdout 打印
 `RPC_LISTEN=127.0.0.1:<实际端口>` 一行供自动发现。）
 
@@ -84,8 +86,9 @@ tui\target\release\ppp-tui.exe
 点击“进入总览并启动”，同一个 TUI/CLI 进程直接启动真正的 C++ 核心并随后进入
 “总览 / 网络”等运行页面。
 也可以先在“启动设置”中修改目录和启动参数，然后点击“刷新服务器配置”。
-默认启动参数由结构化设置生成，不再重复填充 `--mode`、RPC、TUN 默认值。窗口内支持填入
-RPC 地址和 Token 连接已有核心；该选项只用于主动连接已经独立运行的核心。
+默认启动参数由结构化设置生成，不再重复填充 `--mode`、TUN 默认值。“RPC 监听”控制
+当前 GUI/CLI 所启动 core 的本机 API，“RPC 地址”则用于主动连接已经独立运行的核心；
+两种模式的 Token 都可设置或留空。
 
 “启动命令接口”提供启动模式（`client` 客户端、`proxy` 无 TUN/无监听的目录或控制模式、
 `server` 服务端）、配置文件、服务器目录（默认 `./config`）、TUN IP/网关/掩码、

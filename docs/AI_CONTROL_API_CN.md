@@ -11,9 +11,9 @@
 
 1. 进程内 C ABI：宿主用 `ppp_core_start` 启动，用
    `ppp_core_command` 调用方法，用 `ppp_core_stop` 停止。
-2. 本机 RPC：core 使用 `--rpc-listen=127.0.0.1:<port>` 和
-   `--rpc-token=<token>` 启动。协议为“四字节大端长度 + UTF-8 JSON”，只允许
-   loopback 地址并要求 token 握手。
+2. 本机 RPC：core 使用 `--rpc-listen=127.0.0.1:<port>` 启动，可选
+   `--rpc-token=<token>`。协议为“四字节大端长度 + UTF-8 JSON”，并且只允许
+   loopback 地址。token 非空时必须匹配；token 为空时允许本机无鉴权连接。
 
 `ppp_core_api_version()` 可在 core 启动前查询命令 ABI 版本。
 
@@ -53,6 +53,12 @@ ppp-tui-cli health --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli diagnose quick --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli snapshot --rpc 127.0.0.1:39100 --token <token> --json
 ppp-tui-cli stop --rpc 127.0.0.1:39100 --token <token>
+```
+
+core 未设置 token 时，CLI 可省略 `--token`：
+
+```text
+ppp-tui-cli health --rpc 127.0.0.1:39100 --json
 ```
 
 API 响应不返回 RPC token、服务器密钥或协议密钥。诊断方法只读取 core 内存状态，

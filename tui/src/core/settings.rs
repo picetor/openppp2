@@ -63,6 +63,10 @@ pub struct StartupSettings {
     #[serde(default = "default_tui_log_enabled")]
     pub tui_log_enabled: bool,
     pub tui_log_file: String,
+    /// Loopback address exposed by a core started by this front-end.
+    /// Empty disables the socket RPC server; the in-process C ABI remains.
+    pub rpc_listen: String,
+    /// Address of an already-running core to attach to.
     pub rpc_address: String,
     pub rpc_token: String,
     pub tun_enabled: bool,
@@ -124,6 +128,7 @@ impl Default for StartupSettings {
             tun_protect: true,
             tui_log_enabled: true,
             tui_log_file: "./ppp-tui.log".to_string(),
+            rpc_listen: String::new(),
             rpc_address: String::new(),
             rpc_token: String::new(),
             tun_enabled: true,
@@ -167,6 +172,10 @@ impl StartupSettings {
         }
 
         let core_args = normalize_core_args(core_args);
+        let rpc_listen = command_value(&core_args, "--rpc-listen").unwrap_or_default();
+        if rpc_token.is_empty() {
+            rpc_token = command_value(&core_args, "--rpc-token").unwrap_or_default();
+        }
         let launch_direct = !core_args.is_empty();
         let command = join_command_args(&core_args);
         let config_path = ["--config", "-c", "--c", "-config"]
@@ -303,6 +312,7 @@ impl StartupSettings {
             tun_protect,
             tui_log_enabled,
             tui_log_file,
+            rpc_listen,
             rpc_address,
             rpc_token,
             tun_enabled,

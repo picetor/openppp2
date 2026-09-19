@@ -1482,6 +1482,29 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
     }
     printfn("Template              : %s", active_configuration_path.data());
 
+    // Keep the local automation endpoint visible in the original core UI.
+    // This is a loopback-only interface. The token is shown here because the
+    // console itself is the local operator surface used to configure clients.
+    if (NULLPTR != rpc_server_)
+    {
+        boost::asio::ip::tcp::endpoint endpoint = rpc_server_->GetLocalEndPoint();
+        ppp::string address = ppp::net::Ipep::ToAddressString<ppp::string>(endpoint.address());
+        if (endpoint.address().is_v6())
+        {
+            printfn("RPC Listen            : [%s]:%d", address.data(), endpoint.port());
+        }
+        else
+        {
+            printfn("RPC Listen            : %s:%d", address.data(), endpoint.port());
+        }
+        printfn("RPC Token             : %s", rpc_token_.empty() ? "(empty, no authentication)" : rpc_token_.data());
+        printfn("RPC Clients           : %d/%d", rpc_server_->GetClientCount(), rpc_max_clients_);
+    }
+    else
+    {
+        printfn("RPC Listen            : %s", "disabled");
+    }
+
     // Print server-specific information in the fixed header.
     std::shared_ptr<VirtualEthernetSwitcher> server = server_;
     if (NULLPTR != server)
@@ -2607,9 +2630,9 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
     fprintf(stdout, "[CoreStartup] stage=arguments-prepare logging-ready log_file='%s'\r\n",
         LOG_FILE_PATH_.data());
 
-    // Parse headless / RPC options.  The local RPC server powers the Rust
-    // TUI front-end (docs/RUST_TUI_DESIGN_CN.md); --rpc-listen requires
-    // --rpc-token and only loopback bindings are accepted by the server.
+    // Parse headless / RPC options. The RPC listener is always loopback-only.
+    // A non-empty token enables authentication; an empty token explicitly
+    // allows trusted local tools to connect without authentication.
     headless_ = ppp::HasCommandArgument("--headless", argc, argv);
     catalog_only_ = ppp::ToBoolean(ppp::GetCommandArgument(
         "--catalog-only", argc, argv, "no").data());
@@ -2619,12 +2642,6 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         atoi(ppp::GetCommandArgument("--rpc-max-clients", argc, argv, "1").data()));
     fprintf(stdout, "[CoreStartup] stage=rpc-arguments listen='%s' headless=%d catalog_only=%d\r\n",
         rpc_listen_.data(), headless_ ? 1 : 0, catalog_only_ ? 1 : 0);
-    if (rpc_listen_.size() > 0 && rpc_token_.empty())
-    {
-        fprintf(stdout, "%s\r\n", "--rpc-listen requires --rpc-token.");
-        return -1;
-    }
-
     // Show help if requested
     if (ppp::IsInputHelpCommand(argc, argv))
     {
@@ -3031,13 +3048,13 @@ void PppApplication::PrintHelpInformation() noexcept
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--rpc-listen=<ip:port>",
-        col_description_width, "Local JSON-RPC server (requires --rpc-token)",
+        col_description_width, "Local loopback JSON-RPC server",
         col_default_width, "disabled");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--rpc-token=<token>",
-        col_description_width, "RPC authentication token (loopback only)",
-        col_default_width, "required with --rpc-listen");
+        col_description_width, "RPC token; empty disables authentication",
+        col_default_width, "empty");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--rpc-max-clients=<n>",
@@ -4347,6 +4364,24 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         snapshot["outbounds"] = outbounds;
     }
 
+    Json::Value control_api(Json::objectValue);
+    control_api["enabled"] = NULLPTR != rpc_server_;
+    control_api["listen"] = "";
+    control_api["authentication"] = rpc_token_.empty() ? "none" : "token";
+    control_api["token_configured"] = !rpc_token_.empty();
+    control_api["clients"] = 0;
+    control_api["max_clients"] = rpc_max_clients_;
+    if (NULLPTR != rpc_server_)
+    {
+        boost::asio::ip::tcp::endpoint endpoint = rpc_server_->GetLocalEndPoint();
+        ppp::string address = ppp::net::Ipep::ToAddressString<ppp::string>(endpoint.address());
+        control_api["listen"] = endpoint.address().is_v6() ?
+            "[" + address + "]:" + stl::to_string<ppp::string>(endpoint.port()) :
+            address + ":" + stl::to_string<ppp::string>(endpoint.port());
+        control_api["clients"] = rpc_server_->GetClientCount();
+    }
+    snapshot["control_api"] = control_api;
+
     snapshot["last_error"]["code"] = 0;
     snapshot["last_error"]["severity"] = "";
     snapshot["last_error"]["retryable"] = false;
@@ -4415,6 +4450,8 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         result["safety"]["mutations_are_explicit"] = true;
         result["safety"]["diagnostics_are_read_only"] = true;
         result["safety"]["secrets_in_responses"] = false;
+        result["safety"]["loopback_only"] = true;
+        result["safety"]["authentication_optional"] = true;
         return true;
     }
 

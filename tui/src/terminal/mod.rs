@@ -304,7 +304,7 @@ impl TerminalApp {
 
     /// Enter edit mode on settings field `index` (text fields only).
     fn begin_editing(&mut self, index: usize) {
-        if index == 26 || !matches!(index, 2..=51) {
+        if index == 26 || !matches!(index, 2..=25 | 32..=48 | 53) {
             return;
         }
         let current = match index {
@@ -352,6 +352,7 @@ impl TerminalApp {
             46 => self.settings.bypass_ngw.clone(),
             47 => self.settings.bypass_nic6.clone(),
             48 => self.settings.bypass_ngw6.clone(),
+            53 => self.settings.rpc_listen.clone(),
             _ => self.settings.command.clone(),
         };
         self.editing = Some(index);
@@ -405,6 +406,7 @@ impl TerminalApp {
             46 => self.settings.bypass_ngw = text,
             47 => self.settings.bypass_nic6 = text,
             48 => self.settings.bypass_ngw6 = text,
+            53 => self.settings.rpc_listen = text,
             32 => self.settings.command = text,
             _ => {}
         }
@@ -1072,6 +1074,12 @@ fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
     ] {
         remove_command_argument(&mut args, name);
     }
+    set_optional_command_argument(&mut args, "--rpc-listen", &settings.rpc_listen);
+    if settings.rpc_listen.trim().is_empty() || settings.rpc_token.is_empty() {
+        remove_command_argument(&mut args, "--rpc-token");
+    } else {
+        set_command_argument(&mut args, "--rpc-token", &settings.rpc_token);
+    }
 
     let configured_mode = normalized_launch_mode(&settings.mode);
     // The GUI treats client + TUN disabled as proxy-only. Keep that same
@@ -1313,7 +1321,7 @@ fn ensure_visible(selection: &usize, scroll: &mut usize, viewport: usize) {
 }
 
 fn settings_field_count() -> usize {
-    53
+    54
 }
 
 // ---------------------------------------------------------------------------
@@ -1777,6 +1785,20 @@ fn draw_overview(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
                 format_bytes(snapshot.traffic.in_bytes),
                 format_bytes(snapshot.traffic.out_bytes)
             ),
+        ));
+        rows.push((
+            "RPC",
+            if snapshot.control_api.enabled {
+                snapshot.control_api.listen.clone()
+            } else {
+                "未启用".to_string()
+            },
+            "Token",
+            if app.settings.rpc_token.is_empty() {
+                "(empty)".to_string()
+            } else {
+                app.settings.rpc_token.clone()
+            },
         ));
         if let Some(latest) = app.traffic.latest() {
             rows.push((
@@ -2288,6 +2310,21 @@ mod tests {
     }
 
     #[test]
+    fn owned_core_rpc_settings_are_forwarded_and_token_is_optional() {
+        let mut settings = StartupSettings::default();
+        settings.rpc_listen = "127.0.0.1:39100".to_string();
+        settings.rpc_token.clear();
+
+        let args = prepared_core_args(&settings);
+        assert!(has_arg(&args, "--rpc-listen=127.0.0.1:39100"));
+        assert!(!args.iter().any(|arg| arg.starts_with("--rpc-token")));
+
+        settings.rpc_token = "local-secret".to_string();
+        let args = prepared_core_args(&settings);
+        assert!(has_arg(&args, "--rpc-token=local-secret"));
+    }
+
+    #[test]
     fn structured_core_options_are_forwarded_with_platform_scope() {
         let mut settings = StartupSettings::default();
         settings.rt = false;
@@ -2608,7 +2645,7 @@ fn draw_routes(frame: &mut ratatui::Frame, area: Rect, app: &TerminalApp) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Field labels for the Settings page (indices 0..=52, see
+/// Field labels for the Settings page (indices 0..=53, see
 /// settings_field_count).  Toggle fields get a [x]/[ ] prefix at render
 /// time; text fields show their value after the label.
 fn setting_label(index: usize) -> &'static str {
@@ -2666,6 +2703,7 @@ fn setting_label(index: usize) -> &'static str {
         50 => "TUN 路由",
         51 => "TUN 保护",
         52 => "TUI 日志",
+        53 => "RPC 监听",
         _ => "",
     }
 }
@@ -2716,6 +2754,7 @@ fn settings_value(app: &TerminalApp, index: usize) -> String {
         46 => app.settings.bypass_ngw.clone(),
         47 => app.settings.bypass_nic6.clone(),
         48 => app.settings.bypass_ngw6.clone(),
+        53 => app.settings.rpc_listen.clone(),
         _ => String::new(),
     }
 }

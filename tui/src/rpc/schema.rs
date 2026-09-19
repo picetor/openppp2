@@ -45,8 +45,20 @@ pub struct Snapshot {
     pub routes: RouteInfo,
     pub geo: Geo,
     pub outbounds: Vec<Outbound>,
+    pub control_api: ControlApi,
     pub last_error: LastError,
     pub log_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ControlApi {
+    pub enabled: bool,
+    pub listen: String,
+    pub authentication: String,
+    pub token_configured: bool,
+    pub clients: i32,
+    pub max_clients: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

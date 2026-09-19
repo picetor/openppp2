@@ -6,9 +6,9 @@
  *
  * @details Serves a length-prefixed JSON frame protocol on a loopback TCP
  *          socket (see docs/RUST_TUI_DESIGN_CN.md §4).  The server owns
- *          transport only: it parses frames, authenticates the `hello`
- *          handshake with a token, and forwards every other request to a
- *          caller-provided handler callback.
+ *          transport only: it parses frames, optionally authenticates the
+ *          `hello` handshake when a token is configured, and forwards every
+ *          other request to a caller-provided handler callback.
  *
  *          Frame format: 4-byte big-endian length + JSON UTF-8 body.
  *          Message model: request/response with `id`, plus server-push
