@@ -65,6 +65,7 @@ namespace ppp {
 
                 void                                                            AcceptLoop() noexcept;
                 void                                                            HandleAccept(const boost::system::error_code& ec, const AsioTcpSocketPtr& socket) noexcept;
+                void                                                            RemoveSession(const SessionPtr& session) noexcept;
 
             private:
                 ContextPtr                                                      context_;

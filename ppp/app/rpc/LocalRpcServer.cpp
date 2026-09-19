@@ -35,11 +35,14 @@ namespace ppp {
                 }
 
                 void Dispose() noexcept {
+                    bool expected = false;
+                    if (!disposed_.compare_exchange_strong(expected, true)) return;
                     LOG_DEBUG("LocalRpcServer::Session::Dispose: closing session, remote=%s",
                         socket_->is_open() ? socket_->remote_endpoint().address().to_string().data() : "closed");
                     boost::system::error_code ec;
                     socket_->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
                     socket_->close(ec);
+                    server_->RemoveSession(shared_from_this());
                 }
 
                 // Write one frame to the peer (responses and notifications).
@@ -251,6 +254,7 @@ namespace ppp {
                 AsioTcpSocketPtr                                                socket_;
                 boost::asio::strand<AsioTcpSocket::executor_type>               strand_;
                 bool                                                            authenticated_ = false;
+                std::atomic<bool>                                               disposed_ = false;
                 std::deque<FrameBuffer>                                         write_queue_;
                 bool                                                            writing_ = false;
             };
@@ -390,6 +394,17 @@ namespace ppp {
                 for (const SessionPtr& session : sessions)
                 {
                     session->SendFrame(notification);
+                }
+            }
+
+            void LocalRpcServer::RemoveSession(const SessionPtr& session) noexcept
+            {
+                if (NULLPTR == session) return;
+
+                std::lock_guard<std::mutex> scope(syncobj_);
+                if (sessions_.erase(session) > 0)
+                {
+                    client_count_.fetch_sub(1);
                 }
             }
 
