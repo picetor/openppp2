@@ -201,10 +201,10 @@ API 监听成功只代表控制面正常，不代表数据面已连通。依次�
 5. 用 `get_snapshot.vpn_server` 交叉确认实际远端。该字段和原版界面的 “VPN Server”
    都来自 `client->GetRemoteUri()`，并附带 `[static]`/`[dynamic]` 等显示标记。
 
-当前实现的已知限制：`get_health.server` 和 `get_snapshot.server` 仍从程序启动时的
-`configuration_->client.server` 构造，热切换后可能继续显示旧服务器。修复前不要用
-这两个字段判断活动出口；它们与 `get_outbounds` 或 `vpn_server` 冲突时，以后两者和
-core 日志为准。这个限制只影响状态上报，不表示切换本身失败。
+`get_health.server` 和 `get_snapshot.server` 按运行阶段选择数据源：连接建立后使用
+活动 exchanger 的 `current_entry`；连接中或重连时使用活动 client configuration 的
+服务器值。`transport` 同样从活动 configuration 更新，不再回退到热切换前的启动
+配置。若需要完整的原版界面显示文本，仍读取 `get_snapshot.vpn_server`。
 
 ## 原始 RPC 协议
 

@@ -89,5 +89,6 @@ API 响应不返回 RPC token、服务器密钥或协议密钥。诊断方法只
 `current_entry`/`state` 作为完成条件。
 
 实时远端显示应读取 `get_snapshot.vpn_server`，其来源与原版界面相同，都是
-`client->GetRemoteUri()`。当前 `get_health.server`/`get_snapshot.server` 仍可能来自
-启动配置，在热切换后滞后；修复前不能用它们判断当前活动服务器。
+`client->GetRemoteUri()`。`get_health.server`/`get_snapshot.server` 在连接建立后返回
+活动 exchanger 的实际 `current_entry`；连接中或重连时回退到活动 client
+configuration，而不是热切换前的启动配置。

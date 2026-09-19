@@ -3933,10 +3933,19 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
     capabilities.append("mux.stripe");
     snapshot["capabilities"] = capabilities;
 
-    // Derive the transport scheme from the configured server URL.
-    if (NULLPTR != configuration_ && configuration_->client.server.size() > 0)
+    // Preserve the startup configuration as a fallback before the client is
+    // available.  Once a hot switch promotes another primary profile, the
+    // live client configuration below must replace this identity.
+    auto apply_server_identity = [&snapshot](
+        const std::shared_ptr<AppConfiguration>& configuration) noexcept
     {
-        ppp::string server = configuration_->client.server;
+        if (NULLPTR == configuration || configuration->client.server.empty())
+        {
+            return;
+        }
+
+        ppp::string server = configuration->client.server;
+        snapshot["server"] = server;
         std::size_t scheme = server.find("://");
         if (scheme != ppp::string::npos)
         {
@@ -3945,9 +3954,9 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             {
                 snapshot["transport"] = transport;
             }
-            snapshot["server"] = server;
         }
-    }
+    };
+    apply_server_identity(configuration_);
 
     // Client-mode state: phase, live entry, MUX details.
     std::shared_ptr<VEthernetNetworkSwitcher> client = client_;
@@ -3957,8 +3966,10 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         // status area.  These are exported through RPC for the Rust TUI;
         // the C++ TUI rendering itself remains unchanged.
         std::shared_ptr<AppConfiguration> active_configuration = client->GetConfiguration();
+        apply_server_identity(active_configuration);
         ppp::string guid = NULLPTR != active_configuration ?
-            active_configuration->client.guid : configuration_->client.guid;
+            active_configuration->client.guid :
+            (NULLPTR != configuration_ ? configuration_->client.guid : ppp::string());
         if (guid.size() >= 2 && guid.front() == '{' && guid.back() == '}')
         {
             guid = guid.substr(1, guid.size() - 2);
