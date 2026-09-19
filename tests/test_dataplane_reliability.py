@@ -639,6 +639,7 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn('result["read_only"] = true', core)
         self.assertIn('result["safety"]["secrets_in_responses"] = false', core)
         self.assertIn('result["safety"]["authentication_optional"] = true', core)
+        self.assertIn('result["authentication"] = rpc_token_.empty() ? "none" : "token"', core)
         self.assertIn('snapshot["control_api"] = control_api', core)
         self.assertIn('snapshot["network"]["tun"]', core)
         self.assertNotIn("const auto tun_interface = client->", core)

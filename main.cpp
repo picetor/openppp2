@@ -4416,7 +4416,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         result["core_version"] = PPP_APPLICATION_VERSION;
         result["transport"] = "length-prefixed-json";
         result["network_scope"] = "loopback-only";
-        result["authentication"] = "token";
+        result["authentication"] = rpc_token_.empty() ? "none" : "token";
 
         Json::Value methods(Json::arrayValue);
         auto add_method = [&methods](
