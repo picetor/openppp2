@@ -5,6 +5,10 @@
 控制面由 C++ core 实现，GUI TUI、终端 TUI、一次性 CLI 和 AI 自动化只做客户端。
 这样状态、诊断和变更语义只有一个来源。
 
+API 的行为以原版 core 手动操作为准。RPC 只负责鉴权、参数解码和调用分派；具体
+操作必须进入与原版控制台/TUI 相同的 C++ 方法，不能另行修改状态或复制连接、路由
+和 DNS 逻辑。响应中的 `accepted` 表示请求已被 core 接受，不等于异步操作完成。
+
 ## 两种传输
 
 同一组方法可通过两种方式调用：
@@ -44,8 +48,8 @@
 | `set_log_level` | 控制 | 动态调整日志等级 |
 | `update_settings` | 控制 | 批量调整可热更新设置 |
 | `configure_api` | 控制 | 由 core 自行启停、改绑和调整 API 鉴权 |
-| `switch_server` | 控制 | 切换主出口 |
-| `switch_rank1` | 控制 | 切换至探测排名第一入口 |
+| `switch_server` | 控制 | 调用 `SwitchPrimaryOutbound(tag)` 请求切换主出口 |
+| `switch_rank1` | 控制 | 调用 `SwitchPrimaryOutboundToRankedFirst(tag)` 请求活动出口切换至 Rank #1 |
 | `shutdown` | 生命周期 | 停止或请求重启，必须带确认字段 |
 
 启动不是运行中 core 的 RPC 方法：独立进程由服务管理器/CLI 启动，内嵌模式由
@@ -72,3 +76,18 @@ ppp-tui-cli health --rpc 127.0.0.1:39100 --json
 
 API 响应不返回 RPC token、服务器密钥或协议密钥。诊断方法只读取 core 内存状态，
 不发送测试流量、不修改路由/DNS，也不切换服务器。
+
+## 异步切换语义
+
+原版服务器页选择非活动项时调用 `SwitchPrimaryOutbound(tag)`；选择当前活动项时调用
+`SwitchPrimaryOutboundToRankedFirst(tag)`。RPC 的两个切换方法直接调用这两个入口。
+
+`switch_server` 成功受理后会先创建目标主 exchanger，再等待约 2000 ms 的热切换
+窗口。窗口结束且目标可提升时，core 才更新 `exchanger_`、`primary_outbound_`，应用
+目标 client configuration，并清理旧连接状态。因此调用方必须在收到
+`accepted: true` 后继续轮询 `get_outbounds`，以目标 `active=true` 和实时
+`current_entry`/`state` 作为完成条件。
+
+实时远端显示应读取 `get_snapshot.vpn_server`，其来源与原版界面相同，都是
+`client->GetRemoteUri()`。当前 `get_health.server`/`get_snapshot.server` 仍可能来自
+启动配置，在热切换后滞后；修复前不能用它们判断当前活动服务器。

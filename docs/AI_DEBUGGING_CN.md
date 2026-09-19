@@ -6,6 +6,31 @@
 统一实现，原版 `ppp`、图形 TUI、终端 TUI 和 `ppp-tui-cli` 使用同一套方法与
 状态。界面不是另一套控制实现，只负责启动、连接和展示。
 
+## 以原版 core 手动操作为准
+
+API 是原版 core 手动操作的远程入口，不是第二套控制实现。增加或修改 API 时必须
+遵守以下规则：
+
+1. API 与原版控制台/TUI 调用同一个 C++ 方法，不得直接改写内部状态来模拟结果。
+2. 参数校验、配置重载、连接建立、热切换延迟、路由/DNS 清理和失败处理均由 core
+   现有实现负责，客户端不得复制这些逻辑。
+3. `accepted` 只表示 core 接受了操作请求，不表示异步操作已经完成。
+4. 操作完成后必须重新读取 core 运行态确认，不能把请求参数当成最终状态。
+5. 原版界面显示的实时值优先来自 `VEthernetNetworkSwitcher`、活动 exchanger 和活动
+   configuration；启动时的 `PppApplication::configuration_` 不能代表热切换后的连接。
+
+服务器页的手动操作与 API 对应关系如下：
+
+| 原版手动操作 | core C++ 入口 | API 方法 |
+|---|---|---|
+| 选择非活动服务器并确认 | `SwitchPrimaryOutbound(tag)` | `switch_server` |
+| 在活动服务器上确认，切换到探测 Rank #1 | `SwitchPrimaryOutboundToRankedFirst(tag)` | `switch_rank1` |
+| 查看服务器列表和活动项 | `GetOutboundStatuses()` | `get_outbounds` |
+| 查看当前 VPN 服务器 | `GetRemoteUri()` / `GetExchanger()` | `get_snapshot` 的 `vpn_server` |
+
+如果将来加入重连、路由、DNS、代理或其他控制命令，也必须先找到原版手动操作的
+core 入口，再将该入口暴露给 RPC 和进程内 C ABI。
+
 ## 启用 API
 
 ### 原版 core
@@ -100,8 +125,8 @@ ppp-tui-cli call run_diagnostics '{"scope":"full"}' --rpc 127.0.0.1:39100 --json
 | `set_log_level` | 动态修改日志等级 | 是 |
 | `update_settings` | 修改 `log_level`、`block_quic`、`static_mode`、`mux`、`mux_acceleration` | 是 |
 | `configure_api` | 启用/关闭 API，修改监听、token、客户端上限 | 是，需确认字段 |
-| `switch_server` | 切换指定服务器/出口 | 是 |
-| `switch_rank1` | 切换至探测排名第一的入口 | 是 |
+| `switch_server` | 请求按原版手动流程切换指定服务器/出口 | 是，异步 |
+| `switch_rank1` | 请求按原版手动流程切换至探测排名第一的入口 | 是，异步 |
 | `shutdown` | 停止或请求重启 core | 是，需确认字段 |
 
 诊断接口本身不发送测试流量、不修改路由或 DNS，也不会自动切换服务器。
@@ -158,6 +183,28 @@ API 监听成功只代表控制面正常，不代表数据面已连通。依次�
 4. core 日志里的网卡、路由、DNS、握手和传输错误。
 
 不要因为看到 API 已监听就忽略后续的 TAP/Wintun 或服务器路由错误。
+
+### 验证服务器切换
+
+`switch_server` 与原版服务器页使用同一个 `SwitchPrimaryOutbound(tag)`。该方法会重载
+目标配置、创建新的主 exchanger，并进入约 2000 ms 的热切换窗口。因此响应中的
+`accepted: true` 只说明请求已建立或已经处于同一待切换请求中。
+
+推荐验证流程：
+
+1. 调用 `switch_server {"tag":"server:bwgus"}`。
+2. 若 `accepted` 为 `false`，读取 `get_logs` 查找标签不存在、配置加载失败、连接打开
+   失败或拓扑不兼容等原因。
+3. 若 `accepted` 为 `true`，等待至少一个运行态刷新周期，再调用 `get_outbounds`。
+4. 仅当目标项的 `active` 为 `true`，并且 `current_entry`、`state` 符合预期时，才判定
+   切换已经完成；当前网络状态枚举中 `1` 表示 established。
+5. 用 `get_snapshot.vpn_server` 交叉确认实际远端。该字段和原版界面的 “VPN Server”
+   都来自 `client->GetRemoteUri()`，并附带 `[static]`/`[dynamic]` 等显示标记。
+
+当前实现的已知限制：`get_health.server` 和 `get_snapshot.server` 仍从程序启动时的
+`configuration_->client.server` 构造，热切换后可能继续显示旧服务器。修复前不要用
+这两个字段判断活动出口；它们与 `get_outbounds` 或 `vpn_server` 冲突时，以后两者和
+core 日志为准。这个限制只影响状态上报，不表示切换本身失败。
 
 ## 原始 RPC 协议
 
