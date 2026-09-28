@@ -35,7 +35,7 @@
 4. **openppp2 无内置延迟测速/优选**：grep `tcping|latency|RTT|probe|health` 无相关实现。
 5. **WSS 优选 IP 加速**（README.md:294）：`server` 填优选 IP:端口，`websocket.host/sni` 填真实域名让 CDN 路由。
 6. **`--server-dir` 热切换**（`main.cpp:3237-3351`）：JSON 目录 → Servers 页面（每页 10 节点），确认后重读 JSON 重建连接，2 秒后切流量；去重用 `guid + server`（`main.cpp:3304`）。
-7. **geo 多出口**：每 outbound 独立读配置，多出口不支持 `--tun-static=yes`（README.md:93）。
+7. **geo 多出口**：每 outbound 独立读配置；`--tun-static=yes` 下各出口的静态 UDP 配置、会话和聚合器彼此隔离。
 
 ### 2.2 关键架构（多入口相关的链路）
 

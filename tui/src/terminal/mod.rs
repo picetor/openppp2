@@ -510,9 +510,7 @@ impl TerminalApp {
                     .outbounds
                     .iter()
                     .enumerate()
-                    .filter(|(_, outbound)| {
-                        outbound.server_menu || outbound.tag.eq_ignore_ascii_case("main")
-                    })
+                    .filter(|(_, outbound)| snapshot.is_visible_server_outbound(outbound))
                     .filter(|(_, outbound)| {
                         filter.is_empty()
                             || outbound.tag.to_lowercase().contains(&filter)
@@ -680,8 +678,7 @@ impl TerminalApp {
             self.handle_response(response);
         }
 
-        // Keep the CLI usable when the owned core exits unexpectedly, matching
-        // the window client's bounded automatic relaunch behavior.
+        // Planned core restarts do not consume the bounded recovery budget.
         let in_process_exited = self.in_process_core
             && self
                 .rpc
@@ -689,6 +686,11 @@ impl TerminalApp {
                 .map(|core| !core.is_running())
                 .unwrap_or(true);
         if in_process_exited && !self.launching {
+            let planned = self
+                .rpc
+                .as_ref()
+                .map(CoreClient::restart_requested)
+                .unwrap_or(false);
             let view = self.view;
             let was_catalog = self.catalog_core;
             self.rpc = None;
@@ -697,9 +699,13 @@ impl TerminalApp {
             self.catalog_core = false;
             self.snapshot = None;
             self.traffic.reset();
-            self.auto_restart_count = self.auto_restart_count.saturating_add(1);
-            if self.auto_restart_count <= 3 {
-                self.status = format!("核心已退出，正在重启（{}/3）…", self.auto_restart_count);
+            if crate::core::restart::allow_restart_after_exit(planned, &mut self.auto_restart_count)
+            {
+                self.status = if planned {
+                    "核心请求主动重启，正在重新启动…".to_string()
+                } else {
+                    format!("核心异常退出，正在重启（{}/3）…", self.auto_restart_count)
+                };
                 if was_catalog {
                     let args = self.core_args();
                     self.launch_core_with_args(args, view, false);
@@ -1059,7 +1065,7 @@ impl TerminalApp {
     }
 }
 
-fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
+pub fn prepared_core_args(settings: &StartupSettings) -> Vec<String> {
     let mut args = normalize_core_args(split_command_line(&settings.command));
     for name in [
         "--headless",
@@ -2021,8 +2027,8 @@ fn network_interface_card(
         rows.extend([
             ("聚合器".to_string(), dash(&network.aggligator)),
             ("代理中间层".to_string(), dash(&network.proxy_interlayer)),
-            ("TCP/IP CC".to_string(), dash(&network.tcp_ip_cc)),
-            ("阻止 QUIC".to_string(), dash(&network.block_quic)),
+            ("TCP/IP 栈".to_string(), dash(&network.tcp_ip_cc)),
+            ("UDP/443 屏蔽".to_string(), dash(&network.block_quic)),
             ("MUX 状态".to_string(), dash(&network.mux_state)),
             ("链路状态".to_string(), dash(&network.link_state)),
         ]);
@@ -2053,9 +2059,7 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
             snapshot
                 .outbounds
                 .iter()
-                .filter(|outbound| {
-                    outbound.server_menu || outbound.tag.eq_ignore_ascii_case("main")
-                })
+                .filter(|outbound| snapshot.is_visible_server_outbound(outbound))
                 .count()
         })
         .unwrap_or(0);
@@ -2660,8 +2664,8 @@ fn setting_label(index: usize) -> &'static str {
         7 => "TUN 网关",
         8 => "TUN 掩码",
         9 => "TUN MUX",
-        10 => "MUX 加速",
-        11 => "链路重启",
+        10 => "MUX 加速选项",
+        11 => "连续连接失败重启阈值",
         12 => "HTTP 代理端口",
         13 => "SOCKS 代理端口",
         14 => "IPv4 分流文件",
@@ -2679,12 +2683,12 @@ fn setting_label(index: usize) -> &'static str {
         26 => "核心模式",
         27 => "TUN Host",
         28 => "TUN VNet",
-        29 => "TUN 静态地址",
-        30 => "TUN 快速启动",
-        31 => "阻止 QUIC",
+        29 => "静态 UDP 传输",
+        30 => "QoS 标记",
+        31 => "屏蔽 UDP/443",
         32 => "启动命令",
         33 => "核心日志等级",
-        34 => "TCP/IP CC",
+        34 => "TCP/IP 栈",
         35 => "实时模式",
         36 => "DNS 服务器",
         37 => "自动重启",

@@ -76,7 +76,10 @@ impl CoreCommand {
             Self::ConfigureApi { settings } => {
                 let mut params = settings.clone();
                 if let Value::Object(ref mut object) = params {
-                    object.insert("confirm".to_string(), Value::String("configure_api".to_string()));
+                    object.insert(
+                        "confirm".to_string(),
+                        Value::String("configure_api".to_string()),
+                    );
                 }
                 params
             }
@@ -418,6 +421,13 @@ impl InProcessClient {
             .unwrap_or(false)
     }
 
+    fn restart_requested(&self) -> bool {
+        self.core
+            .lock()
+            .map(|core| core.restart_requested())
+            .unwrap_or(false)
+    }
+
     fn request_command(&mut self, command: CoreCommand) -> Result<()> {
         if !self.is_running() {
             bail!("core is not running");
@@ -530,6 +540,13 @@ impl CoreClient {
         match self {
             Self::Rpc(client) => client.is_connected(),
             Self::InProcess(client) => client.is_running(),
+        }
+    }
+
+    pub fn restart_requested(&self) -> bool {
+        match self {
+            Self::Rpc(_) => false,
+            Self::InProcess(client) => client.restart_requested(),
         }
     }
 

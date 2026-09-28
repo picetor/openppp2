@@ -1,7 +1,8 @@
 param(
     [ValidateSet("Debug", "Release")]
     [string] $CoreConfiguration = "Release",
-    [string] $CoreLibraryPath
+    [string] $CoreLibraryPath,
+    [switch] $Slint
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +39,15 @@ $env:PPP_TUI_CORE_LIBS = "libssl;libcrypto;jemalloc_s;boost_context-vc145-mt-$bo
 $env:PPP_TUI_CORE_SYSTEM_LIBS = "ws2_32;iphlpapi;shlwapi;qwave;pdh;winmm;wbemuuid;shell32;crypt32;propsys;dbghelp;rpcrt4;ole32;comsuppw;setupapi;fwpuclnt;netapi32;wininet;cryptui;advapi32;secur32;bcrypt;psapi"
 Write-Host "Linking in-process core: $CoreLibraryPath"
 
-cargo build --release --manifest-path (Join-Path $tuiDir "Cargo.toml")
+if ($Slint) {
+    cargo build --release --manifest-path (Join-Path $tuiDir "Cargo.toml") --features slint-ui --bin ppp-tui-slint
+} else {
+    cargo build --release --manifest-path (Join-Path $tuiDir "Cargo.toml")
+}
+if ($LASTEXITCODE -ne 0) {
+    throw "Cargo build failed with exit code $LASTEXITCODE"
+}
 
-$output = Join-Path $tuiDir "target\release\ppp-tui.exe"
+$outputName = if ($Slint) { "ppp-tui-slint.exe" } else { "ppp-tui.exe" }
+$output = Join-Path $tuiDir "target\release\$outputName"
 Write-Host "Standalone Rust TUI: $output"

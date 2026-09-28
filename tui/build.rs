@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    #[cfg(feature = "slint-ui")]
+    slint_build::compile("../designs/slint-desktop/openppp2.slint")
+        .expect("compile Slint desktop interface");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = manifest_dir
         .parent()
@@ -146,7 +149,7 @@ fn main() {
 }
 
 fn emit_link_argument_for_bins(path: &Path) {
-    for binary in ["ppp-tui", "ppp-tui-cli"] {
+    for binary in ["ppp-tui", "ppp-tui-cli", "ppp-tui-slint"] {
         println!("cargo:rustc-link-arg-bin={binary}={}", path.display());
     }
 }
@@ -172,7 +175,7 @@ fn emit_named_library_for_bins(
         } else {
             format!("{name}.lib")
         };
-        for binary in ["ppp-tui", "ppp-tui-cli"] {
+        for binary in ["ppp-tui", "ppp-tui-cli", "ppp-tui-slint"] {
             println!("cargo:rustc-link-arg-bin={binary}={argument}");
         }
     }
@@ -183,7 +186,7 @@ fn emit_named_library_for_bins(
         } else {
             format!("-l{name}")
         };
-        for binary in ["ppp-tui", "ppp-tui-cli"] {
+        for binary in ["ppp-tui", "ppp-tui-cli", "ppp-tui-slint"] {
             println!("cargo:rustc-link-arg-bin={binary}={argument}");
         }
     }
@@ -299,6 +302,10 @@ fn embed_windows_icon(repo_root: &std::path::Path, out_dir: &std::path::Path) {
     println!("cargo:rustc-link-arg-bin=ppp-tui={}", res_path.display());
     println!(
         "cargo:rustc-link-arg-bin=ppp-tui-cli={}",
+        res_path.display()
+    );
+    println!(
+        "cargo:rustc-link-arg-bin=ppp-tui-slint={}",
         res_path.display()
     );
 }

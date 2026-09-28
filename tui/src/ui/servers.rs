@@ -16,7 +16,7 @@ pub fn draw(frame: &mut Frame, area: Rect, snapshot: &Snapshot, app: &App) {
     let server_count = snapshot
         .outbounds
         .iter()
-        .filter(|o| o.server_menu || o.tag.eq_ignore_ascii_case("main"))
+        .filter(|o| snapshot.is_visible_server_outbound(o))
         .count();
 
     let title = if filter.is_empty() {

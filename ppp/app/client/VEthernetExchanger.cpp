@@ -172,6 +172,7 @@ namespace ppp {
                 , outbound_tag_(outbound_tag)
                 , primary_outbound_(primary_outbound)
                 , network_state_(NetworkState_Connecting)
+                , link_restart_policy_(primary_outbound)
                 , static_echo_input_(false)
                 , static_echo_timeout_(UINT64_MAX)
                 , static_echo_session_id_(0)
@@ -260,6 +261,7 @@ namespace ppp {
                             forwarding_ = secondary_forwarding;
                             assigned_ipv6_address_ = boost::asio::ip::address();
                         }
+                        link_restart_policy_.SetPrimary(primary);
                         primary_outbound_.store(primary);
                     }
                 }
@@ -1033,6 +1035,9 @@ namespace ppp {
                 }
 
                 StaticEchoClean();
+                if (std::shared_ptr<aggligator::aggligator> aggligator = std::move(aggligator_); NULLPTR != aggligator) {
+                    aggligator->close();
+                }
                 if (NULLPTR != transmission) {
                     LOG_DEBUG("VEthernetExchanger::Finalize: disposing transmission, disposed=%d", (int)disposed_);
                     transmission->Dispose();
@@ -1550,6 +1555,8 @@ namespace ppp {
 #endif
                 bool run_once = false;
                 while (!disposed_) {
+                    const auto attempt = link_restart_policy_.BeginAttempt();
+                    bool established = false;
                     ExchangeToConnectingState(); {
                         LOG_DEBUG("VEthernetExchanger::Loopback: connecting to server...");
                         ITransmissionPtr transmission = OpenTransmission(context, y);
@@ -1564,6 +1571,8 @@ namespace ppp {
                             }
                             LOG_DEBUG("VEthernetExchanger::Loopback: handshake %s", handshake_ok ? "success" : "failed");
                             if (handshake_ok && EchoLanToRemoteExchanger(transmission, y) > -1) {
+                                established = true;
+                                link_restart_policy_.Established(attempt);
                                 LOG_DEBUG("VEthernetExchanger::Loopback: link established, entering data loop");
                                 ExchangeToEstablishState(); {
                                     transmission_ = transmission; {
@@ -1601,6 +1610,16 @@ namespace ppp {
                     // reconnect wait after shutdown has already begun; Finalize will
                     // cancel any timers that were active before Dispose.
                     if (disposed_) {
+                        break;
+                    }
+
+                    // A healthy session ending is not a failed connection attempt.
+                    // Latch at the failure site so the 1-second application tick
+                    // cannot miss the threshold if another attempt succeeds.
+                    if (!established && link_restart_policy_.Failed(attempt, switcher_->GetLinkRestartLimit())) {
+                        LOG_WARN("VEthernetExchanger::Loopback: primary outbound=%s reached consecutive connection failure limit=%d; requesting core restart",
+                            outbound_tag_.data(), switcher_->GetLinkRestartLimit());
+                        switcher_->RequestLinkRestart();
                         break;
                     }
 
@@ -3114,6 +3133,65 @@ namespace ppp {
                 static_echo_transport_   = NULLPTR;
             }
 
+            bool VEthernetExchanger::PrepareAggregator() noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                std::shared_ptr<boost::asio::io_context> context = GetContext();
+                if (NULLPTR == configuration || NULLPTR == context) return false;
+                // The aggregator writes to this buffer. It must not be shared
+                // with another outbound running on the same io_context.
+                std::shared_ptr<Byte> buffer = make_shared_alloc<Byte>(PPP_BUFFER_SIZE);
+                if (NULLPTR == buffer) return false;
+                auto aggligator = make_shared_object<aggligator::aggligator>(
+                    *context, buffer, PPP_BUFFER_SIZE, PPP_AGGLIGATOR_CONGESTIONS);
+                if (NULLPTR == aggligator) return false;
+#if defined(_LINUX)
+                aggligator->ProtectorNetwork = switcher_->GetProtectorNetwork();
+#endif
+                aggligator->AppConfiguration = configuration;
+                aggligator->BufferswapAllocator = configuration->GetBufferAllocator();
+#if defined(_WIN32)
+                std::shared_ptr<VEthernetNetworkSwitcher> protector_switcher = switcher_;
+                aggligator->SocketProtector = [protector_switcher](
+                    intptr_t socket_handle, const boost::asio::ip::address& address) noexcept {
+                    return NULLPTR != protector_switcher &&
+                        protector_switcher->ProtectWindowsSocket(socket_handle, address);
+                };
+#endif
+                aggligator_ = std::move(aggligator);
+                return true;
+            }
+
+            bool VEthernetExchanger::PrepareStaticEndpoints() noexcept {
+                AppConfigurationPtr configuration = GetConfiguration();
+                if (NULLPTR == configuration) return false;
+                ppp::unordered_set<boost::asio::ip::tcp::endpoint> aggregate_servers;
+                for (const ppp::string& server_string : configuration->udp.static_.servers) {
+                    ppp::string host;
+                    int port = 0;
+                    if (!Ipep::ParseEndPoint(server_string, host, port) ||
+                        port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) return false;
+                    IPEndPoint remote = Ipep::GetEndPoint(host, port);
+                    if (IPEndPoint::IsInvalid(remote)) return false;
+                    if (aggligator_) {
+                        aggregate_servers.emplace(IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(remote));
+                    }
+                    else {
+                        auto endpoint = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(remote);
+                        if (!StaticEchoAddRemoteEndPoint(endpoint)) return false;
+                    }
+                }
+                if (aggligator_ && !aggligator_started_) {
+                    if (aggregate_servers.empty()) {
+                        auto aggligator = std::move(aggligator_);
+                        aggligator->close();
+                    }
+                    else if (!aggligator_->client_open(configuration->udp.static_.aggligator,
+                        aggregate_servers)) return false;
+                    else aggligator_started_ = true;
+                }
+                return true;
+            }
+
             bool VEthernetExchanger::StaticEchoAllocated() noexcept {
                 if (disposed_) {
                     return false;
@@ -3252,6 +3330,7 @@ namespace ppp {
                 if (disposed_) {
                     return false;
                 }
+                if (!PrepareStaticEndpoints()) return false;
 
                 if (StaticEchoAllocated()) {
                     return true;
@@ -3445,6 +3524,15 @@ namespace ppp {
                     }
                 }
                 if (int serverPort = serverEP.port(); serverPort > IPEndPoint::MinPort && serverPort <= IPEndPoint::MaxPort) {
+#if defined(_WIN32)
+                    if (NULLPTR == switcher_ ||
+                        !switcher_->ProtectWindowsSocket((intptr_t)socket->native_handle(), serverEP.address())) {
+                        static_echo_send_errors_.fetch_add(1, std::memory_order_relaxed);
+                        LOG_ERROR("VEthernetExchanger::StaticEchoPacketToRemoteExchanger: physical socket protection failed, outbound=%s, remote=%s:%u",
+                            outbound_tag_.data(), serverEP.address().to_string().c_str(), (unsigned int)serverEP.port());
+                        return false;
+                    }
+#endif
                     // Accept responses only from endpoints to which this
                     // session actually sent. This also covers dynamically
                     // selected aggligator endpoints.
@@ -3733,17 +3821,18 @@ namespace ppp {
                 }
 
                 SynchronizedObjectScope scope(syncobj_);
-                auto r = static_echo_server_ep_set_.emplace(destinationEP);
-                if (!r.second) {
-                    return false;
+                if (std::find(static_echo_server_ep_balances_.begin(),
+                    static_echo_server_ep_balances_.end(), destinationEP) ==
+                    static_echo_server_ep_balances_.end()) {
+                    // Endpoint lists are per exchanger, so duplicate entries
+                    // in one outbound configuration are harmless.
+                    static_echo_server_ep_balances_.emplace_back(destinationEP);
                 }
-
-                static_echo_server_ep_balances_.emplace_back(destinationEP);
                 return true;
             }
 
             boost::asio::ip::udp::endpoint VEthernetExchanger::StaticEchoGetRemoteEndPoint() noexcept {
-                std::shared_ptr<aggligator::aggligator> aggligator = switcher_->GetAggligator();
+                std::shared_ptr<aggligator::aggligator> aggligator = aggligator_;
                 if (NULLPTR != aggligator) {
 #if !defined(_ANDROID) && !defined(_IPHONE)
                     auto ni = switcher_->GetUnderlyingNetworkInterface(); 
@@ -3824,8 +3913,8 @@ namespace ppp {
                         Socket::SetWindowSizeIfNotZero(socket.native_handle(), configuration->udp.cwnd, configuration->udp.rwnd);
                     }
                     
-#if defined(_ANDROID)
-                    std::shared_ptr<aggligator::aggligator> aggligator = switcher_->GetAggligator();
+#if defined(_LINUX)
+                    std::shared_ptr<aggligator::aggligator> aggligator = aggligator_;
                     if (NULLPTR == aggligator) {
                         auto protector_network = switcher_->GetProtectorNetwork(); 
                         if (NULLPTR != protector_network) {

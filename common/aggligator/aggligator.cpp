@@ -470,6 +470,11 @@ namespace aggligator
                 }
             }
 #elif defined(_WIN32)                                                       // Windows QoS tagging
+            if (aggligator->SocketProtector &&
+                !aggligator->SocketProtector((intptr_t)socket->native_handle(), server.address()))
+            {
+                return false;
+            }
             qoss_ = QoSS::New(socket->native_handle(), server.address(), server.port());
 #endif
             socket_ = socket;                                               // Store socket

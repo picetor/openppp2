@@ -16,6 +16,8 @@
 #include <ppp/auxiliary/UriAuxiliary.h>
 #include <ppp/transmissions/proxys/IForwarding.h>
 #include <ppp/app/client/ConnectivityProbe.h>
+#include <ppp/app/client/LinkRestartPolicy.h>
+#include <common/aggligator/aggligator.h>
 
 namespace ppp {
     namespace app {
@@ -332,6 +334,8 @@ namespace ppp {
                 bool                                                                    StaticEchoAddRemoteEndPoint(boost::asio::ip::udp::endpoint& remoteEP) noexcept;
                 boost::asio::ip::udp::endpoint                                          StaticEchoGetRemoteEndPoint() noexcept;
                 void                                                                    StaticEchoClean() noexcept;
+                bool                                                                    PrepareAggregator() noexcept;
+                bool                                                                    PrepareStaticEndpoints() noexcept;
                 bool                                                                    StaticEchoNextTimeout() noexcept;
                 bool                                                                    StaticEchoSwapAsynchronousSocket() noexcept;
                 bool                                                                    StaticEchoGatewayServer(int ack_id) noexcept;
@@ -391,6 +395,7 @@ namespace ppp {
                 std::atomic<uint64_t>                                                   mux_fallbacks_ = 0;
                 
                 int                                                                     reconnection_count_ = 0;
+                LinkRestartPolicy                                                       link_restart_policy_;
 
                 typedef ppp::unordered_map<ppp::string, ConnectivityProbe::Result>      ProbeResultTable;
                 ProbeResultTable                                                        probe_results_;
@@ -411,6 +416,8 @@ namespace ppp {
 
                 CiphertextPtr                                                           static_echo_protocol_;
                 CiphertextPtr                                                           static_echo_transport_;
+                std::shared_ptr<aggligator::aggligator>                                 aggligator_;
+                bool                                                                    aggligator_started_ = false;
                 std::shared_ptr<StaticEchoDatagarmSocket>                               static_echo_sockets_[2];
                 ppp::list<boost::asio::ip::udp::endpoint>                               static_echo_server_ep_balances_;
                 ppp::unordered_set<boost::asio::ip::udp::endpoint>                      static_echo_server_ep_set_;

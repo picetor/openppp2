@@ -1,5 +1,7 @@
 # 🔐 PPP PRIVATE NETWORK™ 2 — 分支特性说明
 
+> **桌面控制入口迁移至网页 + C++ 核心**：使用 `web/dist/ppp-web.exe` 打开本地网页，通过核心 AI/API 控制运行状态、服务器和配置。沿用确认的 egui 风格网页设计。构建与使用见 [web/README.md](web/README.md)。Rust egui / Slint / TUI / CLI 暂停作为主入口，源码保留。
+
 <div align="right" style="margin-top:-40px;">
   <kbd style="background:#0366d6;">
     <strong>简体中文</strong>
@@ -138,7 +140,7 @@ rules:
 - 全部模式只创建一个 TAP；主配置负责地址、DNS、系统路由和本地代理监听。
   选中出口断线时不会泄漏或回退到其他出口。
 - TCP 连接在建立时固定出口；原始 TCP/UDP/ICMP 按目标地址维护活动粘滞，持续有流量时不会因 DNS TTL 到期切换到另一组 key，空闲 5 分钟后才重新按规则选择。
-- 多出口模式不支持 `--tun-static=yes`，因为旧静态 UDP 回声只有一套全局服务器/聚合器，无法隔离不同出口密钥；使用该组合会明确拒绝启动。传统 JSON 模式不受影响。
+- 多出口模式支持 `--tun-static=yes`；每个出口使用自身配置中的静态 UDP 服务器、会话和聚合器。
 
 ### 服务器热切换
 

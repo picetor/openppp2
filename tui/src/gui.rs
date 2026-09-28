@@ -4,7 +4,9 @@
 //! front-end owns its C++ core through the in-process C ABI. External loopback
 //! RPC remains available only for attaching to an already-running core.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
@@ -68,7 +70,7 @@ struct LocalServerProfile {
     entries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StartupSettings {
     pub settings_file: String,
@@ -453,6 +455,8 @@ pub struct DesktopApp {
     rpc_connect_rx: Option<Receiver<Result<TcpStream, String>>>,
     rpc_connecting: bool,
     snapshot: Option<Snapshot>,
+    proxy_ports_cache: Option<ConfigProxyPortsCache>,
+    command_preview_cache: Option<(u64, String)>,
     traffic: TrafficHistory,
     last_refresh: Instant,
     last_connect_attempt: Instant,
@@ -468,9 +472,19 @@ pub struct DesktopApp {
     probe_table: Arc<Mutex<ProbeTable>>,
 }
 
+struct ConfigProxyPortsCache {
+    path: PathBuf,
+    checked_at: Instant,
+    modified: Option<SystemTime>,
+    len: Option<u64>,
+    http_port: Option<String>,
+    socks_port: Option<String>,
+}
+
 impl DesktopApp {
     pub fn new(cc: &CreationContext<'_>, settings: StartupSettings) -> Self {
         boot_log("DesktopApp::new entered");
+        configure_tui_logging(&settings);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         cc.egui_ctx.set_pixels_per_point(1.16);
         boot_log("installing CJK font");
@@ -524,6 +538,8 @@ impl DesktopApp {
             rpc_connect_rx: None,
             rpc_connecting: false,
             snapshot: None,
+            proxy_ports_cache: None,
+            command_preview_cache: None,
             traffic: TrafficHistory::new(),
             last_refresh: Instant::now() - Duration::from_secs(2),
             last_connect_attempt: Instant::now() - Duration::from_secs(5),
@@ -710,8 +726,8 @@ impl DesktopApp {
             self.handle_response(response);
         }
 
-        // Restart an owned in-process core if its worker thread exits
-        // unexpectedly. An intentional stop_core() clears the ownership flag.
+        // Relaunch after a planned restart or a recoverable unexpected exit.
+        // An intentional stop_core() clears the ownership flag.
         let in_process_exited = self.in_process_core
             && self
                 .rpc
@@ -719,20 +735,33 @@ impl DesktopApp {
                 .map(|core| !core.is_running())
                 .unwrap_or(true);
         if !self.launching && in_process_exited {
+            let planned = self
+                .rpc
+                .as_ref()
+                .map(CoreClient::restart_requested)
+                .unwrap_or(false);
             let was_catalog = self.catalog_core;
             let view = self.view;
-            boot_log("poll_core: core exited unexpectedly; scheduling auto-restart");
+            boot_log(&format!(
+                "poll_core: core exited; planned_restart={planned}"
+            ));
             self.rpc = None;
             self.rpc_connect_rx = None;
             self.rpc_connecting = false;
             self.in_process_core = false;
             self.snapshot = None;
             self.traffic.reset();
-            self.auto_restart_count += 1;
-            if self.auto_restart_count <= 3 {
-                self.status = format!("核心异常退出，自动重启中（{}/3）…", self.auto_restart_count);
+            if ppp_tui::core::restart::allow_restart_after_exit(
+                planned,
+                &mut self.auto_restart_count,
+            ) {
+                self.status = if planned {
+                    "核心请求主动重启，正在重新启动…".to_string()
+                } else {
+                    format!("核心异常退出，自动重启中（{}/3）…", self.auto_restart_count)
+                };
                 boot_log(&format!(
-                    "poll_core: auto-restart attempt {}/3 catalog_core={}",
+                    "poll_core: restart planned={planned} recovery_attempt={}/3 catalog_core={}",
                     self.auto_restart_count, was_catalog
                 ));
                 if was_catalog {
@@ -1107,8 +1136,9 @@ impl DesktopApp {
             }
         }
         remove_command_argument(&mut args, "--log-file");
-        if normalize_log_level(&self.settings.log_level) != "none" &&
-            !self.settings.log_file.trim().is_empty() {
+        if normalize_log_level(&self.settings.log_level) != "none"
+            && !self.settings.log_file.trim().is_empty()
+        {
             set_command_argument(&mut args, "--log-file", self.settings.log_file.trim());
         }
         set_command_argument(&mut args, "--log-level", &self.settings.log_level);
@@ -1219,10 +1249,7 @@ impl DesktopApp {
         }
         self.save_settings();
         self.stop_core(false);
-        self.rpc = Some(CoreClient::rpc(
-            address,
-            self.settings.rpc_token.clone(),
-        ));
+        self.rpc = Some(CoreClient::rpc(address, self.settings.rpc_token.clone()));
         self.in_process_core = false;
         self.status = "准备连接已有核心".to_string();
         self.error = None;
@@ -1353,7 +1380,7 @@ impl DesktopApp {
                         let outbounds: Vec<Outbound> = snapshot
                             .outbounds
                             .iter()
-                            .filter(|outbound| outbound.server_menu || outbound.tag == "main")
+                            .filter(|outbound| snapshot.is_visible_server_outbound(outbound))
                             .cloned()
                             .collect();
                         if let Some(outbound) = outbounds.get(
@@ -1826,7 +1853,12 @@ impl DesktopApp {
                     ("RPC Listen".to_string(), endpoint),
                     (
                         "Authentication".to_string(),
-                        if api.token_configured { "Token" } else { "None" }.to_string(),
+                        if api.token_configured {
+                            "Token"
+                        } else {
+                            "None"
+                        }
+                        .to_string(),
                     ),
                     (
                         "Configured Token".to_string(),
@@ -2027,7 +2059,7 @@ impl DesktopApp {
         let outbounds: Vec<Outbound> = snapshot
             .outbounds
             .iter()
-            .filter(|o| o.server_menu || o.tag == "main")
+            .filter(|o| snapshot.is_visible_server_outbound(o))
             .cloned()
             .collect();
         ui.heading(format!("服务器 ({})", outbounds.len()));
@@ -2656,7 +2688,7 @@ impl DesktopApp {
             });
     }
 
-    fn proxy_port_hint(&self, http: bool) -> String {
+    fn proxy_port_hint(&self, http: bool, config_file_port: Option<&str>) -> String {
         let configured = if http {
             self.settings.proxy_http_port.trim()
         } else {
@@ -2674,37 +2706,64 @@ impl DesktopApp {
             };
             proxy_port_from_display(value)
         });
-        let configured_file = self.config_proxy_port(http);
-        match runtime.or(configured_file) {
+        match runtime.or_else(|| config_file_port.map(ToOwned::to_owned)) {
             Some(port) => format!("留空使用当前配置/Main 默认端口 {port}；填写后覆盖"),
             None => "留空读取当前配置/Main；填写 0 可关闭监听".to_string(),
         }
     }
 
-    fn config_proxy_port(&self, http: bool) -> Option<String> {
+    fn config_proxy_ports(&mut self) -> (Option<String>, Option<String>) {
         let base = working_directory(&self.settings);
         let path = resolve_from_working_dir(&base, &self.settings.config_path);
-        let contents = fs::read_to_string(path).ok()?;
-        let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-        let root = serde_json::from_str::<Value>(contents).ok()?;
-        let section = if http { "http-proxy" } else { "socks-proxy" };
-        let port = root.get("client")?.get(section)?.get("port")?;
-        if let Some(value) = port.as_i64() {
-            return Some(value.to_string());
+        let now = Instant::now();
+        if let Some(cache) = self.proxy_ports_cache.as_ref() {
+            if cache.path == path && now.duration_since(cache.checked_at) < Duration::from_secs(1) {
+                return (cache.http_port.clone(), cache.socks_port.clone());
+            }
         }
-        if let Some(value) = port.as_u64() {
-            return Some(value.to_string());
+
+        let metadata = fs::metadata(&path).ok();
+        let modified = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok());
+        let len = metadata.as_ref().map(fs::Metadata::len);
+        if let Some(cache) = self.proxy_ports_cache.as_mut() {
+            if cache.path == path && cache.modified == modified && cache.len == len {
+                cache.checked_at = now;
+                return (cache.http_port.clone(), cache.socks_port.clone());
+            }
         }
-        port.as_str().map(ToOwned::to_owned)
+
+        let root = fs::read_to_string(&path).ok().and_then(|contents| {
+            let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+            serde_json::from_str::<Value>(contents).ok()
+        });
+        let http_port = root
+            .as_ref()
+            .and_then(|root| config_proxy_port(root, "http-proxy"));
+        let socks_port = root
+            .as_ref()
+            .and_then(|root| config_proxy_port(root, "socks-proxy"));
+        self.proxy_ports_cache = Some(ConfigProxyPortsCache {
+            path,
+            checked_at: now,
+            modified,
+            len,
+            http_port: http_port.clone(),
+            socks_port: socks_port.clone(),
+        });
+        (http_port, socks_port)
+    }
+
+    fn proxy_port_hints(&mut self) -> (String, String) {
+        let (http_config_port, socks_config_port) = self.config_proxy_ports();
+        let http_hint = self.proxy_port_hint(true, http_config_port.as_deref());
+        let socks_hint = self.proxy_port_hint(false, socks_config_port.as_deref());
+        (http_hint, socks_hint)
     }
 
     fn draw_settings_body(&mut self, ui: &mut egui::Ui) {
-        // Keep every path field in the portable form used by the command
-        // interface. This also converts an old saved Windows path as soon as
-        // the settings page is opened, instead of waiting for Save.
-        self.settings.normalize_paths();
-        let http_proxy_hint = self.proxy_port_hint(true);
-        let socks_proxy_hint = self.proxy_port_hint(false);
+        let (http_proxy_hint, socks_proxy_hint) = self.proxy_port_hints();
         ui.label(
             RichText::new(
                 "填写核心启动目录和参数。启动后核心在当前 TUI 进程内运行，日志写入 ppp-core.log；修改后可随时点击右上角保存设置。",
@@ -2941,13 +3000,15 @@ impl DesktopApp {
                 &mut self.settings.server_dir,
                 "./config",
             );
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                let toggle_width = ui.available_width();
                 toggle_cli_option(
                     ui,
                     &mut self.settings.rt,
                     "实时模式",
                     "--rt",
                     "控制核心实时调度模式",
+                    toggle_width,
                 );
                 ui.label(
                     RichText::new("默认开启；关闭可能降低 CPU 占用，但会改变调度时序")
@@ -3045,7 +3106,7 @@ impl DesktopApp {
                 );
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("TCP/IP CC").color(MUTED));
+                ui.label(RichText::new("TCP/IP 栈").color(MUTED));
                 egui::ComboBox::from_id_salt("tcp-ip-cc")
                     .selected_text(
                         match normalize_tcp_ip_cc(&self.settings.tcp_ip_cc).as_str() {
@@ -3068,14 +3129,14 @@ impl DesktopApp {
                         ui.selectable_value(
                             &mut self.settings.tcp_ip_cc,
                             "ctcp".to_string(),
-                            "ctcp（非 lwIP 路径）",
+                            "ctcp（核心 TCP 路径）",
                         );
                     });
                 self.settings.tcp_ip_cc = normalize_tcp_ip_cc(&self.settings.tcp_ip_cc);
             });
             ui.label(
                 RichText::new(
-                    "auto：Windows 的 Wintun 默认 ctcp、TAP 默认 lwIP；Linux/macOS 默认 ctcp。仅客户端 TUN 模式生效。",
+                    "选择客户端 TUN 使用的 TCP/IP 实现：lwIP 为内置协议栈，ctcp 为核心 TCP 路径。auto 按平台/驱动选择；仅客户端 TUN 模式生效。",
                 )
                 .small()
                 .color(MUTED),
@@ -3092,60 +3153,76 @@ impl DesktopApp {
                 ui,
                 "MUX 加速",
                 "--tun-mux-acceleration",
-                "MUX 数据处理加速等级",
+                "位选项：0 关闭，1 远端加速，2 本地加速，3 两端加速；不是性能等级",
                 &mut self.settings.tun_mux_acceleration,
                 "例如 0",
             );
             labeled_cli_text(
                 ui,
-                "链路重连",
+                "连续连接失败重启阈值",
                 "--link-restart",
-                "链路失败后的自动重连次数",
+                "主出口连续连接失败达到 N 次后重启核心；首次连接失败也计数，连接成功清零；0 关闭",
                 &mut self.settings.link_restart,
-                "例如 3",
+                "例如 3；0 或留空关闭",
             );
+            let toggle_columns: usize = if ui.available_width() < 820.0 { 1 } else { 2 };
+            let toggle_cell_width = ((ui.available_width()
+                - 18.0 * (toggle_columns.saturating_sub(1) as f32))
+                / toggle_columns as f32)
+                .max(220.0);
             egui::Grid::new("startup-toggle-grid")
-                .num_columns(2)
+                .num_columns(toggle_columns)
                 .spacing([18.0, 8.0])
                 .show(ui, |ui| {
+                    let mut cell_count = 0;
                     toggle_cli_option(
                         ui,
                         &mut self.settings.tun_host,
                         "TUN Host",
                         "--tun-host",
                         "允许核心接管主机网络",
+                        toggle_cell_width,
                     );
+                    finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     toggle_cli_option(
                         ui,
                         &mut self.settings.tun_vnet,
                         "TUN VNet",
                         "--tun-vnet",
                         "启用虚拟网卡数据面",
+                        toggle_cell_width,
                     );
-                    ui.end_row();
+                    finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     toggle_cli_option(
                         ui,
                         &mut self.settings.tun_static,
-                        "TUN Static",
+                        "静态 UDP 传输",
                         "--tun-static",
-                        "使用静态 TUN 地址配置",
+                        "启用当前出口配置中的 udp.static 通道",
+                        toggle_cell_width,
                     );
+                    finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     toggle_cli_option(
                         ui,
                         &mut self.settings.tun_flash,
-                        "TUN Flash",
+                        "QoS 标记",
                         "--tun-flash",
-                        "快速刷新 TUN 网络状态",
+                        "为核心隧道流量设置默认 IP QoS/TOS 标记",
+                        toggle_cell_width,
                     );
-                    ui.end_row();
+                    finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     toggle_cli_option(
                         ui,
                         &mut self.settings.block_quic,
-                        "Block QUIC",
+                        "UDP/443 屏蔽",
                         "--block-quic",
-                        "阻止 QUIC，改走 TCP 分流",
+                        "丢弃客户端 TUN 中发往 UDP/443 的流量；应用是否回退 TCP 由应用决定",
+                        toggle_cell_width,
                     );
-                    ui.end_row();
+                    finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
+                    if cell_count % toggle_columns != 0 {
+                        ui.end_row();
+                    }
                 });
             if cfg!(any(target_os = "linux", target_os = "macos")) {
                 labeled_cli_text(
@@ -3168,9 +3245,10 @@ impl DesktopApp {
                 );
             }
             egui::Grid::new("startup-platform-toggle-grid")
-                .num_columns(2)
+                .num_columns(toggle_columns)
                 .spacing([18.0, 8.0])
                 .show(ui, |ui| {
+                    let mut cell_count = 0;
                     if cfg!(any(target_os = "linux", target_os = "macos")) {
                         toggle_cli_option(
                             ui,
@@ -3178,7 +3256,9 @@ impl DesktopApp {
                             "TUN Promisc",
                             "--tun-promisc",
                             "虚拟以太网混杂模式",
+                            toggle_cell_width,
                         );
+                        finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     }
                     if cfg!(target_os = "linux") {
                         toggle_cli_option(
@@ -3187,9 +3267,10 @@ impl DesktopApp {
                             "TUN Route",
                             "--tun-route",
                             "启用 Linux 路由兼容模式",
+                            toggle_cell_width,
                         );
+                        finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     }
-                    ui.end_row();
                     if cfg!(target_os = "linux") {
                         toggle_cli_option(
                             ui,
@@ -3197,9 +3278,13 @@ impl DesktopApp {
                             "TUN Protect",
                             "--tun-protect",
                             "保护物理网络，避免 VPN 路由回环",
+                            toggle_cell_width,
                         );
+                        finish_toggle_grid_cell(ui, &mut cell_count, toggle_columns);
                     }
-                    ui.end_row();
+                    if cell_count % toggle_columns != 0 {
+                        ui.end_row();
+                    }
                 });
             labeled_cli_text(
                 ui,
@@ -3281,7 +3366,23 @@ impl DesktopApp {
                 self.import_command_fields();
             }
             ui.add_space(8.0);
-            let preview = format_command_preview(&self.prepared_core_args());
+            let mut hasher = DefaultHasher::new();
+            self.settings.hash(&mut hasher);
+            let preview_fingerprint = hasher.finish();
+            let preview_is_stale = self
+                .command_preview_cache
+                .as_ref()
+                .map(|(fingerprint, _)| *fingerprint != preview_fingerprint)
+                .unwrap_or(true);
+            if preview_is_stale {
+                let preview = format_command_preview(&self.prepared_core_args());
+                self.command_preview_cache = Some((preview_fingerprint, preview));
+            }
+            let preview = self
+                .command_preview_cache
+                .as_ref()
+                .map(|(_, preview)| preview.as_str())
+                .unwrap_or_default();
             ui.label(RichText::new("启动命令预览").strong());
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -3356,10 +3457,6 @@ impl DesktopApp {
 
 impl App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        // The settings page edits this field in place. Refresh the shared
-        // logger before any per-frame diagnostics so clearing the path takes
-        // effect without requiring a restart.
-        configure_tui_logging(&self.settings);
         self.frame_counter = self.frame_counter.saturating_add(1);
         let frame = self.frame_counter;
         let verbose = self.verbose_frame_log();
@@ -3713,12 +3810,32 @@ fn toggle_cli_option(
     label: &str,
     cli_name: &str,
     description: &str,
+    width: f32,
 ) {
-    ui.allocate_ui(Vec2::new(220.0, 48.0), |ui| {
+    ui.allocate_ui(Vec2::new(width, 64.0), |ui| {
+        ui.set_width(width);
         let response = ui.checkbox(value, format!("{label} {{{cli_name}}}"));
         scroll_focused_control(ui, &response);
-        ui.label(RichText::new(description).small().color(MUTED));
+        ui.add(egui::Label::new(RichText::new(description).small().color(MUTED)).wrap());
     });
+}
+
+fn finish_toggle_grid_cell(ui: &mut egui::Ui, cell_count: &mut usize, columns: usize) {
+    *cell_count += 1;
+    if *cell_count % columns == 0 {
+        ui.end_row();
+    }
+}
+
+fn config_proxy_port(root: &Value, section: &str) -> Option<String> {
+    let port = root.get("client")?.get(section)?.get("port")?;
+    if let Some(value) = port.as_i64() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = port.as_u64() {
+        return Some(value.to_string());
+    }
+    port.as_str().map(ToOwned::to_owned)
 }
 
 fn proxy_port_from_display(value: &str) -> Option<String> {
@@ -4030,11 +4147,11 @@ fn interface_rows(
                 value_or_dash(&network.proxy_interlayer).to_string(),
             ),
             (
-                "TCP/IP CC".to_string(),
+                "TCP/IP 栈".to_string(),
                 value_or_dash(&network.tcp_ip_cc).to_string(),
             ),
             (
-                "Block QUIC".to_string(),
+                "UDP/443 屏蔽".to_string(),
                 value_or_dash(&network.block_quic).to_string(),
             ),
             (
@@ -4933,15 +5050,11 @@ mod tests {
     fn owned_core_rpc_settings_are_forwarded_and_token_is_optional() {
         let mut args = vec!["--rpc-token=stale".to_string()];
         set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "");
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--rpc-listen=127.0.0.1:39100"));
+        assert!(args.iter().any(|arg| arg == "--rpc-listen=127.0.0.1:39100"));
         assert!(!args.iter().any(|arg| arg.starts_with("--rpc-token")));
 
         set_owned_rpc_arguments(&mut args, "127.0.0.1:39100", "local-secret");
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--rpc-token=local-secret"));
+        assert!(args.iter().any(|arg| arg == "--rpc-token=local-secret"));
     }
 
     #[test]

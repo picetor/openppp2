@@ -6,6 +6,7 @@ pub mod command;
 pub mod control;
 pub mod in_process;
 pub mod probe;
+pub mod restart;
 pub mod server_catalog;
 pub mod settings;
 pub mod traffic;

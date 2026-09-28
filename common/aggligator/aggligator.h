@@ -101,6 +101,9 @@ namespace aggligator
     public:
         AppConfigurationPtr AppConfiguration;                               // Application configuration (socket buffers)
         BufferswapAllocatorPtr BufferswapAllocator;                         // Allocator for shared byte arrays
+        // Optional host hook for binding client sockets to the physical network
+        // before connecting. Used by embedded clients that own a virtual default route.
+        ppp::function<bool(intptr_t, const boost::asio::ip::address&)> SocketProtector;
 
     public:
         ppp::function<void()> Exit;                                         // Callback invoked when aggregator is fully closed

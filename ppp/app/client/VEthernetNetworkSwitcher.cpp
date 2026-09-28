@@ -1432,7 +1432,7 @@ namespace ppp {
 
                 // If the VPN uses static transmission mode, ensure that the link is link ready.
                 if (static_mode_) {
-                    auto& static_ = configuration_->udp.static_;
+                    auto& static_ = exchanger->GetConfiguration()->udp.static_;
                     if (static_.quic && destinationPort == PPP_HTTPS_SYS_PORT) {
                         if (exchanger->StaticEchoAllocated()) {
                             const bool sent = exchanger->StaticEchoPacketToRemoteExchanger(frame);
@@ -1614,7 +1614,7 @@ namespace ppp {
                     return false;
                 }
 
-                auto& static_ = configuration_->udp.static_;
+                auto& static_ = exchanger->GetConfiguration()->udp.static_;
                 // ICMP static echo is an independent UDP control path. It is
                 // intentionally usable without enabling static transport for
                 // all data protocols, so gateway/public ping is not serialized
@@ -1680,7 +1680,7 @@ namespace ppp {
                             return false;
                         }
 
-                        auto& static_ = configuration_->udp.static_;
+                        auto& static_ = exchanger->GetConfiguration()->udp.static_;
                         // ICMP static echo is an independent UDP control path. It is
                         // intentionally usable without enabling static transport for
                         // all data protocols, so gateway/public ping is not serialized
@@ -2907,6 +2907,11 @@ namespace ppp {
                 return NewExchanger(configuration, "main", true);
             }
 
+            std::shared_ptr<aggligator::aggligator> VEthernetNetworkSwitcher::GetAggligator() noexcept {
+                SynchronizedObjectScope scope(GetSynchronizedObject());
+                return NULLPTR != exchanger_ ? exchanger_->aggligator_ : NULLPTR;
+            }
+
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::NewExchanger(
                 const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration,
                 const ppp::string& tag, bool primary) noexcept {
@@ -2920,7 +2925,32 @@ namespace ppp {
 
                 auto my = shared_from_this();
                 auto self = std::dynamic_pointer_cast<VEthernetNetworkSwitcher>(my);
-                return make_shared_object<VEthernetExchanger>(self, configuration, GetContext(), guid, tag, primary);
+                auto exchanger = make_shared_object<VEthernetExchanger>(self, configuration, GetContext(), guid, tag, primary);
+                if (NULLPTR == exchanger) return NULLPTR;
+                if (static_mode_ && configuration->udp.static_.aggligator > 0 &&
+                    !exchanger->PrepareAggregator()) return NULLPTR;
+                if (!exchanger->PrepareStaticEndpoints()) return NULLPTR;
+                // Each lazily created outbound needs the same physical server
+                // route policy as the initial main exchanger.
+                if (auto underlying = underlying_ni_; NULLPTR != underlying &&
+                    underlying->GatewayServer.is_v4()) {
+                    if (NULLPTR == rib_) rib_ = make_shared_object<RouteInformationTable>();
+                    if (NULLPTR == rib_) return NULLPTR;
+                    for (const ppp::string& server_string : configuration->udp.static_.servers) {
+                        ppp::string host;
+                        int port = 0;
+                        if (!Ipep::ParseEndPoint(server_string, host, port)) return NULLPTR;
+                        IPEndPoint remote = Ipep::GetEndPoint(host, port);
+                        if (IPEndPoint::IsInvalid(remote)) return NULLPTR;
+                        auto address = IPEndPoint::ToEndPoint<boost::asio::ip::udp>(remote).address();
+                        if (address.is_v4() && !address.is_loopback() &&
+                            !rib_->AddRoute(htonl(address.to_v4().to_uint()), 32,
+                                htonl(underlying->GatewayServer.to_v4().to_uint()),
+                                ppp::net::native::RouteOrigin::ServerPin,
+                                ppp::net::native::RouteAction::Direct)) return NULLPTR;
+                    }
+                }
+                return exchanger;
             }
 
             VEthernetNetworkSwitcher::VEthernetHttpProxySwitcherPtr VEthernetNetworkSwitcher::NewHttpProxy(const std::shared_ptr<VEthernetExchanger>& exchanger) noexcept {
@@ -4931,32 +4961,6 @@ namespace ppp {
             }
 #endif
 
-            bool VEthernetNetworkSwitcher::PreparedAggregator() noexcept {
-                std::shared_ptr<boost::asio::io_context> context = ppp::threading::Executors::GetDefault();
-                if (NULLPTR == context) {
-                    return false;
-                }
-
-                std::shared_ptr<Byte> buffer = ppp::threading::Executors::GetCachedBuffer(context);
-                if (NULLPTR == buffer) {
-                    return false;
-                }
-
-                std::shared_ptr<aggligator::aggligator> aggligator = 
-                    make_shared_object<aggligator::aggligator>(*context, buffer, PPP_BUFFER_SIZE, PPP_AGGLIGATOR_CONGESTIONS);
-                if (NULLPTR == aggligator) {
-                    return false;
-                }
-
-                aggligator_ = aggligator;
-#if defined(_LINUX)
-                aggligator->ProtectorNetwork = GetProtectorNetwork();
-#endif
-                aggligator->AppConfiguration = configuration_;
-                aggligator->BufferswapAllocator = configuration_->GetBufferAllocator();
-                return true;
-            }
-
             bool VEthernetNetworkSwitcher::Open(const std::shared_ptr<ITap>& tap) noexcept {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: starting");
 #if defined(_ANDROID) || defined(_IPHONE)
@@ -5121,15 +5125,6 @@ namespace ppp {
                 // scheduler below.
                 const bool metadata_only = proxy_only_ &&
                     configuration_ != NULLPTR && configuration_->client.server.empty();
-                if (outbound_configurations.size() > 1 && static_mode_) {
-                    // Static UDP echo owns one global server/aggregator set in the
-                    // legacy design; sharing it would mix independently keyed
-                    // outbounds. Reject it instead of routing through the wrong key.
-                    LOG_ERROR("VEthernetNetworkSwitcher::Open: multi-outbound mode does not support --tun-static=yes");
-                    IDisposable::Dispose(qos);
-                    return false;
-                }
-
                 OutboundExchangerTable opened_outbounds;
                 std::shared_ptr<VEthernetExchanger> exchanger;
                 for (const OutboundConfiguration& outbound : outbound_configurations) {
@@ -5217,14 +5212,6 @@ namespace ppp {
                     LOG_INFO("VEthernetNetworkSwitcher::Open: proxy-only connected; kernel routes/DNS disabled, proxy geo policy enabled%s",
                         NULLPTR == http_proxy_ && NULLPTR == socks_proxy_ ? "; no local listener" : "");
                     return true;
-                }
-
-                // New the beast network bandwidth aggregator.
-                if (static_mode_ && configuration_->udp.static_.aggligator > 0) {
-                    if (!PreparedAggregator()) {
-                        LOG_DEBUG("VEthernetNetworkSwitcher::Open: PreparedAggregator failed");
-                        return false;
-                    }
                 }
 
 #if defined(_ANDROID) || defined(_IPHONE)
@@ -7407,7 +7394,14 @@ namespace ppp {
                     ppp::net::IPEndPoint::IsInvalid(address) || address.is_unspecified()) {
                     return false;
                 }
-                if (address.is_loopback()) {
+                boost::asio::ip::address remote_address = address;
+                if (remote_address.is_v6() && remote_address.to_v6().is_v4_mapped()) {
+                    const auto bytes = remote_address.to_v6().to_bytes();
+                    boost::asio::ip::address_v4::bytes_type v4_bytes = {
+                        bytes[12], bytes[13], bytes[14], bytes[15] };
+                    remote_address = boost::asio::ip::address(boost::asio::ip::address_v4(v4_bytes));
+                }
+                if (remote_address.is_loopback()) {
                     return true;
                 }
 
@@ -7418,14 +7412,17 @@ namespace ppp {
                     return false;
                 }
 
-                const bool route_ok = address.is_v4() ?
-                    EnsureWindowsIPv4ServerRoute(address) : EnsureWindowsIPv6ServerRoute(address);
+                const bool route_ok = remote_address.is_v4() ?
+                    EnsureWindowsIPv4ServerRoute(remote_address) : EnsureWindowsIPv6ServerRoute(remote_address);
                 if (!route_ok) {
                     return false;
                 }
 
                 const SOCKET socket = (SOCKET)socket_handle;
                 int option_result = SOCKET_ERROR;
+                // The socket is intentionally still unbound here. Its protocol
+                // family follows the resolved remote endpoint; IPv4-mapped
+                // IPv6 endpoints therefore need IPV6_UNICAST_IF as well.
                 if (address.is_v4()) {
                     DWORD interface_index = htonl((DWORD)underlying->Index);
                     option_result = ::setsockopt(socket, IPPROTO_IP, IP_UNICAST_IF,
@@ -7439,22 +7436,22 @@ namespace ppp {
                 if (option_result == SOCKET_ERROR) {
                     const int error = ::WSAGetLastError();
                     LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: interface bind failed, remote=%s, ifindex=%d, error=%d",
-                        address.to_string().c_str(), underlying->Index, error);
+                        remote_address.to_string().c_str(), underlying->Index, error);
                     return false;
                 }
 
                 sockaddr_storage destination = {};
-                if (address.is_v4()) {
+                if (remote_address.is_v4()) {
                     sockaddr_in* endpoint = reinterpret_cast<sockaddr_in*>(&destination);
                     endpoint->sin_family = AF_INET;
-                    endpoint->sin_addr.s_addr = htonl(address.to_v4().to_uint());
+                    endpoint->sin_addr.s_addr = htonl(remote_address.to_v4().to_uint());
                 }
                 else {
                     sockaddr_in6* endpoint = reinterpret_cast<sockaddr_in6*>(&destination);
                     endpoint->sin6_family = AF_INET6;
-                    const boost::asio::ip::address_v6::bytes_type bytes = address.to_v6().to_bytes();
+                    const boost::asio::ip::address_v6::bytes_type bytes = remote_address.to_v6().to_bytes();
                     memcpy(&endpoint->sin6_addr, bytes.data(), bytes.size());
-                    endpoint->sin6_scope_id = address.to_v6().scope_id();
+                    endpoint->sin6_scope_id = remote_address.to_v6().scope_id();
                 }
 
                 DWORD selected_interface = 0;
@@ -7909,11 +7906,6 @@ namespace ppp {
                     qos->Dispose();
                 }
 
-                // Close and release the aggligator.
-                if (std::shared_ptr<aggligator::aggligator> aggligator = std::move(aggligator_); NULLPTR != aggligator) {
-                    aggligator->close();
-                }
-
                 // Close and release the forwarding.
                 if (IForwardingPtr forwarding = std::move(forwarding_); NULLPTR != forwarding) {
                     forwarding->Dispose();
@@ -8175,64 +8167,6 @@ namespace ppp {
                             ppp::net::native::RouteOrigin::ServerPin,
                             ppp::net::native::RouteAction::Direct);
                     };
-
-                // Check whether the static tunnel specifies an IP address endpoint (required for transit).
-                ppp::unordered_set<boost::asio::ip::tcp::endpoint> servers;
-                auto StaticEchoAddRemoteEndPoint = 
-                    [this, &servers, &fib_add_route_ipv4, &exchanger](const ppp::string& server_string) noexcept {
-                        if (server_string.empty()) {
-                            return false;
-                        }
-
-                        ppp::string host_string;
-                        int port;
-
-                        if (!ppp::net::Ipep::ParseEndPoint(server_string, host_string, port)) {
-                            return false;
-                        }
-
-                        if (port <= IPEndPoint::MinPort || port > IPEndPoint::MaxPort) {
-                            return false;
-                        }
-
-                        IPEndPoint remoteEP = ppp::net::Ipep::GetEndPoint(host_string, port);
-                        if (IPEndPoint::IsInvalid(remoteEP)) {
-                            return false;
-                        }
-
-                        boost::asio::ip::udp::endpoint ep =
-                            IPEndPoint::ToEndPoint<boost::asio::ip::udp>(remoteEP);
-                        if (!remoteEP.IsLoopback() && !fib_add_route_ipv4(ep.address())) {
-                            return false;
-                        }
-
-                        if (aggligator_) {
-                            auto r = servers.emplace(
-                                IPEndPoint::ToEndPoint<boost::asio::ip::tcp>(remoteEP));
-                            return r.second;
-                        }
-                       
-                        return exchanger->StaticEchoAddRemoteEndPoint(ep);
-                    };
-
-                for (const ppp::string& server_string : configuration_->udp.static_.servers) {
-                    if (!StaticEchoAddRemoteEndPoint(server_string)) {
-                        LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: StaticEchoAddRemoteEndPoint failed");
-                        return false;
-                    }
-                }
-
-                // Open the beast network bandwidth aggregator.
-                if (std::shared_ptr<aggligator::aggligator> aggligator = aggligator_; NULLPTR != aggligator) {
-                    if (servers.empty()) {
-                        aggligator_.reset();
-                        aggligator->close();
-                    }
-                    elif(!aggligator->client_open(configuration_->udp.static_.aggligator, servers)) {
-                        LOG_DEBUG("VEthernetNetworkSwitcher::AddRemoteEndPointToIPList: aggligator client_open failed");
-                        return false;
-                    }
-                }
 
                 // The gateway address must be IPV4 or it is considered a failure because there is no V6 gateway serving the V4 address.
                 if (serverEP.IsLoopback()) {

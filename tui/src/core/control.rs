@@ -134,8 +134,8 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
         }
         "set" => {
             let text = one_positional(name, &positional)?;
-            let settings: Value = serde_json::from_str(&text)
-                .context("set requires one JSON object")?;
+            let settings: Value =
+                serde_json::from_str(&text).context("set requires one JSON object")?;
             if !settings.is_object() {
                 bail!("set requires one JSON object")
             }
@@ -143,8 +143,8 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
         }
         "api-config" => {
             let text = one_positional(name, &positional)?;
-            let settings: Value = serde_json::from_str(&text)
-                .context("api-config requires one JSON object")?;
+            let settings: Value =
+                serde_json::from_str(&text).context("api-config requires one JSON object")?;
             if !settings.is_object() {
                 bail!("api-config requires one JSON object")
             }
@@ -154,11 +154,15 @@ pub fn parse_cli_control(args: &[String]) -> Result<Option<CliControlRequest>> {
             if positional.is_empty() || positional.len() > 2 {
                 bail!("call requires a method and optional JSON parameters")
             }
-            let params = positional.get(1)
+            let params = positional
+                .get(1)
                 .map(|text| serde_json::from_str(text).context("invalid call parameters JSON"))
                 .transpose()?
                 .unwrap_or_else(|| serde_json::json!({}));
-            CoreCommand::Raw { method: positional[0].clone(), params }
+            CoreCommand::Raw {
+                method: positional[0].clone(),
+                params,
+            }
         }
         "logs" => {
             require_no_positional(name, &positional)?;
@@ -266,7 +270,10 @@ pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
     match command {
         CoreCommand::DescribeApi => {
             let name = value.get("name").and_then(Value::as_str).unwrap_or("");
-            let version = value.get("api_version").and_then(Value::as_u64).unwrap_or(0);
+            let version = value
+                .get("api_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let methods = value
                 .get("methods")
                 .and_then(Value::as_array)
@@ -276,8 +283,14 @@ pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
         }
         CoreCommand::GetHealth => format!(
             "status     {}\nrunning    {}\nready      {}\nphase      {}",
-            value.get("status").and_then(Value::as_str).unwrap_or("unknown"),
-            value.get("running").and_then(Value::as_bool).unwrap_or(false),
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            value
+                .get("running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             value.get("ready").and_then(Value::as_bool).unwrap_or(false),
             value.get("phase").and_then(Value::as_str).unwrap_or("")
         ),
@@ -285,7 +298,10 @@ pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
             let summary = value.get("summary").unwrap_or(&Value::Null);
             format!(
                 "status     {}\npassed     {}\nwarnings   {}\nfailed     {}",
-                summary.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                summary
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
                 summary.get("passed").and_then(Value::as_i64).unwrap_or(0),
                 summary.get("warnings").and_then(Value::as_i64).unwrap_or(0),
                 summary.get("failed").and_then(Value::as_i64).unwrap_or(0)
@@ -311,8 +327,9 @@ pub fn format_human_result(command: &CoreCommand, value: &Value) -> String {
         CoreCommand::GetSettings
         | CoreCommand::UpdateSettings { .. }
         | CoreCommand::ConfigureApi { .. }
-        | CoreCommand::Raw { .. } => serde_json::to_string_pretty(value)
-            .unwrap_or_else(|_| value.to_string()),
+        | CoreCommand::Raw { .. } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
         CoreCommand::GetLogs { .. } => value
             .get("logs")
             .and_then(Value::as_array)
@@ -386,12 +403,9 @@ mod tests {
 
     #[test]
     fn parses_control_command_without_token() {
-        let request = parse_cli_control(&args(&[
-            "health",
-            "--rpc=127.0.0.1:39100",
-        ]))
-        .unwrap()
-        .unwrap();
+        let request = parse_cli_control(&args(&["health", "--rpc=127.0.0.1:39100"]))
+            .unwrap()
+            .unwrap();
         assert_eq!(request.command, CoreCommand::GetHealth);
         assert_eq!(request.token, "");
     }
@@ -441,13 +455,9 @@ mod tests {
         .unwrap();
         assert_eq!(api.command, CoreCommand::DescribeApi);
 
-        let health = parse_cli_control(&args(&[
-            "health",
-            "--rpc=127.0.0.1:39100",
-            "--token=t",
-        ]))
-        .unwrap()
-        .unwrap();
+        let health = parse_cli_control(&args(&["health", "--rpc=127.0.0.1:39100", "--token=t"]))
+            .unwrap()
+            .unwrap();
         assert_eq!(health.command, CoreCommand::GetHealth);
 
         let diagnose = parse_cli_control(&args(&[

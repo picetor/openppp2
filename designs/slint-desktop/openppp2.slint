@@ -1,0 +1,654 @@
+// Shared Slint view. The standalone preview supplies sample values; the
+// ppp-tui-slint binary binds these properties and callbacks to the core.
+import { ScrollView } from "std-widgets.slint";
+
+export struct ServerItem {
+    name: string,
+    detail: string,
+    latency: string,
+}
+
+export struct OutboundItem {
+    name: string,
+    detail: string,
+    state: string,
+    action: string,
+    active: bool,
+}
+
+export struct InfoItem {
+    label: string,
+    value: string,
+}
+
+global Theme {
+    out property <color> bg: #0f1218;
+    out property <color> panel: #151a23;
+    out property <color> input: #10151e;
+    out property <color> border: #293140;
+    out property <color> text: #e8edf5;
+    out property <color> muted: #8b98ad;
+    out property <color> blue: #71aaff;
+    out property <color> green: #65d6a1;
+}
+
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback picked();
+    width: 104px;
+    height: 36px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.primary ? #82b6ff : Theme.border;
+    background: touch.has-hover ? (root.primary ? #8bbaff : #242e3e) : (root.primary ? Theme.blue : #1a2230);
+    Text { text: root.label; color: root.primary ? #101a2c : Theme.text; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { clicked => { root.picked(); } }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> number;
+    in property <bool> selected;
+    callback picked();
+    height: 42px;
+    border-radius: 8px;
+    background: root.selected ? #20334f : (touch.has-hover ? #19222f : transparent);
+    Rectangle { x: 0px; y: 14px; width: 3px; height: 18px; border-radius: 2px; background: root.selected ? Theme.blue : transparent; }
+    HorizontalLayout {
+        padding-left: 16px; padding-right: 14px; spacing: 14px;
+        Text { text: root.number; width: 20px; color: root.selected ? Theme.blue : #58667b; font-size: 13px; vertical-alignment: center; }
+        Text { text: root.label; color: root.selected ? Theme.text : Theme.muted; font-size: 16px; vertical-alignment: center; }
+    }
+    touch := TouchArea { clicked => { root.picked(); } }
+}
+
+component Card inherits Rectangle {
+    in property <string> heading;
+    in property <string> note;
+    in property <bool> dense: false;
+    vertical-stretch: 0;
+    background: Theme.panel;
+    border-color: Theme.border;
+    border-width: 1px;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: root.dense ? 12px : 16px; spacing: root.dense ? 4px : 10px;
+        HorizontalLayout {
+            Text { text: root.heading; color: Theme.text; font-size: 17px; font-weight: 600; }
+            Text { text: root.note; color: Theme.muted; font-size: 13px; horizontal-alignment: right; }
+        }
+        @children
+    }
+}
+
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> parameter;
+    in property <string> hint;
+    in-out property <string> value;
+    spacing: 7px;
+    HorizontalLayout {
+        height: 20px;
+        Text { text: root.label; color: Theme.text; font-size: 15px; }
+        Text { text: root.parameter; color: #677891; font-size: 13px; horizontal-alignment: right; }
+    }
+    Rectangle {
+        height: 39px;
+        border-width: 1px;
+        border-color: editor.has-focus ? Theme.blue : Theme.border;
+        border-radius: 6px;
+        background: Theme.input;
+        editor := TextInput { x: 12px; y: 9px; width: parent.width - 24px; height: 22px; text <=> root.value; color: Theme.text; font-size: 15px; single-line: true; }
+    }
+    Text { text: root.hint; color: Theme.muted; font-size: 13px; wrap: word-wrap; min-height: 18px; }
+}
+
+component FieldPair inherits Rectangle {
+    in property <bool> compact;
+    in property <string> left-label;
+    in property <string> left-parameter;
+    in property <string> left-hint;
+    in-out property <string> left-value;
+    in property <string> right-label;
+    in property <string> right-parameter;
+    in property <string> right-hint;
+    in-out property <string> right-value;
+    height: root.compact ? 246px : 116px;
+    if !root.compact: HorizontalLayout {
+        spacing: 24px;
+        Field { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; label: root.left-label; parameter: root.left-parameter; hint: root.left-hint; value <=> root.left-value; }
+        Field { min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; label: root.right-label; parameter: root.right-parameter; hint: root.right-hint; value <=> root.right-value; }
+    }
+    if root.compact: VerticalLayout {
+        spacing: 14px;
+        Field { label: root.left-label; parameter: root.left-parameter; hint: root.left-hint; value <=> root.left-value; }
+        Field { label: root.right-label; parameter: root.right-parameter; hint: root.right-hint; value <=> root.right-value; }
+    }
+}
+
+component SettingToggle inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in-out property <bool> checked: true;
+    height: 62px;
+    background: Theme.input;
+    border-radius: 8px;
+    HorizontalLayout {
+        padding: 10px; spacing: 12px;
+        VerticalLayout {
+            spacing: 5px;
+            Text { text: root.label; color: Theme.text; font-size: 15px; }
+            Text { text: root.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+        }
+        Rectangle {
+            width: 38px; height: 22px;
+            border-radius: 11px;
+            background: root.checked ? Theme.blue : #3b4658;
+            Rectangle { x: root.checked ? 18px : 3px; y: 3px; width: 16px; height: 16px; border-radius: 8px; background: root.checked ? #10213b : #d0d8e5; animate x { duration: 120ms; } }
+            TouchArea { clicked => { root.checked = !root.checked; } }
+        }
+    }
+}
+
+component Metric inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> detail;
+    height: 90px;
+    background: Theme.panel;
+    border-width: 1px; border-color: Theme.border; border-radius: 12px;
+    VerticalLayout {
+        padding: 10px; spacing: 2px;
+        Text { text: root.label; color: Theme.muted; font-size: 14px; }
+        Text { text: root.value; color: Theme.text; font-size: 29px; font-weight: 600; }
+        Text { text: root.detail; color: Theme.green; font-size: 13px; }
+    }
+}
+
+component TrafficGraph inherits Rectangle {
+    in property <string> heading;
+    in property <string> rate;
+    in property <color> bar-color: Theme.green;
+    in property <[int]> bars: [];
+    height: 150px;
+    background: Theme.input;
+    border-width: 1px; border-color: Theme.border; border-radius: 8px;
+    Text { x: 12px; y: 9px; text: root.heading + "  " + root.rate; color: root.bar-color; font-size: 14px; }
+    Rectangle { x: 12px; y: 33px; width: parent.width - 24px; height: parent.height - 45px; background: transparent;
+        HorizontalLayout { padding: 0px; spacing: 1px;
+            for value in root.bars: Rectangle { horizontal-stretch: 1; background: transparent;
+                Rectangle { x: 0px; width: parent.width; height: parent.height * value / 100; y: parent.height - self.height; background: root.bar-color; }
+            }
+        }
+    }
+}
+
+component InfoRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    height: 30px;
+    spacing: 12px;
+    Text { text: root.label; color: Theme.muted; font-size: 14px; width: 170px; vertical-alignment: center; }
+    Text { text: root.value; color: Theme.text; font-size: 14px; horizontal-alignment: left; vertical-alignment: center; wrap: word-wrap; }
+}
+
+component ServerRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <string> latency;
+    in property <bool> selected;
+    callback picked();
+    height: 76px;
+    background: root.selected ? #19283d : Theme.input;
+    border-color: root.selected ? #436898 : Theme.border;
+    border-width: 1px; border-radius: 8px;
+    HorizontalLayout {
+        padding: 10px; spacing: 12px;
+        Rectangle { width: 34px; height: 34px; border-radius: 8px; background: #24344c; Text { text: "P"; color: Theme.blue; horizontal-alignment: center; vertical-alignment: center; font-size: 17px; } }
+        VerticalLayout { spacing: 5px;
+            Text { text: root.label; color: Theme.text; font-size: 16px; }
+            Text { text: root.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+        }
+        Text { text: root.latency; color: Theme.green; font-size: 15px; vertical-alignment: center; width: 70px; }
+        Action { label: root.selected ? "已选择" : "选择"; primary: root.selected; picked => { root.picked(); } }
+    }
+}
+
+component OutboundRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <string> state;
+    in property <string> action;
+    in property <bool> active;
+    callback picked();
+    height: 76px;
+    background: root.active ? #19283d : Theme.input;
+    border-color: root.active ? #436898 : Theme.border;
+    border-width: 1px; border-radius: 8px;
+    HorizontalLayout {
+        padding: 10px; spacing: 12px;
+        VerticalLayout { spacing: 5px;
+            Text { text: root.label; color: Theme.text; font-size: 16px; }
+            Text { text: root.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+        }
+        Text { text: root.state; color: Theme.green; font-size: 14px; vertical-alignment: center; width: 140px; wrap: word-wrap; }
+        Action { label: root.action; primary: root.active; picked => { root.picked(); } }
+    }
+}
+
+export component OpenPPP2Design inherits Window {
+    title: root.preview-mode ? "PPP PRIVATE NETWORK 2 · Slint Design" : "PPP PRIVATE NETWORK 2";
+    preferred-width: 1320px; preferred-height: 940px;
+    min-width: 860px; min-height: 620px;
+    background: Theme.bg;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 15px;
+    in-out property <int> page-index: 4;
+    in-out property <bool> compact: false;
+    changed width => { root.compact = root.width < 1140px; }
+    in-out property <int> selected-server: 0;
+    in-out property <int> route-mode: 1;
+    in-out property <int> mode-index: 0;
+    in-out property <string> notice: "界面设计预览 · 所有运行数据均为示例";
+    in property <bool> core-running: true;
+    in property <bool> core-launching: false;
+    in property <bool> has-snapshot: false;
+    in property <bool> preview-mode: true;
+    in property <string> admin-label: "管理员";
+    in property <string> status-label: "已连接";
+    in property <string> download-rate: "12.8 MB/s";
+    in property <string> upload-rate: "1.24 MB/s";
+    in property <string> received-total: "累计接收  2.46 GB";
+    in property <string> sent-total: "累计发送  318 MB";
+    in property <string> connected-duration: "02:34:18";
+    in property <string> server-name: "Main · Singapore";
+    in property <string> server-detail: "主出口  /  PPP + TCP  /  静态 UDP";
+    in property <string> server-latency: "64 ms";
+    in property <string> network-adapter: "PPP";
+    in property <string> network-ipv4: "192.168.14.68 / 24";
+    in property <string> network-gateway: "192.168.14.1";
+    in property <string> network-dns: "1.1.1.1  /  8.8.8.8";
+    in property <string> network-mtu: "1400";
+    in property <string> physical-adapter: "Ethernet";
+    in property <string> physical-ipv4: "192.168.1.100 / 24";
+    in property <string> physical-gateway: "192.168.1.1";
+    in property <string> transport-status: "Established";
+    in property <string> tcp-ip-stack: "ctcp";
+    in property <string> udp-443-status: "已屏蔽";
+    in property <string> mux-summary: "compat · 4 channels";
+    in property <string> http-summary: "127.0.0.1:8080";
+    in property <string> socks-summary: "127.0.0.1:1080";
+    in property <string> active-outbound: "Main · Singapore";
+    in property <string> mux-mode: "compat · 4 links";
+    in property <[InfoItem]> connection-items: [];
+    in property <[InfoItem]> api-items: [];
+    in property <[InfoItem]> tunnel-items: [];
+    in property <[InfoItem]> mux-items: [];
+    in property <[InfoItem]> tun-items: [];
+    in property <[InfoItem]> nic-items: [];
+    in property <[InfoItem]> route-items: [];
+    in property <[InfoItem]> split-items: [];
+    in property <[int]> rx-bars: [];
+    in property <[int]> tx-bars: [];
+    in-out property <string> working-dir: ".";
+    in-out property <string> settings-file: "./ppp-tui.json";
+    in-out property <string> config-path: "./config/Main.json";
+    in-out property <string> server-dir: "./config";
+    in-out property <string> core-log-file: "./ppp-core.log";
+    in-out property <string> tui-log-file: "./ppp-tui.log";
+    in-out property <string> log-level: "error";
+    in-out property <string> tun-ip: "";
+    in-out property <string> tun-gw: "";
+    in-out property <string> tun-mask: "";
+    in-out property <string> nic: "";
+    in-out property <string> ngw: "";
+    in-out property <string> tun-name: "";
+    in-out property <string> tun-driver: "auto";
+    in-out property <string> tcp-ip-cc: "auto";
+    in-out property <string> tun-mux: "4";
+    in-out property <string> tun-mux-acceleration: "";
+    in-out property <string> link-restart: "3";
+    in-out property <string> tun-lease-time: "";
+    in-out property <string> tun-ssmt: "";
+    in-out property <string> dns: "";
+    in-out property <string> auto-restart: "";
+    in-out property <string> firewall-rules: "";
+    in-out property <string> bypass-ngw: "";
+    in-out property <string> bypass-ngw6: "";
+    in-out property <string> bypass-nic: "";
+    in-out property <string> bypass-nic6: "";
+    in-out property <string> proxy-http-port: "8080";
+    in-out property <string> proxy-socks-port: "1080";
+    in-out property <string> rpc-listen: "127.0.0.1:39100";
+    in-out property <string> rpc-address: "";
+    in-out property <string> rpc-token: "";
+    in-out property <string> advanced-command: "";
+    in property <string> command-preview: "";
+    in property <string> runtime-api: "运行端点：未启用";
+    in-out property <string> geo-rules-file: "./geo-rules.yaml";
+    in-out property <string> geosite-file: "./geosite.dat";
+    in-out property <string> geoip-file: "./geoip.dat";
+    in-out property <string> bypass-file: "./ip.txt";
+    in-out property <string> bypass6-file: "./ipv6.txt";
+    in-out property <string> dns-rules-file: "./dns-rules.txt";
+    in-out property <bool> tun-enabled: true;
+    in-out property <bool> tun-static: true;
+    in-out property <bool> tun-host: true;
+    in-out property <bool> tun-vnet: true;
+    in-out property <bool> tun-flash: false;
+    in-out property <bool> tun-promisc: true;
+    in-out property <bool> tun-route: false;
+    in-out property <bool> tun-protect: true;
+    in-out property <bool> block-quic: true;
+    in-out property <bool> rt: true;
+    in-out property <bool> tui-log-enabled: true;
+    in-out property <bool> system-proxy-enabled: false;
+    in property <[OutboundItem]> outbound-items: [];
+    in-out property <[ServerItem]> server-items: [
+        { name: "Main · Singapore", detail: "当前主出口  /  PPP tunnel", latency: "64 ms" },
+        { name: "Hong Kong 01", detail: "可用服务器  /  PPP tunnel", latency: "20 ms" },
+        { name: "Japan 01", detail: "可用服务器  /  PPP tunnel", latency: "69 ms" },
+        { name: "US · United States", detail: "可用服务器  /  PPP tunnel", latency: "169 ms" },
+        { name: "Hong Kong 02", detail: "可用服务器  /  PPP tunnel", latency: "15 ms" }
+    ];
+    callback save-requested();
+    callback start-requested();
+    callback stop-requested();
+    callback server-picked(int);
+    callback outbound-picked(int);
+    callback routes-requested();
+    callback refresh-probes-requested();
+    callback refresh-catalog-requested();
+    callback restart-requested();
+    callback attach-requested();
+    property <string> page-title: ["总览", "网络", "服务器", "分流", "启动设置"][root.page-index];
+    property <string> page-description: ["连接、流量与活动出口，一目了然。", "查看虚拟网卡、物理网络与传输状态。", "选择服务器；运行后在同一列表切换主出口或首选入口。", "按规则为流量选择合适的出口。", "管理核心启动参数与本地控制接口。"][root.page-index];
+
+    VerticalLayout {
+        padding: 0px; spacing: 0px;
+        Rectangle {
+            height: 64px; background: #121720;
+            HorizontalLayout {
+                padding-left: 24px; padding-right: 24px; spacing: 14px;
+                Rectangle { width: 36px; height: 36px; border-radius: 10px; background: #253f63; Text { text: "P"; font-size: 24px; font-weight: 700; color: Theme.blue; horizontal-alignment: center; vertical-alignment: center; } }
+                VerticalLayout { spacing: 3px;
+                    Text { text: "PPP PRIVATE NETWORK 2"; color: Theme.text; font-size: 18px; font-weight: 600; }
+                    Text { text: "PRIVATE CONNECTION, CLEAR CONTROL"; color: #66768e; font-size: 11px; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "●  " + root.status-label; color: root.core-running ? Theme.green : Theme.muted; vertical-alignment: center; }
+                if !root.compact && root.admin-label != "": Text { text: root.admin-label; color: #d9b675; font-size: 13px; vertical-alignment: center; width: 60px; }
+                Action { label: root.core-running || root.core-launching ? "停止" : "启动"; primary: !root.core-running && !root.core-launching; picked => { if (root.core-running || root.core-launching) { root.stop-requested(); } else { root.start-requested(); } } }
+                Action { label: "设置"; picked => { root.page-index = 4; } }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+        HorizontalLayout {
+            spacing: 0px;
+            Rectangle {
+                width: root.compact ? 168px : 204px; background: #11161e;
+                VerticalLayout {
+                padding: 12px; padding-top: 16px; spacing: 4px;
+                    Text { text: "工作空间"; color: #607087; font-size: 13px; height: 30px; }
+                    for label[index] in ["总览", "网络", "服务器", "分流", "启动设置"]: NavItem {
+                        label: label; number: "0" + (index + 1); selected: root.page-index == index;
+                        picked => { root.page-index = index; }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    Text { text: "点击栏目切换页面"; color: #64758c; font-size: 13px; height: 27px; }
+                    Text { text: root.preview-mode ? "SLINT / DESIGN 01" : "SLINT / DESKTOP"; color: #46566d; font-size: 12px; height: 20px; }
+                }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            VerticalLayout {
+                padding: root.compact ? 14px : 20px; spacing: 12px;
+                HorizontalLayout {
+                    height: 54px; spacing: 12px;
+                    VerticalLayout { spacing: 3px;
+                        Text { text: root.page-title; color: Theme.text; font-size: 27px; font-weight: 600; }
+                        Text { text: root.page-description; color: Theme.muted; font-size: 14px; }
+                    }
+                    if root.page-index == 4: Action { label: "保存设置"; primary: true; picked => { if (root.preview-mode) { root.notice = "设计预览：设置仅保留在本次界面中"; } root.save-requested(); } }
+                    if root.page-index == 2 && !root.has-snapshot: Action { label: "刷新配置"; picked => { root.refresh-catalog-requested(); } }
+                    if root.page-index == 2 && !root.has-snapshot: Action { label: "刷新延迟"; picked => { if (root.preview-mode) { root.notice = "设计预览：服务器延迟为示例数据"; } root.refresh-probes-requested(); } }
+                }
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 10px;
+                        if root.page-index == 4: VerticalLayout {
+                            spacing: 10px;
+                            Card {
+                                heading: "核心启动"; note: "01 / BASIC";
+                                HorizontalLayout { spacing: 10px;
+                                    Action { label: "客户端"; primary: root.mode-index == 0; picked => { root.mode-index = 0; } }
+                                    Action { label: "仅代理"; primary: root.mode-index == 1; picked => { root.mode-index = 1; } }
+                                    Action { label: "服务端"; primary: root.mode-index == 2; picked => { root.mode-index = 2; } }
+                                }
+                                FieldPair { compact: root.compact;
+                                    left-label: "启动目录"; left-parameter: "working directory"; left-value <=> root.working-dir; left-hint: "相对路径以此目录为基准";
+                                    right-label: "配置文件"; right-parameter: "--config"; right-value <=> root.config-path; right-hint: "核心使用的主配置文件";
+                                }
+                                FieldPair { compact: root.compact;
+                                    left-label: "服务器目录"; left-parameter: "--server-dir"; left-value <=> root.server-dir; left-hint: "读取服务器 JSON 的目录";
+                                    right-label: "核心日志等级"; right-parameter: "--log-level"; right-value <=> root.log-level; right-hint: "排查问题时可使用 info 或 debug";
+                                }
+                                FieldPair { compact: root.compact;
+                                    left-label: "核心日志文件"; left-parameter: "--log-file"; left-value <=> root.core-log-file; left-hint: "保存核心运行日志";
+                                    right-label: "设置文件"; right-parameter: "settings"; right-value <=> root.settings-file; right-hint: "保存当前桌面设置";
+                                }
+                                SettingToggle { label: "启用 TUI 日志"; detail: "记录界面启动与诊断"; checked <=> root.tui-log-enabled; }
+                                Field { label: "TUI 日志文件"; parameter: "tui log"; value <=> root.tui-log-file; hint: "相对路径以启动目录为基准"; }
+                            }
+                            Card {
+                                heading: "隧道与传输"; note: "02 / TUNNEL";
+                                if root.mode-index == 0: SettingToggle { label: "启用 TUN"; detail: "关闭后使用仅代理模式"; checked <=> root.tun-enabled; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "静态 UDP 传输"; detail: "启用当前出口配置中的 udp.static 通道"; checked <=> root.tun-static; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN Host"; detail: "允许核心接管主机网络"; checked <=> root.tun-host; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN VNet"; detail: "启用虚拟网络模式"; checked <=> root.tun-vnet; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN Flash"; detail: "启用快速网卡模式"; checked <=> root.tun-flash; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN 混杂模式"; detail: "Linux/macOS 虚拟网卡选项"; checked <=> root.tun-promisc; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN 路由"; detail: "Linux 路由选项"; checked <=> root.tun-route; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "TUN 保护"; detail: "Linux 路由保护"; checked <=> root.tun-protect; }
+                                if root.mode-index == 0 && root.tun-enabled: SettingToggle { label: "屏蔽 UDP/443"; detail: "丢弃客户端 TUN 中发往 UDP/443 的流量"; checked <=> root.block-quic; }
+                                FieldPair { compact: root.compact;
+                                    left-label: "MUX 通道数"; left-parameter: "--tun-mux"; left-value <=> root.tun-mux; left-hint: "复用的并行传输通道数量";
+                                    right-label: "连续连接失败重启阈值"; right-parameter: "--link-restart"; right-value <=> root.link-restart; right-hint: "主出口连续连接失败达到 N 次后重启；0 关闭";
+                                }
+                                FieldPair { compact: root.compact;
+                                    left-label: "MUX 加速"; left-parameter: "--tun-mux-acceleration"; left-value <=> root.tun-mux-acceleration; left-hint: "留空使用核心默认值";
+                                    right-label: "TCP/IP 实现"; right-parameter: "--lwip"; right-value <=> root.tcp-ip-cc; right-hint: "auto、lwip 或 ctcp";
+                                }
+                                if root.mode-index == 0 && root.tun-enabled: FieldPair { compact: root.compact;
+                                    left-label: "TUN IP"; left-parameter: "--tun-ip"; left-value <=> root.tun-ip; left-hint: "留空自动配置";
+                                    right-label: "TUN 网关"; right-parameter: "--tun-gw"; right-value <=> root.tun-gw; right-hint: "留空自动配置";
+                                }
+                                if root.mode-index == 0 && root.tun-enabled: FieldPair { compact: root.compact;
+                                    left-label: "TUN 掩码"; left-parameter: "--tun-mask"; left-value <=> root.tun-mask; left-hint: "留空自动配置";
+                                    right-label: "TUN 名称"; right-parameter: "--tun"; right-value <=> root.tun-name; right-hint: "虚拟网卡名称";
+                                }
+                                if root.mode-index == 0 && root.tun-enabled: FieldPair { compact: root.compact;
+                                    left-label: "物理网卡"; left-parameter: "--nic"; left-value <=> root.nic; left-hint: "留空自动检测";
+                                    right-label: "物理网关"; right-parameter: "--ngw"; right-value <=> root.ngw; right-hint: "留空自动检测";
+                                }
+                                if root.mode-index == 0 && root.tun-enabled: FieldPair { compact: root.compact;
+                                    left-label: "TUN 驱动"; left-parameter: "--tun-driver"; left-value <=> root.tun-driver; left-hint: "auto 或驱动名称";
+                                    right-label: "租约秒数"; right-parameter: "--tun-lease-time-in-seconds"; right-value <=> root.tun-lease-time; right-hint: "留空使用核心默认值";
+                                }
+                                if root.mode-index == 0 && root.tun-enabled: Field { label: "TUN SSMT"; parameter: "--tun-ssmt"; value <=> root.tun-ssmt; hint: "Linux/macOS 可用；留空使用核心默认值"; }
+                            }
+                            Card { heading: "网络与运行"; note: "03 / NETWORK";
+                                SettingToggle { label: "实时模式"; detail: "核心实时网络处理"; checked <=> root.rt; }
+                                SettingToggle { label: "系统代理"; detail: "启动时设置系统 HTTP 代理"; checked <=> root.system-proxy-enabled; }
+                                FieldPair { compact: root.compact;
+                                    left-label: "DNS"; left-parameter: "--dns"; left-value <=> root.dns; left-hint: "留空使用核心默认值";
+                                    right-label: "自动重启"; right-parameter: "--auto-restart"; right-value <=> root.auto-restart; right-hint: "留空使用核心默认值";
+                                }
+                                if root.mode-index == 2: Field { label: "防火墙规则"; parameter: "--firewall-rules"; value <=> root.firewall-rules; hint: "服务端规则文件"; }
+                            }
+                            Card {
+                                heading: "本地代理"; note: "04 / PROXY";
+                                FieldPair { compact: root.compact;
+                                    left-label: "HTTP 代理端口"; left-parameter: "--proxy-http-port"; left-value <=> root.proxy-http-port; left-hint: "留空跟随配置/Main；0 表示关闭";
+                                    right-label: "SOCKS 代理端口"; right-parameter: "--proxy-socks-port"; right-value <=> root.proxy-socks-port; right-hint: "留空跟随配置/Main；0 表示关闭";
+                                }
+                            }
+                            Card {
+                                heading: "AI / API 控制"; note: "05 / LOCAL API";
+                                FieldPair { compact: root.compact;
+                                    left-label: "RPC 监听"; left-parameter: "--rpc-listen"; left-value <=> root.rpc-listen; left-hint: "仅允许本机回环地址；留空关闭";
+                                    right-label: "RPC Token"; right-parameter: "--rpc-token"; right-value <=> root.rpc-token; right-hint: "留空表示本机连接无需鉴权";
+                                }
+                                InfoRow { label: root.preview-mode ? "运行端点 · 示例" : "运行端点"; value: root.runtime-api; }
+                                Field { label: "连接已有核心"; parameter: "--rpc"; value <=> root.rpc-address; hint: "填写后启动按钮改为连接该地址"; }
+                            }
+                            Card { heading: "高级命令"; note: "06 / ADVANCED";
+                                Field { label: "额外启动参数"; parameter: "command"; value <=> root.advanced-command; hint: "结构化设置优先于相同的命令参数"; }
+                                Text { text: "启动命令预览（保存后更新）"; color: Theme.muted; font-size: 14px; }
+                                Text { text: root.command-preview; color: Theme.text; font-size: 13px; wrap: word-wrap; }
+                            }
+                        }
+                        if root.page-index == 0: VerticalLayout {
+                            spacing: 10px;
+                            Card { heading: "连接控制"; note: "CONTROL"; dense: true;
+                                Text { text: "切换 TUN 或系统代理后，点击应用并重启核心生效。"; color: Theme.muted; font-size: 13px; }
+                                HorizontalLayout { spacing: 8px;
+                                    if root.mode-index == 0: Action { width: 132px; label: root.tun-enabled ? "TUN VPN：开" : "TUN VPN：关"; primary: root.tun-enabled; picked => { root.tun-enabled = !root.tun-enabled; } }
+                                    Action { width: 132px; label: root.system-proxy-enabled ? "系统代理：开" : "系统代理：关"; primary: root.system-proxy-enabled; picked => { root.system-proxy-enabled = !root.system-proxy-enabled; } }
+                                    Action { width: 132px; label: "应用并重启"; picked => { root.restart-requested(); } }
+                                }
+                            }
+                            if root.has-snapshot: HorizontalLayout { spacing: 10px;
+                                Metric { label: "连接状态"; value: root.status-label; detail: root.server-detail; }
+                                Metric { label: "主出口"; value: root.active-outbound; detail: root.server-latency; }
+                                if !root.compact: Metric { label: "运行时间"; value: root.connected-duration; detail: root.transport-status; }
+                            }
+                            if root.has-snapshot: HorizontalLayout {
+                                spacing: 10px;
+                                Metric { label: "下载速率"; value: root.download-rate; detail: root.received-total; }
+                                Metric { label: "上传速率"; value: root.upload-rate; detail: root.sent-total; }
+                                if !root.compact: Metric { label: "MUX"; value: root.mux-mode; detail: root.mux-summary; }
+                            }
+                            if !root.has-snapshot: Card { heading: "服务器延迟"; note: "CATALOG";
+                                Text { text: "未连接核心；可以在下方选择服务器，再点击顶部启动。"; color: Theme.muted; font-size: 14px; }
+                                for item[index] in root.server-items: ServerRow {
+                                    label: item.name; detail: item.detail; latency: item.latency;
+                                    selected: index == root.selected-server;
+                                    picked => { root.selected-server = index; root.server-picked(index); }
+                                }
+                            }
+                            Card { heading: "连接信息"; note: "SESSION"; dense: true;
+                                for item in root.connection-items: InfoRow { label: item.label; value: item.value; }
+                                if root.connection-items.length == 0: Text { text: "等待核心快照"; color: Theme.muted; }
+                            }
+                            Card { heading: "AI / API 控制"; note: "RPC"; dense: true;
+                                for item in root.api-items: InfoRow { label: item.label; value: item.value; }
+                                if root.api-items.length == 0: Text { text: "等待核心快照"; color: Theme.muted; }
+                            }
+                            TrafficGraph { heading: "▼ RX"; rate: root.download-rate; bar-color: Theme.green; bars: root.rx-bars; }
+                            TrafficGraph { heading: "▲ TX"; rate: root.upload-rate; bar-color: Theme.blue; bars: root.tx-bars; }
+                        }
+                        if root.page-index == 1: VerticalLayout {
+                            spacing: 10px;
+                            if !root.has-snapshot: Card { heading: "网络快照"; note: "WAIT";
+                                Text { text: "启动核心后这里显示 TUN、NIC、代理和 MUX 状态。"; color: Theme.muted; font-size: 14px; }
+                            }
+                            if root.tunnel-items.length > 0: Card { heading: "逻辑隧道"; note: "TUNNEL"; dense: true;
+                                for item in root.tunnel-items: InfoRow { label: item.label; value: item.value; }
+                            }
+                            Card { heading: "虚拟网卡"; note: "TUN"; dense: true;
+                                for item in root.tun-items: InfoRow { label: item.label; value: item.value; }
+                                if root.tun-items.length == 0: Text { text: "暂无 TUN 信息"; color: Theme.muted; }
+                            }
+                            Card { heading: "物理网络"; note: "NIC"; dense: true;
+                                for item in root.nic-items: InfoRow { label: item.label; value: item.value; }
+                                if root.nic-items.length == 0: Text { text: "暂无物理网卡信息"; color: Theme.muted; }
+                            }
+                            Card { heading: "传输"; note: "TRANSPORT"; dense: true;
+                                InfoRow { label: "链路状态"; value: root.transport-status; }
+                                InfoRow { label: "TCP/IP 实现"; value: root.tcp-ip-stack; }
+                                InfoRow { label: "UDP/443"; value: root.udp-443-status; }
+                                InfoRow { label: "MUX"; value: root.mux-mode; }
+                                InfoRow { label: "HTTP 代理"; value: root.http-summary; }
+                                InfoRow { label: "SOCKS 代理"; value: root.socks-summary; }
+                            }
+                            if root.mux-items.length > 0: Card { heading: "MUX 详情"; note: "MULTIPLEX"; dense: true;
+                                for item in root.mux-items: InfoRow { label: item.label; value: item.value; }
+                            }
+                        }
+                        if root.page-index == 2 && !root.has-snapshot: Card {
+                            heading: "服务器配置"; note: root.server-items.length + " SERVERS";
+                            if root.server-items.length == 0: Text { text: "没有找到服务器配置；请检查启动目录和服务器目录。"; color: Theme.muted; font-size: 14px; }
+                            if root.selected-server >= 0 && !root.core-running && !root.core-launching: Action { label: "选择并启动"; primary: true; picked => { root.start-requested(); } }
+                            for item[index] in root.server-items: ServerRow {
+                                label: item.name; detail: item.detail;
+                                latency: item.latency;
+                                selected: index == root.selected-server;
+                                picked => { root.selected-server = index; if (root.preview-mode) { root.notice = "设计预览：已更改列表选中状态"; } root.server-picked(index); }
+                            }
+                        }
+                        if root.page-index == 2 && root.has-snapshot: Card {
+                            heading: "服务器"; note: root.outbound-items.length + " SERVERS";
+                            if root.outbound-items.length == 0: Text { text: "核心尚未报告可切换的服务器。"; color: Theme.muted; font-size: 14px; }
+                            for item[index] in root.outbound-items: OutboundRow {
+                                label: item.name; detail: item.detail; state: item.state; action: item.action; active: item.active;
+                                picked => { root.outbound-picked(index); }
+                            }
+                        }
+                        if root.page-index == 3: VerticalLayout {
+                            spacing: 10px;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Action { label: "IP 分流"; primary: root.route-mode == 0; picked => { root.route-mode = 0; } }
+                                Action { label: "GEO 分流"; primary: root.route-mode == 1; picked => { root.route-mode = 1; } }
+                                Action { label: "关闭用户分流"; primary: root.route-mode == 2; picked => { root.route-mode = 2; } }
+                            }
+                            if root.route-mode == 1: Card { heading: "GEO 规则"; note: "RULES";
+                                Field { label: "规则文件"; parameter: "--geo-rules"; value <=> root.geo-rules-file; hint: "按域名和 IP 数据库选择流量出口"; }
+                                if root.preview-mode: InfoRow { label: "geosite:openai"; value: "US · United States"; }
+                                if root.preview-mode: InfoRow { label: "其余流量"; value: "Main · Singapore"; }
+                                if !root.preview-mode: Text { text: "编辑规则文件后，点击应用分流并重启核心。"; color: Theme.muted; font-size: 14px; }
+                            }
+                            if root.route-mode == 1: Card { heading: "GEO 数据库"; note: "DATA";
+                                FieldPair { compact: root.compact;
+                                    left-label: "Geosite"; left-parameter: "--geosite"; left-value <=> root.geosite-file; left-hint: "域名分类数据库";
+                                    right-label: "GeoIP"; right-parameter: "--geoip"; right-value <=> root.geoip-file; right-hint: "IP 地址分类数据库";
+                                }
+                            }
+                            if root.route-mode == 0: Card { heading: "IP 分流文件"; note: "FILES";
+                                Field { label: "IPv4 规则"; parameter: "--bypass"; value <=> root.bypass-file; hint: "IPv4 分流地址列表"; }
+                                Field { label: "IPv6 规则"; parameter: "--bypass6"; value <=> root.bypass6-file; hint: "IPv6 分流地址列表"; }
+                            }
+                            if root.route-mode != 2: Card { heading: "通用规则"; note: "COMMON";
+                                Field { label: "DNS 规则"; parameter: "--dns-rules"; value <=> root.dns-rules-file; hint: "域名解析规则文件"; }
+                                FieldPair { compact: root.compact;
+                                    left-label: "IPv4 旁路网关"; left-parameter: "--bypass-ngw"; left-value <=> root.bypass-ngw; left-hint: "留空自动检测";
+                                    right-label: "IPv6 旁路网关"; right-parameter: "--bypass-ngw6"; right-value <=> root.bypass-ngw6; right-hint: "留空自动检测";
+                                }
+                                FieldPair { compact: root.compact;
+                                    left-label: "IPv4 旁路网卡"; left-parameter: "--bypass-nic"; left-value <=> root.bypass-nic; left-hint: "留空自动检测";
+                                    right-label: "IPv6 旁路网卡"; right-parameter: "--bypass-nic6"; right-value <=> root.bypass-nic6; right-hint: "留空自动检测";
+                                }
+                            }
+                            if root.route-mode == 2: Card { heading: "关闭用户分流"; note: "DIRECT POLICY";
+                                Text { text: "普通流量进入当前 VPN 出口，保留服务器所需路由。"; color: Theme.muted; wrap: word-wrap; }
+                            }
+                            if root.has-snapshot: Card { heading: "运行时分流摘要"; note: "ACTIVE"; dense: true;
+                                for item in root.route-items: InfoRow { label: item.label; value: item.value; }
+                            }
+                            if root.has-snapshot && root.split-items.length > 0: Card { heading: "Split Rules"; note: root.split-items.length + " RULES"; dense: true;
+                                for item in root.split-items: InfoRow { label: item.label; value: item.value; }
+                            }
+                            Action { label: "应用分流"; primary: true; picked => { if (root.preview-mode) { root.notice = "设计预览：规则未写入文件，也未应用至核心"; } root.routes-requested(); } }
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+        Rectangle { height: 28px; background: #11161e;
+            Text { x: 22px; text: root.notice; color: #65758c; font-size: 12px; vertical-alignment: center; }
+        }
+    }
+}

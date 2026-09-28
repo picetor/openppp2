@@ -134,6 +134,11 @@ MISSING*
 
 # Local scratch/temp workspace
 /.build_tmp/
+/.build-sidecar/
+/build-tlog/
+/build-tlogppp.lastbuildstate
+/ppp-web.json
+/ppp-web-address.txt
 
 # Allow libglibc_compat.a to be tracked
 !libglibc_compat.a

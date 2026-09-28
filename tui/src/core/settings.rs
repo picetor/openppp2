@@ -160,7 +160,7 @@ impl StartupSettings {
                         rpc_token = value;
                     }
                 }
-                "--help" | "-h" => {}
+                "--help" | "-h" | "--slint-auto-start" => {}
                 _ if arg.starts_with("--rpc=") => {
                     rpc_address = arg[6..].to_string();
                 }
@@ -320,7 +320,10 @@ impl StartupSettings {
             launch_direct,
         };
 
-        if std::env::args_os().nth(1).is_none() {
+        if std::env::args_os()
+            .skip(1)
+            .all(|arg| arg.to_string_lossy() == "--slint-auto-start")
+        {
             settings.load_saved();
         }
         settings.normalize_paths();

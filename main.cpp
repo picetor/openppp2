@@ -429,7 +429,8 @@ private:
     // Load configuration file
     std::shared_ptr<AppConfiguration>               LoadConfiguration(int argc, const char* argv[], ppp::string& path) noexcept;
     bool                                            LoadServerConfigurations(int argc, const char* argv[],
-                                                        const std::shared_ptr<AppConfiguration>& primary) noexcept;
+                                                        const std::shared_ptr<AppConfiguration>& primary,
+                                                        const ppp::string& primary_path) noexcept;
     bool                                            LoadGeoOutboundConfigurations(
                                                         const std::shared_ptr<NetworkInterface>& network_interface,
                                                         const std::shared_ptr<AppConfiguration>& primary) noexcept;
@@ -753,7 +754,7 @@ static struct {
 
     bool                                            restart                     = false; // Restart flag
 
-    int                                             link_restart                = 0;     // Link restart count
+    int                                             link_restart                = 0;     // Consecutive primary connection failure limit
     int                                             auto_restart                = 0;     // Auto restart interval
 
     std::shared_ptr<BypassSet>                      bypass;                              // Bypass file path
@@ -1140,6 +1141,24 @@ void PppApplication::PullIPList(const ppp::string& command) noexcept
     }
 }
 
+static bool IsVisibleServerStatus(
+    const VEthernetNetworkSwitcher::OutboundStatus& status,
+    const VEthernetNetworkSwitcher::OutboundStatusList& statuses) noexcept
+{
+    if (status.server_menu) return true;
+    if (status.tag != "main") return false;
+    for (const auto& candidate : statuses)
+    {
+        if (candidate.server_menu && candidate.tag != "main" &&
+            candidate.server == status.server &&
+            candidate.display_name == status.display_name)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Handle keyboard input for tab switching (non-blocking, cross-platform)
 void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
 {
@@ -1154,10 +1173,7 @@ void PppApplication::HandleServerSelection(int delta, bool activate) noexcept
     ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
     for (auto& status : statuses)
     {
-        // Always offer the primary configuration ("main") so the user can hot
-        // switch back after moving to a --server-dir server, even when the
-        // primary JSON is not duplicated inside the server directory.
-        if (status.server_menu || status.tag == "main")
+        if (IsVisibleServerStatus(status, statuses))
         {
             servers.emplace_back(std::move(status));
         }
@@ -2093,9 +2109,7 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
             ppp::vector<VEthernetNetworkSwitcher::OutboundStatus> servers;
             for (auto& status : statuses)
             {
-                // Same rule as HandleServerSelection: "main" (the primary
-                // configuration) is always a valid hot-switch target.
-                if (status.server_menu || status.tag == "main")
+                if (IsVisibleServerStatus(status, statuses))
                 {
                     servers.emplace_back(std::move(status));
                 }
@@ -2429,6 +2443,7 @@ bool PppApplication::PreparedLoopbackEnvironment(const std::shared_ptr<NetworkIn
             // configured vmux logical stream and fall back to an independent
             // PPP transmission when vmux is unavailable.
             ethernet->Mux(&network_interface->Mux);
+            ethernet->SetLinkRestartLimit(GLOBAL_.link_restart);
             ethernet->MuxAcceleration(&network_interface->MuxAcceleration);
             ethernet->StaticMode(&network_interface->StaticMode);
             if (!proxy_mode_)
@@ -2687,7 +2702,7 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
         fprintf(stdout, "[CoreStartup] stage=mode-resolve mode='%s' client=%d proxy=%d\r\n",
             mode.data(), client_mode_ ? 1 : 0, proxy_mode_ ? 1 : 0);
 
-        if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration))
+        if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration, path))
         {
             fprintf(stdout, "[CoreStartup] FAIL stage=server-configurations\r\n");
             return -1;
@@ -3039,7 +3054,7 @@ void PppApplication::PrintHelpInformation() noexcept
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
         col_option_width, "--link-restart=<count>",
-        col_description_width, "Link reconnection attempts",
+        col_description_width, "Restart after N consecutive connection failures",
         col_default_width, "0");
 
     printf("│ %-*s │ %-*s │ %-*s │\n",
@@ -4744,9 +4759,18 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
             }
             else if (key == "static_mode" && value.isBool() && NULLPTR != client)
             {
-                bool setting = value.asBool();
-                client->StaticMode(&setting);
-                applied[key.c_str()] = client->StaticMode(NULLPTR);
+                // Static mode changes the UDP transport's sockets, endpoints
+                // and optional aggregator. Flipping the policy bit while the
+                // core is running leaves those resources unprepared (and can
+                // bypass the multi-outbound startup check).
+                if (value.asBool() == client->StaticMode(NULLPTR))
+                {
+                    applied[key.c_str()] = value.asBool();
+                }
+                else
+                {
+                    restart_required.append(Json::Value(key.c_str()));
+                }
             }
             else if (key == "mux" && value.isUInt() && value.asUInt() <= 65535 && NULLPTR != client)
             {
@@ -5014,33 +5038,21 @@ bool PppApplication::OnTick(uint64_t now) noexcept
         return false;
     }
 
+    // The failure site latches this request. Connection success or a primary
+    // switch before the next tick must not erase a reached threshold.
+    if (client->ConsumeLinkRestartRequest())
+    {
+        return ShutdownApplication(true);
+    }
+
     // Check whether the current VPN exchanger exists.
-    std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger(); 
+    std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
     if (NULLPTR == exchanger)
     {
         return false;
     }
 
-    // Check link status
-    NetworkState network_state = exchanger->GetNetworkState();
-    if (network_state == NetworkState::NetworkState_Established) 
-    {
-        // Handle link restart count
-        if (GLOBAL_.link_restart > 0) 
-        {
-            // If the number of link reconnections exceeds a certain number, the program needs to be restarted immediately.
-            if (exchanger->GetReconnectionCount() >= GLOBAL_.link_restart)
-            {
-                return ShutdownApplication(true);
-            }
-        }
-    }
-    else 
-    {
-        return false;
-    }
-
-    return true;
+    return exchanger->GetNetworkState() == NetworkState::NetworkState_Established;
 }
 
 // Start/stop periodic tick timer
@@ -5124,33 +5136,59 @@ std::shared_ptr<AppConfiguration> PppApplication::GetConfiguration() noexcept
 }
 
 bool PppApplication::LoadServerConfigurations(int argc, const char* argv[],
-    const std::shared_ptr<AppConfiguration>& primary) noexcept
+    const std::shared_ptr<AppConfiguration>& primary,
+    const ppp::string& primary_path) noexcept
 {
     server_directory_.clear();
     ppp::string value = ppp::ATrim<ppp::string>(
         ppp::GetCommandArgument("--server-dir", argc, argv));
-    if (value.empty())
-    {
-        return true;
-    }
     if (NULLPTR == primary)
     {
         return false;
     }
 
-    bool has_main = false;
+    ppp::string primary_json_path = primary_path;
     for (const ClientOutboundConfiguration& outbound : outbound_configurations_)
+    {
+        if (outbound.configuration == primary && !outbound.source_path.empty())
+        {
+            primary_json_path = outbound.source_path;
+            break;
+        }
+    }
+    ppp::string primary_name = File::GetFileName(primary_json_path.data());
+    ppp::string primary_name_lower = ppp::ToLower<ppp::string>(primary_name);
+    if (primary_name_lower.size() >= 5 &&
+        primary_name_lower.compare(primary_name_lower.size() - 5, 5, ".json") == 0)
+    {
+        primary_name.erase(primary_name.size() - 5);
+    }
+    else
+    {
+        primary_name = "main";
+    }
+
+    bool has_main = false;
+    for (ClientOutboundConfiguration& outbound : outbound_configurations_)
     {
         if (ppp::ToLower<ppp::string>(outbound.tag) == "main")
         {
             has_main = true;
+            if (outbound.display_name.empty() || outbound.display_name == "main")
+            {
+                outbound.display_name = primary_name;
+            }
             break;
         }
     }
     if (!has_main)
     {
         outbound_configurations_.insert(outbound_configurations_.begin(),
-            ClientOutboundConfiguration{ "main", primary, "main", false, ppp::string(), false });
+            ClientOutboundConfiguration{ "main", primary, primary_name, false, primary_json_path, false });
+    }
+    if (value.empty())
+    {
+        return true;
     }
 
     server_directory_ = File::GetFullPath(File::RewritePath(value.data()).data());
@@ -5456,7 +5494,8 @@ bool PppApplication::LoadGeoOutboundConfigurations(
                 matched->route_used = false;
                 ppp::string display_name = matched->display_name;
                 bool server_menu = matched->server_menu;
-                matched->display_name = "main";
+                // Preserve the JSON filename for the primary row. "main" is
+                // only the internal routing tag, never the user-facing name.
                 matched->server_menu = false;
                 outbound_configurations_.emplace_back(ClientOutboundConfiguration{
                     declaration.tag, matched->configuration,
@@ -5684,7 +5723,6 @@ bool PppApplication::ShutdownApplication(bool restart) noexcept
     }
     else
     {
-        GLOBAL_.restart |= restart;
         boost::asio::post(*context, 
             [restart, context]() noexcept
             {
@@ -5694,6 +5732,9 @@ bool PppApplication::ShutdownApplication(bool restart) noexcept
                 {
                     return false;
                 }
+
+                // Record only the shutdown that actually owns cleanup.
+                GLOBAL_.restart = restart;
 
                 // Output a prompt message that the current app is exiting.
                 fprintf(stdout, "%s\r\n", restart ? "Application is restarting..." : "Application is shutting down...");
@@ -5925,6 +5966,11 @@ static bool Windows_PreferredNetwork(int argc, const char* argv[]) noexcept
 // Main application entry point
 int PppApplication::Main(int argc, const char* argv[]) noexcept
 {
+    // Install restart policy before opening any asynchronous client transport.
+    GLOBAL_.auto_restart = std::max<int>(0, atoi(ppp::GetCommandArgument("--auto-restart", argc, argv).data()));
+    const long link_restart = std::strtol(ppp::GetCommandArgument("--link-restart", argc, argv).data(), NULLPTR, 10);
+    GLOBAL_.link_restart = static_cast<int>(std::min<long>(INT_MAX, std::max<long>(0, link_restart)));
+
     fprintf(stdout, "[CoreStartup] Main enter client=%d proxy=%d headless=%d catalog_only=%d config='%s'\r\n",
         client_mode_ ? 1 : 0,
         proxy_mode_ ? 1 : 0,
@@ -6045,10 +6091,6 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
             GLOBAL_.bypass = network_interface_->Bypass;
         }
     }
-
-    // Parse restart configuration
-    GLOBAL_.auto_restart = std::max<int>(0, atoi(ppp::GetCommandArgument("--auto-restart", argc, argv).data()));
-    GLOBAL_.link_restart = (uint8_t)std::max<int>(0, atoi(ppp::GetCommandArgument("--link-restart", argc, argv).data()));
 
     // Start the local RPC server (Rust TUI front-end / headless control).
     if (rpc_listen_.size() > 0)
@@ -6191,6 +6233,7 @@ struct ppp_core_handle final {
     bool                                                    startup_success = false;
     bool                                                    finished = false;
     int                                                     result_code = -1;
+    ppp_core_exit_reason                                    exit_reason = PPP_CORE_EXIT_NONE;
     std::string                                             error;
 };
 
@@ -6227,7 +6270,8 @@ static void CoreApiSignalStartup(
     handle->state_cv.notify_all();
 }
 
-static void CoreApiSignalFinished(ppp_core_handle* handle, int result_code) noexcept
+static void CoreApiSignalFinished(ppp_core_handle* handle, int result_code,
+    ppp_core_exit_reason reason = PPP_CORE_EXIT_FAILED) noexcept
 {
     if (NULLPTR == handle) {
         return;
@@ -6236,6 +6280,7 @@ static void CoreApiSignalFinished(ppp_core_handle* handle, int result_code) noex
     std::lock_guard<std::mutex> scope(handle->state_mutex);
     handle->finished = true;
     handle->result_code = result_code;
+    handle->exit_reason = reason;
     handle->state_cv.notify_all();
 }
 
@@ -6253,7 +6298,10 @@ static void CoreApiRun(
     } active_guard;
 
     int result_code = -1;
+    ppp_core_exit_reason exit_reason = PPP_CORE_EXIT_FAILED;
     std::shared_ptr<PppApplication> APP;
+    // A previous embedded run may have requested a restart in this process.
+    GLOBAL_.restart = false;
     g_core_in_process_host.store(true, std::memory_order_release);
 
     try {
@@ -6378,6 +6426,9 @@ static void CoreApiRun(
             DEFAULT_.reset();
         }
         CloseCoreLogFile();
+        exit_reason = result_code == 0
+            ? (GLOBAL_.restart ? PPP_CORE_EXIT_RESTART_REQUESTED : PPP_CORE_EXIT_STOPPED)
+            : PPP_CORE_EXIT_FAILED;
         g_core_in_process_host.store(false, std::memory_order_release);
     }
     catch (const std::exception& exception) {
@@ -6403,7 +6454,7 @@ static void CoreApiRun(
         result_code = -1;
     }
 
-    CoreApiSignalFinished(handle, result_code);
+    CoreApiSignalFinished(handle, result_code, exit_reason);
 }
 
 static bool CoreApiWaitFinished(ppp_core_handle* handle, int timeout_ms) noexcept
@@ -6711,6 +6762,13 @@ extern "C" int ppp_core_is_running(ppp_core_handle* handle)
 
     std::lock_guard<std::mutex> scope(handle->state_mutex);
     return handle->startup_success && !handle->finished ? 1 : 0;
+}
+
+extern "C" ppp_core_exit_reason ppp_core_get_exit_reason(ppp_core_handle* handle)
+{
+    if (NULLPTR == handle) return PPP_CORE_EXIT_NONE;
+    std::lock_guard<std::mutex> scope(handle->state_mutex);
+    return handle->finished ? handle->exit_reason : PPP_CORE_EXIT_NONE;
 }
 
 extern "C" int ppp_core_stop(

@@ -117,7 +117,7 @@ impl App {
         let outbound_count = snapshot
             .outbounds
             .iter()
-            .filter(|o| o.server_menu || o.tag.eq_ignore_ascii_case("main"))
+            .filter(|o| snapshot.is_visible_server_outbound(o))
             .count();
         self.snapshot = Some(snapshot);
         if self.server_selection >= outbound_count && outbound_count > 0 {
@@ -148,7 +148,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, o)| {
-                (o.server_menu || o.tag.eq_ignore_ascii_case("main"))
+                snapshot.is_visible_server_outbound(o)
                     && (filter.is_empty()
                         || o.tag.to_lowercase().contains(&filter)
                         || o.display_name.to_lowercase().contains(&filter)

@@ -241,6 +241,24 @@ pub struct LastError {
 }
 
 impl Snapshot {
+    /// One visible row per server, including the primary configuration when
+    /// it has no separate server-menu alias. GEO can expose the same primary
+    /// configuration under a route tag; that alias owns the menu row.
+    pub fn is_visible_server_outbound(&self, outbound: &Outbound) -> bool {
+        if outbound.server_menu {
+            return true;
+        }
+        if !outbound.tag.eq_ignore_ascii_case("main") {
+            return false;
+        }
+        !self.outbounds.iter().any(|candidate| {
+            candidate.server_menu
+                && !candidate.tag.eq_ignore_ascii_case("main")
+                && candidate.server == outbound.server
+                && candidate.display_name == outbound.display_name
+        })
+    }
+
     /// True when the tunnel is fully established.
     pub fn is_connected(&self) -> bool {
         self.phase == "connected"
@@ -257,5 +275,61 @@ impl Snapshot {
             "flow_v2" => "flow-v2",
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Outbound, Snapshot};
+
+    #[test]
+    fn geo_alias_replaces_duplicate_primary_menu_row() {
+        let snapshot = Snapshot {
+            outbounds: vec![
+                Outbound {
+                    tag: "main".into(),
+                    display_name: "ggvJP".into(),
+                    server: "ppp://example".into(),
+                    ..Default::default()
+                },
+                Outbound {
+                    tag: "jp".into(),
+                    display_name: "ggvJP".into(),
+                    server: "ppp://example".into(),
+                    server_menu: true,
+                    active: true,
+                    ..Default::default()
+                },
+                Outbound {
+                    tag: "us".into(),
+                    display_name: "ggvUS".into(),
+                    server: "ppp://other".into(),
+                    server_menu: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let visible: Vec<_> = snapshot
+            .outbounds
+            .iter()
+            .filter(|item| snapshot.is_visible_server_outbound(item))
+            .map(|item| item.display_name.as_str())
+            .collect();
+        assert_eq!(visible, ["ggvJP", "ggvUS"]);
+    }
+
+    #[test]
+    fn standalone_primary_remains_selectable() {
+        let snapshot = Snapshot {
+            outbounds: vec![Outbound {
+                tag: "main".into(),
+                display_name: "home".into(),
+                server: "ppp://example".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(snapshot.is_visible_server_outbound(&snapshot.outbounds[0]));
     }
 }

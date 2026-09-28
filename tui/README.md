@@ -1,7 +1,16 @@
 # ppp-tui — Rust native desktop client for openppp2
 
+> **暂时停用为主入口**：桌面控制迁移到 [网页 + C++ 宿主](../web/README.md)，Rust egui、Slint、TUI/CLI 源码保留用于参考与回退。以下为旧入口文档。
+
 独立 Rust 原生窗口客户端。Release 构建将 C++ 核心静态链接进 TUI/CLI，窗口和终端
 直接通过稳定 C ABI 控制同一进程内的核心；连接已有核心时仍支持本地 JSON-RPC。
+
+另有实验性 Slint 窗口入口 `ppp-tui-slint.exe`，与现有 `ppp-tui.exe` 共用
+`designs/slint-desktop/openppp2.slint` 中的界面源稿。可用
+`cargo build --features slint-ui --bin ppp-tui-slint` 单独构建。它已接入设置保存、
+服务器配置选择与延迟探测、客户端/代理/服务端模式、核心启动/停止、连接已有核心、
+RPC 快照、运行时出口切换、日志和分流设置。两个桌面窗口可以同时打开，但旧版窗口仍运行时
+Slint 入口会阻止启动第二个本地核心。
 
 ## 构建
 
@@ -28,6 +37,8 @@ cargo build --release
 .\build-standalone.ps1 -CoreConfiguration Release
 # 当前只有 Debug 核心时：
 .\build-standalone.ps1 -CoreConfiguration Debug
+# 构建 Slint 窗口入口：
+.\build-standalone.ps1 -Slint
 ```
 
 发布时只需要 TUI/CLI 可执行文件、驱动和用户自己的配置/规则文件，不需要另行分发
@@ -92,7 +103,7 @@ tui\target\release\ppp-tui.exe
 
 “启动命令接口”提供启动模式（`client` 客户端、`proxy` 无 TUN/无监听的目录或控制模式、
 `server` 服务端）、配置文件、服务器目录（默认 `./config`）、TUN IP/网关/掩码、
-TUN Host/VNet/Static/Flash、TCP/IP CC（auto/lwIP/ctcp）、MUX 通道与加速、链路重连、Block QUIC、分流模式、
+TUN Host/VNet、静态 UDP 传输、QoS 标记、TCP/IP 栈（auto/lwIP/ctcp）、MUX 通道与加速选项、连续连接失败重启阈值、UDP/443 屏蔽、分流模式、
 HTTP/SOCKS 端口和核心日志文件路径；同时可设置 TUI 日志文件。所有路径字段保存和
 显示为 `/`，Windows 路径仍可读取。核心默认值不会重复写入命令；只有修改后的值
 才会出现在“启动命令预览”中。客户端 TUN 模式会显示 UAC 盾牌提示，Proxy 和服务端
@@ -171,11 +182,23 @@ ppp-tui-cli restart --rpc $rpc --token $token
 `--log-level=info` 或 `--log-level=debug`，也可以在 TUI 设置页运行时调整；`--log-file` 在
 Release 和 Debug 核心中都有效。
 
-`TCP/IP CC` 设置对应核心的 `--lwip` 参数：`auto` 不传参数，保留核心的平台/驱动默认值；
+`TCP/IP 栈` 设置对应核心的 `--lwip` 参数：`auto` 不传参数，保留核心的平台/驱动默认值；
 `lwIP` 传 `--lwip=yes`，使用内置 lwIP 协议栈；`ctcp` 传 `--lwip=no`，使用核心的非
 lwIP TCP 路径。当前默认建议使用 `auto`：Windows 使用 Wintun 时默认走 `ctcp`，使用 TAP
 时默认走 `lwIP`；Linux/macOS 默认走 `ctcp`。该选项只对客户端 TUN 模式生效，Proxy/Server
 模式不会创建 TUN。
+
+几个容易误解的参数：`--tun-static` 启用所选服务器配置中的 `udp.static` 静态 UDP 通道，
+不负责静态分配 TUN 地址；多出口下各出口分别使用自己的静态服务器、会话和聚合器。
+`--tun-flash` 为核心隧道流量设置
+IP QoS/TOS 标记，不是刷新网络状态。`--tun-mux-acceleration` 是位选项：0 关闭、1 远端、
+2 本地、3 两端启用。`--block-quic` 会丢弃客户端 TUN 中发往 UDP/443 的流量，应用是否
+回退到 TCP 由应用自身决定。
+
+`--link-restart=N` 表示主出口连续连接失败达到 N 次后重启核心，首次连接失败也计数；
+成功建立连接后计数清零，已建立会话断开本身不计为连接失败。0 或留空关闭该策略。
+分流出口的失败不会触发整个核心重启，切换主出口时重新统计。达到阈值的请求会保留到
+核心完成重启。TUI/CLI 将这类主动重启与异常退出区分，主动重启不消耗三次异常恢复额度。
 
 启动设置页还覆盖核心的 DNS、实时调度、自动重启、物理网卡/网关、TUN 适配器和平台专用
 参数（Windows 驱动与 DHCP 租约、Linux 路由保护/分流网卡、Linux/macOS SSMT 与混杂模式）。

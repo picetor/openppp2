@@ -40,6 +40,7 @@ mod enabled {
             error_buffer_size: usize,
         ) -> c_int;
         fn ppp_core_is_running(handle: *mut RawCoreHandle) -> c_int;
+        fn ppp_core_get_exit_reason(handle: *mut RawCoreHandle) -> c_int;
         fn ppp_core_stop(
             handle: *mut RawCoreHandle,
             error_buffer: *mut c_char,
@@ -172,6 +173,11 @@ mod enabled {
 
         pub fn is_running(&self) -> bool {
             unsafe { ppp_core_is_running(self.raw.as_ptr()) != 0 }
+        }
+
+        pub fn restart_requested(&self) -> bool {
+            // PPP_CORE_EXIT_RESTART_REQUESTED; published only after cleanup.
+            unsafe { ppp_core_get_exit_reason(self.raw.as_ptr()) == 2 }
         }
 
         pub fn stop(&self) -> Result<()> {

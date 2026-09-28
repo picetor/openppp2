@@ -130,8 +130,8 @@ fn interface_rows(
             "Proxy Interlayer".to_string(),
             value_line(&network.proxy_interlayer),
         ));
-        rows.push(("TCP/IP CC".to_string(), value_line(&network.tcp_ip_cc)));
-        rows.push(("Block QUIC".to_string(), value_line(&network.block_quic)));
+        rows.push(("TCP/IP 栈".to_string(), value_line(&network.tcp_ip_cc)));
+        rows.push(("UDP/443 屏蔽".to_string(), value_line(&network.block_quic)));
         rows.push(("Mux State".to_string(), value_line(&network.mux_state)));
         rows.push(("Link State".to_string(), value_line(&network.link_state)));
     }

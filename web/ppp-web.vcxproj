@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{73B8A33C-F4BC-40EC-83FA-D973CE47CC50}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props"/>
+ <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props"/>
+ <PropertyGroup><OutDir>$(ProjectDir)dist\</OutDir><IntDir>$(ProjectDir)obj\</IntDir><TargetName>ppp-web</TargetName><VcpkgEnabled>false</VcpkgEnabled></PropertyGroup>
+ <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization><EnableEnhancedInstructionSet>AdvancedVectorExtensions</EnableEnhancedInstructionSet><AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NDEBUG;FUNCTION;__SIMD__;NOMINMAX;JEMALLOC;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0A00;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..;$(ProjectDir)..\common\json\include;$(ProjectDir)..\common;$(ProjectDir)..\common\lwip\include;$(ProjectDir)..\common\lwip\my;$(ProjectDir)..\..\vcpkg_installed\x64-windows-static\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+ <Link><SubSystem>Windows</SubSystem><UACExecutionLevel>AsInvoker</UACExecutionLevel><AdditionalLibraryDirectories>$(ProjectDir)..\x64\Release;$(ProjectDir)..\..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>ppp-core.lib;libssl.lib;libcrypto.lib;jemalloc_s.lib;boost_context-vc145-mt-x64-1_91.lib;boost_coroutine-vc145-mt-x64-1_91.lib;boost_thread-vc145-mt-x64-1_91.lib;boost_filesystem-vc145-mt-x64-1_91.lib;ws2_32.lib;iphlpapi.lib;shlwapi.lib;qwave.lib;pdh.lib;winmm.lib;wbemuuid.lib;shell32.lib;crypt32.lib;propsys.lib;dbghelp.lib;rpcrt4.lib;ole32.lib;comsuppw.lib;setupapi.lib;fwpuclnt.lib;netapi32.lib;wininet.lib;cryptui.lib;advapi32.lib;secur32.lib;bcrypt.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
+ <ItemGroup><ClCompile Include="host.cpp"/></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets"/>
+</Project>

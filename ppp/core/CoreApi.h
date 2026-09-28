@@ -20,6 +20,13 @@ extern "C" {
 
 typedef struct ppp_core_handle ppp_core_handle;
 
+typedef enum ppp_core_exit_reason {
+    PPP_CORE_EXIT_NONE = 0,
+    PPP_CORE_EXIT_STOPPED = 1,
+    PPP_CORE_EXIT_RESTART_REQUESTED = 2,
+    PPP_CORE_EXIT_FAILED = 3
+} ppp_core_exit_reason;
+
 typedef void (*ppp_core_log_callback)(
     void* user_data,
     const char* level,
@@ -69,6 +76,11 @@ PPP_CORE_API int ppp_core_set_log_level(
 // front-end to detect an unexpected in-process shutdown without polling a
 // child-process handle.
 PPP_CORE_API int ppp_core_is_running(ppp_core_handle* handle);
+
+// Published after executor shutdown and network cleanup; NONE until finished.
+// Hosts should restart RESTART_REQUESTED without consuming crash-recovery retries.
+// The value belongs to this handle and remains available until destroy().
+PPP_CORE_API ppp_core_exit_reason ppp_core_get_exit_reason(ppp_core_handle* handle);
 
 // Requests a synchronous network cleanup and waits for the core executor to
 // finish.  The call is idempotent.  Returns non-zero when cleanup completed.

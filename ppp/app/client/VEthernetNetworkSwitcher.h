@@ -17,6 +17,7 @@
 #include <ppp/app/protocol/VirtualEthernetInformation.h>
 #include <ppp/app/protocol/VirtualEthernetLogger.h>
 #include <ppp/app/client/dns/Rule.h>
+#include <ppp/app/client/LinkRestartPolicy.h>
 #include <ppp/app/client/geo/GeoRuleEngine.h>
 #include <ppp/app/client/proxys/VEthernetHttpProxySwitcher.h>
 #include <ppp/app/client/proxys/VEthernetSocksProxySwitcher.h>
@@ -201,9 +202,14 @@ namespace ppp {
                 RouteInformationTablePtr                                            GetRib()                     noexcept { return rib_; }
                 ForwardInformationTablePtr                                          GetFib()                     noexcept { return fib_; }
                 IForwardingPtr                                                      GetForwarding()              noexcept { return forwarding_; }
-                std::shared_ptr<aggligator::aggligator>                             GetAggligator()              noexcept { return aggligator_; }
+                std::shared_ptr<aggligator::aggligator>                             GetAggligator()              noexcept;
                 bool                                                                IsBlockQUIC()                noexcept { return block_quic_; }
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
+                // Configure before Open(); the request is shared across primary switches.
+                void                                                                SetLinkRestartLimit(int value) noexcept { link_restart_limit_ = value; }
+                int                                                                 GetLinkRestartLimit() const noexcept { return link_restart_limit_; }
+                void                                                                RequestLinkRestart() noexcept { link_restart_request_.Request(); }
+                bool                                                                ConsumeLinkRestartRequest() noexcept { return link_restart_request_.Consume(); }
                 bool                                                                IsBypassIpAddress(const boost::asio::ip::address& ip) noexcept;
                 bool                                                                IsBypassIpAddress6(const boost::asio::ip::address& ip) noexcept;
                 bool                                                                IsDirectProxyHost(const ppp::string& hostname) noexcept;
@@ -436,7 +442,6 @@ namespace ppp {
                 bool                                                                ERORTE(int ack_id) noexcept;
                 
             private:
-                bool                                                                PreparedAggregator() noexcept;
                 bool                                                                IPAddressIsGatewayServer(UInt32 ip, UInt32 gw, UInt32 mask) noexcept { return ip == gw ? true : htonl((ntohl(gw) & ntohl(mask)) + 1) == ip; }
                 bool                                                                EchoOtherServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
                 bool                                                                EchoGatewayServer(const std::shared_ptr<VEthernetExchanger>& exchanger, const std::shared_ptr<IPFrame>& packet, const std::shared_ptr<ppp::threading::BufferswapAllocator>& allocator) noexcept;
@@ -530,11 +535,12 @@ namespace ppp {
                 // without locking (locked write happens only in
                 // CompletePendingOutboundSwitch / constructor).
                 std::atomic<bool>                                                   prefer_ipv4_ = false;
+                int                                                                 link_restart_limit_ = 0;
+                LinkRestartRequest                                                  link_restart_request_;
 
                 RouteInformationTablePtr                                            rib_;
                 ForwardInformationTablePtr                                          fib_;
                 ppp::string                                                         server_ru_;
-                std::shared_ptr<aggligator::aggligator>                             aggligator_;
                 IForwardingPtr                                                      forwarding_;
                 
 #if !defined(_ANDROID) && !defined(_IPHONE)
