@@ -27,6 +27,7 @@ on:
       - 'android/**'
       - 'go/**'
       - 'tui/**'
+      - 'web/**'
       - '.github/workflows/**'
 
 concurrency:
@@ -322,6 +323,40 @@ jobs:
           Get-ChildItem -LiteralPath $libDestination -File -Filter '*.lib' |
             Copy-Item -Destination (Join-Path $coreBuildDir 'deps') -Force
 
+          # ppp-web is the Windows x64 desktop entry point. It links the
+          # in-process core library built above and packages its static web UI
+          # under web/dist, so no Rust, Node.js or browser runtime is shipped.
+          $webDist = $null
+          if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') {
+            Write-Output "=== Building ppp-web (Release|x64) ==="
+            & "${{ github.workspace }}\web\build.ps1" -SkipCore
+            if ($LASTEXITCODE -ne 0) {
+              throw "ppp-web build failed with exit code $LASTEXITCODE"
+            }
+
+            $webDist = "${{ github.workspace }}\web\dist"
+            $requiredWebOutputs = @(
+              (Join-Path $webDist 'ppp-web.exe'),
+              (Join-Path $webDist 'web\index.html'),
+              (Join-Path $webDist 'web\style.css'),
+              (Join-Path $webDist 'web\app.js')
+            )
+            foreach ($output in $requiredWebOutputs) {
+              if (-not (Test-Path -LiteralPath $output)) {
+                throw "Required ppp-web output was not produced: $output"
+              }
+            }
+
+            $webTests = @(
+              Get-ChildItem -LiteralPath "${{ github.workspace }}\web\tests" -File -Filter '*.test.cjs' |
+                Select-Object -ExpandProperty FullName
+            )
+            node --test $webTests
+            if ($LASTEXITCODE -ne 0) {
+              throw "ppp-web tests failed with exit code $LASTEXITCODE"
+            }
+          }
+
           # Find the Release executable
           $releaseExe = "${{ matrix.platform.msbuild_platform }}\Release\ppp.exe"
           if (-not (Test-Path $releaseExe)) {
@@ -348,6 +383,10 @@ jobs:
           Copy-Item "${{ github.workspace }}\ip.txt" "$PackageDir\"
           Copy-Item "${{ github.workspace }}\ipv6.txt" "$PackageDir\"
           Copy-Item -Recurse "${{ github.workspace }}\Driver" "$PackageDir\Driver"
+          if ($null -ne $webDist) {
+            Copy-Item -LiteralPath (Join-Path $webDist 'ppp-web.exe') -Destination (Join-Path $PackageDir 'ppp-web.exe')
+            Copy-Item -LiteralPath (Join-Path $webDist 'web') -Destination (Join-Path $PackageDir 'web') -Recurse
+          }
 
           $ReleaseArtifactName = "${PackageDir}"
 
