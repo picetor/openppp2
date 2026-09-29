@@ -7,6 +7,5 @@ if(!$msbuild){throw 'MSBuild not found'}
 if(!$SkipCore){& $msbuild "$repo\ppp.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:BuildCoreLibrary=true /p:PreferredToolArchitecture=x64 /m:1 /v:minimal;if($LASTEXITCODE){throw 'Core build failed'}}
 & $msbuild "$PSScriptRoot\ppp-web.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PreferredToolArchitecture=x64 /m:1 /v:minimal
 if($LASTEXITCODE){throw 'Web host build failed'}
-New-Item -ItemType Directory -Path "$PSScriptRoot\dist\web" -Force | Out-Null
-Copy-Item -LiteralPath "$PSScriptRoot\index.html","$PSScriptRoot\style.css","$PSScriptRoot\app.js" -Destination "$PSScriptRoot\dist\web" -Force
+# HTML, CSS, JavaScript and icon.ico are compiled into the executable by resources.rc.
 Write-Host "Built $PSScriptRoot\dist\ppp-web.exe"

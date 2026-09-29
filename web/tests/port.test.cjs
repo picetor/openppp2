@@ -4,9 +4,10 @@ const fs=require('node:fs/promises');
 const path=require('node:path');
 const os=require('node:os');
 const net=require('node:net');
-const {spawn}=require('node:child_process');
+const {spawn,execFile}=require('node:child_process');
+const execFileAsync=require('node:util').promisify(execFile);
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
-test('default 19999 conflict: bind another port and publish its actual URL',{timeout:20000},async()=>{
+test('default 19999 conflict: bind another port, expose tray icon, and exit from tray window',{timeout:30000},async()=>{
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'ppp-web-port-test-'));
  const blocker=net.createServer(s=>s.destroy());
  let ownedBlocker=false;
@@ -24,9 +25,10 @@ test('default 19999 conflict: bind another port and publish its actual URL',{tim
   assert.equal((await call('host.save',{settings:{web_port:'70000'}})).ok,false);
   assert.equal((await call('host.save',{settings:{web_port:'21000'}})).ok,true);
   assert.equal(JSON.parse(await fs.readFile(path.join(directory,'ppp-web.json'),'utf8')).web_port,'21000');
-  assert.equal((await call('host.exit')).ok,true);
+  await execFileAsync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'close-tray.ps1'),'-HostProcessId',String(child.pid)],{windowsHide:true,timeout:15000});
   for(let i=0;i<30&&child.exitCode===null;i++)await pause(100);
-  assert.equal(child.exitCode,0);
+  assert.equal(child.exitCode,0,'Tray close exits the host cleanly');
+  await assert.rejects(fetch(url+'session.js'), 'Tray exit closes the HTTP listener');
   if(ownedBlocker)assert.equal(blocker.listening,true,'Occupying application was not disturbed');
  }finally{if(child.exitCode===null){child.kill();await ended}if(ownedBlocker)await new Promise(r=>blocker.close(r));assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));assert.ok(path.basename(directory).startsWith('ppp-web-port-test-'));await fs.rm(directory,{recursive:true,force:true})}
 });

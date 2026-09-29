@@ -1,0 +1,6 @@
+#include "resources.h"
+IDI_PPP_WEB ICON "../icon.ico"
+IDR_WEB_INDEX RCDATA "index.html"
+IDR_WEB_STYLE RCDATA "style.css"
+IDR_WEB_APP RCDATA "app.js"
+IDR_WEB_FAVICON RCDATA "../icon.ico"

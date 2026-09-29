@@ -14,10 +14,17 @@ test('real C++ HTTP host: auth, paths, settings, core lifecycle and AI/API',{tim
  await fs.writeFile(path.join(dir,'test-server.json'),JSON.stringify(cfg));await fs.writeFile(path.join(dir,'ip.txt'),'127.0.0.0/8\n');
  const settings={working_dir:dir,mode:'proxy',tun_enabled:false,config_path:'./test-server.json',server_dir:'.',proxy_http_port:'0',proxy_socks_port:'0',system_proxy_enabled:false,auto_restart:'0',log_file:'./core.log',rpc_listen:'',rpc_token:'',bypass_mode:'no'};
  await fs.writeFile(path.join(dir,'ppp-web.json'),JSON.stringify(settings));
- const child=spawn(path.join(root,'web/dist/ppp-web.exe'),['--base='+dir,'--port='+port,'--no-browser'],{windowsHide:true,stdio:'ignore'});const exited=new Promise(r=>child.once('exit',r));const url='http://127.0.0.1:'+port;let token;
+ // Exercise the fresh-device distribution: copy ONLY the executable, with no web/ or icon files.
+ const executable=path.join(dir,'ppp-web.exe');
+ await fs.copyFile(path.join(root,'web/dist/ppp-web.exe'),executable);
+ const child=spawn(executable,['--base='+dir,'--port='+port,'--no-browser'],{windowsHide:true,stdio:'ignore'});const exited=new Promise(r=>child.once('exit',r));const url='http://127.0.0.1:'+port;let token;
  try{
   for(let i=0;i<80;i++){try{const r=await fetch(url+'/session.js');if(r.ok){token=JSON.parse((await r.text()).match(/=(.*);/s)[1]);break;}}catch{}await pause(100);}assert.ok(token,'Host is reachable');
   const call=async(method,params={})=>{const r=await fetch(url+'/api/rpc',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({id:1,method,params})});assert.equal(r.status,200);return r.json();};
+  for(const [endpoint,source,type] of [['/','web/index.html','text/html'],['/style.css','web/style.css','text/css'],['/app.js','web/app.js','text/javascript'],['/favicon.ico','icon.ico','image/x-icon']]){
+   const response=await fetch(url+endpoint);assert.equal(response.status,200);assert.ok(response.headers.get('content-type').startsWith(type));
+   assert.deepEqual(Buffer.from(await response.arrayBuffer()),await fs.readFile(path.join(root,source)),'Embedded asset matches source: '+endpoint);
+  }
   let r=await fetch(url+'/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(r.status,401);
   r=await fetch(url+'/api/rpc',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token,Origin:'https://untrusted.example'},body:'{}'});assert.equal(r.status,403);
   const hostCode=await new Promise((resolve,reject)=>{require('node:http').get(url+'/session.js',{headers:{Host:'untrusted.example'}},r=>{r.resume();resolve(r.statusCode)}).on('error',reject)});assert.equal(hostCode,403);

@@ -17,6 +17,8 @@ on:
       - 'main.cpp'
       - 'resource.h'
       - 'resource.rc'
+      - 'icon.ico'
+      - 'ppp.vcxproj'
       - 'glibc_compat.h'
       - 'appsettings.json'
       - 'CMakeLists.txt'
@@ -324,8 +326,8 @@ jobs:
             Copy-Item -Destination (Join-Path $coreBuildDir 'deps') -Force
 
           # ppp-web is the Windows x64 desktop entry point. It links the
-          # in-process core library built above and packages its static web UI
-          # under web/dist, so no Rust, Node.js or browser runtime is shipped.
+          # in-process core library built above; web UI and icons are embedded
+          # in the executable, with no separate web/ directory to distribute.
           $webDist = $null
           if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') {
             Write-Output "=== Building ppp-web (Release|x64) ==="
@@ -336,10 +338,7 @@ jobs:
 
             $webDist = "${{ github.workspace }}\web\dist"
             $requiredWebOutputs = @(
-              (Join-Path $webDist 'ppp-web.exe'),
-              (Join-Path $webDist 'web\index.html'),
-              (Join-Path $webDist 'web\style.css'),
-              (Join-Path $webDist 'web\app.js')
+              (Join-Path $webDist 'ppp-web.exe')
             )
             foreach ($output in $requiredWebOutputs) {
               if (-not (Test-Path -LiteralPath $output)) {
@@ -385,7 +384,6 @@ jobs:
           Copy-Item -Recurse "${{ github.workspace }}\Driver" "$PackageDir\Driver"
           if ($null -ne $webDist) {
             Copy-Item -LiteralPath (Join-Path $webDist 'ppp-web.exe') -Destination (Join-Path $PackageDir 'ppp-web.exe')
-            Copy-Item -LiteralPath (Join-Path $webDist 'web') -Destination (Join-Path $PackageDir 'web') -Recurse
           }
 
           $ReleaseArtifactName = "${PackageDir}"

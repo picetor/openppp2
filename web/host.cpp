@@ -18,13 +18,14 @@
 #include <thread>
 #include <algorithm>
 #include <stdexcept>
+#include "resources.h"
 
 namespace fs = std::filesystem;
 using J = Json::Value;
 static std::atomic<bool> exiting{false};
 static std::mutex stateMutex;
 static ppp_core_handle* core = nullptr;
-static fs::path base, assets, settingsPath, exe;
+static fs::path base, settingsPath, exe;
 static J settings;
 static std::string sessionToken, origin, lastError;
 static int port=19999;
@@ -32,6 +33,17 @@ static int port=19999;
 static std::wstring wide(const std::string& s) { int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),(int)s.size(),nullptr,0); if(!n&&!s.empty())throw std::runtime_error("Invalid UTF-8");std::wstring w(n,0);MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),w.data(),n);return w; }
 static std::string utf8(const std::wstring& s) { int n=WideCharToMultiByte(CP_UTF8,0,s.data(),(int)s.size(),nullptr,0,nullptr,nullptr);std::string r(n,0);WideCharToMultiByte(CP_UTF8,0,s.data(),(int)s.size(),r.data(),n,nullptr,nullptr);return r; }
 static std::string readFile(const fs::path& p) { std::ifstream f(p,std::ios::binary);if(!f)throw std::runtime_error("Cannot read: "+p.u8string());return {std::istreambuf_iterator<char>(f),{}}; }
+static std::string embeddedAsset(const std::string& name) {
+ int id = name=="index.html" ? IDR_WEB_INDEX : name=="app.js" ? IDR_WEB_APP : name=="style.css" ? IDR_WEB_STYLE : name=="favicon.ico" ? IDR_WEB_FAVICON : 0;
+ HMODULE module=GetModuleHandleW(nullptr);
+ HRSRC resource=id ? FindResourceW(module,MAKEINTRESOURCEW(id),RT_RCDATA) : nullptr;
+ if(!resource)throw std::runtime_error("Missing embedded web resource: "+name);
+ HGLOBAL data=LoadResource(module,resource);
+ DWORD size=SizeofResource(module,resource);
+ const char* bytes=data ? static_cast<const char*>(LockResource(data)) : nullptr;
+ if(!bytes||!size)throw std::runtime_error("Cannot load embedded web resource: "+name);
+ return std::string(bytes,size);
+}
 static std::string json(const J& v) { Json::StreamWriterBuilder b;b["indentation"]="";return Json::writeString(b,v).c_str(); }
 static J parse(const std::string& s) { Json::CharReaderBuilder b;std::unique_ptr<Json::CharReader> r(b.newCharReader());J v;Json::String e;if(!r->parse(s.data(),s.data()+s.size(),&v,&e))throw std::runtime_error(std::string("Invalid JSON: ")+e.c_str());return v; }
 static std::string str(const J& v,const char* key,const char* fallback="") { const J& x=v[key];return x.isString()?x.asCString():fallback; }
@@ -77,6 +89,7 @@ static J status() {
 }
 static J dispatch(const std::string& m,const J& p) {
  std::lock_guard<std::mutex> lock(stateMutex);
+ if(exiting)throw std::runtime_error("Host is exiting");
  if(m=="host.status")return status();
  if(m=="host.settings")return settings;
  if(m=="host.save"){if(p["settings"].isMember("web_port")){auto value=str(p["settings"],"web_port");if(value.empty()||value.size()>5||value.find_first_not_of("0123456789")!=std::string::npos||std::stoi(value)<1024||std::stoi(value)>65535)throw std::runtime_error("Web port must be between 1024 and 65535");}if(!p["settings"].isObject())throw std::runtime_error("settings object required");for(auto& k:p["settings"].getMemberNames()){auto v=p["settings"][k];if(!v.isString()&&!v.isBool())throw std::runtime_error("Settings must contain strings or booleans");settings[k]=v;}saveSettings();return settings;}
@@ -107,17 +120,119 @@ static void serve(SOCKET s) {
   while(std::getline(stream,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();auto colon=line.find(':');if(colon==std::string::npos)continue;auto value=line.substr(colon+1);value.erase(0,value.find_first_not_of(" \t"));auto key=lower(line.substr(0,colon));if(headers.count(key))throw std::runtime_error("Duplicate header");headers[key]=value;}
   auto host="127.0.0.1:"+std::to_string(port);if(headers["host"]!=host){respond(s,403,"{\"error\":\"Invalid Host\"}");closesocket(s);return;}
   if((headers.count("origin")&&headers["origin"]!=origin)||headers["sec-fetch-site"]=="cross-site"){respond(s,403,"{\"error\":\"Cross-origin request denied\"}");closesocket(s);return;}
-  if(method=="GET"&&(path=="/"||path=="/index.html"||path=="/app.js"||path=="/style.css"||path=="/session.js")){
-   if(path=="/session.js")respond(s,200,"window.PPP_SESSION="+json(J(sessionToken.c_str()))+";","text/javascript; charset=utf-8");else{auto file=(path=="/"||path=="/index.html")?"index.html":path.substr(1);respond(s,200,readFile(assets/fs::u8path(file)),file=="index.html"?"text/html; charset=utf-8":file=="app.js"?"text/javascript; charset=utf-8":"text/css; charset=utf-8");}
+  if(method=="GET"&&(path=="/"||path=="/index.html"||path=="/app.js"||path=="/style.css"||path=="/favicon.ico"||path=="/session.js")){
+   if(path=="/session.js")respond(s,200,"window.PPP_SESSION="+json(J(sessionToken.c_str()))+";","text/javascript; charset=utf-8");else{auto file=(path=="/"||path=="/index.html")?"index.html":path.substr(1);respond(s,200,embeddedAsset(file),file=="index.html"?"text/html; charset=utf-8":file=="app.js"?"text/javascript; charset=utf-8":file=="favicon.ico"?"image/x-icon":"text/css; charset=utf-8");}
   }else if(method=="POST"&&path=="/api/rpc"){
    if(headers["authorization"]!="Bearer "+sessionToken){respond(s,401,"{\"error\":\"Session expired; reload the page\"}");closesocket(s);return;}
    if(headers.count("transfer-encoding")||headers["content-type"].rfind("application/json",0)!=0)throw std::runtime_error("JSON content required");auto lengthText=headers["content-length"];if(lengthText.empty()||lengthText.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid Content-Length");size_t length=std::stoul(lengthText);if(length>1024*1024)throw std::runtime_error("Body too large");std::string body=request.substr(end+4);while(body.size()<length){int n=recv(s,buf,(int)std::min(sizeof(buf),length-body.size()),0);if(n<=0)throw std::runtime_error("Incomplete body");body.append(buf,n);}auto input=parse(body.substr(0,length));if(!input.isObject()||!input["method"].isString())throw std::runtime_error("method required");J r;r["id"]=input["id"];try{r["result"]=dispatch(input["method"].asCString(),input.get("params",J(Json::objectValue)));r["ok"]=true;}catch(const std::exception& e){r["ok"]=false;r["error"]=e.what();}respond(s,200,json(r));
   }else respond(s,404,"{\"error\":\"Not found\"}");
  }catch(const std::exception& e){J r;r["error"]=e.what();respond(s,400,json(r));}shutdown(s,SD_BOTH);closesocket(s);
 }
+
+// A hidden top-level window receives Explorer restart broadcasts and tray events.
+// Core lifecycle work remains on workers so the tray can respond during startup.
+static constexpr UINT WM_TRAY = WM_APP + 1;
+static constexpr UINT MENU_OPEN = 1001, MENU_EXIT = 1002;
+class TrayHost {
+ HWND window=nullptr;
+ NOTIFYICONDATAW icon{};
+ UINT taskbarCreated=0;
+ std::wstring label=L"PPP Web - 管理面板运行中；核心未启动";
+ bool added=false;
+ void add() {
+  added=Shell_NotifyIconW(NIM_ADD,&icon)!=FALSE;
+  if(added){icon.uVersion=NOTIFYICON_VERSION_4;Shell_NotifyIconW(NIM_SETVERSION,&icon);}
+ }
+ void openPanel() {
+  if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",wide(origin).c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+   MessageBoxW(window,L"无法打开浏览器，请使用托盘提示中的本机管理地址。",L"PPP Web",MB_OK|MB_ICONERROR);
+ }
+ void menu() {
+  HMENU popup=CreatePopupMenu();
+  if(!popup)return;
+  AppendMenuW(popup,MF_STRING|MF_GRAYED,0,label.c_str());
+  AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+  AppendMenuW(popup,MF_STRING,MENU_OPEN,L"打开管理面板");
+  AppendMenuW(popup,MF_STRING,MENU_EXIT,L"退出（停止核心）");
+  SetMenuDefaultItem(popup,MENU_OPEN,FALSE);
+  POINT point{};GetCursorPos(&point);SetForegroundWindow(window);
+  UINT command=TrackPopupMenu(popup,TPM_RETURNCMD|TPM_NONOTIFY|TPM_RIGHTBUTTON,point.x,point.y,0,window,nullptr);
+  DestroyMenu(popup);PostMessageW(window,WM_NULL,0,0);
+  if(command==MENU_OPEN)openPanel();
+  if(command==MENU_EXIT)exiting=true;
+ }
+ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
+  auto self=reinterpret_cast<TrayHost*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+  if(message==WM_NCCREATE){
+   self=static_cast<TrayHost*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);
+   SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));
+  }
+  if(self){
+   if(message==self->taskbarCreated&&self->taskbarCreated){self->add();return 0;}
+   if(message==WM_TRAY){
+    switch(LOWORD(l)){
+     case NIN_SELECT: case NIN_KEYSELECT: self->openPanel();break;
+     case WM_CONTEXTMENU: self->menu();break;
+    }
+    return 0;
+   }
+   if(message==WM_CLOSE){exiting=true;return 0;}
+   if(message==WM_QUERYENDSESSION)return TRUE;
+   if(message==WM_ENDSESSION&&w){exiting=true;return 0;}
+  }
+  return DefWindowProcW(hwnd,message,w,l);
+ }
+public:
+ TrayHost() {
+  taskbarCreated=RegisterWindowMessageW(L"TaskbarCreated");
+  WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"OpenPPP2WebTray";cls.hIcon=LoadIconW(cls.hInstance,MAKEINTRESOURCEW(IDI_PPP_WEB));
+  if(!RegisterClassW(&cls)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)throw std::runtime_error("Cannot register tray window");
+  window=CreateWindowExW(WS_EX_TOOLWINDOW,cls.lpszClassName,L"PPP Web",WS_OVERLAPPED,0,0,0,0,nullptr,nullptr,cls.hInstance,this);
+  if(!window)throw std::runtime_error("Cannot create tray window");
+  icon.cbSize=sizeof(icon);icon.hWnd=window;icon.uID=1;
+  icon.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;icon.uCallbackMessage=WM_TRAY;
+  icon.hIcon=LoadIconW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDI_PPP_WEB));
+  lstrcpynW(icon.szTip,label.c_str(),static_cast<int>(sizeof(icon.szTip)/sizeof(wchar_t)));
+  add();
+  // Explorer may not be ready yet (or absent in a CI session); refresh retries.
+ }
+ ~TrayHost(){if(added)Shell_NotifyIconW(NIM_DELETE,&icon);if(window)DestroyWindow(window);}
+ void refresh() {
+  std::unique_lock<std::mutex> lock(stateMutex,std::try_to_lock);
+  if(!lock.owns_lock())label=L"PPP Web - 管理面板运行中；核心操作中";
+  else {
+   label=L"PPP Web - 管理面板运行中；核心未启动";
+   if(!lastError.empty())label=L"PPP Web - 核心异常，请打开面板";
+   if(core&&ppp_core_is_running(core)){
+    try{
+     auto health=callCore("get_health",J(Json::objectValue));
+     label=health["ready"].asBool()&&health["healthy"].asBool()
+      ? L"PPP Web - 核心就绪" : L"PPP Web - 核心运行中（连接中或待检查）";
+    }catch(...){label=L"PPP Web - 核心状态暂不可用";}
+   }
+  }
+  auto tip=label+L"\n"+wide(origin);
+  lstrcpynW(icon.szTip,tip.c_str(),static_cast<int>(sizeof(icon.szTip)/sizeof(wchar_t)));
+  if(added&&!Shell_NotifyIconW(NIM_MODIFY,&icon))added=false;
+  if(!added)add();
+ }
+ void run() {
+  ULONGLONG next=0;
+  while(!exiting){
+   MSG message{};
+   while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
+    if(message.message==WM_QUIT){exiting=true;break;}
+    TranslateMessage(&message);DispatchMessageW(&message);
+   }
+   auto now=GetTickCount64();if(now>=next){refresh();next=now+1000;}
+   MsgWaitForMultipleObjects(0,nullptr,FALSE,100,QS_ALLINPUT);
+  }
+ }
+};
+
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
  try{
-  wchar_t file[32768];GetModuleFileNameW(nullptr,file,32768);exe=fs::path(file);base=exe.parent_path();assets=base/L"web";bool open=true;bool explicitPort=false;int argc=0;LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<argc;++i){std::wstring a=argv[i];if(a.rfind(L"--base=",0)==0)base=fs::absolute(a.substr(7));else if(a.rfind(L"--port=",0)==0){port=std::stoi(a.substr(7));explicitPort=true;}else if(a==L"--no-browser")open=false;}LocalFree(argv);if(port<1024||port>65535)throw std::runtime_error("Invalid port");settingsPath=base/L"ppp-web.json";defaults();if(!explicitPort){auto saved=str(settings,"web_port","19999");if(saved.empty()||saved.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid saved web port");port=std::stoi(saved);if(port<1024||port>65535)throw std::runtime_error("Web port must be between 1024 and 65535");}origin="http://127.0.0.1:"+std::to_string(port);
+  wchar_t file[32768];GetModuleFileNameW(nullptr,file,32768);exe=fs::path(file);base=exe.parent_path();bool open=true;bool explicitPort=false;int argc=0;LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<argc;++i){std::wstring a=argv[i];if(a.rfind(L"--base=",0)==0)base=fs::absolute(a.substr(7));else if(a.rfind(L"--port=",0)==0){port=std::stoi(a.substr(7));explicitPort=true;}else if(a==L"--no-browser")open=false;}LocalFree(argv);if(port<1024||port>65535)throw std::runtime_error("Invalid port");settingsPath=base/L"ppp-web.json";defaults();if(!explicitPort){auto saved=str(settings,"web_port","19999");if(saved.empty()||saved.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid saved web port");port=std::stoi(saved);if(port<1024||port>65535)throw std::runtime_error("Web port must be between 1024 and 65535");}origin="http://127.0.0.1:"+std::to_string(port);
   unsigned char random[32];if(BCryptGenRandom(nullptr,random,sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG)!=0)throw std::runtime_error("Random generator failed");const char* hex="0123456789abcdef";for(auto c:random){sessionToken+=hex[c>>4];sessionToken+=hex[c&15];}
   WSADATA ws;if(WSAStartup(MAKEWORD(2,2),&ws))throw std::runtime_error("Winsock startup failed");
   SOCKET listener=INVALID_SOCKET;
@@ -141,10 +256,15 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
   origin="http://127.0.0.1:"+std::to_string(port);
   // This convenience file contains no token and lets no-browser users find the URL.
   {std::ofstream endpoint(base/L"ppp-web-address.txt",std::ios::trunc);if(endpoint)endpoint<<origin<<"/\n";}
-  if(!fs::exists(assets/L"index.html"))throw std::runtime_error("Missing web/index.html next to ppp-web.exe");if(open)ShellExecuteW(nullptr,L"open",wide(origin).c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+  for(const char* asset:{"index.html","style.css","app.js","favicon.ico"})embeddedAsset(asset);
+  TrayHost tray;
+  // Multiple accept workers must never block after another worker consumes a connection.
+  u_long nonblocking=1;if(ioctlsocket(listener,FIONBIO,&nonblocking)!=0)throw std::runtime_error("Cannot configure web listener");
+  if(open)ShellExecuteW(nullptr,L"open",wide(origin).c_str(),nullptr,nullptr,SW_SHOWNORMAL);
   // Bounded workers keep status responsive and slow clients cannot create unlimited threads.
-  std::vector<std::thread> workers;for(int i=0;i<4;++i)workers.emplace_back([listener]{while(!exiting){fd_set set;FD_ZERO(&set);FD_SET(listener,&set);timeval wait={0,250000};if(select(0,&set,nullptr,nullptr,&wait)>0){SOCKET s=accept(listener,nullptr,nullptr);if(s!=INVALID_SOCKET)serve(s);}}});
-  while(!exiting){Sleep(250);std::lock_guard<std::mutex> lock(stateMutex);if(core&&!ppp_core_is_running(core)){auto reason=ppp_core_get_exit_reason(core);ppp_core_destroy(core);core=nullptr;if(reason==PPP_CORE_EXIT_RESTART_REQUESTED){try{startCore();}catch(const std::exception& e){lastError=e.what();}}else if(reason==PPP_CORE_EXIT_FAILED)lastError="Core exited unexpectedly; check the core log";}}
+  std::vector<std::thread> workers;for(int i=0;i<4;++i)workers.emplace_back([listener]{while(!exiting){fd_set set;FD_ZERO(&set);FD_SET(listener,&set);timeval wait={0,250000};if(select(0,&set,nullptr,nullptr,&wait)>0){SOCKET s=accept(listener,nullptr,nullptr);if(s!=INVALID_SOCKET){u_long blocking=0;if(ioctlsocket(s,FIONBIO,&blocking)==0)serve(s);else closesocket(s);}}}});
+  workers.emplace_back([]{while(!exiting){Sleep(250);std::lock_guard<std::mutex> lock(stateMutex);if(exiting)break;if(core&&!ppp_core_is_running(core)){auto reason=ppp_core_get_exit_reason(core);ppp_core_destroy(core);core=nullptr;if(reason==PPP_CORE_EXIT_RESTART_REQUESTED){try{startCore();}catch(const std::exception& e){lastError=e.what();}}else if(reason==PPP_CORE_EXIT_FAILED)lastError="Core exited unexpectedly; check the core log";}}});
+  tray.run();
   closesocket(listener);for(auto& thread:workers)thread.join();stopCore();WSACleanup();return 0;
  }catch(const std::exception& e){MessageBoxW(nullptr,wide(e.what()).c_str(),L"PPP Web",MB_OK|MB_ICONERROR);return 1;}
 }
