@@ -57,6 +57,9 @@
     <ClCompile Include="windows\ppp\win32\network\NetworkInterface.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="windows\ppp\win32\network\DnsLifecycle.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="windows\ppp\win32\Win32Variant.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

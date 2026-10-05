@@ -633,8 +633,6 @@ namespace ppp {
                 AllNicDnsServerAddresses                                            ni_dns_servers_;
                 ppp::unordered_map<int, ppp::vector<ppp::string>>                   ni_dns_servers_v6_;
                 int                                                                 ni_dns_interface_index_ = -1;
-                bool                                                                ni_dns_ipv4_auto_ = true;
-                bool                                                                ni_dns_ipv6_auto_ = true;
                 bool                                                                ni_dns_ipv4_touched_ = false;
                 bool                                                                ni_dns_ipv6_touched_ = false;
                 ppp::unordered_set<int>                                             ni_router_discovery_disabled_v6_;

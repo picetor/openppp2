@@ -133,6 +133,12 @@ namespace ppp
             int                                                 GetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
             int                                                 SetAllNicsDnsAddressesV6(ppp::unordered_map<int, ppp::vector<ppp::string>>& dns_map) noexcept;
             bool                                                ClearDnsAddresses(int interface_index) noexcept;
+            // Physical-uplink DNS lifecycle. Journal by adapter GUID before any
+            // override; automatic/static mode is independent of effective DNS.
+            bool                                                PinDnsToLoopback(int interface_index, int family) noexcept;
+            bool                                                RefreshDnsLoopback(int interface_index, int family) noexcept;
+            bool                                                RestoreDnsTakeover(int interface_index, int family) noexcept;
+            bool                                                RecoverDnsTakeovers() noexcept;
             bool                                                SetIPv6PrefixPolicy(const ppp::string& prefix, int precedence, int label) noexcept;
             bool                                                SetIPv6PrefixPolicyPreferULA() noexcept;
             bool                                                RestoreIPv6PrefixPolicyULA() noexcept;

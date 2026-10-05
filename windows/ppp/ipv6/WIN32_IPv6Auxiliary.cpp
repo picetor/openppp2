@@ -305,41 +305,8 @@ namespace ppp {
                         state.OriginalDnsServers = current_ni->DnsAddresses;
                     }
 
-                    // Capture IPv6 DNS only for the current IPv6 uplink.  The WMI
-                    // DNSServerSearchOrder tells us whether the interface was using
-                    // manually configured DNS; an empty list means automatic DNS.
-                    state.OriginalDnsInterfaceIndex = -1;
-                    state.OriginalDnsV6Auto = true;
-                    state.OriginalDnsV6Changed = false;
-                    state.OriginalDnsV6Servers.clear();
-                    state.OriginalAllDnsServers.clear();
-
-                    boost::asio::ip::address default_gateway;
-                    int uplink_index = context.UnderlyingInterfaceIndex;
-                    if (uplink_index < 0) {
-                        ppp::win32::network::GetIPv6DefaultGateway(default_gateway, uplink_index);
-                    }
-                    if (uplink_index >= 0 && uplink_index != context.InterfaceIndex) {
-                        state.OriginalDnsInterfaceIndex = uplink_index;
-
-                        if (auto uplink_ni = ppp::win32::network::GetNetworkInterfaceByInterfaceIndex(uplink_index);
-                            NULLPTR != uplink_ni) {
-                            for (const ppp::string& dns : uplink_ni->DnsAddresses) {
-                                IN6_ADDR parsed;
-                                if (::inet_pton(AF_INET6, dns.c_str(), &parsed) == 1) {
-                                    state.OriginalDnsV6Servers.emplace_back(dns);
-                                }
-                            }
-                        }
-                        state.OriginalDnsV6Auto = state.OriginalDnsV6Servers.empty();
-
-                        ppp::unordered_map<int, ppp::vector<ppp::string>> effective_dns;
-                        ppp::win32::network::GetAllNicsDnsAddressesV6(effective_dns);
-                        auto it = effective_dns.find(uplink_index);
-                        if (it != effective_dns.end() && !it->second.empty()) {
-                            state.OriginalAllDnsServers[uplink_index] = it->second;
-                        }
-                    }
+                    // The physical adapter's automatic/static DNS state is
+                    // captured by the takeover journal, separately from this lease.
                 }
 
                 bool ApplyClientAddress(const ::ppp::ipv6::auxiliary::ClientContext& context, const boost::asio::ip::address& address, int prefix_length, bool gua_mode, ::ppp::ipv6::auxiliary::ClientState& state) noexcept {
@@ -557,14 +524,8 @@ namespace ppp {
                         return ppp::diagnostics::SetLastError(ppp::diagnostics::ErrorCode::IPv6ClientDnsApplyFailed);
                     }
 
-                    // Clear IPv6 DNS only on the selected underlying uplink.  Other
-                    // WLAN and virtual adapters keep their original configuration.
-                    for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
-                        if (if_index != context.InterfaceIndex && !servers.empty()) {
-                            state.OriginalDnsV6Changed = true;
-                            ppp::win32::network::ClearDnsAddressesV6(if_index);
-                        }
-                    }
+                    // Physical-uplink DNS is owned by the takeover journal, not
+                    // by IPv6 lease configuration.
                     state.DnsApplied = true;
                     state.DnsServers = dns_servers;
                     ppp::tap::TapWindows::DnsFlushResolverCache();
@@ -673,19 +634,6 @@ namespace ppp {
 
                     if (state.DnsApplied) {
                         ppp::win32::network::SetDnsAddressesV6(context.InterfaceIndex, state.OriginalDnsServers);
-
-                        if (state.OriginalDnsV6Changed &&
-                            state.OriginalDnsInterfaceIndex >= 0 &&
-                            state.OriginalDnsInterfaceIndex != context.InterfaceIndex) {
-                            if (state.OriginalDnsV6Auto) {
-                                ppp::win32::network::ClearDnsAddressesV6(state.OriginalDnsInterfaceIndex);
-                            }
-                            elif(!state.OriginalDnsV6Servers.empty()) {
-                                ppp::win32::network::SetDnsAddressesV6(
-                                    state.OriginalDnsInterfaceIndex,
-                                    state.OriginalDnsV6Servers);
-                            }
-                        }
 
                         ppp::tap::TapWindows::DnsFlushResolverCache();
                     }

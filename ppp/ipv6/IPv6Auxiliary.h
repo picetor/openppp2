@@ -42,11 +42,6 @@ namespace ppp {
                 ppp::string                                                   OriginalDefaultRouteInterface;
                 ppp::vector<ppp::string>                                      DnsServers;
                 ppp::vector<ppp::string>                                      OriginalDnsServers;
-                ppp::unordered_map<int, ppp::vector<ppp::string>>              OriginalAllDnsServers;
-                int                                                           OriginalDnsInterfaceIndex = -1;
-                bool                                                          OriginalDnsV6Auto = true;
-                bool                                                          OriginalDnsV6Changed = false;
-                ppp::vector<ppp::string>                                      OriginalDnsV6Servers;
                 ppp::vector<ppp::string>                                      OriginalDefaultRoutes;
                 ppp::string                                                   OriginalDnsConfiguration;
                 ppp::string                                                   OriginalDefaultRoute;
@@ -71,11 +66,6 @@ namespace ppp {
                     OriginalDefaultRouteInterface.clear();
                     DnsServers.clear();
                     OriginalDnsServers.clear();
-                    OriginalAllDnsServers.clear();
-                    OriginalDnsInterfaceIndex = -1;
-                    OriginalDnsV6Auto = true;
-                    OriginalDnsV6Changed = false;
-                    OriginalDnsV6Servers.clear();
                     OriginalDefaultRoutes.clear();
                     OriginalDnsConfiguration.clear();
                     OriginalDefaultRoute.clear();

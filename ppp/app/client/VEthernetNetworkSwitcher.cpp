@@ -3428,19 +3428,13 @@ namespace ppp {
                     // Clear IPv6 DNS on the TAP interface itself (in case a previous
                     // ApplyClientDns call left stale IPv6 DNS servers behind).
                     ppp::win32::network::ClearDnsAddressesV6(ctx.InterfaceIndex);
-                    // Clear IPv6 DNS only on the selected underlying uplink.  Other
-                    // WLAN, virtual, and disconnected adapters keep their settings.
-                    for (auto& [if_index, servers] : state.OriginalAllDnsServers) {
-                        if (if_index != ctx.InterfaceIndex && !servers.empty()) {
-                            state.OriginalDnsV6Changed = true;
-                            ppp::win32::network::ClearDnsAddressesV6(if_index);
-                        }
-                    }
+                    // Physical-uplink DNS is handled transactionally by
+                    // ApplyNetworkTakeover; do not destroy its original mode here.
                     state.DnsApplied = true;
                     state.DnsServers = std::move(dns_servers);
                     ppp::tap::TapWindows::DnsFlushResolverCache();
-                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TAP + selected uplink IPv6 DNS (prefer IPv4), ifIndex=%d",
-                        state.OriginalDnsInterfaceIndex);
+                    LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: cleared TUN IPv6 DNS (prefer IPv4), ifIndex=%d",
+                        ctx.InterfaceIndex);
                 }
 #else
                 if (!state.DnsApplied) {
@@ -4981,6 +4975,10 @@ namespace ppp {
                 // This is needed in both TUN and proxy-only modes: proxy-only still
                 // requires the physical NIC info for IPv6 server route pinning.
 #if defined(_WIN32)
+                if (!proxy_only_ && !ppp::win32::network::RecoverDnsTakeovers()) {
+                    LOG_ERROR("VEthernetNetworkSwitcher::Open: previous DNS takeover could not be recovered");
+                    return false;
+                }
                 underlying_ni_ = Windows_GetUnderlyingNetowrkInterface(tap, preferred_nic_);
 #else
                 underlying_ni_ = Unix_GetUnderlyingNetowrkInterface(tap, preferred_nic_);
@@ -5460,15 +5458,13 @@ namespace ppp {
                     }
                     int tap_if_index = tun_ni->Index;
                     int dns_if_index = tap_if_index;
-                    // Snapshot the original DNS only for the selected underlying NIC.  The
-                    // WMI-backed NetworkInterface::DnsAddresses list contains the configured
-                    // DNS search order: empty means automatic DNS, non-empty means static DNS.
+                    // Effective DNS is used only to decide which families need a
+                    // loopback proxy. The persistent manual override is captured
+                    // by PinDnsToLoopback before changing the physical adapter.
                     const int managed_dns_if_index =
                         underlying_ni_ && underlying_ni_->Index >= 0 && underlying_ni_->Index != tap_if_index
                             ? underlying_ni_->Index : -1;
                     ni_dns_interface_index_ = managed_dns_if_index;
-                    ni_dns_ipv4_auto_ = true;
-                    ni_dns_ipv6_auto_ = true;
                     ni_dns_ipv4_touched_ = false;
                     ni_dns_ipv6_touched_ = false;
 
@@ -5492,13 +5488,6 @@ namespace ppp {
                         }
                     }
 
-                    if (!original_dns_v4.empty()) {
-                        ni_dns_ipv4_auto_ = false;
-                        ni_dns_servers_[managed_dns_if_index] = original_dns_v4;
-                    }
-                    if (!original_dns_v6.empty()) {
-                        ni_dns_ipv6_auto_ = false;
-                    }
                     ni_dns_servers_[tap_if_index] = tun_ni->DnsAddresses;
 
                     const auto target_dns_v4 = all_dns_v4.find(managed_dns_if_index);
@@ -5516,9 +5505,6 @@ namespace ppp {
                     if (auto tap_dns_v6 = all_dns_v6.find(tap_if_index);
                         tap_dns_v6 != all_dns_v6.end() && !tap_dns_v6->second.empty()) {
                         ni_dns_servers_v6_[tap_if_index] = tap_dns_v6->second;
-                    }
-                    if (!original_dns_v6.empty()) {
-                        ni_dns_servers_v6_[managed_dns_if_index] = original_dns_v6;
                     }
 
                     const auto target_dns_v6 = all_dns_v6.find(managed_dns_if_index);
@@ -5538,12 +5524,8 @@ namespace ppp {
                             ppp::win32::network::SetAllNicsDnsAddressesV6(restore_dns6);
                         }
                         if (managed_if_index >= 0 && ni_dns_ipv6_touched_) {
-                            if (ni_dns_ipv6_auto_) {
-                                ppp::win32::network::ClearDnsAddressesV6(managed_if_index);
-                            }
-                            else if (auto it = ni_dns_servers_v6_.find(managed_if_index);
-                                it != ni_dns_servers_v6_.end() && !it->second.empty()) {
-                                ppp::win32::network::SetDnsAddressesV6(managed_if_index, it->second);
+                            if (!ppp::win32::network::RestoreDnsTakeover(managed_if_index, AF_INET6)) {
+                                LOG_ERROR("Windows DNS rollback failed; recovery journal retained, ifIndex=%d family=IPv6", managed_if_index);
                             }
                         }
 
@@ -5553,24 +5535,14 @@ namespace ppp {
                             ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
                         }
                         if (managed_if_index >= 0 && ni_dns_ipv4_touched_) {
-                            if (ni_dns_ipv4_auto_) {
-                                ppp::win32::network::ClearDnsAddresses(managed_if_index);
-                            }
-                            else if (auto it = ni_dns_servers_.find(managed_if_index);
-                                it != ni_dns_servers_.end() && !it->second.empty()) {
-                                ppp::vector<ppp::string> servers;
-                                for (const auto& address : it->second) {
-                                    servers.emplace_back(address.to_string());
-                                }
-                                ppp::win32::network::SetDnsAddresses(managed_if_index, servers);
+                            if (!ppp::win32::network::RestoreDnsTakeover(managed_if_index, AF_INET)) {
+                                LOG_ERROR("Windows DNS rollback failed; recovery journal retained, ifIndex=%d family=IPv4", managed_if_index);
                             }
                         }
 
                         ni_dns_servers_v6_.clear();
                         ni_dns_servers_.clear();
                         ni_dns_interface_index_ = -1;
-                        ni_dns_ipv4_auto_ = true;
-                        ni_dns_ipv6_auto_ = true;
                         ni_dns_ipv4_touched_ = false;
                         ni_dns_ipv6_touched_ = false;
                         StopLocalDnsProxy();
@@ -5613,9 +5585,9 @@ namespace ppp {
 
                         // Pin only the selected underlying NIC to the local DNS proxy.
                         if (need_loopback_v4) {
-                            if (ppp::win32::network::SetDnsAddresses(managed_dns_if_index, { "127.0.0.1" })) {
+                            ni_dns_ipv4_touched_ = true; // Also roll back partial netsh failures.
+                            if (ppp::win32::network::PinDnsToLoopback(managed_dns_if_index, AF_INET)) {
                                 non_tap_v4_indexes.emplace_back(managed_dns_if_index);
-                                ni_dns_ipv4_touched_ = true;
                             }
                             else {
                                 LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv4 DNS to 127.0.0.1, ifIndex=%d", managed_dns_if_index);
@@ -5625,9 +5597,9 @@ namespace ppp {
                         }
 
                         if (need_loopback_v6) {
-                            if (ppp::win32::network::SetDnsAddressesV6(managed_dns_if_index, { "::1" })) {
+                            ni_dns_ipv6_touched_ = true;
+                            if (ppp::win32::network::PinDnsToLoopback(managed_dns_if_index, AF_INET6)) {
                                 non_tap_v6_indexes.emplace_back(managed_dns_if_index);
-                                ni_dns_ipv6_touched_ = true;
                             }
                             else {
                                 LOG_ERROR("VEthernetNetworkSwitcher::ApplyNetworkTakeover: cannot pin IPv6 DNS to ::1, ifIndex=%d", managed_dns_if_index);
@@ -5664,14 +5636,16 @@ namespace ppp {
                                             // NIC pinned to the local proxy so the
                                             // tunnel resolver always wins the race.
                                             for (int if_index : non_tap_v4_indexes) {
-                                                ppp::win32::network::SetDnsAddresses(if_index, { "127.0.0.1" });
+                                                if (!self->dns_guard_active_.load()) break;
+                                                ppp::win32::network::RefreshDnsLoopback(if_index, AF_INET);
                                             }
                                             // DHCPv6/RA may re-inject IPv6 DNS after
                                             // takeover; keep the selected NIC pinned to
                                             // the local proxy so the tunnel resolver
                                             // always wins the parallel race.
                                             for (int if_index : non_tap_v6_indexes) {
-                                                ppp::win32::network::SetDnsAddressesV6(if_index, { "::1" });
+                                                if (!self->dns_guard_active_.load()) break;
+                                                ppp::win32::network::RefreshDnsLoopback(if_index, AF_INET6);
                                             }
                                             ppp::win32::network::ClearDnsAddressesV6(tap_if_index);
                                             if (self->dns_guard_active_.load()) {
@@ -7786,12 +7760,8 @@ namespace ppp {
                     ppp::win32::network::SetAllNicsDnsAddressesV6(restore_dns6);
                 }
                 if (managed_if_index >= 0 && ni_dns_ipv6_touched_) {
-                    if (ni_dns_ipv6_auto_) {
-                        ppp::win32::network::ClearDnsAddressesV6(managed_if_index);
-                    }
-                    else if (auto it = ni_dns_servers_v6_.find(managed_if_index);
-                        it != ni_dns_servers_v6_.end() && !it->second.empty()) {
-                        ppp::win32::network::SetDnsAddressesV6(managed_if_index, it->second);
+                    if (!ppp::win32::network::RestoreDnsTakeover(managed_if_index, AF_INET6)) {
+                        LOG_ERROR("Windows DNS restore failed; recovery journal retained, ifIndex=%d family=IPv6", managed_if_index);
                     }
                 }
 
@@ -7801,24 +7771,14 @@ namespace ppp {
                     ppp::win32::network::SetAllNicsDnsAddresses(restore_dns);
                 }
                 if (managed_if_index >= 0 && ni_dns_ipv4_touched_) {
-                    if (ni_dns_ipv4_auto_) {
-                        ppp::win32::network::ClearDnsAddresses(managed_if_index);
-                    }
-                    else if (auto it = ni_dns_servers_.find(managed_if_index);
-                        it != ni_dns_servers_.end() && !it->second.empty()) {
-                        ppp::vector<ppp::string> servers;
-                        for (const auto& address : it->second) {
-                            servers.emplace_back(address.to_string());
-                        }
-                        ppp::win32::network::SetDnsAddresses(managed_if_index, servers);
+                    if (!ppp::win32::network::RestoreDnsTakeover(managed_if_index, AF_INET)) {
+                        LOG_ERROR("Windows DNS restore failed; recovery journal retained, ifIndex=%d family=IPv4", managed_if_index);
                     }
                 }
 
                 ni_dns_servers_v6_.clear();
                 ni_dns_servers_.clear();
                 ni_dns_interface_index_ = -1;
-                ni_dns_ipv4_auto_ = true;
-                ni_dns_ipv6_auto_ = true;
                 ni_dns_ipv4_touched_ = false;
                 ni_dns_ipv6_touched_ = false;
                 ppp::tap::TapWindows::DnsFlushResolverCache();
