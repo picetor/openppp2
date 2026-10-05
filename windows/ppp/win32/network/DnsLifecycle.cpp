@@ -2,6 +2,7 @@
 #include <windows/ppp/win32/network/NetworkInterface.h>
 #include <windows/ppp/win32/Win32Native.h>
 #endif
+#include <iphlpapi.h>
 #include <netioapi.h>
 #include <algorithm>
 #include <cstdio>
