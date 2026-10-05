@@ -93,6 +93,7 @@ jobs:
           cd ${{ github.workspace }}
           git clone https://github.com/microsoft/vcpkg.git
           git -C vcpkg checkout $env:VCPKG_REF
+          New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
           cd vcpkg
           .\bootstrap-vcpkg.bat
           echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> $env:GITHUB_ENV
