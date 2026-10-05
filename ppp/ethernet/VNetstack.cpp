@@ -612,13 +612,14 @@ namespace ppp {
             }
 
             int iphdr_len = (char*)tcp - (char*)ip;
+            int ippkg_len = iphdr_len + tcp_len;
+            ip->len = htons((uint16_t)ippkg_len);
             ip->chksum = 0;
             ip->chksum = ppp::net::native::inet_chksum(ip, iphdr_len);
             if (ip->chksum == 0) {
                 ip->chksum = 0xffff;
             }
 
-            int ippkg_len = ((char*)tcp + tcp_len) - (char*)ip;
             if (NULLPTR == c) {
                 bool ok = tap->OutputWithTrace(ip, ippkg_len, "REMOTE_RX");
                 LOG_DEBUG("DATAPLANE VNetstack::Output: direct tap->Output, len=%d, result=%d, src=%u:%u, dest=%u:%u",

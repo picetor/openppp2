@@ -6563,24 +6563,40 @@ namespace ppp {
                 const uint32_t mask = IPEndPoint::PrefixToNetmask(32);
 
                 SynchronizedObjectScope scope(GetSynchronizedObject());
-                for (const IPv4ServerRoute& route : ipv4_server_routes_) {
-                    if (route.address == remote && route.gateway == gateway &&
-                        route.interface_index == underlying->Index) {
-                        return true;
+                auto cached_route = ipv4_server_routes_.end();
+                for (auto i = ipv4_server_routes_.begin(); i != ipv4_server_routes_.end(); ++i) {
+                    if (i->address == remote && i->gateway == gateway &&
+                        i->interface_index == underlying->Index) {
+                        cached_route = i;
+                        break;
                     }
                 }
 
-                if (auto table = ppp::win32::network::Router::GetIpForwardTable(); NULLPTR != table) {
+                auto table = ppp::win32::network::Router::GetIpForwardTable();
+                if (NULLPTR != table) {
                     for (DWORD i = 0; i < table->dwNumEntries; ++i) {
                         const MIB_IPFORWARDROW& route = table->table[i];
                         if (route.dwForwardDest == remote && route.dwForwardMask == mask &&
                             route.dwForwardNextHop == gateway &&
                             static_cast<int>(route.dwForwardIfIndex) == underlying->Index) {
-                            ipv4_server_routes_.emplace_back(IPv4ServerRoute{
-                                remote, gateway, underlying->Index, false });
+                            if (cached_route == ipv4_server_routes_.end()) {
+                                ipv4_server_routes_.emplace_back(IPv4ServerRoute{
+                                    remote, gateway, underlying->Index, false });
+                            }
                             return true;
                         }
                     }
+                }
+
+                // Routes in the active Windows table can disappear when an adapter
+                // reconnects or the machine resumes from sleep.  The vector is only
+                // an ownership cache, so never treat a cache hit as proof that the
+                // route is still installed.
+                if (cached_route != ipv4_server_routes_.end()) {
+                    ipv4_server_routes_.erase(cached_route);
+                    LOG_WARN("VEthernetNetworkSwitcher::EnsureWindowsIPv4ServerRoute: cached /32 missing; reinstalling remote=%s, gateway=%s, ifindex=%d",
+                        address.to_string().c_str(), underlying->GatewayServer.to_string().c_str(),
+                        underlying->Index);
                 }
 
                 if (!ppp::win32::network::Router::Add(
