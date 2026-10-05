@@ -217,10 +217,22 @@ static void TestPartialFailuresAndUserChanges() {
     CHECK(!HasJournal(AF_INET));
 }
 
+static void TestGuidConversion() {
+    // Adapter callbacks are mocked above, so exercise the real COM APIs too.
+    // Their declarations must come from DnsLifecycle.cpp's own includes.
+    const wchar_t* text = L"{701B1FD5-BA8C-49D5-8A32-040144000007}";
+    GUID guid = {};
+    wchar_t buffer[40] = {};
+    CHECK(SUCCEEDED(::CLSIDFromString(text, &guid)));
+    CHECK(::StringFromGUID2(guid, buffer, 40) == 39);
+    CHECK(std::wstring(buffer) == text);
+}
+
 int main() {
     WSADATA data = {};
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
     try {
+        TestGuidConversion();
         TestAutomaticAndStatic();
         TestRecoveryOwnership();
         TestPartialFailuresAndUserChanges();

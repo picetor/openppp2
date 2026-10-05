@@ -4,6 +4,7 @@
 #endif
 #include <iphlpapi.h>
 #include <netioapi.h>
+#include <objbase.h>
 #include <algorithm>
 #include <cstdio>
 #include <string>
