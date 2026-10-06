@@ -106,9 +106,21 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg/binary-cache
             ${{ github.workspace }}/vcpkg/downloads
-          key: vcpkg-binary-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-${{ env.VCPKG_REF }}-boost1.92-openssl3-jemalloc-v1
+          key: vcpkg-binary-cache-v2-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-${{ env.VCPKG_REF }}-boost1.92-openssl3-jemalloc-v1
           restore-keys: |
-            vcpkg-binary-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-
+            vcpkg-binary-cache-v2-${{ runner.os }}-${{ matrix.platform.vcpkg_triplet }}-
+
+      - name: Report vcpkg binary cache
+        shell: pwsh
+        env:
+          VCPKG_CACHE_HIT: ${{ steps.cache-vcpkg.outputs.cache-hit }}
+        run: |
+          $cacheRoot = $env:VCPKG_DEFAULT_BINARY_CACHE
+          $archives = Get-ChildItem -LiteralPath $cacheRoot -File -Recurse -ErrorAction SilentlyContinue
+          $bytes = ($archives | Measure-Object -Property Length -Sum).Sum
+          Write-Host "VCPKG_CACHE_HIT=$env:VCPKG_CACHE_HIT"
+          Write-Host "VCPKG_BINARY_CACHE_FILES=$($archives.Count)"
+          Write-Host "VCPKG_BINARY_CACHE_BYTES=$bytes"
 
       - name: Install dependencies via vcpkg
         run: |
@@ -125,7 +137,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: |
-            ${{ github.workspace }}/vcpkg/packages
+            ${{ github.workspace }}/vcpkg/binary-cache
             ${{ github.workspace }}/vcpkg/downloads
           key: ${{ steps.cache-vcpkg.outputs.cache-primary-key }}
 
