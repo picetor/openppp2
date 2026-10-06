@@ -25,6 +25,7 @@ on:
       - 'CMakeLists.txt'
       - 'tools/ci/**'
       - 'tests/windows_dns_lifecycle_test.cpp'
+      - 'tests/vnetstack_delayed_syn_test.cpp'
       - 'linux/**'
       - 'darwin/**'
       - 'windows/**'
@@ -88,6 +89,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "DNS lifecycle test compilation failed" }
           & ".\$testExe"
           if ($LASTEXITCODE -ne 0) { throw "DNS lifecycle regression tests failed" }
+
+      - name: Test delayed SYN slot concurrency
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsRoot) { throw "Visual C++ tools not found" }
+          $devCmd = Join-Path $vsRoot "Common7\Tools\VsDevCmd.bat"
+          $arch = if ('${{ matrix.platform.msbuild_platform }}' -eq 'Win32') { 'x86' } else { 'x64' }
+          New-Item -ItemType Directory -Path "artifacts\delayed-syn-tests" -Force | Out-Null
+          $testExe = "artifacts\delayed-syn-tests\vnetstack-delayed-syn-test.exe"
+          cmd /c "call `"$devCmd`" -arch=$arch -host_arch=x64 >nul && cl /nologo /std:c++17 /EHsc /W4 tests\vnetstack_delayed_syn_test.cpp /Foartifacts\delayed-syn-tests\vnetstack-delayed-syn-test.obj /Fe$testExe"
+          if ($LASTEXITCODE -ne 0) { throw "Delayed SYN slot test compilation failed" }
+          & ".\$testExe"
+          if ($LASTEXITCODE -ne 0) { throw "Delayed SYN slot regression tests failed" }
 
       - name: Setup vcpkg
         run: |

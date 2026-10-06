@@ -433,6 +433,35 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         checksum_update = body.index("ip->chksum = ppp::net::native::inet_chksum")
         self.assertLess(length_update, checksum_update)
 
+    def test_vnetstack_delayed_syn_is_published_once_before_remote_connect(self) -> None:
+        netstack = read("ppp/ethernet/VNetstack.cpp")
+        header = read("ppp/ethernet/VNetstack.h")
+        slot = read("ppp/ethernet/DelayedPacketSlot.h")
+        input_start = netstack.index("bool VNetstack::Input")
+        input_end = netstack.index("uint64_t VNetstack::GetMaxConnectTimeout", input_start)
+        input_body = netstack[input_start:input_end]
+        publish = input_body.index("this->Output(lan2wan, ip, tcp, tcp_len, c.get())")
+        begin_accept = input_body.index("if (!c->BeginAccept())", publish)
+        self.assertLess(publish, begin_accept)
+        lwip_start = netstack.index("int VNetstack::LwIpBeginAccept")
+        lwip_end = netstack.index("VNetstack::LwIpAcceptLink", lwip_start)
+        lwip_body = netstack[lwip_start:lwip_end]
+        lwip_publish = lwip_body.index("delayed_syn_.StoreOnce")
+        lwip_begin_accept = lwip_body.index("if (!pcb->BeginAccept())", lwip_publish)
+        self.assertLess(lwip_publish, lwip_begin_accept)
+        self.assertIn("repeated SYN on existing flow", input_body)
+        self.assertIn("link->Update();\n                                return true;", input_body)
+        self.assertIn("ip->dest != tap->IPAddress", netstack)
+        self.assertIn("GetDelayedSynDiagnostics", netstack)
+        self.assertIn('snapshot["dataplane"]["delayed_syn"]', read("main.cpp"))
+        self.assertIn("DelayedPacketSlot<ITap, Byte>", header)
+        self.assertIn("StoreOnce", slot)
+        self.assertIn("state_ = State::Ready", slot)
+        self.assertIn("state_ = State::Replayed", slot)
+        self.assertIn("state_ = State::Closed", slot)
+        self.assertNotIn("sync_ack_byte_array_", header)
+        self.assertNotIn("sync_ack_state_", header)
+
     def test_wintun_submit_has_validation_and_completion_counters(self) -> None:
         tap = read("windows/ppp/tap/TapWindows.cpp")
         self.assertIn("ValidateWintunInjectionPacket", tap)

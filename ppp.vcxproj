@@ -697,6 +697,7 @@
     <ClInclude Include="ppp\cryptography\rc4.h" />
     <ClInclude Include="ppp\cryptography\digest.h" />
     <ClInclude Include="ppp\cryptography\ssea.h" />
+    <ClInclude Include="ppp\ethernet\DelayedPacketSlot.h" />
     <ClInclude Include="ppp\ethernet\VNetstack.h" />
     <ClInclude Include="ppp\IDisposable.h" />
     <ClInclude Include="ppp\Int128.h" />

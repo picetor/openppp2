@@ -33,10 +33,6 @@ typedef tcp_hdr::tcp_state                                      TcpState;
 typedef ppp::collections::Dictionary                            Dictionary;
 
 namespace ppp {
-    static constexpr Byte VNETSTACK_SYNC_ACK_STATE_CLOSED    = 0;
-    static constexpr Byte VNETSTACK_SYNC_ACK_STATE_SYN_SENT  = 1;
-    static constexpr Byte VNETSTACK_SYNC_ACK_STATE_SYN_RECVD = 2;
-
     namespace ethernet {
 #ifdef SYSNAT
         static VNetstack::SynchronizedObject& openppp2_sysnat_syncobj() noexcept {
@@ -369,6 +365,10 @@ namespace ppp {
                             rst = c->IsDisposed();
                             LOG_DEBUG("DATAPLANE VNetstack::Input: repeated SYN on existing flow, disposed=%d, duplicate_syn_count=%llu",
                                 (int)rst, (unsigned long long)duplicate_syn_count);
+                            if (!rst) {
+                                link->Update();
+                                return true;
+                            }
                             break;
                         }
                     }
@@ -383,7 +383,6 @@ namespace ppp {
                     }
                     LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAcceptClient ok, client=%p", (void*)c.get());
 
-                    c->sync_ack_state_ = VNETSTACK_SYNC_ACK_STATE_SYN_SENT;
 #ifdef SYSNAT
                     for (SynchronizedObjectScope _(c->sysnat_synbobj_);;) {
                         c->listenPort_ = this->listenEP_.Port;
@@ -392,21 +391,49 @@ namespace ppp {
                     }
 #endif
 
-                    if (!c->BeginAccept()) {
-                        LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept failed -> RST");
-                        break;
-                    }
-                    LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept ok, sync_ack_state_=%d", (int)c->sync_ack_state_);
-
                     rst = false;
                     c->link_ = link;
+                    c->owner_ = GetReference();
                     link->socket = c;
 
+                    const uint32_t original_src = ip->src;
+                    const uint32_t original_dest = ip->dest;
+                    const uint16_t original_src_port = tcp->src;
+                    const uint16_t original_dest_port = tcp->dest;
                     ip->src = tap->GatewayServer;
                     tcp->src = link->natPort;
                     ip->dest = tap->IPAddress;
                     tcp->dest = ntohs(this->listenEP_.Port);
-                    break;
+
+                    // Publish the complete rewritten SYN before the asynchronous
+                    // remote connection can complete and call AckAccept().
+                    if (!this->Output(lan2wan, ip, tcp, tcp_len, c.get())) {
+                        LOG_DEBUG("DATAPLANE VNetstack::Input: delayed SYN store failed -> RST");
+                        c->delayed_syn_.Close();
+                        this->CloseTcpLink(link);
+                        ip->src = original_src;
+                        ip->dest = original_dest;
+                        tcp->src = original_src_port;
+                        tcp->dest = original_dest_port;
+                        this->RST(ip, tcp, tcp_len);
+                        return false;
+                    }
+
+                    if (!c->BeginAccept()) {
+                        LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept failed after delayed SYN publish -> RST");
+                        if (c->delayed_syn_.Close() == TapTcpClient::DelayedSynSlot::State::Ready) {
+                            delayed_syn_closed_before_replay_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        this->CloseTcpLink(link);
+                        ip->src = original_src;
+                        ip->dest = original_dest;
+                        tcp->src = original_src_port;
+                        tcp->dest = original_dest_port;
+                        this->RST(ip, tcp, tcp_len);
+                        return false;
+                    }
+                    LOG_DEBUG("DATAPLANE VNetstack::Input: BeginAccept ok after delayed SYN publish");
+                    return true;
                 }
             }
             else {
@@ -459,6 +486,17 @@ namespace ppp {
             SynchronizedObjectScope scope(syncobj_);
             lan2wan = lan2wan_.size();
             wan2lan = wan2lan_.size();
+        }
+
+        VNetstack::DelayedSynDiagnostics VNetstack::GetDelayedSynDiagnostics() const noexcept {
+            DelayedSynDiagnostics diagnostics;
+            diagnostics.stored = delayed_syn_stored_.load(std::memory_order_relaxed);
+            diagnostics.replayed = delayed_syn_replayed_.load(std::memory_order_relaxed);
+            diagnostics.closed_before_replay = delayed_syn_closed_before_replay_.load(std::memory_order_relaxed);
+            diagnostics.store_rejected = delayed_syn_store_rejected_.load(std::memory_order_relaxed);
+            diagnostics.take_rejected = delayed_syn_take_rejected_.load(std::memory_order_relaxed);
+            diagnostics.destination_mismatch = delayed_syn_destination_mismatch_.load(std::memory_order_relaxed);
+            return diagnostics;
         }
 
         bool VNetstack::Update(uint64_t now) noexcept {
@@ -638,10 +676,22 @@ namespace ppp {
                 memcpy(packet.get(), ip, ippkg_len);
             }
 
-            c->sync_ack_tap_driver_ = tap;
-            c->sync_ack_byte_array_ = packet;
-            c->sync_ack_bytes_size_ = ippkg_len;
-            LOG_DEBUG("DATAPLANE VNetstack::Output: delayed sync-ack stored, len=%d, client=%p, src=%u:%u, dest=%u:%u",
+            if (ip->dest != tap->IPAddress) {
+                delayed_syn_destination_mismatch_.fetch_add(1, std::memory_order_relaxed);
+                LOG_ERROR("DATAPLANE VNetstack::Output: delayed SYN destination mismatch, len=%d, client=%p, expected=%u, actual=%u",
+                    ippkg_len, (void*)c, (unsigned)tap->IPAddress, (unsigned)ip->dest);
+                return false;
+            }
+
+            if (!c->delayed_syn_.StoreOnce(tap, packet, ippkg_len)) {
+                delayed_syn_store_rejected_.fetch_add(1, std::memory_order_relaxed);
+                LOG_DEBUG("DATAPLANE VNetstack::Output: delayed SYN store rejected, len=%d, client=%p, state=%u",
+                    ippkg_len, (void*)c, (unsigned)c->delayed_syn_.GetState());
+                return false;
+            }
+
+            delayed_syn_stored_.fetch_add(1, std::memory_order_relaxed);
+            LOG_DEBUG("DATAPLANE VNetstack::Output: delayed SYN stored, len=%d, client=%p, src=%u:%u, dest=%u:%u",
                 ippkg_len, (void*)c, (unsigned)ip->src, (unsigned)ntohs(tcp->src),
                 (unsigned)ip->dest, (unsigned)ntohs(tcp->dest));
             return true;
@@ -781,16 +831,24 @@ namespace ppp {
                 return -1;
             }
             
-            Byte sync_ack_state = VNETSTACK_SYNC_ACK_STATE_CLOSED;
-            if (pcb->sync_ack_state_.compare_exchange_strong(sync_ack_state, VNETSTACK_SYNC_ACK_STATE_SYN_SENT)) {
+            typedef TapTcpClient::DelayedSynSlot::State DelayedSynState;
+            if (pcb->delayed_syn_.GetState() == DelayedSynState::Empty) {
                 int sync_packet_size = 0;
                 link->Update();
 
-                pcb->sync_ack_bytes_size_ = 0;
-                pcb->sync_ack_byte_array_ = lwip::netstack_wrap_ipv4_tcp_syn_packet(dest, src, wnd, ack, seq, sync_packet_size);
+                std::shared_ptr<Byte> packet = lwip::netstack_wrap_ipv4_tcp_syn_packet(
+                    dest, src, wnd, ack, seq, sync_packet_size);
 
-                if (NULLPTR != pcb->sync_ack_byte_array_) {
-                    pcb->sync_ack_bytes_size_ = sync_packet_size;
+                if (NULLPTR == packet || sync_packet_size < 1) {
+                    delayed_syn_store_rejected_.fetch_add(1, std::memory_order_relaxed);
+                    LOG_DEBUG("VNetstack::LwIpBeginAccept: failed to build delayed SYN, source=%s:%u, destination=%s:%u",
+                        src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port());
+                    this->CloseTcpLink(link);
+                    return -1;
+                }
+
+                if (pcb->delayed_syn_.StoreOnce(NULLPTR, packet, sync_packet_size)) {
+                    delayed_syn_stored_.fetch_add(1, std::memory_order_relaxed);
                     LOG_DEBUG("VNetstack::LwIpBeginAccept: delayed SYN stored, source=%s:%u, destination=%s:%u, seq=%u, ack=%u, wnd=%u, length=%d",
                         src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port(),
                         seq, ack, wnd, sync_packet_size);
@@ -799,24 +857,26 @@ namespace ppp {
                     // remote connection. A fast completion may call AckAccept()
                     // immediately and must always see a complete replay packet.
                     if (!pcb->BeginAccept()) {
+                        if (pcb->delayed_syn_.Close() == DelayedSynState::Ready) {
+                            delayed_syn_closed_before_replay_.fetch_add(1, std::memory_order_relaxed);
+                        }
                         this->CloseTcpLink(link);
                         return -1;
                     }
 
                     return 1;
                 }
-                else {
-                    LOG_DEBUG("VNetstack::LwIpBeginAccept: failed to build delayed SYN, source=%s:%u, destination=%s:%u",
-                        src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port());
-                    this->CloseTcpLink(link);
-                    return -1;
-                }
+                // Another callback may have published the same SYN after the
+                // Empty observation above. Treat that as a normal duplicate;
+                // never close or overwrite the winning packet.
+                delayed_syn_store_rejected_.fetch_add(1, std::memory_order_relaxed);
             }
 
-            Byte state = pcb->sync_ack_state_.load();
-            int result = state >= VNETSTACK_SYNC_ACK_STATE_SYN_RECVD ? 0 : 1;
+            DelayedSynState state = pcb->delayed_syn_.GetState();
+            int result = state == DelayedSynState::Ready ? 1 : 0;
             LOG_DEBUG("VNetstack::LwIpBeginAccept: repeated SYN, source=%s:%u, destination=%s:%u, state=%u, result=%d",
-                src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port(), state, result);
+                src.address().to_string().data(), src.port(), dest.address().to_string().data(), dest.port(),
+                (unsigned)state, result);
             return result;
         }
 
@@ -863,6 +923,7 @@ namespace ppp {
 
             socket->lwip_ = key;
             socket->link_ = link;
+            socket->owner_ = GetReference();
 
 #ifdef SYSNAT
             for (SynchronizedObjectScope _(socket->sysnat_synbobj_);;) {
@@ -880,9 +941,7 @@ namespace ppp {
             : lwip_(IPEndPoint::MinPort)
             , disposed_(FALSE)
             , context_(context)
-            , strand_(strand)
-            , sync_ack_state_(VNETSTACK_SYNC_ACK_STATE_CLOSED)
-            , sync_ack_bytes_size_(0) {
+            , strand_(strand) {
             socket_ = strand ? 
                 make_shared_object<boost::asio::ip::tcp::socket>(*strand) : make_shared_object<boost::asio::ip::tcp::socket>(*context);
         }
@@ -953,6 +1012,12 @@ namespace ppp {
             std::shared_ptr<TapTcpLink> link = std::move(link_);
 
             disposed_.exchange(TRUE);
+            DelayedSynSlot::State delayed_state = delayed_syn_.Close();
+            if (delayed_state == DelayedSynSlot::State::Ready) {
+                if (std::shared_ptr<VNetstack> owner = owner_.lock(); NULLPTR != owner) {
+                    owner->delayed_syn_closed_before_replay_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
             if (NULLPTR != socket) {
                 Socket::Closesocket(socket);
             }
@@ -1013,10 +1078,6 @@ namespace ppp {
             this->natEP_ = natEP;
             this->socket_ = socket;
 
-            this->sync_ack_byte_array_.reset();
-            this->sync_ack_bytes_size_ = 0;
-            this->sync_ack_tap_driver_.reset();
-
             if (lwip_) {
                 std::shared_ptr<TapTcpLink> link = this->link_;
                 if (NULLPTR == link) {
@@ -1037,23 +1098,18 @@ namespace ppp {
                 return false;
             }
 
-            std::shared_ptr<Byte> packet = std::move(this->sync_ack_byte_array_);
-            std::shared_ptr<ITap> tap = std::move(this->sync_ack_tap_driver_);
-
-            int packet_length = this->sync_ack_bytes_size_;
-            if (packet_length < 1) {
-                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: delayed SYN is empty, this=%p, packet=%p, size=%d, state=%u",
-                    this, packet.get(), packet_length, sync_ack_state_.load());
+            std::shared_ptr<Byte> packet;
+            std::shared_ptr<ITap> tap;
+            int packet_length = 0;
+            if (!delayed_syn_.Take(tap, packet, packet_length)) {
+                if (std::shared_ptr<VNetstack> owner = owner_.lock(); NULLPTR != owner) {
+                    owner->delayed_syn_take_rejected_.fetch_add(1, std::memory_order_relaxed);
+                }
+                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: delayed SYN unavailable, this=%p, state=%u",
+                    this, (unsigned)delayed_syn_.GetState());
                 return false;
             }
 
-            Byte sync_ack_state = VNETSTACK_SYNC_ACK_STATE_SYN_SENT;
-            if (!this->sync_ack_state_.compare_exchange_strong(sync_ack_state, VNETSTACK_SYNC_ACK_STATE_SYN_RECVD)) {
-                LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: invalid state, this=%p, actual=%u", this, sync_ack_state);
-                return false;
-            }
-
-            this->sync_ack_bytes_size_ = 0;
             if (lwip_) {
                 std::shared_ptr<TapTcpLink> link = this->link_;
                 if (NULLPTR == link) {
@@ -1063,6 +1119,11 @@ namespace ppp {
 
                 link->state = TcpState::TCP_STATE_SYN_RECEIVED;
                 bool queued = lwip::netstack::input(packet.get(), packet_length);
+                if (queued) {
+                    if (std::shared_ptr<VNetstack> owner = owner_.lock(); NULLPTR != owner) {
+                        owner->delayed_syn_replayed_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: delayed SYN queued, this=%p, packet=%p, length=%d, result=%d",
                     this, packet.get(), packet_length, queued ? 1 : 0);
                 return queued;
@@ -1135,8 +1196,14 @@ namespace ppp {
 #endif
 
             LOG_DEBUG("VNetstack::TapTcpClient::AckAccept: writing delayed SYN back, this=%p, tap=%p, len=%d, state=%u",
-                this, tap.get(), packet_length, sync_ack_state_.load());
-            return tap->OutputWithTrace(packet.get(), packet_length, "REMOTE_RX");
+                this, tap.get(), packet_length, (unsigned)delayed_syn_.GetState());
+            bool replayed = tap->OutputWithTrace(packet.get(), packet_length, "REMOTE_RX");
+            if (replayed) {
+                if (std::shared_ptr<VNetstack> owner = owner_.lock(); NULLPTR != owner) {
+                    owner->delayed_syn_replayed_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            return replayed;
         }
     }
 }

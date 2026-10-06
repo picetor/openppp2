@@ -3899,6 +3899,12 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
     snapshot["mux_fallback_reason"] = "";
     snapshot["connected_monotonic_ms"] = 0;
     snapshot["dataplane"]["duplicate_syn_count"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["stored"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["replayed"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["closed_before_replay"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["store_rejected"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["take_rejected"] = (Json::UInt64)0;
+    snapshot["dataplane"]["delayed_syn"]["destination_mismatch"] = (Json::UInt64)0;
     snapshot["dataplane"]["static_echo"]["receive_packets"] = (Json::UInt64)0;
     snapshot["dataplane"]["static_echo"]["receive_errors"] = (Json::UInt64)0;
     snapshot["dataplane"]["static_echo"]["response_timeouts"] = (Json::UInt64)0;
@@ -4138,6 +4144,13 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         if (std::shared_ptr<ppp::ethernet::VNetstack> netstack = client->GetNetstack(); NULLPTR != netstack)
         {
             snapshot["dataplane"]["duplicate_syn_count"] = (Json::UInt64)netstack->GetDuplicateSynCount();
+            const ppp::ethernet::VNetstack::DelayedSynDiagnostics delayed_syn = netstack->GetDelayedSynDiagnostics();
+            snapshot["dataplane"]["delayed_syn"]["stored"] = (Json::UInt64)delayed_syn.stored;
+            snapshot["dataplane"]["delayed_syn"]["replayed"] = (Json::UInt64)delayed_syn.replayed;
+            snapshot["dataplane"]["delayed_syn"]["closed_before_replay"] = (Json::UInt64)delayed_syn.closed_before_replay;
+            snapshot["dataplane"]["delayed_syn"]["store_rejected"] = (Json::UInt64)delayed_syn.store_rejected;
+            snapshot["dataplane"]["delayed_syn"]["take_rejected"] = (Json::UInt64)delayed_syn.take_rejected;
+            snapshot["dataplane"]["delayed_syn"]["destination_mismatch"] = (Json::UInt64)delayed_syn.destination_mismatch;
         }
 
 #if defined(_WIN32)

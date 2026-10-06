@@ -11,6 +11,7 @@
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/SocketAcceptor.h>
 #include <ppp/net/asio/IAsynchronousWriteIoQueue.h>
+#include <ppp/ethernet/DelayedPacketSlot.h>
 
 #ifdef SYSNAT
 #include <linux/ppp/tap/openppp2_sysnat.h>
@@ -24,6 +25,15 @@ namespace ppp {
 
         public:
             class                                                           TapTcpClient;
+
+            struct DelayedSynDiagnostics final {
+                uint64_t stored = 0;
+                uint64_t replayed = 0;
+                uint64_t closed_before_replay = 0;
+                uint64_t store_rejected = 0;
+                uint64_t take_rejected = 0;
+                uint64_t destination_mismatch = 0;
+            };
 
         private:
             struct TapTcpLink {
@@ -113,10 +123,9 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::tcp::socket>               socket_;
                 std::shared_ptr<TapTcpLink>                                 link_;
 
-                std::shared_ptr<ITap>                                       sync_ack_tap_driver_;
-                std::shared_ptr<Byte>                                       sync_ack_byte_array_;
-                std::atomic<Byte>                                           sync_ack_state_      = 0;
-                int                                                         sync_ack_bytes_size_ = 0;
+                typedef DelayedPacketSlot<ITap, Byte>                       DelayedSynSlot;
+                DelayedSynSlot                                              delayed_syn_;
+                std::weak_ptr<VNetstack>                                    owner_;
 
                 boost::asio::ip::tcp::endpoint                              natEP_;
                 boost::asio::ip::tcp::endpoint                              localEP_;
@@ -153,6 +162,7 @@ namespace ppp {
             virtual bool                                                    Update(uint64_t now) noexcept;
             void                                                            GetDebugConnectionCounts(size_t& lan2wan, size_t& wan2lan) noexcept;
             uint64_t                                                        GetDuplicateSynCount() const noexcept { return duplicate_syn_count_.load(std::memory_order_relaxed); }
+            DelayedSynDiagnostics                                           GetDelayedSynDiagnostics() const noexcept;
 
         protected:
             virtual std::shared_ptr<TapTcpClient>                           BeginAcceptClient(const boost::asio::ip::tcp::endpoint& localEP, const boost::asio::ip::tcp::endpoint& remoteEP) noexcept = 0;
@@ -186,6 +196,12 @@ namespace ppp {
             int                                                             ap_     = 0;
             bool                                                            lwip_   = false;
             std::atomic<uint64_t>                                           duplicate_syn_count_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_stored_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_replayed_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_closed_before_replay_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_store_rejected_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_take_rejected_ = 0;
+            std::atomic<uint64_t>                                           delayed_syn_destination_mismatch_ = 0;
 #ifdef SYSNAT
             bool                                                            sysnat_ = false;
             ppp::string                                                     sysnat_interface_name_;
