@@ -7518,13 +7518,12 @@ namespace ppp {
                 // GetBestInterfaceEx performs a host-wide route lookup. It cannot
                 // observe this socket's per-socket interface override and may
                 // report the TUN adapter even when this socket is pinned correctly.
+                // getsockopt returns IP_UNICAST_IF in host byte order, although
+                // setsockopt requires the IPv4 interface index in network order.
                 if (selected_interface_length != sizeof(selected_interface) ||
-                    (address.is_v4() ? ntohl(selected_interface) : selected_interface) !=
-                        (DWORD)underlying->Index) {
-                    const DWORD selected_host_index = address.is_v4()
-                        ? ntohl(selected_interface) : selected_interface;
+                    selected_interface != (DWORD)underlying->Index) {
                     LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: socket interface verification failed, remote=%s, selected=%lu, physical=%d",
-                        address.to_string().c_str(), (unsigned long)selected_host_index,
+                        address.to_string().c_str(), (unsigned long)selected_interface,
                         underlying->Index);
                     return false;
                 }

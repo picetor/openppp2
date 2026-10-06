@@ -287,7 +287,8 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         for token in ("IP_UNICAST_IF", "IPV6_UNICAST_IF", "getsockopt"):
             self.assertIn(token, protect_body)
         self.assertIn("socket interface verification failed", protect_body)
-        self.assertIn("ntohl(selected_interface)", protect_body)
+        self.assertIn("selected_interface != (DWORD)underlying->Index", protect_body)
+        self.assertNotIn("ntohl(selected_interface)", protect_body)
         self.assertIn("GetBestInterfaceEx performs a host-wide route lookup", protect_body)
 
         transmission_start = exchanger.index("VEthernetExchanger::OpenTransmission")
