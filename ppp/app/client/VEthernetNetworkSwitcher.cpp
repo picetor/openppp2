@@ -6627,12 +6627,76 @@ namespace ppp {
                 }
 
                 SynchronizedObjectScope scope(GetSynchronizedObject());
-                for (const IPv6ServerRoute& route : ipv6_server_routes_) {
-                    if (route.address == address &&
-                        route.interface_index == underlying->Index &&
-                        route.gateway == underlying->IPv6GatewayServer) {
-                        return true;
+                auto cached_route = ipv6_server_routes_.end();
+                for (auto i = ipv6_server_routes_.begin(); i != ipv6_server_routes_.end(); ++i) {
+                    if (i->address == address &&
+                        i->interface_index == underlying->Index &&
+                        i->gateway == underlying->IPv6GatewayServer) {
+                        cached_route = i;
+                        break;
                     }
+                }
+
+                auto route_is_installed = [&]() noexcept {
+                    PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                    const DWORD result = ::GetIpForwardTable2(AF_INET6, &table);
+                    if (result != NO_ERROR || NULLPTR == table) {
+                        if (NULLPTR != table) {
+                            ::FreeMibTable(table);
+                        }
+                        LOG_WARN("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: route table query failed, remote=%s, result=%lu",
+                            address.to_string().c_str(), static_cast<unsigned long>(result));
+                        return false;
+                    }
+
+                    const auto remote_bytes = address.to_v6().to_bytes();
+                    const auto gateway = underlying->IPv6GatewayServer.to_v6();
+                    const auto gateway_bytes = gateway.to_bytes();
+                    unsigned long gateway_scope = gateway.scope_id();
+                    if (gateway.is_link_local() && gateway_scope == 0) {
+                        gateway_scope = static_cast<unsigned long>(underlying->Index);
+                    }
+
+                    bool found = false;
+                    for (ULONG i = 0; i < table->NumEntries; ++i) {
+                        const MIB_IPFORWARD_ROW2& route = table->Table[i];
+                        if (route.InterfaceIndex != static_cast<NET_IFINDEX>(underlying->Index) ||
+                            route.DestinationPrefix.Prefix.si_family != AF_INET6 ||
+                            route.DestinationPrefix.PrefixLength != 128 ||
+                            route.NextHop.si_family != AF_INET6 ||
+                            ::memcmp(&route.DestinationPrefix.Prefix.Ipv6.sin6_addr,
+                                remote_bytes.data(), sizeof(IN6_ADDR)) != 0 ||
+                            ::memcmp(&route.NextHop.Ipv6.sin6_addr,
+                                gateway_bytes.data(), sizeof(IN6_ADDR)) != 0) {
+                            continue;
+                        }
+
+                        if (gateway.is_link_local() &&
+                            route.NextHop.Ipv6.sin6_scope_id != gateway_scope) {
+                            continue;
+                        }
+
+                        found = true;
+                        break;
+                    }
+
+                    ::FreeMibTable(table);
+                    return found;
+                };
+
+                if (route_is_installed()) {
+                    if (cached_route == ipv6_server_routes_.end()) {
+                        ipv6_server_routes_.emplace_back(IPv6ServerRoute{
+                            address, underlying->IPv6GatewayServer, underlying->Index, false });
+                    }
+                    return true;
+                }
+
+                if (cached_route != ipv6_server_routes_.end()) {
+                    ipv6_server_routes_.erase(cached_route);
+                    LOG_WARN("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: cached /128 missing; reinstalling remote=%s, gateway=%s, ifindex=%d",
+                        address.to_string().c_str(), underlying->IPv6GatewayServer.to_string().c_str(),
+                        underlying->Index);
                 }
 
                 bool created = false;
@@ -6642,6 +6706,17 @@ namespace ppp {
                     LOG_ERROR("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: add /128 failed, remote=%s, gateway=%s, ifindex=%d",
                         address.to_string().c_str(),
                         underlying->IPv6GatewayServer.to_string().c_str(),
+                        underlying->Index);
+                    return false;
+                }
+
+                if (!route_is_installed()) {
+                    if (created) {
+                        ipv6_server_routes_.emplace_back(IPv6ServerRoute{
+                            address, underlying->IPv6GatewayServer, underlying->Index, true });
+                    }
+                    LOG_ERROR("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: /128 not present on physical interface after add, remote=%s, gateway=%s, ifindex=%d",
+                        address.to_string().c_str(), underlying->IPv6GatewayServer.to_string().c_str(),
                         underlying->Index);
                     return false;
                 }
@@ -7410,19 +7485,19 @@ namespace ppp {
 
                 const SOCKET socket = (SOCKET)socket_handle;
                 int option_result = SOCKET_ERROR;
+                int option_level = IPPROTO_IPV6;
+                int option_name = IPV6_UNICAST_IF;
+                DWORD interface_index = (DWORD)underlying->Index;
                 // The socket is intentionally still unbound here. Its protocol
                 // family follows the resolved remote endpoint; IPv4-mapped
                 // IPv6 endpoints therefore need IPV6_UNICAST_IF as well.
                 if (address.is_v4()) {
-                    DWORD interface_index = htonl((DWORD)underlying->Index);
-                    option_result = ::setsockopt(socket, IPPROTO_IP, IP_UNICAST_IF,
-                        reinterpret_cast<const char*>(&interface_index), sizeof(interface_index));
+                    option_level = IPPROTO_IP;
+                    option_name = IP_UNICAST_IF;
+                    interface_index = htonl(interface_index);
                 }
-                else {
-                    DWORD interface_index = (DWORD)underlying->Index;
-                    option_result = ::setsockopt(socket, IPPROTO_IPV6, IPV6_UNICAST_IF,
-                        reinterpret_cast<const char*>(&interface_index), sizeof(interface_index));
-                }
+                option_result = ::setsockopt(socket, option_level, option_name,
+                    reinterpret_cast<const char*>(&interface_index), sizeof(interface_index));
                 if (option_result == SOCKET_ERROR) {
                     const int error = ::WSAGetLastError();
                     LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: interface bind failed, remote=%s, ifindex=%d, error=%d",
@@ -7430,30 +7505,27 @@ namespace ppp {
                     return false;
                 }
 
-                sockaddr_storage destination = {};
-                if (remote_address.is_v4()) {
-                    sockaddr_in* endpoint = reinterpret_cast<sockaddr_in*>(&destination);
-                    endpoint->sin_family = AF_INET;
-                    endpoint->sin_addr.s_addr = htonl(remote_address.to_v4().to_uint());
-                }
-                else {
-                    sockaddr_in6* endpoint = reinterpret_cast<sockaddr_in6*>(&destination);
-                    endpoint->sin6_family = AF_INET6;
-                    const boost::asio::ip::address_v6::bytes_type bytes = remote_address.to_v6().to_bytes();
-                    memcpy(&endpoint->sin6_addr, bytes.data(), bytes.size());
-                    endpoint->sin6_scope_id = remote_address.to_v6().scope_id();
+                DWORD selected_interface = 0;
+                int selected_interface_length = sizeof(selected_interface);
+                if (::getsockopt(socket, option_level, option_name,
+                        reinterpret_cast<char*>(&selected_interface), &selected_interface_length) == SOCKET_ERROR) {
+                    const int error = ::WSAGetLastError();
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: interface verification failed, remote=%s, ifindex=%d, error=%d",
+                        address.to_string().c_str(), underlying->Index, error);
+                    return false;
                 }
 
-                DWORD selected_interface = 0;
-                const DWORD route_result = ::GetBestInterfaceEx(
-                    reinterpret_cast<sockaddr*>(&destination), &selected_interface);
-                std::shared_ptr<ITap> tap = GetTap();
-                const int tap_index = NULLPTR == tap ? -1 : tap->GetInterfaceIndex();
-                if (route_result != NO_ERROR || selected_interface != (DWORD)underlying->Index ||
-                    (tap_index >= 0 && selected_interface == (DWORD)tap_index)) {
-                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: route verification failed, remote=%s, result=%lu, selected=%lu, physical=%d, tap=%d",
-                        address.to_string().c_str(), (unsigned long)route_result,
-                        (unsigned long)selected_interface, underlying->Index, tap_index);
+                // GetBestInterfaceEx performs a host-wide route lookup. It cannot
+                // observe this socket's per-socket interface override and may
+                // report the TUN adapter even when this socket is pinned correctly.
+                if (selected_interface_length != sizeof(selected_interface) ||
+                    (address.is_v4() ? ntohl(selected_interface) : selected_interface) !=
+                        (DWORD)underlying->Index) {
+                    const DWORD selected_host_index = address.is_v4()
+                        ? ntohl(selected_interface) : selected_interface;
+                    LOG_ERROR("VEthernetNetworkSwitcher::ProtectWindowsSocket: socket interface verification failed, remote=%s, selected=%lu, physical=%d",
+                        address.to_string().c_str(), (unsigned long)selected_host_index,
+                        underlying->Index);
                     return false;
                 }
                 return true;

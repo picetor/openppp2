@@ -284,10 +284,11 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         protect_start = switcher.index("bool VEthernetNetworkSwitcher::ProtectWindowsSocket")
         protect_end = switcher.index("#endif", protect_start)
         protect_body = switcher[protect_start:protect_end]
-        for token in ("IP_UNICAST_IF", "IPV6_UNICAST_IF", "GetBestInterfaceEx"):
+        for token in ("IP_UNICAST_IF", "IPV6_UNICAST_IF", "getsockopt"):
             self.assertIn(token, protect_body)
-        self.assertIn("selected_interface != (DWORD)underlying->Index", protect_body)
-        self.assertIn("selected_interface == (DWORD)tap_index", protect_body)
+        self.assertIn("socket interface verification failed", protect_body)
+        self.assertIn("ntohl(selected_interface)", protect_body)
+        self.assertIn("GetBestInterfaceEx performs a host-wide route lookup", protect_body)
 
         transmission_start = exchanger.index("VEthernetExchanger::OpenTransmission")
         transmission = exchanger[transmission_start:]
@@ -410,6 +411,17 @@ class DataplaneReliabilitySourceTests(unittest.TestCase):
         self.assertIn("ipv4_server_routes_.erase(cached_route)", body)
         self.assertIn("cached /32 missing; reinstalling", body)
         self.assertNotIn("route.interface_index == underlying->Index) {\n                        return true;", body)
+
+    def test_windows_ipv6_server_route_cache_is_revalidated_against_active_table(self) -> None:
+        switcher = read("ppp/app/client/VEthernetNetworkSwitcher.cpp")
+        start = switcher.index("bool VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute")
+        end = switcher.index("void VEthernetNetworkSwitcher::RemoveWindowsIPv6ServerRoutes", start)
+        body = switcher[start:end]
+        self.assertIn("GetIpForwardTable2(AF_INET6", body)
+        self.assertIn("route.DestinationPrefix.PrefixLength != 128", body)
+        self.assertIn("route.NextHop.Ipv6.sin6_addr", body)
+        self.assertIn("ipv6_server_routes_.erase(cached_route)", body)
+        self.assertIn("cached /128 missing; reinstalling", body)
 
     def test_vnetstack_output_updates_ipv4_total_length_before_checksum(self) -> None:
         netstack = read("ppp/ethernet/VNetstack.cpp")
