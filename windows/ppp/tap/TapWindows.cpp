@@ -62,10 +62,15 @@ namespace ppp
         };
 
         static bool LocateWintunIpv6Transport(const Byte* packet, int packet_size,
-            WintunIpv6TransportView& view) noexcept
+            WintunIpv6TransportView& view, const char** failure_reason = NULLPTR) noexcept
         {
+            if (NULLPTR != failure_reason)
+            {
+                *failure_reason = "unknown";
+            }
             if (NULLPTR == packet || packet_size < 40 || (packet[0] >> 4) != 6)
             {
+                if (NULLPTR != failure_reason) *failure_reason = "ipv6_header_invalid";
                 return false;
             }
 
@@ -81,6 +86,7 @@ namespace ppp
                 {
                     if (++extension_count > 8 || cursor + 2 > packet_size)
                     {
+                        if (NULLPTR != failure_reason) *failure_reason = "ipv6_extension_header_truncated_or_too_many";
                         return false;
                     }
                     const int extension_length = next_header == 51 ?
@@ -88,6 +94,7 @@ namespace ppp
                         (static_cast<int>(packet[cursor + 1]) + 1) * 8;
                     if (extension_length < 8 || cursor + extension_length > packet_size)
                     {
+                        if (NULLPTR != failure_reason) *failure_reason = "ipv6_extension_length_invalid";
                         return false;
                     }
                     next_header = packet[cursor];
@@ -98,6 +105,7 @@ namespace ppp
                 {
                     if (fragment_seen || ++extension_count > 8 || cursor + 8 > packet_size)
                     {
+                        if (NULLPTR != failure_reason) *failure_reason = "ipv6_fragment_header_truncated_duplicate_or_too_many";
                         return false;
                     }
                     fragment_seen = true;
@@ -106,6 +114,7 @@ namespace ppp
                         static_cast<unsigned int>(packet[cursor + 3]);
                     if ((fragment_flags & 0x0006U) != 0)
                     {
+                        if (NULLPTR != failure_reason) *failure_reason = "ipv6_fragment_reserved_bits_set";
                         return false;
                     }
                     fragmented = (fragment_flags & 0xfff9U) != 0;
@@ -118,6 +127,7 @@ namespace ppp
 
             if (cursor > packet_size)
             {
+                if (NULLPTR != failure_reason) *failure_reason = "ipv6_extension_offset_invalid";
                 return false;
             }
             view.payload = packet + cursor;
@@ -419,10 +429,23 @@ namespace ppp
         }
 
         static bool ValidateWintunInjectionPacket(const void* packet, int packet_size, int mtu,
-            uint32_t expected_ipv4, const boost::asio::ip::address& expected_ipv6) noexcept
+            uint32_t expected_ipv4, const boost::asio::ip::address& expected_ipv6,
+            const char*& failure_reason) noexcept
         {
-            if (NULLPTR == packet || packet_size < 1 || packet_size > mtu)
+            failure_reason = "unknown";
+            if (NULLPTR == packet)
             {
+                failure_reason = "packet_null";
+                return false;
+            }
+            if (packet_size < 1)
+            {
+                failure_reason = "packet_empty";
+                return false;
+            }
+            if (packet_size > mtu)
+            {
+                failure_reason = "packet_exceeds_mtu";
                 return false;
             }
 
@@ -432,17 +455,36 @@ namespace ppp
             {
                 if (packet_size < ppp::net::native::ip_hdr::IP_HLEN)
                 {
+                    failure_reason = "ipv4_header_truncated";
                     return false;
                 }
                 const ppp::net::native::ip_hdr* ip =
                     reinterpret_cast<const ppp::net::native::ip_hdr*>(packet);
                 const int header_length = (ip->v_hl & 0x0f) << 2;
                 const int total_length = ntohs(ip->len);
-                if (header_length < ppp::net::native::ip_hdr::IP_HLEN ||
-                    header_length > packet_size || total_length != packet_size ||
-                    ppp::net::native::inet_chksum(const_cast<void*>(packet), header_length) != 0 ||
-                    expected_ipv4 == IPEndPoint::AnyAddress || ip->dest != expected_ipv4)
+                if (header_length < ppp::net::native::ip_hdr::IP_HLEN || header_length > packet_size)
                 {
+                    failure_reason = "ipv4_header_length_invalid";
+                    return false;
+                }
+                if (total_length != packet_size)
+                {
+                    failure_reason = "ipv4_total_length_mismatch";
+                    return false;
+                }
+                if (ppp::net::native::inet_chksum(const_cast<void*>(packet), header_length) != 0)
+                {
+                    failure_reason = "ipv4_header_checksum_invalid";
+                    return false;
+                }
+                if (expected_ipv4 == IPEndPoint::AnyAddress)
+                {
+                    failure_reason = "ipv4_tun_address_unset";
+                    return false;
+                }
+                if (ip->dest != expected_ipv4)
+                {
+                    failure_reason = "ipv4_destination_mismatch";
                     return false;
                 }
 
@@ -461,25 +503,53 @@ namespace ppp
                 {
                     if (transport_length < (int)sizeof(ppp::net::native::udp_hdr))
                     {
+                        failure_reason = "ipv4_udp_header_truncated";
                         return false;
                     }
                     ppp::net::native::udp_hdr* udp =
                         reinterpret_cast<ppp::net::native::udp_hdr*>(transport);
-                    return ntohs(udp->len) == transport_length &&
-                        (udp->chksum == 0 ||
-                            ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_UDP,
-                                transport_length, ip->src, ip->dest) == 0);
+                    if (ntohs(udp->len) != transport_length)
+                    {
+                        failure_reason = "ipv4_udp_length_mismatch";
+                        return false;
+                    }
+                    if (udp->chksum != 0 &&
+                        ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_UDP,
+                            transport_length, ip->src, ip->dest) != 0)
+                    {
+                        failure_reason = "ipv4_udp_checksum_invalid";
+                        return false;
+                    }
+                    return true;
                 }
                 if (ip->proto == ppp::net::native::ip_hdr::IP_PROTO_ICMP)
                 {
-                    return transport_length >= (int)sizeof(ppp::net::native::icmp_hdr) &&
-                        ppp::net::native::inet_chksum(transport, transport_length) == 0;
+                    if (transport_length < (int)sizeof(ppp::net::native::icmp_hdr))
+                    {
+                        failure_reason = "ipv4_icmp_header_truncated";
+                        return false;
+                    }
+                    if (ppp::net::native::inet_chksum(transport, transport_length) != 0)
+                    {
+                        failure_reason = "ipv4_icmp_checksum_invalid";
+                        return false;
+                    }
+                    return true;
                 }
                 if (ip->proto == ppp::net::native::ip_hdr::IP_PROTO_TCP)
                 {
-                    return transport_length >= ppp::net::native::tcp_hdr::TCP_HLEN &&
-                        ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_TCP,
-                            transport_length, ip->src, ip->dest) == 0;
+                    if (transport_length < ppp::net::native::tcp_hdr::TCP_HLEN)
+                    {
+                        failure_reason = "ipv4_tcp_header_truncated";
+                        return false;
+                    }
+                    if (ppp::net::native::inet_chksum_pseudo(transport, IPPROTO_TCP,
+                        transport_length, ip->src, ip->dest) != 0)
+                    {
+                        failure_reason = "ipv4_tcp_checksum_invalid";
+                        return false;
+                    }
+                    return true;
                 }
                 return true;
             }
@@ -487,24 +557,31 @@ namespace ppp
             {
                 if (packet_size < 40)
                 {
+                    failure_reason = "ipv6_header_truncated";
                     return false;
                 }
                 uint16_t payload_length = 0;
                 memcpy(&payload_length, bytes + 4, sizeof(payload_length));
-                if (40 + ntohs(payload_length) != packet_size ||
-                    !expected_ipv6.is_v6() || expected_ipv6.is_unspecified())
+                if (40 + ntohs(payload_length) != packet_size)
                 {
+                    failure_reason = "ipv6_payload_length_mismatch";
+                    return false;
+                }
+                if (!expected_ipv6.is_v6() || expected_ipv6.is_unspecified())
+                {
+                    failure_reason = "ipv6_tun_address_unset";
                     return false;
                 }
                 const boost::asio::ip::address_v6::bytes_type expected =
                     expected_ipv6.to_v6().to_bytes();
                 if (0 != memcmp(bytes + 24, expected.data(), expected.size()))
                 {
+                    failure_reason = "ipv6_destination_mismatch";
                     return false;
                 }
 
                 WintunIpv6TransportView transport_view;
-                if (!LocateWintunIpv6Transport(bytes, packet_size, transport_view))
+                if (!LocateWintunIpv6Transport(bytes, packet_size, transport_view, &failure_reason))
                 {
                     return false;
                 }
@@ -529,6 +606,7 @@ namespace ppp
                     (next_header == IPPROTO_TCP ? 20 : 4);
                 if (transport_length < minimum)
                 {
+                    failure_reason = "ipv6_transport_header_truncated";
                     return false;
                 }
                 if (next_header == IPPROTO_UDP)
@@ -537,8 +615,14 @@ namespace ppp
                     uint16_t udp_checksum = 0;
                     memcpy(&udp_length, transport_view.payload + 4, sizeof(udp_length));
                     memcpy(&udp_checksum, transport_view.payload + 6, sizeof(udp_checksum));
-                    if (ntohs(udp_length) != transport_length || udp_checksum == 0)
+                    if (ntohs(udp_length) != transport_length)
                     {
+                        failure_reason = "ipv6_udp_length_mismatch";
+                        return false;
+                    }
+                    if (udp_checksum == 0)
+                    {
+                        failure_reason = "ipv6_udp_checksum_missing";
                         return false;
                     }
                 }
@@ -547,10 +631,16 @@ namespace ppp
                 memcpy(source_bytes.data(), bytes + 8, source_bytes.size());
                 const boost::asio::ip::address_v6 source(source_bytes);
                 const boost::asio::ip::address_v6 destination(expected);
-                return ppp::ipv6::ComputePseudoChecksum(
+                if (ppp::ipv6::ComputePseudoChecksum(
                     const_cast<Byte*>(transport_view.payload), static_cast<unsigned int>(transport_length),
-                    source, destination, next_header) == 0;
+                    source, destination, next_header) != 0)
+                {
+                    failure_reason = "ipv6_transport_checksum_invalid";
+                    return false;
+                }
+                return true;
             }
+            failure_reason = "ip_version_unsupported";
             return false;
         }
 
@@ -1804,14 +1894,18 @@ namespace ppp
             if (NULLPTR == packet || packet_size < 1)
             {
                 wintun_validate_failures_.fetch_add(1, std::memory_order_relaxed);
+                LogWintunFailure("WINTUN_VALIDATE_FAIL", flow_id, packet_size,
+                    NULLPTR == packet ? "packet_null" : "packet_empty");
                 return false;
             }
 
+            const char* validationFailure = NULLPTR;
             if (!ValidateWintunInjectionPacket(packet, packet_size,
-                    interface_mtu_.load(std::memory_order_relaxed), IPAddress, IPv6Address))
+                    interface_mtu_.load(std::memory_order_relaxed), IPAddress, IPv6Address,
+                    validationFailure))
             {
                 wintun_validate_failures_.fetch_add(1, std::memory_order_relaxed);
-                LogWintunFailure("WINTUN_VALIDATE_FAIL", flow_id, packet_size);
+                LogWintunFailure("WINTUN_VALIDATE_FAIL", flow_id, packet_size, validationFailure);
                 return false;
             }
 
@@ -1828,7 +1922,7 @@ namespace ppp
             if (!wintun->IsOpen())
             {
                 wintun_submit_failures_.fetch_add(1, std::memory_order_relaxed);
-                LogWintunFailure("WINTUN_SUBMIT_CLOSED", flow_id, packet_size);
+                LogWintunFailure("WINTUN_SUBMIT_CLOSED", flow_id, packet_size, "adapter_not_open");
                 return false;
             }
 
@@ -1857,12 +1951,13 @@ namespace ppp
             else
             {
                 wintun_submit_failures_.fetch_add(1, std::memory_order_relaxed);
-                LogWintunFailure("WINTUN_SUBMIT_FAIL", flow_id, packet_size);
+                LogWintunFailure("WINTUN_SUBMIT_FAIL", flow_id, packet_size, "wintun_send_packet_failed");
             }
             return submitted;
         }
 
-        void TapWindows::LogWintunFailure(const char* stage, uint64_t flow_id, int packet_size) noexcept
+        void TapWindows::LogWintunFailure(const char* stage, uint64_t flow_id, int packet_size,
+            const char* reason) noexcept
         {
             const uint64_t now = ppp::threading::Executors::GetTickCount();
             uint64_t previous = wintun_error_log_last_ms_.load(std::memory_order_relaxed);
@@ -1870,11 +1965,12 @@ namespace ppp
                 wintun_error_log_last_ms_.compare_exchange_strong(previous, now, std::memory_order_relaxed))
             {
                 const uint64_t suppressed = wintun_error_log_suppressed_.exchange(0, std::memory_order_relaxed);
-                LOG_ERROR("DATAPLANE %s flow_id=%llu bytes=%d mtu=%d suppressed=%llu",
+                LOG_ERROR("DATAPLANE %s flow_id=%llu bytes=%d mtu=%d reason=%s suppressed=%llu",
                     NULLPTR != stage ? stage : "WINTUN_FAILURE",
                     (unsigned long long)flow_id,
                     packet_size,
                     interface_mtu_.load(std::memory_order_relaxed),
+                    NULLPTR != reason ? reason : "n/a",
                     (unsigned long long)suppressed);
             }
             else

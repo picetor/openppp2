@@ -18,17 +18,68 @@
 #include <thread>
 #include <algorithm>
 #include <stdexcept>
+#include <cstdio>
+#include <system_error>
 #include "resources.h"
 
 namespace fs = std::filesystem;
 using J = Json::Value;
 static std::atomic<bool> exiting{false};
 static std::mutex stateMutex;
+static std::mutex hostLogMutex;
+static std::atomic<uint64_t> nextConnectionId{1};
+static std::atomic<int> activeWebConnections{0};
+static uint64_t hostLogBytes=0;
+static bool hostLogSizeKnown=false;
+static thread_local uint64_t activeConnectionId=0;
+static thread_local const char* activeRoute="unparsed";
+static thread_local const char* activeStage="accept";
 static ppp_core_handle* core = nullptr;
 static fs::path base, settingsPath, exe;
 static J settings;
 static std::string sessionToken, origin, lastError;
 static int port=19999;
+
+static void hostLog(std::string message) noexcept {
+ try {
+  SYSTEMTIME now{};GetLocalTime(&now);char timestamp[40]{};
+  std::snprintf(timestamp,sizeof(timestamp),"%04u-%02u-%02u %02u:%02u:%02u.%03u",
+   now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds);
+  std::lock_guard<std::mutex> lock(hostLogMutex);
+  const fs::path path=base/L"ppp-web-debug.log";
+  if(!hostLogSizeKnown){std::error_code error;hostLogBytes=fs::file_size(path,error);if(error)hostLogBytes=0;hostLogSizeKnown=true;}
+  if(hostLogBytes>=4*1024*1024){message="log_rotated previous_bytes="+std::to_string(hostLogBytes)+" "+message;hostLogBytes=0;}
+  std::ostringstream entry;
+  entry<<'['<<timestamp<<"] pid="<<GetCurrentProcessId()<<" tid="<<GetCurrentThreadId();
+  if(activeConnectionId)entry<<" conn="<<activeConnectionId;
+  entry<<" active="<<activeWebConnections.load(std::memory_order_relaxed)<<' '<<message<<"\r\n";
+  const std::string record=entry.str();
+  std::ofstream log(path,std::ios::out|(hostLogBytes?std::ios::app:std::ios::trunc)|std::ios::binary);
+  if(!log)return;
+  log.write(record.data(),static_cast<std::streamsize>(record.size()));
+  if(log)hostLogBytes+=record.size();
+ }catch(...){}
+}
+
+static std::string safeMethodLabel(const std::string& value) {
+ if(value.empty()||value.size()>64)return "other";
+ for(unsigned char c:value){
+  if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.'))return "other";
+ }
+ return value;
+}
+
+static const char* routeLabel(const std::string& path) {
+ const auto query=path.find('?');const auto route=path.substr(0,query);
+ if(route=="/")return "/";
+ if(route=="/index.html")return "/index.html";
+ if(route=="/session.js")return "/session.js";
+ if(route=="/app.js")return "/app.js";
+ if(route=="/style.css")return "/style.css";
+ if(route=="/favicon.ico")return "/favicon.ico";
+ if(route=="/api/rpc")return "/api/rpc";
+ return "other";
+}
 
 static std::wstring wide(const std::string& s) { int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),(int)s.size(),nullptr,0); if(!n&&!s.empty())throw std::runtime_error("Invalid UTF-8");std::wstring w(n,0);MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),w.data(),n);return w; }
 static std::string utf8(const std::wstring& s) { int n=WideCharToMultiByte(CP_UTF8,0,s.data(),(int)s.size(),nullptr,0,nullptr,nullptr);std::string r(n,0);WideCharToMultiByte(CP_UTF8,0,s.data(),(int)s.size(),r.data(),n,nullptr,nullptr);return r; }
@@ -87,8 +138,7 @@ static J status() {
  J r;r["admin"]=admin();r["running"]=core&&ppp_core_is_running(core);r["error"]=lastError.c_str();r["settings_path"]=settingsPath.u8string().c_str();r["web_url"]=origin.c_str();
  if(r["running"].asBool())r["snapshot"]=callCore("get_snapshot",J(Json::objectValue));return r;
 }
-static J dispatch(const std::string& m,const J& p) {
- std::lock_guard<std::mutex> lock(stateMutex);
+static J dispatchLocked(const std::string& m,const J& p) {
  if(exiting)throw std::runtime_error("Host is exiting");
  if(m=="host.status")return status();
  if(m=="host.settings")return settings;
@@ -107,26 +157,99 @@ static J dispatch(const std::string& m,const J& p) {
  static const std::set<std::string> methods={"ping","describe_api","get_health","run_diagnostics","get_snapshot","get_log_level","get_logs","get_outbounds","get_settings","set_log_level","update_settings","configure_api","switch_server","switch_rank1","shutdown"};
  if(!methods.count(m))throw std::runtime_error("Unknown method");return callCore(m,p);
 }
+static J dispatch(const std::string& m,const J& p) {
+ const auto started=GetTickCount64();const auto method=safeMethodLabel(m);
+ hostLog("rpc_begin method="+method);
+ std::unique_lock<std::mutex> lock(stateMutex);
+ const auto acquired=GetTickCount64();
+ hostLog("rpc_lock_acquired method="+method+" wait_ms="+std::to_string(acquired-started));
+ try{
+  J result=dispatchLocked(m,p);
+  hostLog("rpc_complete method="+method+" elapsed_ms="+std::to_string(GetTickCount64()-started));
+  return result;
+ }catch(const std::exception&){
+  hostLog("rpc_exception method="+method+" elapsed_ms="+std::to_string(GetTickCount64()-started));
+  throw;
+ }catch(...){
+  hostLog("rpc_exception_unknown method="+method+" elapsed_ms="+std::to_string(GetTickCount64()-started));
+  throw;
+ }
+}
 static std::string lower(std::string s){std::transform(s.begin(),s.end(),s.begin(),[](unsigned char c){return (char)std::tolower(c);});return s;}
-static void sendAll(SOCKET s,const std::string& data){size_t sent=0;while(sent<data.size()){int n=send(s,data.data()+sent,(int)(data.size()-sent),0);if(n<=0)return;sent+=n;}}
+static bool sendAll(SOCKET s,const std::string& data){
+ size_t sent=0;
+ while(sent<data.size()){
+  int n=send(s,data.data()+sent,(int)(data.size()-sent),0);
+  if(n<=0){const int error=n==SOCKET_ERROR?WSAGetLastError():0;hostLog("send_failure route="+std::string(activeRoute)+" sent="+std::to_string(sent)+" total="+std::to_string(data.size())+" wsa="+std::to_string(error));return false;}
+  sent+=n;
+ }
+ return true;
+}
 static void respond(SOCKET s,int code,const std::string& body,const std::string& type="application/json; charset=utf-8"){
- sendAll(s,"HTTP/1.1 "+std::to_string(code)+(code==200?" OK":" Error")+"\r\nContent-Type: "+type+"\r\nContent-Length: "+std::to_string(body.size())+"\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n\r\n"+body);
+ const bool sent=sendAll(s,"HTTP/1.1 "+std::to_string(code)+(code==200?" OK":" Error")+"\r\nContent-Type: "+type+"\r\nContent-Length: "+std::to_string(body.size())+"\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n\r\n"+body);
+ hostLog("http_response route="+std::string(activeRoute)+" status="+std::to_string(code)+" body_bytes="+std::to_string(body.size())+" send_ok="+(sent?"1":"0"));
 }
 static void serve(SOCKET s) {
- DWORD timeout=5000;setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout,sizeof(timeout));setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,(char*)&timeout,sizeof(timeout));
+ activeRoute="unparsed";
+ activeStage="socket_setup";
+ DWORD timeout=5000;
+ if(setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout,sizeof(timeout))==SOCKET_ERROR)hostLog("socket_option_failure option=recv_timeout wsa="+std::to_string(WSAGetLastError()));
+ if(setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,(char*)&timeout,sizeof(timeout))==SOCKET_ERROR)hostLog("socket_option_failure option=send_timeout wsa="+std::to_string(WSAGetLastError()));
  try{
-  std::string request;char buf[8192];size_t end;while((end=request.find("\r\n\r\n"))==std::string::npos){int n=recv(s,buf,sizeof(buf),0);if(n<=0)throw std::runtime_error("Incomplete request");request.append(buf,n);if(request.size()>16384)throw std::runtime_error("Headers too large");}
+  activeStage="read_headers";
+  std::string request;char buf[8192];size_t end;
+  while((end=request.find("\r\n\r\n"))==std::string::npos){
+   int n=recv(s,buf,sizeof(buf),0);
+   if(n<=0){const int error=n==SOCKET_ERROR?WSAGetLastError():0;hostLog("request_recv_failure route="+std::string(activeRoute)+" bytes="+std::to_string(request.size())+" wsa="+std::to_string(error));throw std::runtime_error("Incomplete request");}
+   request.append(buf,n);if(request.size()>16384)throw std::runtime_error("Headers too large");
+  }
+  activeStage="parse_headers";
   std::istringstream stream(request.substr(0,end));std::string method,path,version,line;stream>>method>>path>>version;std::getline(stream,line);std::map<std::string,std::string> headers;
   while(std::getline(stream,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();auto colon=line.find(':');if(colon==std::string::npos)continue;auto value=line.substr(colon+1);value.erase(0,value.find_first_not_of(" \t"));auto key=lower(line.substr(0,colon));if(headers.count(key))throw std::runtime_error("Duplicate header");headers[key]=value;}
-  auto host="127.0.0.1:"+std::to_string(port);if(headers["host"]!=host){respond(s,403,"{\"error\":\"Invalid Host\"}");closesocket(s);return;}
-  if((headers.count("origin")&&headers["origin"]!=origin)||headers["sec-fetch-site"]=="cross-site"){respond(s,403,"{\"error\":\"Cross-origin request denied\"}");closesocket(s);return;}
+  activeRoute=routeLabel(path);
+  auto host="127.0.0.1:"+std::to_string(port);const bool hostValid=headers["host"]==host;
+  const bool originValid=(!headers.count("origin")||headers["origin"]==origin)&&headers["sec-fetch-site"]!="cross-site";
+  hostLog("http_request method="+safeMethodLabel(method)+" route="+std::string(activeRoute)+" host_valid="+(hostValid?"1":"0")+" origin_valid="+(originValid?"1":"0"));
+  if(!hostValid){hostLog("http_reject reason=invalid_host route="+std::string(activeRoute));respond(s,403,"{\"error\":\"Invalid Host\"}");closesocket(s);return;}
+  if(!originValid){hostLog("http_reject reason=cross_origin route="+std::string(activeRoute));respond(s,403,"{\"error\":\"Cross-origin request denied\"}");closesocket(s);return;}
+  activeStage="route_request";
   if(method=="GET"&&(path=="/"||path=="/index.html"||path=="/app.js"||path=="/style.css"||path=="/favicon.ico"||path=="/session.js")){
+   activeStage="serve_asset";
    if(path=="/session.js")respond(s,200,"window.PPP_SESSION="+json(J(sessionToken.c_str()))+";","text/javascript; charset=utf-8");else{auto file=(path=="/"||path=="/index.html")?"index.html":path.substr(1);respond(s,200,embeddedAsset(file),file=="index.html"?"text/html; charset=utf-8":file=="app.js"?"text/javascript; charset=utf-8":file=="favicon.ico"?"image/x-icon":"text/css; charset=utf-8");}
   }else if(method=="POST"&&path=="/api/rpc"){
-   if(headers["authorization"]!="Bearer "+sessionToken){respond(s,401,"{\"error\":\"Session expired; reload the page\"}");closesocket(s);return;}
-   if(headers.count("transfer-encoding")||headers["content-type"].rfind("application/json",0)!=0)throw std::runtime_error("JSON content required");auto lengthText=headers["content-length"];if(lengthText.empty()||lengthText.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid Content-Length");size_t length=std::stoul(lengthText);if(length>1024*1024)throw std::runtime_error("Body too large");std::string body=request.substr(end+4);while(body.size()<length){int n=recv(s,buf,(int)std::min(sizeof(buf),length-body.size()),0);if(n<=0)throw std::runtime_error("Incomplete body");body.append(buf,n);}auto input=parse(body.substr(0,length));if(!input.isObject()||!input["method"].isString())throw std::runtime_error("method required");J r;r["id"]=input["id"];try{r["result"]=dispatch(input["method"].asCString(),input.get("params",J(Json::objectValue)));r["ok"]=true;}catch(const std::exception& e){r["ok"]=false;r["error"]=e.what();}respond(s,200,json(r));
-  }else respond(s,404,"{\"error\":\"Not found\"}");
- }catch(const std::exception& e){J r;r["error"]=e.what();respond(s,400,json(r));}shutdown(s,SD_BOTH);closesocket(s);
+   activeStage="validate_rpc_headers";
+   if(headers["authorization"]!="Bearer "+sessionToken){hostLog("http_reject reason=invalid_session route=/api/rpc");respond(s,401,"{\"error\":\"Session expired; reload the page\"}");closesocket(s);return;}
+   if(headers.count("transfer-encoding")||headers["content-type"].rfind("application/json",0)!=0)throw std::runtime_error("JSON content required");auto lengthText=headers["content-length"];if(lengthText.empty()||lengthText.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid Content-Length");size_t length=std::stoul(lengthText);if(length>1024*1024)throw std::runtime_error("Body too large");activeStage="read_rpc_body";std::string body=request.substr(end+4);while(body.size()<length){int n=recv(s,buf,(int)std::min(sizeof(buf),length-body.size()),0);if(n<=0){const int error=n==SOCKET_ERROR?WSAGetLastError():0;hostLog("body_recv_failure route=/api/rpc expected="+std::to_string(length)+" received="+std::to_string(body.size())+" wsa="+std::to_string(error));throw std::runtime_error("Incomplete body");}body.append(buf,n);}activeStage="parse_rpc_json";auto input=parse(body.substr(0,length));if(!input.isObject()||!input["method"].isString())throw std::runtime_error("method required");J r;r["id"]=input["id"];activeStage="dispatch_rpc";try{r["result"]=dispatch(input["method"].asCString(),input.get("params",J(Json::objectValue)));r["ok"]=true;}catch(const std::exception& e){r["ok"]=false;r["error"]=e.what();}activeStage="send_rpc_response";respond(s,200,json(r));
+  }else {activeStage="route_not_found";respond(s,404,"{\"error\":\"Not found\"}");}
+ }catch(const std::exception& e){hostLog("http_exception stage="+std::string(activeStage)+" route="+std::string(activeRoute)+" response_status=400");J r;r["error"]=e.what();activeStage="send_error_response";respond(s,400,json(r));}
+ const int shutdownResult=shutdown(s,SD_BOTH);if(shutdownResult==SOCKET_ERROR){const int error=WSAGetLastError();if(error!=WSAENOTCONN)hostLog("socket_shutdown_failure route="+std::string(activeRoute)+" wsa="+std::to_string(error));}
+ if(closesocket(s)==SOCKET_ERROR)hostLog("socket_close_failure route="+std::string(activeRoute)+" wsa="+std::to_string(WSAGetLastError()));
+}
+
+static void serveAcceptedConnection(SOCKET s) {
+ activeConnectionId=nextConnectionId.fetch_add(1,std::memory_order_relaxed);
+ const int active=activeWebConnections.fetch_add(1,std::memory_order_relaxed)+1;
+ hostLog("connection_accepted capacity=4 active_after_accept="+std::to_string(active));
+ const auto started=GetTickCount64();
+ u_long blocking=0;
+ if(ioctlsocket(s,FIONBIO,&blocking)!=0){
+  const int error=WSAGetLastError();
+  hostLog("connection_socket_mode_failure wsa="+std::to_string(error));
+  if(closesocket(s)==SOCKET_ERROR)hostLog("connection_close_failure wsa="+std::to_string(WSAGetLastError()));
+ }else{
+  try{serve(s);}
+  catch(...){
+   hostLog("connection_worker_exception stage="+std::string(activeStage)+" route="+std::string(activeRoute));
+   shutdown(s,SD_BOTH);
+   if(closesocket(s)==SOCKET_ERROR)hostLog("connection_close_failure wsa="+std::to_string(WSAGetLastError()));
+  }
+ }
+ const auto elapsed=GetTickCount64()-started;
+ const int remaining=activeWebConnections.fetch_sub(1,std::memory_order_relaxed)-1;
+ hostLog("connection_complete elapsed_ms="+std::to_string(elapsed)+" active_after_close="+std::to_string(remaining));
+ activeConnectionId=0;
+ activeRoute="unparsed";
+ activeStage="accept";
 }
 
 // A hidden top-level window receives Explorer restart broadcasts and tray events.
@@ -239,31 +362,49 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
   const int preferredPort=port;
   // Bind atomically; never open a URL served by the process occupying our port.
   // Wait briefly on the preferred port so a UAC predecessor can finish exiting.
+  int bindError=0;int bindAttempt=0;
   for(int attempt=0;attempt<131;++attempt){
    int candidate=attempt<30?preferredPort:attempt<130?preferredPort+attempt-29:0;
    if(candidate>65535)continue;
    listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-   if(listener==INVALID_SOCKET)throw std::runtime_error("Cannot create web listener");
+   if(listener==INVALID_SOCKET){const int error=WSAGetLastError();hostLog("listener_socket_failure wsa="+std::to_string(error));throw std::runtime_error("Cannot create web listener");}
    BOOL exclusive=TRUE;setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,(char*)&exclusive,sizeof(exclusive));
    sockaddr_in addr={};addr.sin_family=AF_INET;addr.sin_port=htons((u_short)candidate);inet_pton(AF_INET,"127.0.0.1",&addr.sin_addr);
    if(bind(listener,(sockaddr*)&addr,sizeof(addr))==0&&listen(listener,16)==0){
     int size=sizeof(addr);if(getsockname(listener,(sockaddr*)&addr,&size)!=0)throw std::runtime_error("Cannot read bound web port");
-    port=ntohs(addr.sin_port);break;
+    port=ntohs(addr.sin_port);bindAttempt=attempt;break;
    }
+   bindError=WSAGetLastError();
    closesocket(listener);listener=INVALID_SOCKET;if(attempt<29)Sleep(100);
   }
-  if(listener==INVALID_SOCKET)throw std::runtime_error("No available loopback port for web control");
+  if(listener==INVALID_SOCKET){hostLog("listener_bind_failure preferred_port="+std::to_string(preferredPort)+" last_candidate_error_wsa="+std::to_string(bindError));throw std::runtime_error("No available loopback port for web control");}
   origin="http://127.0.0.1:"+std::to_string(port);
+  hostLog("listener_bound address=127.0.0.1 port="+std::to_string(port)+" preferred_port="+std::to_string(preferredPort)+" bind_attempt="+std::to_string(bindAttempt));
   // This convenience file contains no token and lets no-browser users find the URL.
   {std::ofstream endpoint(base/L"ppp-web-address.txt",std::ios::trunc);if(endpoint)endpoint<<origin<<"/\n";}
   for(const char* asset:{"index.html","style.css","app.js","favicon.ico"})embeddedAsset(asset);
   TrayHost tray;
   // Multiple accept workers must never block after another worker consumes a connection.
-  u_long nonblocking=1;if(ioctlsocket(listener,FIONBIO,&nonblocking)!=0)throw std::runtime_error("Cannot configure web listener");
+  u_long nonblocking=1;if(ioctlsocket(listener,FIONBIO,&nonblocking)!=0){const int error=WSAGetLastError();hostLog("listener_nonblocking_failure wsa="+std::to_string(error));throw std::runtime_error("Cannot configure web listener");}
   if(open)ShellExecuteW(nullptr,L"open",wide(origin).c_str(),nullptr,nullptr,SW_SHOWNORMAL);
   // Bounded workers keep status responsive and slow clients cannot create unlimited threads.
-  std::vector<std::thread> workers;for(int i=0;i<4;++i)workers.emplace_back([listener]{while(!exiting){fd_set set;FD_ZERO(&set);FD_SET(listener,&set);timeval wait={0,250000};if(select(0,&set,nullptr,nullptr,&wait)>0){SOCKET s=accept(listener,nullptr,nullptr);if(s!=INVALID_SOCKET){u_long blocking=0;if(ioctlsocket(s,FIONBIO,&blocking)==0)serve(s);else closesocket(s);}}}});
+  std::vector<std::thread> workers;
+  for(int i=0;i<4;++i)workers.emplace_back([listener]{
+   while(!exiting){
+    fd_set set;FD_ZERO(&set);FD_SET(listener,&set);timeval wait={0,250000};
+    const int ready=select(0,&set,nullptr,nullptr,&wait);
+    if(ready>0){
+     SOCKET s=accept(listener,nullptr,nullptr);
+     if(s!=INVALID_SOCKET)serveAcceptedConnection(s);
+     else{const int error=WSAGetLastError();if(error!=WSAEWOULDBLOCK&&error!=WSAENOTSOCK)hostLog("accept_failure wsa="+std::to_string(error));}
+    }else if(ready==SOCKET_ERROR){
+     const int error=WSAGetLastError();if(error!=WSAEINTR)hostLog("listener_select_failure wsa="+std::to_string(error));Sleep(100);
+    }
+   }
+  });
+  workers.emplace_back([]{ULONGLONG saturatedSince=0,lastWarning=0;while(!exiting){Sleep(500);const int active=activeWebConnections.load(std::memory_order_relaxed);const ULONGLONG now=GetTickCount64();if(active>=4){if(!saturatedSince)saturatedSince=now;if(now-saturatedSince>=2000&&(!lastWarning||now-lastWarning>=5000)){hostLog("worker_pool_saturated active="+std::to_string(active)+" capacity=4 duration_ms="+std::to_string(now-saturatedSince));lastWarning=now;}}else{saturatedSince=0;lastWarning=0;}}});
   workers.emplace_back([]{while(!exiting){Sleep(250);std::lock_guard<std::mutex> lock(stateMutex);if(exiting)break;if(core&&!ppp_core_is_running(core)){auto reason=ppp_core_get_exit_reason(core);ppp_core_destroy(core);core=nullptr;if(reason==PPP_CORE_EXIT_RESTART_REQUESTED){try{startCore();}catch(const std::exception& e){lastError=e.what();}}else if(reason==PPP_CORE_EXIT_FAILED)lastError="Core exited unexpectedly; check the core log";}}});
+  hostLog("web_host_ready address=127.0.0.1 port="+std::to_string(port)+" worker_capacity=4");
   tray.run();
   closesocket(listener);for(auto& thread:workers)thread.join();stopCore();WSACleanup();return 0;
  }catch(const std::exception& e){MessageBoxW(nullptr,wide(e.what()).c_str(),L"PPP Web",MB_OK|MB_ICONERROR);return 1;}

@@ -102,7 +102,8 @@ namespace ppp
                 uint64_t expires_at = 0;
             };
 
-            void                                    LogWintunFailure(const char* stage, uint64_t flow_id, int packet_size) noexcept;
+            void                                    LogWintunFailure(const char* stage, uint64_t flow_id, int packet_size,
+                                                        const char* reason = nullptr) noexcept;
             bool                                    OutputWintun(const void* packet, int packet_size, uint64_t flow_id, uint64_t trace_started) noexcept;
             void                                    RememberWintunTrace(const ppp::string& key, const TraceContext& context) noexcept;
             bool                                    PeekWintunTrace(const ppp::string& key, TraceContext& context) noexcept;
