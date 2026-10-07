@@ -27,8 +27,12 @@ using J = Json::Value;
 static std::atomic<bool> exiting{false};
 static std::mutex stateMutex;
 static std::mutex hostLogMutex;
+static std::mutex listenerMutex;
 static std::atomic<uint64_t> nextConnectionId{1};
 static std::atomic<int> activeWebConnections{0};
+static SOCKET listenerSocket=INVALID_SOCKET;
+static ULONGLONG listenerRetryAfter=0;
+static int listenerRetryDelayMs=250;
 static uint64_t hostLogBytes=0;
 static bool hostLogSizeKnown=false;
 static thread_local uint64_t activeConnectionId=0;
@@ -59,6 +63,86 @@ static void hostLog(std::string message) noexcept {
   log.write(record.data(),static_cast<std::streamsize>(record.size()));
   if(log)hostLogBytes+=record.size();
  }catch(...){}
+}
+
+static bool openWebListener(int bindPort,SOCKET& result,int& error) {
+ result=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+ if(result==INVALID_SOCKET){error=WSAGetLastError();return false;}
+ BOOL exclusive=TRUE;
+ if(setsockopt(result,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,(char*)&exclusive,sizeof(exclusive))==SOCKET_ERROR){error=WSAGetLastError();closesocket(result);result=INVALID_SOCKET;return false;}
+ sockaddr_in addr={};addr.sin_family=AF_INET;addr.sin_port=htons((u_short)bindPort);inet_pton(AF_INET,"127.0.0.1",&addr.sin_addr);
+ if(bind(result,(sockaddr*)&addr,sizeof(addr))==SOCKET_ERROR||listen(result,16)==SOCKET_ERROR){error=WSAGetLastError();closesocket(result);result=INVALID_SOCKET;return false;}
+ u_long nonblocking=1;
+ if(ioctlsocket(result,FIONBIO,&nonblocking)!=0){error=WSAGetLastError();closesocket(result);result=INVALID_SOCKET;return false;}
+ error=0;
+ return true;
+}
+
+static bool recoverWebListenerLocked(const char* reason,int previousError) {
+ if(listenerSocket!=INVALID_SOCKET){
+  if(closesocket(listenerSocket)==SOCKET_ERROR)hostLog("listener_close_failure reason="+std::string(reason)+" wsa="+std::to_string(WSAGetLastError()));
+  listenerSocket=INVALID_SOCKET;
+ }
+ SOCKET replacement=INVALID_SOCKET;int error=0;
+ if(!openWebListener(port,replacement,error)){
+  const int retry=listenerRetryDelayMs;
+  listenerRetryAfter=GetTickCount64()+retry;
+  listenerRetryDelayMs=std::min(listenerRetryDelayMs*2,5000);
+  hostLog("listener_rebind_failure reason="+std::string(reason)+" previous_wsa="+std::to_string(previousError)+" wsa="+std::to_string(error)+" retry_ms="+std::to_string(retry));
+  return false;
+ }
+ listenerSocket=replacement;
+ listenerRetryAfter=0;
+ listenerRetryDelayMs=250;
+ hostLog("listener_rebound reason="+std::string(reason)+" previous_wsa="+std::to_string(previousError)+" address=127.0.0.1 port="+std::to_string(port));
+ return true;
+}
+
+static bool listenerErrorNeedsRecovery(int error) {
+ return error==WSAEINVAL||error==WSAENOTSOCK||error==WSAENETDOWN||error==WSAENETRESET;
+}
+
+static bool refreshWebListener(const char* reason) {
+ std::lock_guard<std::mutex> lock(listenerMutex);
+ if(exiting||listenerSocket==INVALID_SOCKET)return false;
+ return recoverWebListenerLocked(reason,0);
+}
+
+static SOCKET acceptWebConnection() {
+ std::lock_guard<std::mutex> lock(listenerMutex);
+ if(exiting)return INVALID_SOCKET;
+ if(listenerSocket==INVALID_SOCKET){
+  const ULONGLONG now=GetTickCount64();
+  if(now<listenerRetryAfter)return INVALID_SOCKET;
+  SOCKET replacement=INVALID_SOCKET;int error=0;
+  if(!openWebListener(port,replacement,error)){
+   const int retry=listenerRetryDelayMs;
+   listenerRetryAfter=now+retry;
+   listenerRetryDelayMs=std::min(listenerRetryDelayMs*2,5000);
+   hostLog("listener_rebind_failure reason=retry previous_wsa=0 wsa="+std::to_string(error)+" retry_ms="+std::to_string(retry));
+   return INVALID_SOCKET;
+  }
+  listenerSocket=replacement;
+  listenerRetryAfter=0;
+  listenerRetryDelayMs=250;
+  hostLog("listener_rebound reason=retry previous_wsa=0 address=127.0.0.1 port="+std::to_string(port));
+ }
+
+ fd_set set;FD_ZERO(&set);FD_SET(listenerSocket,&set);timeval wait={0,250000};
+ const int ready=select(0,&set,nullptr,nullptr,&wait);
+ if(ready>0){
+  SOCKET accepted=accept(listenerSocket,nullptr,nullptr);
+  if(accepted!=INVALID_SOCKET)return accepted;
+  const int error=WSAGetLastError();
+  if(error==WSAEWOULDBLOCK)return INVALID_SOCKET;
+  if(listenerErrorNeedsRecovery(error))recoverWebListenerLocked("accept",error);
+  else if(error!=WSAEINTR)hostLog("accept_failure wsa="+std::to_string(error));
+ }else if(ready==SOCKET_ERROR){
+  const int error=WSAGetLastError();
+  if(listenerErrorNeedsRecovery(error))recoverWebListenerLocked("select",error);
+  else if(error!=WSAEINTR)hostLog("listener_select_failure wsa="+std::to_string(error));
+ }
+ return INVALID_SOCKET;
 }
 
 static std::string safeMethodLabel(const std::string& value) {
@@ -129,6 +213,9 @@ static void startCore() {
  if(str(settings,"mode","client")=="client"&&flag(settings,"tun_enabled",true)&&!admin())throw std::runtime_error("TUN needs administrator privileges. Click UAC first.");
  if(!fs::is_directory(workDir()))throw std::runtime_error("Working directory does not exist");if(!fs::is_regular_file(resolve(str(settings,"config_path"))))throw std::runtime_error("Configuration file does not exist");
  fs::current_path(workDir());auto a=arguments();std::vector<const char*> raw;for(auto& s:a)raw.push_back(s.c_str());char err[4096]={};core=ppp_core_start((int)raw.size(),raw.data(),nullptr,nullptr,err,sizeof(err));if(!core){lastError=err;throw std::runtime_error(lastError);}lastError.clear();
+ // PaperAirplane can update the Winsock provider catalog while the web host is
+ // running. Recreate the listener after core startup so it uses the new catalog.
+ refreshWebListener("core_started");
 }
 static J catalog() {
  J result(Json::arrayValue);std::set<fs::path> paths;auto dir=resolve(str(settings,"server_dir"));if(fs::is_directory(dir))for(auto& e:fs::directory_iterator(dir))if(e.is_regular_file()&&e.path().extension()==L".json")paths.insert(e.path());auto primary=resolve(str(settings,"config_path"));if(fs::is_regular_file(primary))paths.insert(primary);
@@ -386,26 +473,22 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
   TrayHost tray;
   // Multiple accept workers must never block after another worker consumes a connection.
   u_long nonblocking=1;if(ioctlsocket(listener,FIONBIO,&nonblocking)!=0){const int error=WSAGetLastError();hostLog("listener_nonblocking_failure wsa="+std::to_string(error));throw std::runtime_error("Cannot configure web listener");}
+  listenerSocket=listener;
   if(open)ShellExecuteW(nullptr,L"open",wide(origin).c_str(),nullptr,nullptr,SW_SHOWNORMAL);
   // Bounded workers keep status responsive and slow clients cannot create unlimited threads.
   std::vector<std::thread> workers;
-  for(int i=0;i<4;++i)workers.emplace_back([listener]{
+  for(int i=0;i<4;++i)workers.emplace_back([]{
    while(!exiting){
-    fd_set set;FD_ZERO(&set);FD_SET(listener,&set);timeval wait={0,250000};
-    const int ready=select(0,&set,nullptr,nullptr,&wait);
-    if(ready>0){
-     SOCKET s=accept(listener,nullptr,nullptr);
-     if(s!=INVALID_SOCKET)serveAcceptedConnection(s);
-     else{const int error=WSAGetLastError();if(error!=WSAEWOULDBLOCK&&error!=WSAENOTSOCK)hostLog("accept_failure wsa="+std::to_string(error));}
-    }else if(ready==SOCKET_ERROR){
-     const int error=WSAGetLastError();if(error!=WSAEINTR)hostLog("listener_select_failure wsa="+std::to_string(error));Sleep(100);
-    }
+    SOCKET s=acceptWebConnection();
+    if(s!=INVALID_SOCKET)serveAcceptedConnection(s);
+    else Sleep(50);
    }
   });
   workers.emplace_back([]{ULONGLONG saturatedSince=0,lastWarning=0;while(!exiting){Sleep(500);const int active=activeWebConnections.load(std::memory_order_relaxed);const ULONGLONG now=GetTickCount64();if(active>=4){if(!saturatedSince)saturatedSince=now;if(now-saturatedSince>=2000&&(!lastWarning||now-lastWarning>=5000)){hostLog("worker_pool_saturated active="+std::to_string(active)+" capacity=4 duration_ms="+std::to_string(now-saturatedSince));lastWarning=now;}}else{saturatedSince=0;lastWarning=0;}}});
   workers.emplace_back([]{while(!exiting){Sleep(250);std::lock_guard<std::mutex> lock(stateMutex);if(exiting)break;if(core&&!ppp_core_is_running(core)){auto reason=ppp_core_get_exit_reason(core);ppp_core_destroy(core);core=nullptr;if(reason==PPP_CORE_EXIT_RESTART_REQUESTED){try{startCore();}catch(const std::exception& e){lastError=e.what();}}else if(reason==PPP_CORE_EXIT_FAILED)lastError="Core exited unexpectedly; check the core log";}}});
   hostLog("web_host_ready address=127.0.0.1 port="+std::to_string(port)+" worker_capacity=4");
   tray.run();
-  closesocket(listener);for(auto& thread:workers)thread.join();stopCore();WSACleanup();return 0;
+  {std::lock_guard<std::mutex> lock(listenerMutex);if(listenerSocket!=INVALID_SOCKET){closesocket(listenerSocket);listenerSocket=INVALID_SOCKET;}}
+  for(auto& thread:workers)thread.join();stopCore();WSACleanup();return 0;
  }catch(const std::exception& e){MessageBoxW(nullptr,wide(e.what()).c_str(),L"PPP Web",MB_OK|MB_ICONERROR);return 1;}
 }
