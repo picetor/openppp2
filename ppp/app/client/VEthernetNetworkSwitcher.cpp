@@ -4778,6 +4778,15 @@ namespace ppp {
                                 LOG_INFO("TUN injection probe: host received %llu/%llu injected packets; the client can deliver tunnel traffic to the host stack",
                                     (unsigned long long)received, (unsigned long long)sent);
                             }
+#if defined(_WIN32) || defined(_MACOS)
+                            // Injection works again: give the system proxy back to the
+                            // user's own setting if this fallback had enabled it.
+                            if (self->system_proxy_fallback_) {
+                                self->system_proxy_fallback_ = false;
+                                self->ClearHttpProxyToSystemEnv();
+                                LOG_INFO("TUN injection fallback: injection recovered; the fallback system proxy was removed");
+                            }
+#endif
                         }
                         else {
                             LOG_WARN("TUN injection probe: host received %llu/%llu injected packets. Packets written into the tunnel adapter are "
@@ -4785,6 +4794,25 @@ namespace ppp {
                                 "tunnel itself stays healthy; Windows Firewall allow rules do not override this. Diagnose with "
                                 "tests/tools/TunInboundProbe.ps1 and consider --tun-driver=tap.",
                                 (unsigned long long)received, (unsigned long long)sent);
+#if defined(_WIN32) || defined(_MACOS)
+                            // Fall back to the local proxies. They are reached over
+                            // loopback and resolve names remotely, so browsing keeps
+                            // working even though the host cannot receive a single
+                            // injected packet. Only take the system proxy over when
+                            // this client did not already apply it.
+                            if (self->tun_injection_fallback_ && !self->system_proxy_fallback_ && !self->system_proxy_applied_) {
+                                if (self->SetHttpProxyToSystemEnv() && self->system_proxy_applied_) {
+                                    self->system_proxy_fallback_ = true;
+                                    LOG_WARN("TUN injection fallback: enabled the system proxy %s because the host cannot receive injected "
+                                        "packets; it is removed automatically once injection recovers",
+                                        self->system_proxy_server_.data());
+                                }
+                                else {
+                                    LOG_WARN("TUN injection fallback: the system proxy could not be enabled; enable the HTTP proxy and point "
+                                        "the browser at it manually");
+                                }
+                            }
+#endif
                         }
                         self->injection_probe_reported_.store(true);
                         self->injection_probe_running_.store(false);

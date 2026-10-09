@@ -703,6 +703,15 @@ namespace ppp {
 #if defined(_WIN32) || defined(_MACOS)
                 ppp::string                                                         system_proxy_server_;
                 bool                                                                system_proxy_applied_ = false;
+                // Code-level fallback for a tunnel adapter whose injected packets the
+                // host stack discards (measured: the client writes valid DNS answers,
+                // ICMP replies and TCP handshakes into the adapter and the host never
+                // sees them). The local HTTP/SOCKS proxies run over loopback and let
+                // the proxy resolve names remotely, so traffic keeps flowing without
+                // a single injected packet. Enable the system proxy while the
+                // injection self-test is failing and restore it when it recovers.
+                bool                                                                tun_injection_fallback_ = true;
+                bool                                                                system_proxy_fallback_ = false;
 #endif
             };
         }
