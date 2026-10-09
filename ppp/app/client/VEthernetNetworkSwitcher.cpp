@@ -4698,6 +4698,44 @@ namespace ppp {
                     injection_probe_next_ms_.store(now + probe_retry_ms);
                     return;
                 }
+
+                // The client must write into the adapter that actually owns the tunnel
+                // address. Machines that have run several builds keep stale Wintun/TAP
+                // adapters around, and a packet injected into the wrong interface never
+                // reaches a socket bound to the tunnel address: the host finds no local
+                // address for it and discards it at the transport layer, which looks
+                // exactly like a firewall drop but cannot be fixed by any rule. Log the
+                // identity so a mismatch is visible instead of guessed.
+                {
+                    const int tap_if_index = tap->GetInterfaceIndex();
+                    ppp::win32::network::NetworkInterfacePtr host_ni =
+                        ppp::win32::network::GetNetworkInterfaceByInterfaceIndex(tap_if_index);
+                    if (NULLPTR == host_ni) {
+                        LOG_WARN("TUN injection probe: the tunnel adapter (ifIndex=%d) is not present in the host interface table",
+                            tap_if_index);
+                    }
+                    else {
+                        ppp::string host_addresses;
+                        for (const ppp::string& address : host_ni->IPAddresses) {
+                            if (!host_addresses.empty()) {
+                                host_addresses += ",";
+                            }
+                            host_addresses += address;
+                        }
+
+                        const std::string probe_address =
+                            IPEndPoint::ToEndPoint<boost::asio::ip::udp>(IPEndPoint(tun_ip, IPEndPoint::MinPort)).address().to_string();
+                        if (!host_addresses.empty() && host_addresses.find(probe_address.c_str()) != ppp::string::npos) {
+                            LOG_DEBUG("TUN injection probe: adapter ifIndex=%d owns the tunnel address %s, host addresses=[%s]",
+                                tap_if_index, probe_address.c_str(), host_addresses.data());
+                        }
+                        else {
+                            LOG_WARN("TUN injection probe: adapter ifIndex=%d does not own the tunnel address %s "
+                                "(host addresses=[%s]); packets injected into it cannot reach a socket bound to that address",
+                                tap_if_index, probe_address.c_str(), host_addresses.data());
+                        }
+                    }
+                }
                 injection_probe_next_ms_.store(now + probe_interval_ms);
 
                 auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
