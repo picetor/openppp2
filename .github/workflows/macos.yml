@@ -1,4 +1,4 @@
-﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
 # Description: Build openppp2 macOS - arm64 + amd64 variants using prebuilt 3rd-party libs.
 # Author     : picetor
 # Date-Time  : 2026/06/24
@@ -31,7 +31,6 @@ on:
       - 'windows/**'
       - 'android/**'
       - 'go/**'
-      - 'tui/**'
       - '.github/workflows/**'
 
 concurrency:
@@ -124,13 +123,6 @@ jobs:
           cp ../bin/ppp "${ARTIFACT_NAME}"
           file "${ARTIFACT_NAME}"
 
-          core_build="../build/openppp2-macos-${{ matrix.platform.name }}-tui-core"
-          mkdir -p "${core_build}/deps"
-          cp ../bin/libppp-core.a "${core_build}/libppp-core.a"
-          cp ../3rd/boost/stage/lib/*.a "${core_build}/deps/"
-          cp ../3rd/jemalloc/lib/libjemalloc.a "${core_build}/deps/"
-          cp ../3rd/openssl/libssl.a ../3rd/openssl/libcrypto.a "${core_build}/deps/"
-
       - name: Package release artifact
         run: |
           ZIP_NAME="openppp2-${{ matrix.platform.triple }}"
@@ -152,100 +144,4 @@ jobs:
         with:
           name: openppp2-macos-${{ matrix.platform.name }}
           path: build/${{ env.PKG_DIR }}/
-          if-no-files-found: error
-
-      - name: Upload TUI/CLI core link package
-        uses: actions/upload-artifact@v6
-        with:
-          name: openppp2-macos-${{ matrix.platform.name }}-tui-core
-          path: build/openppp2-macos-${{ matrix.platform.name }}-tui-core/
-          if-no-files-found: error
-
-  build-macos-tui:
-    name: build-macos-tui-cli (${{ matrix.platform.name }})
-    needs: build-macos
-    if: ${{ needs.build-macos.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.build_macos) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - name: arm64
-            triple: darwin-arm64
-            rust_target: aarch64-apple-darwin
-          - name: amd64
-            triple: darwin-amd64
-            rust_target: x86_64-apple-darwin
-
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Download ${{ matrix.platform.name }} core release package
-        uses: actions/download-artifact@v5
-        with:
-          name: openppp2-macos-${{ matrix.platform.name }}
-          path: core-package
-
-      - name: Download ${{ matrix.platform.name }} in-process core link package
-        uses: actions/download-artifact@v5
-        with:
-          name: openppp2-macos-${{ matrix.platform.name }}-tui-core
-          path: core-build
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.rust_target }}
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: macos-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
-          restore-keys: macos-${{ matrix.platform.rust_target }}-tui-
-
-      - name: Build Rust TUI and CLI Release
-        run: |
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-          font=""
-          for candidate in \
-            /System/Library/Fonts/PingFang.ttc \
-            /System/Library/Fonts/STHeiti Light.ttc \
-            /System/Library/Fonts/Hiragino Sans GB.ttc \
-            /Library/Fonts/Arial Unicode.ttf; do
-            if [ -f "$candidate" ]; then
-              font="$candidate"
-              break
-            fi
-          done
-          if [ -z "$font" ] && command -v fc-match >/dev/null 2>&1; then
-            font="$(fc-match -f '%{file}\n' ':lang=zh' | head -n 1)"
-          fi
-          if [ -z "$font" ] || [ ! -f "$font" ]; then
-            echo "No Chinese-capable font found for PPP_TUI_CJK_FONT_PATH"
-            exit 1
-          fi
-          export PPP_TUI_CORE_LIB="$GITHUB_WORKSPACE/core-build/libppp-core.a"
-          export PPP_TUI_CORE_LIB_DIRS="$GITHUB_WORKSPACE/core-build/deps"
-          export PPP_TUI_CORE_LIBS="ssl;crypto;jemalloc;boost_system;boost_coroutine;boost_thread;boost_context;boost_regex;boost_filesystem"
-          export PPP_TUI_CORE_SYSTEM_LIBS="c++;pthread;dl"
-          PPP_TUI_CJK_FONT_PATH="$font" cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
-
-      - name: Package TUI and CLI release
-        run: |
-          package="build/openppp2-${{ matrix.platform.triple }}-tui"
-          mkdir -p "$package"
-          cp "tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui" "$package/ppp-tui"
-          cp "tui/target/${{ matrix.platform.rust_target }}/release/ppp-tui-cli" "$package/ppp-tui-cli"
-          cp core-package/appsettings.json core-package/dns-rules.txt core-package/geo-rules.yaml core-package/firewall-rules.txt core-package/ip.txt core-package/ipv6.txt "$package/"
-
-      - name: Upload TUI and CLI artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: openppp2-macos-${{ matrix.platform.name }}-tui-cli
-          path: build/openppp2-${{ matrix.platform.triple }}-tui/
           if-no-files-found: error

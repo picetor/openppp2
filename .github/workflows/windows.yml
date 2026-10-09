@@ -1,4 +1,4 @@
-﻿# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
+# Copyright  : Copyright (C) 2017 ~ 2035 SupersocksR ORG. All rights reserved.
 # Description: Build openppp2 Windows (MSVC) - Release workflow
 # Author     : picetor
 # Date-Time  : 2026/06/24
@@ -31,7 +31,6 @@ on:
       - 'windows/**'
       - 'android/**'
       - 'go/**'
-      - 'tui/**'
       - 'web/**'
       - '.github/workflows/**'
 
@@ -366,15 +365,6 @@ jobs:
           }
           Write-Output "Found static core library at: $coreLib"
 
-          $coreBuildDir = "openppp2-windows-${{ matrix.platform.name }}-tui-core"
-          if (Test-Path -LiteralPath $coreBuildDir) {
-            Remove-Item -LiteralPath $coreBuildDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path (Join-Path $coreBuildDir 'deps') -Force | Out-Null
-          Copy-Item -LiteralPath $coreLib -Destination (Join-Path $coreBuildDir 'ppp-core.lib')
-          Get-ChildItem -LiteralPath $libDestination -File -Filter '*.lib' |
-            Copy-Item -Destination (Join-Path $coreBuildDir 'deps') -Force
-
           # ppp-web is the Windows x64 desktop entry point. It links the
           # in-process core library built above; web UI and icons are embedded
           # in the executable, with no separate web/ directory to distribute.
@@ -446,109 +436,4 @@ jobs:
         with:
           name: openppp2-windows-${{ matrix.platform.name }}
           path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}
-          if-no-files-found: error
-
-      - name: Upload TUI/CLI core link package
-        uses: actions/upload-artifact@v6
-        with:
-          name: openppp2-windows-${{ matrix.platform.name }}-tui-core
-          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}-tui-core
-          if-no-files-found: error
-
-  build-windows-tui:
-    name: build-windows-tui-cli (${{ matrix.platform.name }})
-    needs: build-windows
-    if: ${{ needs.build-windows.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - name: amd64
-            rust_target: x86_64-pc-windows-msvc
-            boost_suffix: x64
-          - name: i386
-            rust_target: i686-pc-windows-msvc
-            boost_suffix: x32
-
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Download ${{ matrix.platform.name }} core release package
-        uses: actions/download-artifact@v5
-        with:
-          name: openppp2-windows-${{ matrix.platform.name }}
-          path: core-package
-
-      - name: Download ${{ matrix.platform.name }} in-process core link package
-        uses: actions/download-artifact@v5
-        with:
-          name: openppp2-windows-${{ matrix.platform.name }}-tui-core
-          path: core-build
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.rust_target }}
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\.cargo\registry
-            ~\.cargo\git
-          key: windows-${{ matrix.platform.rust_target }}-tui-${{ hashFiles('tui/Cargo.toml', 'tui/Cargo.lock') }}
-          restore-keys: windows-${{ matrix.platform.rust_target }}-tui-
-
-      - name: Build Rust TUI and CLI Release
-        run: |
-          $coreLibrary = Join-Path "${{ github.workspace }}" 'core-build\ppp-core.lib'
-          $coreLibraryDirectory = Join-Path "${{ github.workspace }}" 'core-build\deps'
-          if (-not (Test-Path -LiteralPath $coreLibrary)) {
-            throw "Static core library not found: $coreLibrary"
-          }
-          $fontCandidates = @(
-            "$env:WINDIR\Fonts\msyh.ttc",
-            "$env:WINDIR\Fonts\simhei.ttf",
-            "$env:WINDIR\Fonts\simsun.ttc",
-            "$env:WINDIR\Fonts\NotoSansCJKsc-Regular.otf"
-          )
-          $font = $fontCandidates |
-            Where-Object { Test-Path -LiteralPath $_ } |
-            Select-Object -First 1
-          if ([string]::IsNullOrWhiteSpace($font) -or -not (Test-Path -LiteralPath $font)) {
-            throw 'No system font found for PPP_TUI_CJK_FONT_PATH'
-          }
-          $env:PPP_TUI_CORE_LIB = (Resolve-Path -LiteralPath $coreLibrary).Path
-          $env:PPP_TUI_CORE_LIB_DIRS = (Resolve-Path -LiteralPath $coreLibraryDirectory).Path
-          $env:PPP_TUI_CORE_LIBS = "libssl;libcrypto;jemalloc_s;boost_context-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_coroutine-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_thread-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91;boost_filesystem-vc145-mt-${{ matrix.platform.boost_suffix }}-1_91"
-          $env:PPP_TUI_CORE_SYSTEM_LIBS = "ws2_32;iphlpapi;shlwapi;qwave;pdh;winmm;wbemuuid;shell32;crypt32;propsys;dbghelp;rpcrt4;ole32;comsuppw;setupapi;fwpuclnt;netapi32;wininet;cryptui;advapi32;secur32;bcrypt;psapi;user32;oleaut32;version;dnsapi;mswsock;ncrypt;wintrust"
-          $env:PPP_TUI_CJK_FONT_PATH = $font
-          cargo build --release --target "${{ matrix.platform.rust_target }}" --manifest-path tui/Cargo.toml --bins
-
-      - name: Package TUI and CLI release
-        run: |
-          $packageDir = "${{ github.workspace }}\openppp2-windows-${{ matrix.platform.name }}-tui"
-          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          $tuiOutput = Join-Path "${{ github.workspace }}" "tui\target\${{ matrix.platform.rust_target }}\release"
-          Copy-Item (Join-Path $tuiOutput 'ppp-tui.exe') (Join-Path $packageDir 'ppp-tui.exe')
-          Copy-Item (Join-Path $tuiOutput 'ppp-tui-cli.exe') (Join-Path $packageDir 'ppp-tui-cli.exe')
-          Copy-Item "${{ github.workspace }}\core-package\appsettings.json" $packageDir
-          Copy-Item "${{ github.workspace }}\core-package\dns-rules.txt" $packageDir
-          Copy-Item "${{ github.workspace }}\core-package\geo-rules.yaml" $packageDir
-          Copy-Item "${{ github.workspace }}\core-package\firewall-rules.txt" $packageDir
-          Copy-Item "${{ github.workspace }}\core-package\ip.txt" $packageDir
-          Copy-Item "${{ github.workspace }}\core-package\ipv6.txt" $packageDir
-          $driver = "${{ github.workspace }}\core-package\Driver"
-          if (Test-Path -LiteralPath $driver) {
-            Copy-Item -Recurse $driver (Join-Path $packageDir 'Driver')
-          }
-
-      - name: Upload TUI and CLI artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: openppp2-windows-${{ matrix.platform.name }}-tui-cli
-          path: ${{ github.workspace }}/openppp2-windows-${{ matrix.platform.name }}-tui
           if-no-files-found: error
