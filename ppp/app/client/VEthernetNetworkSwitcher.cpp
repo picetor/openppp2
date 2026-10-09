@@ -5852,7 +5852,13 @@ namespace ppp {
                                             const uint64_t dns_seen_completed = self->dns_failsafe_seen_completed_.exchange(dns_completed, std::memory_order_relaxed);
                                             const uint64_t dns_seen_timeouts = self->dns_failsafe_seen_timeouts_.exchange(dns_timeouts, std::memory_order_relaxed);
                                             const uint64_t dns_delta_timeouts = dns_timeouts - dns_seen_timeouts;
-                                            const bool dns_failing = dns_delta_timeouts >= 5 && dns_completed <= dns_seen_completed;
+                                            const uint64_t dns_delta_completed = dns_completed - dns_seen_completed;
+                                            // A pipeline that answers a handful of queries while dropping
+                                            // most of them still leaves the machine effectively offline, so
+                                            // treat "far more timeouts than answers" as failing too and not
+                                            // only a pipeline that is completely silent.
+                                            const bool dns_failing = dns_delta_timeouts >= 5 &&
+                                                (dns_delta_completed == 0 || dns_delta_timeouts > dns_delta_completed * 3);
                                             if (dns_failing) {
                                                 if (!self->dns_failsafe_active_.exchange(true, std::memory_order_relaxed)) {
                                                     LOG_WARN("Windows DNS fail-safe: the tunnel answered no DNS query in the last interval (%llu timeouts); "
