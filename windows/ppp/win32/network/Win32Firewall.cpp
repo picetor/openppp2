@@ -754,6 +754,38 @@ namespace ppp
                 HANDLE                              g_drop_engine = NULLPTR;
                 HANDLE                              g_drop_subscription = NULLPTR;
                 std::atomic<bool>                   g_drop_active = false;
+                std::atomic<bool>                   g_drop_audit_enabled = false;
+
+                // The platform refuses a net-event subscription until the matching audit
+                // subcategory is on (measured: 0x80320013 = FWP_E_NET_EVENTS_DISABLED).
+                // Flip exactly that one subcategory with the platform's own tool; no
+                // other policy is read or written.
+                bool WFP_RunAuditPol(const wchar_t* switch_text) noexcept {
+                    std::wstring line = L"cmd.exe /c auditpol /set /subcategory:\"{0CCE9225-69AE-11D9-BED3-505054503030}\" ";
+                    if (NULLPTR != switch_text) {
+                        line += switch_text;
+                    }
+
+                    line += L" > nul 2>&1";
+
+                    STARTUPINFOW startup = {};
+                    startup.cb = sizeof(startup);
+                    startup.dwFlags = STARTF_USESHOWWINDOW;
+                    startup.wShowWindow = SW_HIDE;
+
+                    PROCESS_INFORMATION process = {};
+                    if (!::CreateProcessW(NULLPTR, &line[0], NULLPTR, NULLPTR, FALSE, CREATE_NO_WINDOW,
+                        NULLPTR, NULLPTR, &startup, &process)) {
+                        return false;
+                    }
+
+                    ::WaitForSingleObject(process.hProcess, 20000);
+                    DWORD exit_code = 1;
+                    ::GetExitCodeProcess(process.hProcess, &exit_code);
+                    ::CloseHandle(process.hThread);
+                    ::CloseHandle(process.hProcess);
+                    return exit_code == 0;
+                }
 
                 std::string WFP_Utf8(const wchar_t* text) noexcept {
                     if (NULLPTR == text || *text == L'\0') {
@@ -836,20 +868,48 @@ namespace ppp
 
                 HANDLE subscription_handle = NULLPTR;
                 result = ::FwpmNetEventSubscribe0(engine, &subscription, &WFP_DropEventCallback, NULLPTR, &subscription_handle);
+
+                // Windows refuses the subscription while the matching audit subcategory
+                // is off (measured on a real machine: 0x80320013 =
+                // FWP_E_NET_EVENTS_DISABLED). Enable exactly that one subcategory
+                // through the platform's own tool when that is the reason, and put it
+                // back when the diagnostic stops. An audit policy that was already on
+                // is never touched: the subscription succeeds on the first attempt.
+                bool enabled_audit = false;
+                if (result == static_cast<DWORD>(0x80320013)) {
+                    if (WFP_RunAuditPol(L"/failure:enable")) {
+                        LOG_INFO("WFP drop diagnostics: enabled the Filtering Platform Packet Drop audit subcategory to "
+                            "receive drop events; it is turned back off when the diagnostic stops");
+                        enabled_audit = true;
+                        result = ::FwpmNetEventSubscribe0(engine, &subscription, &WFP_DropEventCallback, NULLPTR, &subscription_handle);
+                    }
+                }
+
                 if (result != ERROR_SUCCESS || NULLPTR == subscription_handle) {
-                    LOG_ERROR("Fw::StartDropDiagnostics: FwpmNetEventSubscribe0 failed, result=%lu", result);
+                    if (result == static_cast<DWORD>(0x80320013)) {
+                        LOG_WARN("Fw::StartDropDiagnostics: FwpmNetEventSubscribe0 refused the subscription because the "
+                            "Filtering Platform Packet Drop audit is off (0x80320013) and it could not be enabled; run "
+                            "auditpol /set /subcategory:\"{0CCE9225-69AE-11D9-BED3-505054503030}\" /failure:enable as an "
+                            "administrator to get the drop source named in this log");
+                    }
+                    else {
+                        LOG_ERROR("Fw::StartDropDiagnostics: FwpmNetEventSubscribe0 failed, result=%lu", result);
+                    }
+
+                    if (enabled_audit) {
+                        WFP_RunAuditPol(L"/failure:disable");
+                    }
+
                     ::FwpmEngineClose0(engine);
                     return false;
                 }
 
                 g_drop_engine = engine;
                 g_drop_subscription = subscription_handle;
+                g_drop_audit_enabled.store(enabled_audit);
                 g_drop_active.store(true);
                 LOG_INFO("WFP drop diagnostics: subscribed to net events; drops and aborts are reported as "
                     "'WFP drop event: filterId=... provider=... service=...' while they happen");
-                LOG_INFO("WFP drop diagnostics: if no event appears while traffic is being dropped, the platform "
-                    "audit for it is off; enable it once with "
-                    "auditpol /set /subcategory:\"{0CCE9225-69AE-11D9-BED3-505054503030}\" /failure:enable");
                 return true;
             }
 
@@ -868,6 +928,16 @@ namespace ppp
 
                 if (NULLPTR != engine) {
                     ::FwpmEngineClose0(engine);
+                }
+
+                if (g_drop_audit_enabled.exchange(false)) {
+                    if (WFP_RunAuditPol(L"/failure:disable")) {
+                        LOG_INFO("WFP drop diagnostics: the audit subcategory this diagnostic enabled was turned back off");
+                    }
+                    else {
+                        LOG_WARN("WFP drop diagnostics: could not turn the Filtering Platform Packet Drop audit back off; "
+                            "run auditpol /set /subcategory:\"{0CCE9225-69AE-11D9-BED3-505054503030}\" /failure:disable to restore it");
+                    }
                 }
 
                 LOG_INFO("WFP drop diagnostics: stopped");
