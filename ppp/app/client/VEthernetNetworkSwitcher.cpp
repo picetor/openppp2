@@ -31,6 +31,9 @@
 #include <ppp/ipv6/IPv6Packet.h>
 #if defined(_WIN32)
 #include <windows/ppp/ipv6/IPv6Auxiliary.h>
+#if defined(_WIN32)
+#include <windows/ppp/win32/network/Firewall.h>
+#endif
 #elif defined(_LINUX)
 #include <linux/ppp/ipv6/IPv6Auxiliary.h>
 #elif defined(_MACOS)
@@ -4787,6 +4790,12 @@ namespace ppp {
                                 LOG_INFO("TUN injection fallback: injection recovered; the fallback system proxy was removed");
                             }
 #endif
+#if defined(_WIN32)
+                            if (self->drop_diagnostics_active_) {
+                                self->drop_diagnostics_active_ = false;
+                                ppp::win32::network::Fw::StopDropDiagnostics();
+                            }
+#endif
                         }
                         else {
                             LOG_WARN("TUN injection probe: host received %llu/%llu injected packets. Packets written into the tunnel adapter are "
@@ -4810,6 +4819,17 @@ namespace ppp {
                                 else {
                                     LOG_WARN("TUN injection fallback: the system proxy could not be enabled; enable the HTTP proxy and point "
                                         "the browser at it manually");
+                                }
+                            }
+#endif
+#if defined(_WIN32)
+                            // Ask the platform itself who is dropping our traffic. The
+                            // subscription is harmless without the matching audit policy
+                            // (it then simply reports nothing) and is dropped as soon as
+                            // injection recovers.
+                            if (!self->drop_diagnostics_active_) {
+                                if (ppp::win32::network::Fw::StartDropDiagnostics()) {
+                                    self->drop_diagnostics_active_ = true;
                                 }
                             }
 #endif
@@ -8128,6 +8148,13 @@ namespace ppp {
                     system_proxy_fallback_ = false;
                     ClearHttpProxyToSystemEnv();
                     LOG_INFO("TUN injection fallback: removed the fallback system proxy on shutdown");
+                }
+#endif
+
+#if defined(_WIN32)
+                if (drop_diagnostics_active_) {
+                    drop_diagnostics_active_ = false;
+                    ppp::win32::network::Fw::StopDropDiagnostics();
                 }
 #endif
 

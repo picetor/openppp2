@@ -46,6 +46,18 @@ namespace ppp
                 // enabled = false removes them and needs no other argument.
                 static bool AllowTunnelInbound(const char* rule_name, const char* interface_name,
                     const char* local_addresses, bool enabled) noexcept;
+                // Subscribe to the platform's own packet-drop notifications so the log
+                // can name the filter, provider and service behind traffic that is
+                // dropped or aborted on this host. Measured problem this exists for:
+                // every tunnel connection was aborted locally within a second of
+                // connecting (ecv=10053) while the injected packets never reached the
+                // host stack, and neither the firewall rules nor the filter inventory
+                // explained it. Windows only reports these events while the
+                // "Filtering Platform Packet Drop" audit subcategory is enabled; the
+                // diagnostic logs the one-line command to enable it when it sees
+                // nothing.
+                static bool StartDropDiagnostics() noexcept;
+                static void StopDropDiagnostics() noexcept;
                 static bool AddIPv6LeakBlockWfp(int interface_index, HANDLE& engine_handle) noexcept;
                 static void RemoveIPv6LeakBlockWfp(HANDLE& engine_handle) noexcept;
             };

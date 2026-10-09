@@ -9,6 +9,7 @@
 #include <fwpmu.h>
 #include <netioapi.h>
 #include <comutil.h>
+#include <atomic>
 
 #pragma comment(lib, "ole32.lib")          /* netfw32.lib */
 #pragma comment(lib, "comsuppw.lib")
@@ -734,6 +735,142 @@ namespace ppp
                     // The dynamic session removes all owned filters atomically.
                     ::FwpmEngineClose0(engine);
                 }
+            }
+
+            // ---------------------------------------------------------------------
+            //  WFP drop diagnostics
+            //
+            //  Measured problem this exists for: on a real machine every tunnel
+            //  connection was aborted from the host side (WSAECONNABORTED, ecv=10053,
+            //  reported as "software on your host aborted an established connection")
+            //  within a second of connecting, and the packets the client injected into
+            //  the tunnel adapter never reached the host stack. Neither the firewall
+            //  rules nor the WFP filter inventory explained it, so the client now
+            //  subscribes to the platform's own drop notifications and prints the
+            //  filter, provider and service behind each one.
+            // ---------------------------------------------------------------------
+            namespace
+            {
+                HANDLE                              g_drop_engine = NULLPTR;
+                HANDLE                              g_drop_subscription = NULLPTR;
+                std::atomic<bool>                   g_drop_active = false;
+
+                std::string WFP_Utf8(const wchar_t* text) noexcept {
+                    if (NULLPTR == text || *text == L'\0') {
+                        return std::string();
+                    }
+
+                    return ppp::text::Encoding::wstring_to_utf8(text);
+                }
+
+                void WFP_LogDropDetails(HANDLE engine, UINT64 filter_id, UINT32 layer_id) noexcept {
+                    std::string filter_name;
+                    std::string provider_name;
+                    std::string service_name;
+
+                    FWPM_FILTER0* filter = NULLPTR;
+                    if (NULLPTR != engine && ERROR_SUCCESS == ::FwpmFilterGetById0(engine, filter_id, &filter) && NULLPTR != filter) {
+                        filter_name = WFP_Utf8(filter->displayData.name);
+
+                        if (NULLPTR != filter->providerKey) {
+                            FWPM_PROVIDER0* provider = NULLPTR;
+                            if (ERROR_SUCCESS == ::FwpmProviderGetByKey0(engine, filter->providerKey, &provider) && NULLPTR != provider) {
+                                provider_name = WFP_Utf8(provider->displayData.name);
+                                service_name = WFP_Utf8(provider->serviceName);
+                                ::FwpmFreeMemory0(reinterpret_cast<void**>(&provider));
+                            }
+                        }
+
+                        ::FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
+                    }
+
+                    LOG_WARN("WFP drop event: filterId=%llu layerId=%u filter='%s' provider='%s' service='%s'",
+                        static_cast<unsigned long long>(filter_id), static_cast<unsigned>(layer_id),
+                        filter_name.data(), provider_name.data(), service_name.data());
+                }
+
+                void NTAPI WFP_DropEventCallback(void* context, const FWPM_NET_EVENT1* event) noexcept {
+                    if (NULLPTR == event) {
+                        return;
+                    }
+
+                    try {
+                        switch (event->type) {
+                        case FWPM_NET_EVENT_TYPE_CLASSIFY_DROP:
+                            // The classify-drop payload is a pointer to a versioned
+                            // struct, not an inline member.
+                            if (NULLPTR != event->classifyDrop) {
+                                WFP_LogDropDetails(g_drop_engine, event->classifyDrop->filterId,
+                                    event->classifyDrop->layerId);
+                            }
+                            break;
+                        default:
+                            LOG_DEBUG("WFP net event: type=%d", static_cast<int>(event->type));
+                            break;
+                        }
+                    }
+                    catch (...) {
+                    }
+                }
+            }
+
+            bool Fw::StartDropDiagnostics() noexcept {
+                if (g_drop_active.load()) {
+                    return true;
+                }
+
+                FWPM_SESSION0 session = {};
+                session.displayData.name = const_cast<wchar_t*>(L"openppp2 drop diagnostics");
+                session.displayData.description = const_cast<wchar_t*>(L"Names the filter behind dropped or aborted tunnel traffic");
+                session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+
+                HANDLE engine = NULLPTR;
+                DWORD result = ::FwpmEngineOpen0(NULLPTR, RPC_C_AUTHN_WINNT, NULLPTR, &session, &engine);
+                if (result != ERROR_SUCCESS || NULLPTR == engine) {
+                    LOG_ERROR("Fw::StartDropDiagnostics: FwpmEngineOpen0 failed, result=%lu", result);
+                    return false;
+                }
+
+                FWPM_NET_EVENT_SUBSCRIPTION0 subscription = {};
+                subscription.enumTemplate = NULLPTR;
+
+                HANDLE subscription_handle = NULLPTR;
+                result = ::FwpmNetEventSubscribe0(engine, &subscription, &WFP_DropEventCallback, NULLPTR, &subscription_handle);
+                if (result != ERROR_SUCCESS || NULLPTR == subscription_handle) {
+                    LOG_ERROR("Fw::StartDropDiagnostics: FwpmNetEventSubscribe0 failed, result=%lu", result);
+                    ::FwpmEngineClose0(engine);
+                    return false;
+                }
+
+                g_drop_engine = engine;
+                g_drop_subscription = subscription_handle;
+                g_drop_active.store(true);
+                LOG_INFO("WFP drop diagnostics: subscribed to net events; drops and aborts are reported as "
+                    "'WFP drop event: filterId=... provider=... service=...' while they happen");
+                LOG_INFO("WFP drop diagnostics: if no event appears while traffic is being dropped, the platform "
+                    "audit for it is off; enable it once with "
+                    "auditpol /set /subcategory:\"{0CCE9225-69AE-11D9-BED3-505054503030}\" /failure:enable");
+                return true;
+            }
+
+            void Fw::StopDropDiagnostics() noexcept {
+                if (!g_drop_active.exchange(false)) {
+                    return;
+                }
+
+                HANDLE engine = g_drop_engine;
+                HANDLE subscription = g_drop_subscription;
+                g_drop_engine = NULLPTR;
+                g_drop_subscription = NULLPTR;
+                if (NULLPTR != engine && NULLPTR != subscription) {
+                    ::FwpmNetEventUnsubscribe0(engine, subscription);
+                }
+
+                if (NULLPTR != engine) {
+                    ::FwpmEngineClose0(engine);
+                }
+
+                LOG_INFO("WFP drop diagnostics: stopped");
             }
         }
     }

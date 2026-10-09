@@ -712,6 +712,10 @@ namespace ppp {
                 // injection self-test is failing and restore it when it recovers.
                 bool                                                                tun_injection_fallback_ = true;
                 bool                                                                system_proxy_fallback_ = false;
+                // Windows: while the injection self-test is failing, subscribe to the
+                // platform's drop notifications so the log names whatever is dropping
+                // or aborting the tunnel's traffic.
+                bool                                                                drop_diagnostics_active_ = false;
 #endif
             };
         }
