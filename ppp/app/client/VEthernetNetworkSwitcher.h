@@ -661,6 +661,19 @@ namespace ppp {
                 std::atomic<bool>                                                   injection_probe_running_ = false;
                 std::atomic<bool>                                                   injection_probe_healthy_ = false;
                 std::atomic<bool>                                                   injection_probe_reported_ = false;
+
+                // DNS fail-safe. The takeover points the host resolvers at the
+                // loopback proxy, so a tunnel that cannot answer queries would
+                // otherwise take every name lookup on the machine down with it
+                // (measured on a real machine: a broken tunnel left the host
+                // unable to resolve even domestic names). Count the pipeline
+                // outcome and hand the resolver back to the system while the
+                // tunnel is failing, then take it over again on recovery.
+                std::atomic<uint64_t>                                               local_dns_pipeline_completed_ = 0;
+                std::atomic<uint64_t>                                               local_dns_pipeline_timeouts_ = 0;
+                std::atomic<uint64_t>                                               dns_failsafe_seen_completed_ = 0;
+                std::atomic<uint64_t>                                               dns_failsafe_seen_timeouts_ = 0;
+                std::atomic<bool>                                                   dns_failsafe_active_ = false;
                 struct LocalDnsWaiter final {
                     uint16_t                                                        transaction_id = 0;
                     ppp::function<void(const std::shared_ptr<ppp::string>&, bool)>  callback;

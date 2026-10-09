@@ -4541,6 +4541,7 @@ namespace ppp {
                     }
                     CancelLocalDnsUdp(requests_to_cancel);
                     if (response && !response->empty()) {
+                        local_dns_pipeline_completed_.fetch_add(1, std::memory_order_relaxed);
                         LOG_DEBUG("VEthernetNetworkSwitcher::DispatchLocalDnsQuery: completed host=%s, direct=%d, elapsed_ms=%llu",
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
@@ -4566,6 +4567,7 @@ namespace ppp {
                         complete_pending(processed, false);
                     }
                     else {
+                        local_dns_pipeline_timeouts_.fetch_add(1, std::memory_order_relaxed);
                         LOG_WARN("VEthernetNetworkSwitcher::DispatchLocalDnsQuery: timeout host=%s, direct=%d, elapsed_ms=%llu",
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
@@ -4765,7 +4767,11 @@ namespace ppp {
                         const bool reported = self->injection_probe_reported_.load();
                         self->injection_probe_healthy_.store(healthy);
                         if (sent <= 0) {
-                            LOG_DEBUG("TUN injection probe: tap not ready, nothing injected");
+                            // The adapter or its address was not ready yet: retry
+                            // soon instead of waiting for the next full interval, so
+                            // the verdict arrives shortly after the tunnel comes up.
+                            self->injection_probe_next_ms_.store(Executors::GetTickCount() + 10000);
+                            LOG_DEBUG("TUN injection probe: tap not ready, nothing injected (retrying in 10s)");
                         }
                         else if (healthy) {
                             if (!reported) {
@@ -5785,13 +5791,43 @@ namespace ppp {
 
                                         HRESULT hr = CoInitializeEx(NULLPTR, COINIT_MULTITHREADED);
                                         if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
-                                            // DHCP may re-inject IPv4 DNS after
-                                            // takeover; keep the selected underlying
-                                            // NIC pinned to the local proxy so the
-                                            // tunnel resolver always wins the race.
-                                            for (int if_index : non_tap_v4_indexes) {
-                                                if (!self->dns_guard_active_.load()) break;
-                                                ppp::win32::network::RefreshDnsLoopback(if_index, AF_INET);
+                                            // DNS fail-safe. The takeover pins the host
+                                            // resolver to the loopback proxy, so a tunnel
+                                            // that cannot answer queries takes every name
+                                            // lookup on the machine down with it. When the
+                                            // pipeline produced timeouts without a single
+                                            // answer in the last interval, hand the
+                                            // resolver back to the system; take it over
+                                            // again as soon as resolution recovers.
+                                            const uint64_t dns_completed = self->local_dns_pipeline_completed_.load(std::memory_order_relaxed);
+                                            const uint64_t dns_timeouts = self->local_dns_pipeline_timeouts_.load(std::memory_order_relaxed);
+                                            const uint64_t dns_seen_completed = self->dns_failsafe_seen_completed_.exchange(dns_completed, std::memory_order_relaxed);
+                                            const uint64_t dns_seen_timeouts = self->dns_failsafe_seen_timeouts_.exchange(dns_timeouts, std::memory_order_relaxed);
+                                            const uint64_t dns_delta_timeouts = dns_timeouts - dns_seen_timeouts;
+                                            const bool dns_failing = dns_delta_timeouts >= 5 && dns_completed <= dns_seen_completed;
+                                            if (dns_failing) {
+                                                if (!self->dns_failsafe_active_.exchange(true, std::memory_order_relaxed)) {
+                                                    LOG_WARN("Windows DNS fail-safe: the tunnel answered no DNS query in the last interval (%llu timeouts); "
+                                                        "restoring the system resolver so local browsing keeps working",
+                                                        (unsigned long long)dns_delta_timeouts);
+                                                }
+                                                for (int if_index : non_tap_v4_indexes) {
+                                                    if (!self->dns_guard_active_.load()) break;
+                                                    ppp::win32::network::RestoreDnsTakeover(if_index, AF_INET);
+                                                }
+                                            }
+                                            else {
+                                                if (self->dns_failsafe_active_.exchange(false, std::memory_order_relaxed)) {
+                                                    LOG_INFO("Windows DNS fail-safe: the tunnel resolves again; taking the system resolver over once more");
+                                                }
+                                                // DHCP may re-inject IPv4 DNS after
+                                                // takeover; keep the selected underlying
+                                                // NIC pinned to the local proxy so the
+                                                // tunnel resolver always wins the race.
+                                                for (int if_index : non_tap_v4_indexes) {
+                                                    if (!self->dns_guard_active_.load()) break;
+                                                    ppp::win32::network::RefreshDnsLoopback(if_index, AF_INET);
+                                                }
                                             }
                                             // DHCPv6/RA may re-inject IPv6 DNS after
                                             // takeover; keep the selected NIC pinned to
