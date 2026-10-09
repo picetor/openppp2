@@ -8120,6 +8120,17 @@ namespace ppp {
                 RestoreNetworkState();
 #endif
 
+#if defined(_WIN32) || defined(_MACOS)
+                // Never leave the injection fallback proxy in the OS settings: the
+                // port it points at is closed by the time this function returns, and
+                // a stale proxy would break every browser on the machine.
+                if (system_proxy_fallback_) {
+                    system_proxy_fallback_ = false;
+                    ClearHttpProxyToSystemEnv();
+                    LOG_INFO("TUN injection fallback: removed the fallback system proxy on shutdown");
+                }
+#endif
+
                 // Stop and release the http-proxy service.
                 if (VEthernetHttpProxySwitcherPtr http_proxy = std::move(http_proxy_); NULLPTR != http_proxy) {
                     http_proxy->Dispose();
