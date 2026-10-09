@@ -477,6 +477,9 @@ private:
     ppp::string                                     configuration_path_;                 // Configuration file path
     ppp::string                                     server_directory_;                   // Independent server JSON directory
     std::shared_ptr<NetworkInterface>               network_interface_;                  // Network interface config
+#if defined(_WIN32)
+    ppp::string                                     tunnel_inbound_scope_;               // Tunnel subnet currently allowed by the firewall rules
+#endif
     std::shared_ptr<Timer>                          timeout_                    = 0;     // Periodic timer
     ppp::string                                     startup_failure_;                    // Last startup-stage failure
     ppp::vector<ppp::string>                        command_arguments_;                  // Original argv[1..] for AI inspection
@@ -498,6 +501,10 @@ static std::shared_ptr<PppApplication>              DEFAULT_;                   
 static ppp::string                                   LOG_FILE_PATH_;                      // Log file path from --log-file argument
 static ppp::string                                   LOG_LEVEL_ = "error";                // Runtime log level from --log-level
 FILE*                                                ppp::g_log_stream = stdout;          // Log output stream, redirected by --log-file
+// Base name of the tunnel-interface inbound firewall rules. A program-scoped
+// rule cannot match packets that the userspace tunnel driver injects, so the
+// host would never receive the tunnel's DNS answers or ICMP echo replies.
+static constexpr const char*                         PPP_TUNNEL_INBOUND_RULE = "PPP Tunnel Inbound";
 
 // RPC log ring buffer: fed by the desktop log sink hook (any thread),
 // drained by OnTick (io_context thread) and get_logs (RPC requests).
@@ -3797,6 +3804,15 @@ void PppApplication::Dispose() noexcept
     }
     ppp::diagnostics::SetLogSink(NULLPTR);
 
+#if defined(_WIN32)
+    // Drop the tunnel-interface inbound rules installed at startup.  Removal is
+    // idempotent and does not need the adapter to still exist.
+    if (client_mode_ && !proxy_mode_)
+    {
+        ppp::win32::network::Fw::AllowTunnelInbound(PPP_TUNNEL_INBOUND_RULE, NULLPTR, NULLPTR, false);
+    }
+#endif
+
     // Clean up server
     std::shared_ptr<VirtualEthernetSwitcher> server = std::move(server_);
     if (NULLPTR != server)
@@ -4978,6 +4994,86 @@ bool PppApplication::OnTick(uint64_t now) noexcept
     using NetworkState        = VEthernetExchanger::NetworkState;
 
     MaintainCoreLogFile(now);
+
+#if defined(_WIN32)
+    // Keep an inbound allow rule on the tunnel subnet for the replies the
+    // tunnel driver injects from userspace (DNS answers, ICMP echo replies,
+    // tunneled UDP).  Those packets belong to no process, so the program-scoped
+    // rules installed at startup can never match them.
+    //
+    // This is a guard, not a cure: on a machine where the injected replies had
+    // valid IP/UDP checksums, the host stack still discarded them at
+    // FWPM_LAYER_INBOUND_TRANSPORT_V4 while the ALE layer stayed flat - i.e. not
+    // a firewall policy decision - and these rules changed nothing.  The
+    // client's own "TUN injection probe" log line reports which case applies.
+    // The address is assigned by the server, so the scope only becomes known
+    // after the client has connected; it is refreshed whenever it changes.
+    if (client_mode_ && !proxy_mode_ && NULLPTR != client_)
+    {
+        ppp::string scope;
+        if (std::shared_ptr<ITap> tap = client_->GetTap(); NULLPTR != tap)
+        {
+            const uint32_t ip = tap->IPAddress;
+            const uint32_t mask = tap->SubmaskAddress;
+            if (ip != IPEndPoint::AnyAddress && mask != IPEndPoint::AnyAddress)
+            {
+                // Addresses are held in network byte order, so the leading octet
+                // is the least significant byte on a little-endian host.
+                int prefix = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    const uint32_t octet = (mask >> (i * 8)) & 0xFFU;
+                    if (octet == 0xFFU)
+                    {
+                        prefix += 8;
+                        continue;
+                    }
+
+                    for (int bit = 7; bit >= 0 && (octet & (1U << bit)) != 0; bit--)
+                    {
+                        prefix++;
+                    }
+                    break;
+                }
+
+                // A prefix shorter than /8 would scope the rule far beyond the
+                // tunnel subnet, which must not happen.
+                if (prefix >= 8)
+                {
+                    const uint32_t network = ip & mask;
+                    char buffer[32];
+                    snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u/%d",
+                        (unsigned int)(network & 0xFFU),
+                        (unsigned int)((network >> 8) & 0xFFU),
+                        (unsigned int)((network >> 16) & 0xFFU),
+                        (unsigned int)((network >> 24) & 0xFFU),
+                        prefix);
+                    scope = buffer;
+                }
+            }
+        }
+
+        if (!scope.empty() && scope != tunnel_inbound_scope_)
+        {
+            const char* interface_name = NULLPTR != network_interface_ && !network_interface_->Wintun.empty()
+                ? network_interface_->Wintun.data() : NULLPTR;
+            const bool allowed = ppp::win32::network::Fw::AllowTunnelInbound(
+                PPP_TUNNEL_INBOUND_RULE, interface_name, scope.data(), true);
+            tunnel_inbound_scope_ = scope;
+            if (allowed)
+            {
+                LOG_INFO("PppApplication::OnTick: inbound tunnel traffic allowed on %s", scope.data());
+            }
+            else
+            {
+                LOG_WARN("PppApplication::OnTick: cannot allow inbound tunnel traffic on %s; "
+                    "if the host discards injected DNS answers or ICMP echo replies, check the "
+                    "TUN injection probe log line for the actual cause",
+                    scope.data());
+            }
+        }
+    }
+#endif
 
 #if defined(_WIN32)
     CONSOLE_SELECTION_INFO selection{};

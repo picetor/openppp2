@@ -215,6 +215,16 @@ namespace ppp {
                     }
                 }
 #endif
+
+#if defined(_WIN32)
+                // Self-test the TUN injection path. A healthy tunnel can still leave
+                // the host with nothing to see when the host stack discards the
+                // packets the client writes into the adapter, and that state is
+                // invisible from the tunnel's own counters.
+                if (!injection_probe_running_.load() && now >= injection_probe_next_ms_.load()) {
+                    RunTunInjectionSelfTest(now);
+                }
+#endif
                 {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     for (auto affinity = outbound_affinities_.begin(); affinity != outbound_affinities_.end();) {
@@ -4655,6 +4665,131 @@ namespace ppp {
 
             }
 
+#if defined(_WIN32)
+            void VEthernetNetworkSwitcher::RunTunInjectionSelfTest(uint64_t now) noexcept {
+                // The tunnel can be perfectly healthy while the host sees nothing:
+                // every packet the client receives is delivered by writing it into
+                // the tunnel adapter from userspace, and the host stack may discard
+                // it before any socket sees it.  Windows Firewall enforces inbound
+                // rules at the ALE layer, so such a drop cannot be fixed by an
+                // allow rule.  This probe detects that state instead of leaving the
+                // user with "the tunnel is up but nothing loads".
+                constexpr uint64_t probe_interval_ms = 120000;
+                constexpr uint64_t probe_retry_ms = 5000;
+                constexpr uint64_t probe_timeout_ms = 700;
+                constexpr int probe_packets = 3;
+                constexpr int gateway_probe_port = 5353;
+
+                bool expected = false;
+                if (!injection_probe_running_.compare_exchange_strong(expected, true)) {
+                    return;
+                }
+
+                std::shared_ptr<ppp::tap::ITap> tap = GetTap();
+                const uint32_t tun_ip = NULLPTR != tap ? tap->IPAddress : 0;
+                const uint32_t gateway = NULLPTR != tap ? tap->GatewayServer : 0;
+                if (NULLPTR == tap || !tap->IsReady() || tun_ip == 0 || gateway == 0) {
+                    injection_probe_running_.store(false);
+                    injection_probe_next_ms_.store(now + probe_retry_ms);
+                    return;
+                }
+                injection_probe_next_ms_.store(now + probe_interval_ms);
+
+                auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
+                try {
+                    std::thread([self, tun_ip, gateway]() noexcept {
+                        uint64_t sent = 0;
+                        uint64_t received = 0;
+                        try {
+                            boost::system::error_code ec;
+                            auto context = make_shared_object<boost::asio::io_context>();
+                            auto socket = make_shared_object<boost::asio::ip::udp::socket>(*context);
+                            if (NULLPTR != context && NULLPTR != socket) {
+                                const boost::asio::ip::udp::endpoint bind_ep =
+                                    IPEndPoint::ToEndPoint<boost::asio::ip::udp>(IPEndPoint(tun_ip, IPEndPoint::MinPort));
+                                const boost::asio::ip::udp::endpoint gateway_ep =
+                                    IPEndPoint::ToEndPoint<boost::asio::ip::udp>(IPEndPoint(gateway, gateway_probe_port));
+
+                                socket->open(boost::asio::ip::udp::v4(), ec);
+                                if (!ec) {
+                                    socket->bind(bind_ep, ec);
+                                }
+                                if (ec) {
+                                    LOG_ERROR("TUN injection probe: cannot bind a UDP probe socket on the tunnel address, error=%s",
+                                        ec.message().data());
+                                }
+                                else {
+                                    socket->non_blocking(true, ec);
+                                    const boost::asio::ip::udp::endpoint sink_ep = socket->local_endpoint(ec);
+                                    for (int i = 0; i < probe_packets && !self->IsDisposed(); i++) {
+                                        ppp::string payload = "openppp2-injection-probe-";
+                                        payload.push_back(static_cast<char>('0' + (i % 10)));
+
+                                        // Same construction path a DNS answer takes: the
+                                        // packet is built from the tunnel gateway to the
+                                        // host and written into the adapter.
+                                        if (!self->DatagramOutput(sink_ep, gateway_ep, &payload[0],
+                                            static_cast<int>(payload.size()), false, "injection-probe")) {
+                                            break;
+                                        }
+
+                                        sent++;
+                                        const uint64_t deadline = Executors::GetTickCount() + probe_timeout_ms;
+                                        for (;;) {
+                                            Byte buffer[256];
+                                            boost::asio::ip::udp::endpoint from;
+                                            std::size_t length = socket->receive_from(
+                                                boost::asio::buffer(buffer, sizeof(buffer)), from,
+                                                boost::asio::socket_base::message_end_of_record, ec);
+                                            if (!ec && length > 0) {
+                                                received++;
+                                                break;
+                                            }
+                                            if (Executors::GetTickCount() >= deadline) {
+                                                break;
+                                            }
+                                            ppp::Sleep(10);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (...) {
+                        }
+
+                        self->injection_probe_sent_.store(sent);
+                        self->injection_probe_received_.store(received);
+                        self->injection_probe_last_ms_.store(Executors::GetTickCount());
+
+                        const bool healthy = sent > 0 && received > 0;
+                        const bool reported = self->injection_probe_reported_.load();
+                        self->injection_probe_healthy_.store(healthy);
+                        if (sent <= 0) {
+                            LOG_DEBUG("TUN injection probe: tap not ready, nothing injected");
+                        }
+                        else if (healthy) {
+                            if (!reported) {
+                                LOG_INFO("TUN injection probe: host received %llu/%llu injected packets; the client can deliver tunnel traffic to the host stack",
+                                    (unsigned long long)received, (unsigned long long)sent);
+                            }
+                        }
+                        else {
+                            LOG_WARN("TUN injection probe: host received %llu/%llu injected packets. Packets written into the tunnel adapter are "
+                                "discarded before they reach the host stack, so DNS answers, ICMP replies and TCP handshakes never appear while the "
+                                "tunnel itself stays healthy; Windows Firewall allow rules do not override this. Diagnose with "
+                                "tests/tools/TunInboundProbe.ps1 and consider --tun-driver=tap.",
+                                (unsigned long long)received, (unsigned long long)sent);
+                        }
+                        self->injection_probe_reported_.store(true);
+                        self->injection_probe_running_.store(false);
+                    }).detach();
+                }
+                catch (...) {
+                    injection_probe_running_.store(false);
+                }
+            }
+#endif
+
             void VEthernetNetworkSwitcher::ReceiveLocalDnsUdp(const std::shared_ptr<boost::asio::ip::udp::socket>& socket) noexcept {
                 if (NULLPTR == socket || !socket->is_open()) {
                     return;
@@ -5550,6 +5685,25 @@ namespace ppp {
                     };
 
                     ppp::vector<ppp::string> system_dns_strings;
+                    // Host name resolution must not depend on packets that the
+                    // userspace tunnel injects into the adapter. Measured on
+                    // Windows: the injected answers reach the adapter with valid
+                    // IP/UDP checksums, yet the host stack discards them at the
+                    // inbound transport layer, so the host observes a DNS timeout
+                    // instead of an answer. That drop is not an ALE decision, so
+                    // Windows Firewall allow rules (and third-party allow rules)
+                    // do not override it; the client's own injection self-test
+                    // reports it in the log as "TUN injection probe".
+                    //
+                    // The loopback proxy answers over loopback, which the firewall
+                    // never filters, and it follows exactly the same dispatch path
+                    // as an in-tunnel query: same direct/tunnel policy, same AAAA
+                    // stripping, same cache population and geo observation.  List
+                    // it first and keep the tunnel gateway as a fallback; the DNS
+                    // guard below re-asserts this exact list every 30 seconds.
+                    if (need_loopback_v4) {
+                        system_dns_strings.emplace_back("127.0.0.1");
+                    }
                     system_dns_strings.emplace_back(tun_ni->GatewayServer.to_string());
                     ppp::win32::network::ClearDnsAddresses(dns_if_index);
                     if (!ppp::win32::network::SetDnsAddresses(dns_if_index, system_dns_strings)) {
@@ -5667,8 +5821,8 @@ namespace ppp {
                         dns_guard_timer_->SetInterval(30000);
                         dns_guard_timer_->Start();
                     }
-                    LOG_INFO("Windows DNS: virtual gateway %s on TUN ifIndex=%d, upstream=%s",
-                        system_dns_strings.front().data(), tap_if_index, tunnel_dns_strings.front().data());
+                    LOG_INFO("Windows DNS: TUN ifIndex=%d resolver list head=%s (tunnel upstream=%s)",
+                        tap_if_index, system_dns_strings.front().data(), tunnel_dns_strings.front().data());
                 }
 
                 ppp::tap::TapWindows::DnsFlushResolverCache();

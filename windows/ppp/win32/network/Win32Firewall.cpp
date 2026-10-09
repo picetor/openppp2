@@ -441,6 +441,218 @@ namespace ppp
                 return SUCCEEDED(rules->Item(CComBSTR(name.c_str()), &stored)) && NULLPTR != stored;
             }
 
+            static bool FW_NetFirewallRemoveNamedRule(const wchar_t* name) noexcept
+            {
+                if (NULLPTR == name || *name == L'\0')
+                {
+                    return false;
+                }
+
+                CComPtr<INetFwPolicy2> policy;
+                HRESULT hr = ::CoCreateInstance(__uuidof(NetFwPolicy2), NULLPTR, CLSCTX_INPROC_SERVER,
+                    __uuidof(INetFwPolicy2), reinterpret_cast<void**>(&policy));
+                if (FAILED(hr) || NULLPTR == policy)
+                {
+                    return false;
+                }
+
+                CComPtr<INetFwRules> rules;
+                hr = policy->get_Rules(&rules);
+                if (FAILED(hr) || NULLPTR == rules)
+                {
+                    return false;
+                }
+
+                return SUCCEEDED(rules->Remove(CComBSTR(name)));
+            }
+
+            static bool FW_NetFirewallAddTunnelInboundRule(const wchar_t* name, const wchar_t* interface_w,
+                const wchar_t* local_w, LONG protocol) noexcept
+            {
+                if (NULLPTR == name || *name == L'\0')
+                {
+                    return false;
+                }
+
+                CComPtr<INetFwPolicy2> policy;
+                HRESULT hr = ::CoCreateInstance(__uuidof(NetFwPolicy2), NULLPTR, CLSCTX_INPROC_SERVER,
+                    __uuidof(INetFwPolicy2), reinterpret_cast<void**>(&policy));
+                if (FAILED(hr) || NULLPTR == policy)
+                {
+                    return false;
+                }
+
+                CComPtr<INetFwRules> rules;
+                hr = policy->get_Rules(&rules);
+                if (FAILED(hr) || NULLPTR == rules)
+                {
+                    return false;
+                }
+
+                // Always replace an existing rule so a stale copy from an older
+                // build cannot keep the old protocol scope.
+                rules->Remove(CComBSTR(name));
+
+                CComPtr<INetFwRule> rule;
+                hr = ::CoCreateInstance(__uuidof(NetFwRule), NULLPTR, CLSCTX_INPROC_SERVER,
+                    __uuidof(INetFwRule), reinterpret_cast<void**>(&rule));
+                if (FAILED(hr) || NULLPTR == rule)
+                {
+                    return false;
+                }
+
+                hr = rule->put_Name(CComBSTR(name));
+                if (SUCCEEDED(hr)) hr = rule->put_Description(CComBSTR(L"Allows replies injected by the openppp2 tunnel adapter to reach the host network stack."));
+                if (SUCCEEDED(hr)) hr = rule->put_Direction(NET_FW_RULE_DIR_IN);
+                if (SUCCEEDED(hr)) hr = rule->put_Action(NET_FW_ACTION_ALLOW);
+                if (SUCCEEDED(hr)) hr = rule->put_Profiles(NET_FW_PROFILE2_ALL);
+                // The local address is the inbound scope that actually works for
+                // inbound rules; without it the rule would allow the protocol on
+                // every interface.
+                if (SUCCEEDED(hr) && NULLPTR != local_w && *local_w != L'\0')
+                {
+                    hr = rule->put_LocalAddresses(CComBSTR(local_w));
+                }
+                if (FAILED(hr))
+                {
+                    return false;
+                }
+
+                if (NULLPTR != interface_w && *interface_w != L'\0')
+                {
+                    SAFEARRAYBOUND bound = {};
+                    bound.cElements = 1;
+                    bound.lLbound = 0;
+                    SAFEARRAY* interfaces = ::SafeArrayCreate(VT_VARIANT, 1, &bound);
+                    if (NULLPTR == interfaces)
+                    {
+                        return false;
+                    }
+
+                    VARIANT item;
+                    ::VariantInit(&item);
+                    item.vt = VT_BSTR;
+                    item.bstrVal = ::SysAllocString(interface_w);
+                    LONG index = 0;
+                    HRESULT hr_interfaces =
+                        item.bstrVal ? ::SafeArrayPutElement(interfaces, &index, &item) : E_OUTOFMEMORY;
+                    ::VariantClear(&item);
+                    if (SUCCEEDED(hr_interfaces))
+                    {
+                        VARIANT interface_list;
+                        ::VariantInit(&interface_list);
+                        interface_list.vt = VT_ARRAY | VT_VARIANT;
+                        interface_list.parray = interfaces;
+                        hr_interfaces = rule->put_Interfaces(interface_list);
+                        ::VariantClear(&interface_list);
+                    }
+                    else
+                    {
+                        ::SafeArrayDestroy(interfaces);
+                    }
+
+                    // The interface condition only tightens the scope: the
+                    // INetFwRule documentation states that Interfaces is meant for
+                    // outbound rules, so some systems reject it here.  A failure
+                    // must not drop the rule, because LocalAddresses already scopes
+                    // it to the tunnel subnet.
+                    if (FAILED(hr_interfaces))
+                    {
+                        LOG_WARN("Fw::AllowTunnelInbound: put_Interfaces failed, hr=0x%08X",
+                            (unsigned int)hr_interfaces);
+                    }
+                }
+
+                // The INetFwRule documentation requires an ICMP rule to have its
+                // protocol set before the rule is added; changing other conditions
+                // afterwards can be rejected and silently lose the rule.  Set the
+                // protocol last, immediately before enabling and adding.
+                hr = rule->put_Protocol(protocol);
+                if (FAILED(hr))
+                {
+                    return false;
+                }
+
+                hr = rule->put_Enabled(VARIANT_TRUE);
+                if (FAILED(hr) || FAILED(rules->Add(rule)))
+                {
+                    rules->Remove(CComBSTR(name));
+                    return false;
+                }
+
+                // A successful COM setter does not prove the policy store kept
+                // the rule; verify it is retrievable before reporting success.
+                CComPtr<INetFwRule> stored;
+                return SUCCEEDED(rules->Item(CComBSTR(name), &stored)) && NULLPTR != stored;
+            }
+
+            bool Fw::AllowTunnelInbound(const char* rule_name, const char* interface_name,
+                const char* local_addresses, bool enabled) noexcept
+            {
+                if (NULLPTR == rule_name || *rule_name == '\0')
+                {
+                    return false;
+                }
+
+                // ICMP has no NET_FW_IP_PROTOCOL constant; the policy store keeps
+                // the raw IP protocol number (1 = ICMPv4).
+                static const char* const suffixes[] = { " UDP", " ICMPv4" };
+                static const LONG protocols[] = {
+                    NET_FW_IP_PROTOCOL_UDP, /* 17 */
+                    1,                      /* ICMPv4 */
+                };
+                static const int rule_count = (int)(sizeof(suffixes) / sizeof(suffixes[0]));
+
+                const std::wstring base = ppp::text::Encoding::utf8_to_wstring(rule_name);
+                if (base.empty())
+                {
+                    return false;
+                }
+
+                std::wstring interface_w;
+                if (enabled && NULLPTR != interface_name && *interface_name != '\0')
+                {
+                    interface_w = ppp::text::Encoding::utf8_to_wstring(interface_name);
+                    if (interface_w.empty())
+                    {
+                        return false;
+                    }
+                }
+
+                std::wstring local_w;
+                if (enabled && NULLPTR != local_addresses && *local_addresses != '\0')
+                {
+                    // Without a local scope the rule would allow the protocol on
+                    // every interface, which is not what a tunnel adapter needs.
+                    local_w = ppp::text::Encoding::utf8_to_wstring(local_addresses);
+                    if (local_w.empty())
+                    {
+                        return false;
+                    }
+                }
+
+                if (enabled && local_w.empty())
+                {
+                    return false;
+                }
+
+                bool ok = false;
+                for (int i = 0; i < rule_count; i++)
+                {
+                    const std::wstring name = base + ppp::text::Encoding::utf8_to_wstring(suffixes[i]);
+                    if (enabled)
+                    {
+                        ok |= FW_NetFirewallAddTunnelInboundRule(
+                            name.c_str(), interface_w.c_str(), local_w.c_str(), protocols[i]);
+                    }
+                    else
+                    {
+                        ok |= FW_NetFirewallRemoveNamedRule(name.c_str());
+                    }
+                }
+                return ok;
+            }
+
             bool Fw::AddIPv6LeakBlockWfp(int interface_index, HANDLE& engine_handle) noexcept
             {
                 RemoveIPv6LeakBlockWfp(engine_handle);

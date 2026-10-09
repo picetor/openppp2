@@ -644,6 +644,23 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::udp::socket>                      local_dns_udp6_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp4_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
+
+                // TUN injection self-test. Everything the client receives from the
+                // tunnel reaches the host only because the client writes packets
+                // into the tunnel adapter from userspace, and the host stack can
+                // discard them before any socket sees them. That state makes DNS
+                // answers, ICMP replies and TCP handshakes disappear while the
+                // tunnel itself reports healthy, and no firewall allow rule can
+                // override it. The probe injects packets through the same path a
+                // DNS answer uses and reports whether the host received them.
+                void                                                                RunTunInjectionSelfTest(uint64_t now) noexcept;
+                std::atomic<uint64_t>                                               injection_probe_next_ms_ = 0;
+                std::atomic<uint64_t>                                               injection_probe_sent_ = 0;
+                std::atomic<uint64_t>                                               injection_probe_received_ = 0;
+                std::atomic<uint64_t>                                               injection_probe_last_ms_ = 0;
+                std::atomic<bool>                                                   injection_probe_running_ = false;
+                std::atomic<bool>                                                   injection_probe_healthy_ = false;
+                std::atomic<bool>                                                   injection_probe_reported_ = false;
                 struct LocalDnsWaiter final {
                     uint16_t                                                        transaction_id = 0;
                     ppp::function<void(const std::shared_ptr<ppp::string>&, bool)>  callback;
