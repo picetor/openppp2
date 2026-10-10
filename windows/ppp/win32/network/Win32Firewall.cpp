@@ -881,7 +881,16 @@ namespace ppp
                         LOG_INFO("WFP drop diagnostics: enabled the Filtering Platform Packet Drop audit subcategory to "
                             "receive drop events; it is turned back off when the diagnostic stops");
                         enabled_audit = true;
-                        result = ::FwpmNetEventSubscribe0(engine, &subscription, &WFP_DropEventCallback, NULLPTR, &subscription_handle);
+
+                        // A live run showed the subscription still refused right after
+                        // the policy was set: the change takes a moment to reach the
+                        // filtering platform. Retry briefly instead of giving up on the
+                        // first refusal, which is what left the drop source unnamed.
+                        for (int attempt = 0; attempt < 10 && result == static_cast<DWORD>(0x80320013); attempt++) {
+                            ::Sleep(300);
+                            result = ::FwpmNetEventSubscribe0(engine, &subscription, &WFP_DropEventCallback, NULLPTR,
+                                &subscription_handle);
+                        }
                     }
                 }
 
