@@ -80,6 +80,10 @@ namespace ppp {
                     if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
+                        // The caller reports this entry as unreachable, so name the
+                        // actual reason instead of leaving a wrong verdict in the UI.
+                        LOG_DEBUG("ConnectivityProbe::ProbeTcp: socket protection failed, remote=%s:%d",
+                            remoteEP.address().to_string().c_str(), (int)remoteEP.port());
                         return false;
                     }
                 }
@@ -88,16 +92,20 @@ namespace ppp {
                 stopwatch.Restart();
 
                 bool ok = false;
+                bool connect_completed = false;
+                boost::system::error_code connect_ec;
                 DeadlineTimerPtr timer;
                 if (!ProbeArmTimeout(socket, timeout_ms, timer)) {
                     return false;
                 }
 
                 boost::asio::post(socket->get_executor(),
-                    [socket, remoteEP, &y, &ok]() noexcept {
+                    [socket, remoteEP, &y, &ok, &connect_completed, &connect_ec]() noexcept {
                         socket->async_connect(remoteEP,
-                            [&y, &ok](const boost::system::error_code& ec) noexcept {
+                            [&y, &ok, &connect_completed, &connect_ec](const boost::system::error_code& ec) noexcept {
                                 ok = ec == boost::system::errc::success;
+                                connect_completed = true;
+                                connect_ec = ec;
                                 y.R();
                             });
                     });
@@ -113,6 +121,14 @@ namespace ppp {
                 else {
                     boost::system::error_code ignored;
                     socket->close(ignored);
+                    // error=995 means the timeout timer aborted the connect; any
+                    // other value is the transport's own error (see WSA codes).
+                    // completed=0 means the coroutine was resumed without the
+                    // connect handler ever running, so error is meaningless.
+                    LOG_DEBUG("ConnectivityProbe::ProbeTcp: probe failed, remote=%s:%d, timeout_ms=%d, completed=%d, error=%d, elapsed_ms=%llu",
+                        remoteEP.address().to_string().c_str(), (int)remoteEP.port(), timeout_ms,
+                        (int)connect_completed, connect_ec.value(),
+                        (unsigned long long)stopwatch.ElapsedMilliseconds());
                 }
                 return ok;
             }
@@ -162,6 +178,8 @@ namespace ppp {
                     if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
+                        LOG_DEBUG("ConnectivityProbe::ProbeWebSocket: socket protection failed, remote=%s:%d",
+                            remoteEP.address().to_string().c_str(), (int)remoteEP.port());
                         return false;
                     }
                 }
@@ -201,6 +219,9 @@ namespace ppp {
                 else {
                     boost::system::error_code ignored;
                     socket->close(ignored);
+                    LOG_DEBUG("ConnectivityProbe::ProbeWebSocket: probe failed, remote=%s:%d, host=%s, timeout_ms=%d, elapsed_ms=%llu",
+                        remoteEP.address().to_string().c_str(), (int)remoteEP.port(), host.data(), timeout_ms,
+                        (unsigned long long)stopwatch.ElapsedMilliseconds());
                 }
                 return ok;
             }
@@ -229,6 +250,8 @@ namespace ppp {
                     if (!protect((intptr_t)socket->native_handle(), remoteEP.address())) {
                         boost::system::error_code ignored;
                         socket->close(ignored);
+                        LOG_DEBUG("ConnectivityProbe::ProbeWebSocketSSL: socket protection failed, remote=%s:%d",
+                            remoteEP.address().to_string().c_str(), (int)remoteEP.port());
                         return false;
                     }
                 }
@@ -293,6 +316,9 @@ namespace ppp {
                 else {
                     boost::system::error_code ignored;
                     socket->close(ignored);
+                    LOG_DEBUG("ConnectivityProbe::ProbeWebSocketSSL: probe failed, remote=%s:%d, host=%s, sni=%s, timeout_ms=%d, elapsed_ms=%llu",
+                        remoteEP.address().to_string().c_str(), (int)remoteEP.port(), host.data(), sni.data(), timeout_ms,
+                        (unsigned long long)stopwatch.ElapsedMilliseconds());
                 }
                 return ok;
             }

@@ -2315,6 +2315,13 @@ namespace ppp {
                 sekap_next_ = now + RandomNext(SEND_ECHO_KEEP_ALIVE_PACKET_MIN_TIMEOUT, SEND_ECHO_KEEP_ALIVE_PACKET_MAX_TIMEOUT);
                 network_state_.exchange(NetworkState_Established);
                 reconnection_count_ = 0;
+                // A live transport to this entry is the strongest possible
+                // reachability evidence. Entries created through the legacy
+                // primary path never ran the entry-selection probe, so without
+                // this the server carrying the traffic was reported as
+                // unreachable in the control-plane snapshot and the panel.
+                probe_checked_.store(true);
+                probe_reachable_.store(true);
             }
 
             int64_t VEthernetExchanger::GetReconnectDelayMilliseconds() noexcept {

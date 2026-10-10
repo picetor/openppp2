@@ -2147,11 +2147,22 @@ bool PppApplication::PrintEnvironmentInformation() noexcept
                     ppp::string suffix;
                     if (outbound.probe_checked)
                     {
-                        if (outbound.probe_reachable && outbound.probe_rtt_ms >= 0)
+                        if (outbound.probe_reachable)
                         {
                             suffix = "  (";
-                            suffix += stl::to_string<ppp::string>(outbound.probe_rtt_ms);
-                            suffix += "ms)";
+                            if (outbound.probe_rtt_ms >= 0)
+                            {
+                                suffix += stl::to_string<ppp::string>(outbound.probe_rtt_ms);
+                                suffix += "ms";
+                            }
+                            else
+                            {
+                                // Reachable without a measured latency: an
+                                // established transport proves the server is up
+                                // even when the background probe cannot measure it.
+                                suffix += "ok";
+                            }
+                            suffix += ")";
                         }
                         else
                         {
@@ -3962,6 +3973,13 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
     snapshot["dataplane"]["wintun"]["submit_successes"] = (Json::UInt64)0;
     snapshot["dataplane"]["wintun"]["submit_failures"] = (Json::UInt64)0;
     snapshot["dataplane"]["wintun"]["interface_mtu"] = 0;
+    snapshot["dataplane"]["injection"]["sent"] = (Json::UInt64)0;
+    snapshot["dataplane"]["injection"]["received"] = (Json::UInt64)0;
+    snapshot["dataplane"]["injection"]["last_ms"] = (Json::UInt64)0;
+    snapshot["dataplane"]["injection"]["running"] = false;
+    snapshot["dataplane"]["injection"]["healthy"] = false;
+    snapshot["dataplane"]["injection"]["reported"] = false;
+    snapshot["dataplane"]["injection"]["fallback_proxy"] = false;
 
     Json::Value capabilities(Json::arrayValue);
     capabilities.append("mux.compat");
@@ -4168,6 +4186,26 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             snapshot["dataplane"]["delayed_syn"]["take_rejected"] = (Json::UInt64)delayed_syn.take_rejected;
             snapshot["dataplane"]["delayed_syn"]["destination_mismatch"] = (Json::UInt64)delayed_syn.destination_mismatch;
         }
+
+#if defined(_WIN32)
+        {
+            // TUN delivery verdict. Every packet the tunnel sends to the host is
+            // written into the tunnel adapter from userspace, and the host stack
+            // can discard those packets before any socket sees them: DNS answers,
+            // ICMP replies and TCP handshakes then never arrive while the tunnel
+            // itself reports healthy. Until now the only way to see that was to
+            // read the core log for the injection probe line.
+            const VEthernetNetworkSwitcher::InjectionProbeDiagnostics injection =
+                client->GetInjectionProbeDiagnostics();
+            snapshot["dataplane"]["injection"]["sent"] = (Json::UInt64)injection.sent;
+            snapshot["dataplane"]["injection"]["received"] = (Json::UInt64)injection.received;
+            snapshot["dataplane"]["injection"]["last_ms"] = (Json::UInt64)injection.last_ms;
+            snapshot["dataplane"]["injection"]["running"] = injection.running;
+            snapshot["dataplane"]["injection"]["healthy"] = injection.healthy;
+            snapshot["dataplane"]["injection"]["reported"] = injection.reported;
+            snapshot["dataplane"]["injection"]["fallback_proxy"] = injection.fallback_proxy;
+        }
+#endif
 
 #if defined(_WIN32)
         if (std::shared_ptr<ITap> tap = client->GetTap(); NULLPTR != tap)

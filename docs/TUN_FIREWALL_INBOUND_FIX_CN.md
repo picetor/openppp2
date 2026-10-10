@@ -1,5 +1,8 @@
 # TUN 模式 DNS / ICMP 不通（Windows 防火墙丢弃注入报文）—— 定位与修复
 
+> 后续复查（2026-10-11，同一现场）：另见 `docs/TUN_MODE_REMAINING_ISSUES_CN.md`，
+> 它记录了本文第 3 节未解根因的新增否定结论，以及另外 12 个 TUN 模式遗留问题与修复。
+
 > 现场：Windows 11 + Wintun（适配器 `PPP`，`192.168.14.25/24`，网关 `192.168.14.1`），
 > 客户端 `ppp-web.exe`（`--mode=client --tun-mux=0 --bypass-mode=ip`，服务端 `23.166.168.33:20000`）。
 > 结论：**隧道数据面正常，卡点只有一个——客户端从用户态注入 TUN 的报文被 Windows 防火墙在入站传输层丢弃。**

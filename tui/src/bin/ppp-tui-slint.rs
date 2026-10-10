@@ -778,7 +778,11 @@ impl Backend {
                     },
                     if item.probe_checked {
                         if item.probe_reachable {
-                            format!(" · {}ms", item.probe_rtt_ms)
+                            if item.probe_rtt_ms >= 0 {
+                                format!(" · {}ms", item.probe_rtt_ms)
+                            } else {
+                                " · 可达".into()
+                            }
                         } else {
                             " · 不可达".into()
                         }
@@ -822,7 +826,13 @@ impl Backend {
             .outbounds
             .iter()
             .find(|outbound| outbound.active && outbound.probe_reachable)
-            .map(|outbound| format!("{} ms", outbound.probe_rtt_ms))
+            .map(|outbound| {
+                if outbound.probe_rtt_ms >= 0 {
+                    format!("{} ms", outbound.probe_rtt_ms)
+                } else {
+                    "可达".to_string()
+                }
+            })
             .unwrap_or_else(|| "—".to_string());
         ui.set_server_latency(rtt.into());
         ui.set_transport_status(snapshot.connection.clone().into());

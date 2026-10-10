@@ -2094,7 +2094,13 @@ fn draw_runtime_servers(frame: &mut ratatui::Frame, area: Rect, app: &TerminalAp
         let marker = if focused { ">" } else { " " };
         let state = runtime_state_label(outbound.state);
         let rtt = if outbound.probe_checked && outbound.probe_reachable {
-            format!("{}ms", outbound.probe_rtt_ms)
+            if outbound.probe_rtt_ms >= 0 {
+                format!("{}ms", outbound.probe_rtt_ms)
+            } else {
+                // Reachable but unmeasured: an established transport proves the
+                // server is up even when the background probe cannot measure it.
+                "可达".to_string()
+            }
         } else if outbound.probe_checked {
             "不可达".to_string()
         } else {

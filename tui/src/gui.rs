@@ -2444,8 +2444,13 @@ impl DesktopApp {
             });
             if let Some(outbound) = outbound {
                 if outbound.probe_enabled && outbound.probe_checked {
-                    if outbound.probe_reachable && outbound.probe_rtt_ms >= 0 {
-                        return (format!("{} ms", outbound.probe_rtt_ms), GOOD);
+                    if outbound.probe_reachable {
+                        if outbound.probe_rtt_ms >= 0 {
+                            return (format!("{} ms", outbound.probe_rtt_ms), GOOD);
+                        }
+                        // Reachable but unmeasured: an established transport proves
+                        // the server is up even when the probe cannot measure it.
+                        return ("可达".to_string(), GOOD);
                     }
                     return ("不可达".to_string(), BAD);
                 }
@@ -4233,8 +4238,14 @@ fn usage_text(outbound: &Outbound) -> String {
         _ => {}
     }
     if outbound.probe_checked {
-        if outbound.probe_reachable && outbound.probe_rtt_ms >= 0 {
-            usage.push_str(&format!(" ({}ms)", outbound.probe_rtt_ms));
+        if outbound.probe_reachable {
+            if outbound.probe_rtt_ms >= 0 {
+                usage.push_str(&format!(" ({}ms)", outbound.probe_rtt_ms));
+            } else {
+                // Reachable but unmeasured: an established transport proves the
+                // server is up even when the background probe cannot measure it.
+                usage.push_str(" (ok)");
+            }
         } else {
             usage.push_str(" (unreachable)");
         }

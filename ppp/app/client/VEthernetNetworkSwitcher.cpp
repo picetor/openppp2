@@ -90,6 +90,60 @@ namespace ppp {
     namespace app {
         namespace client {
 #if defined(_WIN32)
+            /**
+             * @brief Formats a Win32/Winsock error code as UTF-8 log text.
+             * @details boost::system::error_code::message() (and FormatMessageA)
+             * returns text in the process ANSI code page. This core writes UTF-8
+             * logs, so a localized message (for example the Chinese text for
+             * WSAEADDRNOTAVAIL) was stored as invalid UTF-8 and made the whole log
+             * file unreadable to UTF-8 tools. Format the wide message and convert
+             * it, and always keep the numeric code next to it.
+             */
+            static ppp::string FormatWin32ErrorText(int error) noexcept {
+                ppp::string text;
+                if (error == 0) {
+                    return text;
+                }
+
+                HMODULE module = NULLPTR;
+                // FORMAT_MESSAGE_ALLOCATE_BUFFER is mandatory here: with a
+                // pointer-to-pointer and nSize=0 it is what makes FormatMessageW
+                // allocate and fill lpBuffer. Without it the call fails with
+                // ERROR_INSUFFICIENT_BUFFER and this function would always return
+                // an empty string. The buffer is released with LocalFree below.
+                DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                    FORMAT_MESSAGE_IGNORE_INSERTS;
+                // Winsock error strings live in ws2_32.dll, not in the system table.
+                if (error >= 10000 /* WSABASEERR */) {
+                    module = ::GetModuleHandleW(L"ws2_32.dll");
+                    if (NULLPTR != module) {
+                        flags |= FORMAT_MESSAGE_FROM_HMODULE;
+                    }
+                }
+
+                LPWSTR buffer = NULLPTR;
+                const DWORD length = ::FormatMessageW(flags, reinterpret_cast<LPCVOID>(module),
+                    static_cast<DWORD>(error), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                    reinterpret_cast<LPWSTR>(&buffer), 0, NULLPTR);
+                if (NULLPTR == buffer || length == 0) {
+                    return text;
+                }
+
+                const int utf8_length = ::WideCharToMultiByte(CP_UTF8, 0, buffer, static_cast<int>(length),
+                    NULLPTR, 0, NULLPTR, NULLPTR);
+                if (utf8_length > 0) {
+                    text.resize(static_cast<std::size_t>(utf8_length));
+                    ::WideCharToMultiByte(CP_UTF8, 0, buffer, static_cast<int>(length),
+                        &text[0], utf8_length, NULLPTR, NULLPTR);
+                    while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' ')) {
+                        text.pop_back();
+                    }
+                }
+
+                ::LocalFree(buffer);
+                return text;
+            }
+
             static VOID WINAPI RouteChangeNotifyCallback(PVOID context, PMIB_IPFORWARD_ROW2, MIB_NOTIFICATION_TYPE) noexcept {
                 HANDLE event = reinterpret_cast<HANDLE>(context);
                 if (event != NULLPTR) {
@@ -162,6 +216,9 @@ namespace ppp {
                 // server.ipv6 section (and must not be treated as the remote
                 // server's capability advertisement).
                 ipv6_server_has_dataplane_ = false;
+                // Until then the client has no IPv6 data plane, so AAAA answers
+                // can only point applications at the leak-block black hole.
+                ipv6_dataplane_unavailable_.store(true, std::memory_order_relaxed);
 
                 if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) {
                     StartDebugWatchdog(context);
@@ -644,13 +701,83 @@ namespace ppp {
                 }
 
 #if defined(_WIN32)
+                // An IPv6 peer entry can only be probed when this host has a
+                // physical IPv6 gateway to pin it to. On a host without an IPv6
+                // uplink (link-local-only WLAN, IPv6 disabled) every probe cycle
+                // would fail the route pin for a candidate that can never become
+                // reachable and log an error for it, forever. Drop those
+                // candidates and state the reason once.
+                {
+                    std::shared_ptr<NetworkInterface> probe_underlying = GetUnderlyingNetworkInterface();
+                    const bool ipv6_uplink = NULLPTR != probe_underlying && probe_underlying->Index >= 0 &&
+                        probe_underlying->IPv6GatewayServer.is_v6() &&
+                        !probe_underlying->IPv6GatewayServer.is_unspecified();
+                    if (!ipv6_uplink) {
+                        bool skipped_any = false;
+                        ppp::vector<ppp::string> skipped_tags;
+                        for (OutboundWork& work : works) {
+                            const std::size_t candidates_before = work.candidates.size();
+                            work.candidates.erase(
+                                std::remove_if(work.candidates.begin(), work.candidates.end(),
+                                    [](const Candidate& candidate) noexcept {
+                                        return candidate.remoteEP.address().is_v6();
+                                    }),
+                                work.candidates.end());
+                            const bool dropped = work.candidates.size() != candidates_before;
+                            skipped_any = skipped_any || dropped;
+                            if (dropped && work.candidates.empty()) {
+                                skipped_tags.emplace_back(work.tag);
+                            }
+                        }
+                        if (skipped_any) {
+                            works.erase(
+                                std::remove_if(works.begin(), works.end(),
+                                    [](const OutboundWork& work) noexcept {
+                                        return work.candidates.empty();
+                                    }),
+                                works.end());
+                            if (!ipv6_probe_candidates_skipped_reported_.exchange(true, std::memory_order_relaxed)) {
+                                LOG_INFO("VEthernetNetworkSwitcher::RefreshOutboundProbes: this host has no physical IPv6 "
+                                    "gateway, so IPv6 peer entries are not probed (their packets would be routed into the "
+                                    "tunnel or dropped); they stay listed as unreachable");
+                            }
+                            if (!skipped_tags.empty()) {
+                                // Keep the display verdict ("unreachable") that the
+                                // failing probe used to produce, without the error.
+                                SynchronizedObjectScope scope(GetSynchronizedObject());
+                                const uint64_t skipped_now = Executors::GetTickCount();
+                                for (const ppp::string& skipped_tag : skipped_tags) {
+                                    OutboundProbeStatus& status = outbound_probe_statuses_[skipped_tag];
+                                    status.checked = true;
+                                    status.reachable = false;
+                                    status.rtt_ms = -1;
+                                    status.server.clear();
+                                    status.updated_at = skipped_now;
+                                }
+                            }
+                        }
+                        if (works.empty()) {
+                            outbound_probe_refreshing_ = false;
+                            return true;
+                        }
+                    }
+                }
+#endif
+
+#if defined(_WIN32)
                 // Pin every candidate on the physical adapter so probe sockets
                 // never enter the TAP (self-loop) while the tunnel is up.
                 for (const OutboundWork& work : works) {
                     for (const Candidate& candidate : work.candidates) {
                         const boost::asio::ip::address& probe_ip = candidate.remoteEP.address();
                         if (probe_ip.is_v4()) {
-                            EnsureWindowsIPv4ServerRoute(probe_ip);
+                            if (!EnsureWindowsIPv4ServerRoute(probe_ip)) {
+                                // The probe socket cannot be pinned; say so instead
+                                // of silently reporting the entry as unreachable.
+                                LOG_DEBUG("VEthernetNetworkSwitcher::RefreshOutboundProbes: cannot pin the physical route "
+                                    "for probe entry %s; the probe result for it is unreliable",
+                                    probe_ip.to_string().c_str());
+                            }
                         }
                         elif(probe_ip.is_v6()) {
                             EnsureWindowsIPv6ServerRoute(probe_ip);
@@ -914,11 +1041,14 @@ namespace ppp {
             // prefers IPv4. If there is no cached A response yet, forward AAAA
             // immediately. Holding it for the DNS timeout delays Happy Eyeballs and
             // can make IPv6-only sites appear unavailable.
-            // Controlled by "udp.dns.prefer_ipv4" in appsettings.json.
+            // Applied when the user asked for it ("udp.dns.prefer_ipv4" in
+            // appsettings.json) and always while the client has no usable IPv6 data
+            // plane: an AAAA answer can then only point the application at the leak
+            // block, where it waits for its own timeout instead of failing over.
             // Returns true if the caller should forward the response now.
             // Returns false if the caller should hold the response (AAAA with no A cache yet).
             bool VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept {
-                if (!prefer_ipv4_.load()) {
+                if (!ShouldPreferIPv4()) {
                     return true;
                 }
                 if (m.questions.empty()) {
@@ -1982,13 +2112,29 @@ namespace ppp {
                     // currently used by the exchanger/MUX.  Replacing it
                     // with the best probe result makes the UI look as if a
                     // healthy connection switched entries when it did not.
+                    //
+                    // A failed probe is also not evidence that a *connected*
+                    // outbound is unreachable: the tunnel to that same server is
+                    // established right now, so the panel used to contradict
+                    // itself and label the server it was using as unreachable.
+                    // Reachability is only taken from the probe while there is no
+                    // established transport to fall back on.
                     {
                         auto probe = outbound_probe_statuses_.find(tag);
                         if (probe != outbound_probe_statuses_.end() && probe->second.checked) {
+                            const bool established = status.state ==
+                                static_cast<int>(VEthernetExchanger::NetworkState_Established);
                             status.probe_checked = true;
-                            status.probe_reachable = probe->second.reachable;
-                            status.probe_rtt_ms = probe->second.rtt_ms;
-                            status.probe_entry = probe->second.server;
+                            if (probe->second.reachable || !established) {
+                                status.probe_reachable = probe->second.reachable;
+                                status.probe_rtt_ms = probe->second.rtt_ms;
+                                status.probe_entry = probe->second.server;
+                            }
+                            else {
+                                // Connected: the probe result says nothing about
+                                // reachability, so keep it out of the display.
+                                status.probe_reachable = true;
+                            }
                         }
                     }
 #endif
@@ -2014,10 +2160,17 @@ namespace ppp {
                     {
                         auto probe = outbound_probe_statuses_.find("main");
                         if (probe != outbound_probe_statuses_.end() && probe->second.checked) {
+                            const bool established = status.state ==
+                                static_cast<int>(VEthernetExchanger::NetworkState_Established);
                             status.probe_checked = true;
-                            status.probe_reachable = probe->second.reachable;
-                            status.probe_rtt_ms = probe->second.rtt_ms;
-                            status.probe_entry = probe->second.server;
+                            if (probe->second.reachable || !established) {
+                                status.probe_reachable = probe->second.reachable;
+                                status.probe_rtt_ms = probe->second.rtt_ms;
+                                status.probe_entry = probe->second.server;
+                            }
+                            else {
+                                status.probe_reachable = true;
+                            }
                         }
                     }
 #endif
@@ -2669,9 +2822,16 @@ namespace ppp {
                     }
 #endif
                     std::shared_ptr<VEthernetExchanger> active = get_active();
-                    LOG_DEBUG("VEthernetNetworkSwitcher::GetExchanger: destination=%s, selected_outbound=%s, reason=geo_rules_unavailable",
-                        ppp::net::Ipep::ToAddressString<ppp::string>(destination).data(),
-                        NULLPTR != active ? active->GetOutboundTag().data() : "none");
+                    // "No geo rules" is a property of the installation (the geoip /
+                    // geosite data is missing), not of this packet: the decision is
+                    // the same for every destination, so reporting it per packet
+                    // produced ~100 log lines per minute and hid everything else.
+                    if (!geo_rules_unavailable_reported_.exchange(true, std::memory_order_relaxed)) {
+                        LOG_WARN("VEthernetNetworkSwitcher::GetExchanger: geo rules are unavailable "
+                            "(geosite/geoip data not loaded), so every packet is routed to outbound '%s'; "
+                            "further occurrences are not logged",
+                            NULLPTR != active ? active->GetOutboundTag().data() : "none");
+                    }
                     return active;
                 }
                 // A direct Geo rule must also work when there is only a main
@@ -3185,6 +3345,9 @@ namespace ppp {
                     extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Nat66 ||
                     extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua;
                 ipv6_server_has_dataplane_ = has_ipv6_dataplane;
+                // Keep the DNS-side flag in step: the mode is the server's own
+                // statement about whether it can carry IPv6 at all.
+                ipv6_dataplane_unavailable_.store(!has_ipv6_dataplane, std::memory_order_relaxed);
 
                 if (!has_ipv6_dataplane) {
                     // A reconnect can explicitly withdraw a previously assigned IPv6
@@ -3403,6 +3566,11 @@ namespace ppp {
                     if (route_applied) {
                         tap->IPv6GatewayServer = extensions.AssignedIPv6Gateway;
                     }
+
+                    // AAAA answers are only useful once the managed IPv6 default
+                    // route is really in place; an advertised-but-unapplied data
+                    // plane must keep the DNS-side stripping active.
+                    ipv6_dataplane_unavailable_.store(!route_applied, std::memory_order_relaxed);
                 }
 
                 // 3. Apply an optional routed subnet prefix.
@@ -4298,9 +4466,10 @@ namespace ppp {
                         if (current != local_dns_upstreams_.end()) {
                             current->second->requests.erase(upstream_id);
                         }
-                        LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: direct send failed, upstream=%s, transferred=%llu, expected=%llu, error=%s",
+                        LOG_WARN("VEthernetNetworkSwitcher::SendLocalDnsUdp: direct send failed, upstream=%s, transferred=%llu, expected=%llu, error=%d, detail=%s",
                             upstream_key.data(), (unsigned long long)transferred,
-                            (unsigned long long)request->size(), ec.message().data());
+                            (unsigned long long)request->size(), ec.value(),
+                            FormatWin32ErrorText(ec.value()).data());
                     });
                 return true;
             }
@@ -4549,7 +4718,7 @@ namespace ppp {
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
                         std::shared_ptr<ppp::string> processed = response;
-                        if (!direct_query && prefer_ipv4_.load()) {
+                        if (!direct_query && ShouldPreferIPv4()) {
                             ::dns::Message message;
                             if (message.decode(reinterpret_cast<const uint8_t*>(response->data()), response->size()) == ::dns::BufferResult::NoError &&
                                 StripAAAADnsResponseIfIPv4Available(message)) {
@@ -4671,6 +4840,22 @@ namespace ppp {
             }
 
 #if defined(_WIN32)
+            VEthernetNetworkSwitcher::InjectionProbeDiagnostics
+                VEthernetNetworkSwitcher::GetInjectionProbeDiagnostics() const noexcept {
+                InjectionProbeDiagnostics diagnostics;
+                // The probe only exists where packets are injected into a kernel
+                // adapter from userspace, so this definition is Windows-only; the
+                // snapshot falls back to the zero-initialised defaults elsewhere.
+                diagnostics.sent = injection_probe_sent_.load(std::memory_order_relaxed);
+                diagnostics.received = injection_probe_received_.load(std::memory_order_relaxed);
+                diagnostics.last_ms = injection_probe_last_ms_.load(std::memory_order_relaxed);
+                diagnostics.running = injection_probe_running_.load(std::memory_order_relaxed);
+                diagnostics.healthy = injection_probe_healthy_.load(std::memory_order_relaxed);
+                diagnostics.reported = injection_probe_reported_.load(std::memory_order_relaxed);
+                diagnostics.fallback_proxy = system_proxy_fallback_;
+                return diagnostics;
+            }
+
             void VEthernetNetworkSwitcher::RunTunInjectionSelfTest(uint64_t now) noexcept {
                 // The tunnel can be perfectly healthy while the host sees nothing:
                 // every packet the client receives is delivered by writing it into
@@ -4758,8 +4943,10 @@ namespace ppp {
                                     socket->bind(bind_ep, ec);
                                 }
                                 if (ec) {
-                                    LOG_ERROR("TUN injection probe: cannot bind a UDP probe socket on the tunnel address, error=%s",
-                                        ec.message().data());
+                                    // The code page text of this error used to be
+                                    // stored raw and corrupted the UTF-8 log file.
+                                    LOG_ERROR("TUN injection probe: cannot bind a UDP probe socket on the tunnel address, error=%d, detail=%s",
+                                        ec.value(), FormatWin32ErrorText(ec.value()).data());
                                 }
                                 else {
                                     socket->non_blocking(true, ec);
@@ -4864,10 +5051,16 @@ namespace ppp {
                             // Ask the platform itself who is dropping our traffic. The
                             // subscription is harmless without the matching audit policy
                             // (it then simply reports nothing) and is dropped as soon as
-                            // injection recovers.
-                            if (!self->drop_diagnostics_active_) {
+                            // injection recovers. A refusal is not something this process
+                            // can fix (it is not elevated, or a policy blocks the audit
+                            // change), so try once per session instead of warning on
+                            // every probe cycle.
+                            if (!self->drop_diagnostics_active_ && !self->drop_diagnostics_failed_) {
                                 if (ppp::win32::network::Fw::StartDropDiagnostics()) {
                                     self->drop_diagnostics_active_ = true;
+                                }
+                                else {
+                                    self->drop_diagnostics_failed_ = true;
                                 }
                             }
 #endif
@@ -4967,7 +5160,8 @@ namespace ppp {
                     udp4->open(boost::asio::ip::udp::v4(), ec);
                     if (!ec) udp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
                     if (ec) {
-                        LOG_ERROR("Local DNS: cannot bind UDP 127.0.0.1:53, error=%s", ec.message().data());
+                        LOG_ERROR("Local DNS: cannot bind UDP 127.0.0.1:53, error=%d, detail=%s",
+                            ec.value(), FormatWin32ErrorText(ec.value()).data());
                     }
                     else {
                         auto tcp4 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
@@ -4976,7 +5170,8 @@ namespace ppp {
                         if (!ec) tcp4->bind({ boost::asio::ip::address_v4::loopback(), PPP_DNS_SYS_PORT }, ec);
                         if (!ec) tcp4->listen(boost::asio::socket_base::max_listen_connections, ec);
                         if (ec) {
-                            LOG_ERROR("Local DNS: cannot bind TCP 127.0.0.1:53, error=%s", ec.message().data());
+                            LOG_ERROR("Local DNS: cannot bind TCP 127.0.0.1:53, error=%d, detail=%s",
+                                ec.value(), FormatWin32ErrorText(ec.value()).data());
                         }
                         else {
                             local_dns_udp4_ = udp4;
@@ -4995,7 +5190,8 @@ namespace ppp {
                     if (!ec) udp6->set_option(boost::asio::ip::v6_only(true), ec);
                     if (!ec) udp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
                     if (ec) {
-                        LOG_ERROR("Local DNS: cannot bind UDP [::1]:53, error=%s", ec.message().data());
+                        LOG_ERROR("Local DNS: cannot bind UDP [::1]:53, error=%d, detail=%s",
+                            ec.value(), FormatWin32ErrorText(ec.value()).data());
                     }
                     else {
                         auto tcp6 = make_shared_object<boost::asio::ip::tcp::acceptor>(*context);
@@ -5005,7 +5201,8 @@ namespace ppp {
                         if (!ec) tcp6->bind({ boost::asio::ip::address_v6::loopback(), PPP_DNS_SYS_PORT }, ec);
                         if (!ec) tcp6->listen(boost::asio::socket_base::max_listen_connections, ec);
                         if (ec) {
-                            LOG_ERROR("Local DNS: cannot bind TCP [::1]:53, error=%s", ec.message().data());
+                            LOG_ERROR("Local DNS: cannot bind TCP [::1]:53, error=%d, detail=%s",
+                                ec.value(), FormatWin32ErrorText(ec.value()).data());
                         }
                         else {
                             local_dns_udp6_ = udp6;
@@ -5289,6 +5486,7 @@ namespace ppp {
                 // closed until its Information extension is received; a client
                 // profile's server.ipv6 section is not a remote capability signal.
                 ipv6_server_has_dataplane_ = false;
+                ipv6_dataplane_unavailable_.store(true, std::memory_order_relaxed);
                 if (!ApplyWindowsIPv6LeakBlockRoutes()) {
                     LOG_ERROR("VEthernetNetworkSwitcher::Open: initial IPv6 leak block failed");
                     return false;

@@ -205,6 +205,21 @@ namespace ppp {
                 std::shared_ptr<aggligator::aggligator>                             GetAggligator()              noexcept;
                 bool                                                                IsBlockQUIC()                noexcept { return block_quic_; }
                 bool                                                                IsMuxEnabled()               noexcept { return mux_ > 0; }
+                // TUN injection self-test verdict. Everything the tunnel sends to
+                // the host (DNS answers, ICMP replies, TCP handshakes) is written
+                // into the tunnel adapter from userspace, and the host stack can
+                // discard those packets before any socket sees them. Without this
+                // verdict the only way to learn that is to read the core log.
+                struct InjectionProbeDiagnostics final {
+                    uint64_t                                                    sent = 0;
+                    uint64_t                                                    received = 0;
+                    uint64_t                                                    last_ms = 0;
+                    bool                                                        running = false;
+                    bool                                                        healthy = false;
+                    bool                                                        reported = false; ///< At least one verdict has been produced.
+                    bool                                                        fallback_proxy = false; ///< The system proxy was taken over because injection is dead.
+                };
+                InjectionProbeDiagnostics                                          GetInjectionProbeDiagnostics() const noexcept;
                 // Configure before Open(); the request is shared across primary switches.
                 void                                                                SetLinkRestartLimit(int value) noexcept { link_restart_limit_ = value; }
                 int                                                                 GetLinkRestartLimit() const noexcept { return link_restart_limit_; }
@@ -475,6 +490,11 @@ namespace ppp {
                 OutboundProbeStatusTable                                            outbound_probe_statuses_;
                 std::atomic<uint64_t>                                               next_outbound_probe_refresh_ = 0;
                 std::atomic<bool>                                                   outbound_probe_refreshing_ = false;
+                // A peer entry that needs a physical route the host does not have
+                // (an IPv6 entry on a machine without an IPv6 uplink) can never be
+                // probed. Skip it instead of retrying every five seconds, and say so
+                // once instead of logging one error per cycle.
+                std::atomic<bool>                                                   ipv6_probe_candidates_skipped_reported_ = false;
 #endif
                 // configuration_ always follows the currently promoted main
                 // exchanger. Keep the startup object separately because the
@@ -507,6 +527,9 @@ namespace ppp {
                 TimeoutEventHandlerTable                                            timeouts_;
                 DNSRuleTable                                                        dns_ruless_[3];
                 std::shared_ptr<ppp::app::client::geo::GeoRuleEngine>               geo_rules_;
+                // The missing-geo-data condition is a property of the installation,
+                // not of a packet: report it once instead of once per packet.
+                std::atomic<bool>                                                   geo_rules_unavailable_reported_ = false;
                 ppp::vector<boost::asio::ip::address>                               direct_dns_servers_;
                 std::atomic<size_t>                                                  direct_dns_server_index_ = 0;
 
@@ -535,6 +558,19 @@ namespace ppp {
                 // without locking (locked write happens only in
                 // CompletePendingOutboundSwitch / constructor).
                 std::atomic<bool>                                                   prefer_ipv4_ = false;
+                // True while the peer has not provided a usable IPv6 data plane
+                // (no managed IPv6 default route), in which case every AAAA record
+                // handed to an application points at the leak-block black hole and
+                // the application stalls until its own timeout. Stripping AAAA in
+                // that state is a correctness fix, not a user preference, so it is
+                // tracked separately from prefer_ipv4_ and read lock-free from the
+                // DNS paths. Starts true: until the first Information extension the
+                // client genuinely has no IPv6 data plane.
+                std::atomic<bool>                                                   ipv6_dataplane_unavailable_ = true;
+                bool                                                                ShouldPreferIPv4() const noexcept {
+                    return prefer_ipv4_.load(std::memory_order_relaxed) ||
+                        ipv6_dataplane_unavailable_.load(std::memory_order_relaxed);
+                }
                 int                                                                 link_restart_limit_ = 0;
                 LinkRestartRequest                                                  link_restart_request_;
 
@@ -716,6 +752,11 @@ namespace ppp {
                 // platform's drop notifications so the log names whatever is dropping
                 // or aborting the tunnel's traffic.
                 bool                                                                drop_diagnostics_active_ = false;
+                // Subscribing without the matching audit subcategory fails for
+                // reasons this process cannot change (it is not elevated, or a
+                // policy blocks the change). Remember the failure so the probe does
+                // not retry and warn every cycle.
+                std::atomic<bool>                                                   drop_diagnostics_failed_ = false;
 #endif
             };
         }
