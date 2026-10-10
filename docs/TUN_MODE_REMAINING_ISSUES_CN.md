@@ -435,3 +435,71 @@ Manual 256  fd42:4242:4242::/64  15  PPP 2
 8. P4 补充（探测超时）：日志里 `ConnectivityProbe::ProbeTcp: probe failed ... error=995`
    的条数应明显下降、`completed=1` 且 `elapsed_ms≈timeout_ms` 的条目不应再被判成「不可达」——
    做法是在配置 `client` 段加 `"probe": { "timeout_ms": 2000 }`（默认 800 ms 对慢服务器过紧）。
+
+## 7. 实测报告：ICMP、境外网页与 TUN 数据面（2026-10-11 01:33–01:55，构建 `6be4ed2`）
+
+现场：客户端 01:33:16 启动，TUN `PPP` ifIndex=71 `192.168.14.25/24` + 网关 `192.168.14.1`，
+物理网卡 `WLAN` `192.168.51.101`，出口 `23.166.168.33:20000`（ZGO），`--tun-mux=0`，MTU 1500。
+
+### 7.1 结果矩阵
+
+| 被测路径 | 测试方法 | 结果 |
+|---|---|---|
+| **TUN 宿主交付**（客户端注入 → 宿主 socket） | 源地址绑 `192.168.14.25`，向隧道网关 `192.168.14.1:53` 发 6 次 DNS 查询 | **0/6 应答**，每次等满 2500 ms |
+| **TUN 内 UDP**（走隧道到公网 DNS） | 同源地址向 `8.8.8.8:53` 发 6 次 | **0/6 应答** |
+| 对照：回环代理（不经注入） | 向 `127.0.0.1:53` 发 6 次 | **6/6 应答**（607/767/2/51/0/0 ms） |
+| 客户端自测注入探针 | `TUN injection probe` | **0/3**，01:33–01:47 八次全部如此；`dataplane.injection={"sent":3,"received":0,"healthy":false,"fallback_proxy":true}` |
+| 期间计数器 | RPC 快照对比（01:45→01:55） | `tun_rx +257`、`submit_successes +43`、`built/allocated +43`、`validate_failures 0`、`correlated_remote_rx_packets 0` —— **客户端确实往网卡里写了 43 个包，宿主一个都没收到** |
+| **ICMP（我的沙箱会话）** | `ping 127.0.0.1 / 192.168.51.1 / 192.168.14.1 / 8.8.8.8 / 1.1.1.1 / 9.9.9.9` | 全部 `transmit failed. General failure.`；`tracert` → `Transmit error: code 5`（WSAEACCES）；`DATAPLANE ICMP` 日志 **0 条新增**（我的包从未进入客户端）→ **此项受我的会话限制，见 7.4，需你侧确认** |
+| ICMP（用户 01:33 的 ping，历史证据） | 日志 `DATAPLANE ICMP: input ... type=8` ×4（目标 9.9.9.9） | 请求**进过** TUN 并被转发（`remote ... result=1`），但**没有回包** → 回包方向与注入结论一致 |
+| 本地 HTTP 代理 8080（`source=local-proxy`） | 手写 HTTP/1.0 请求 | ✅ `www.google.com` 200 + 真首页（3.3 s / 7 KB）、`www.gnu.org` 200、`wikipedia.org` 301、`detectportal.firefox.com/success.txt` 200 `success`；❌ `neverssl.com` **3/3 无响应（≈6 s 超时，字节 0）** |
+| 出口 IP（是否真走 VPN） | `http://api.ipify.org/`、`http://icanhazip.com/` 经代理 | ✅ 两者都返回 **`23.166.168.33`** = VPN 服务器地址 |
+| 本地 SOCKS5 1080 | 手写握手 + CONNECT `www.google.com:443` | ✅ 问候 `05 00`、应答 `05 00 00 01 127.0.0.1 ...`（status=0 成功） |
+| paper-airplane LSP（宿主进程 TCP 被劫持进来） | 日志 `PaperAirplaneConnection::OnConnect` | 19 次 `connected` / 2 次 `remote CONNECT failed`（其中一个是我测的 `93.184.216.34:80`）；宿主侧表现为 `local=127.0.0.1` |
+| 国内直连（bypass 分流） | `http://www.baidu.com/` | ✅ 200、31 ms、源地址 `192.168.51.101`（走物理网卡，符合 `bypass_mode=ip` 预期） |
+| 客户端自诊断 | RPC `run_diagnostics` | ⚠️ **7/7 全部 pass**、`healthy=true`、`network.mtu configured=1500 effective=1500` —— **完全看不到 TUN 交付已死** |
+| HTTPS 端到端（页面渲染） | `curl.exe` / `Invoke-WebRequest` / `SslStream` | ⚠️ **我的会话里 TLS 一律失败**（国内 `baidu.com`、`qq.com` 同样失败 → 环境限制，不作为证据）；可用证据是：经 8080 的 `CONNECT www.google.com:443 / example.com:443 / cloudflare.com:443` 均返回 **200 Connection established**，SOCKS5 CONNECT 也成功 |
+
+### 7.2 结论一：TUN 模式**自己的数据面是坏的**，但客户端用别的路径兜住了
+
+- 需要「客户端注入 → 宿主」这一步的流量（隧道网关 DNS、隧道内 UDP、ICMP 回包、
+  隧道内 TCP 握手）**全部失败**；客户端写进网卡的 43 个包在宿主侧一个都没出现
+  （`validate_failures=0`，说明是宿主栈收下后丢弃，不是网卡拒绝）。
+- 宿主应用能上网，靠的是**另外三条不经过注入的路径**：paper-airplane LSP（把进程的
+  TCP 劫持进客户端进程，宿主看到 `local=127.0.0.1`）、本地 HTTP 代理 8080、
+  本地 SOCKS5 1080；系统代理被探针判定失败后自动指向 8080，所以浏览器一直能用。
+- 因此「网页能开」**不能**作为「TUN 模式正常」的证据；反过来，任何绕过 LSP/代理、
+  必须走 TUN 的程序（服务、部分 UDP 应用、非劫持进程）在这台机器上都会失败。
+
+### 7.3 结论二：新增一个可复现的「境外站点经代理也不通」案例
+
+`http://neverssl.com/` 经本地代理 **3/3 无响应**（客户端读到 REQUEST 后：DNS 经隧道
+`direct=0` 成功 → `ConnectBridgeToPeer...destination=neverssl.com:80` → `Mux enter → no mux`
+→ 之后**既没有 `connected` 也没有失败日志**，请求一直挂着）。同类还有 LSP 的
+`remote CONNECT failed`（`93.184.216.34:80`）。这说明远端桥接**缺少连接超时/失败可见性**：
+挂住的连接不会向上层报错，浏览器/curl 只能等到自己超时 —— 与旧文档 6.2 的「偶发卡顿」同源。
+建议：给 `ConnectBridgeToPeer`/`PaperAirplaneConnection::OnConnect` 的远端连接加显式超时，
+并在超时时打一条 WARN（含 destination 与 elapsed）。
+
+### 7.4 需要你在**自己的窗口**里确认的两件事（我的会话有沙箱限制）
+
+1. ICMP 到底是「发不出去」还是「发出去没有回包」——我的进程里 `ping` 连 `127.0.0.1` 都
+   报 `transmit failed. General failure.` / `Transmit error: code 5`，而我的会话不是管理员、
+   WMI ping 也被拒（`拒绝访问`），所以这可能是我的会话限制而非客户端问题。
+   请在你的 cmd 里跑并把**原文**发我：
+   ```bat
+   ping 192.168.14.1
+   ping 9.9.9.9
+   ```
+   - 若是 `Request timed out` → 发得出去、回包被丢（与注入结论一致，属客户端问题）；
+   - 若是 `transmit failed / General failure / 代码 5` → 连发都被拒，是系统级 ICMP 拦截
+     （LSP 或安全软件），那是另一个（更严重的）问题。
+2. HTTPS 页面：我的会话里 TLS 全线失败（国内站点同样失败），请在浏览器里开
+   `https://www.google.com/` 与 `https://www.cloudflare.com/`；正常应秒开
+   （HTTP 与 SOCKS5 的 CONNECT 都已证明隧道能到这些 443 端点）。
+
+### 7.5 一句话总结
+
+**TUN 数据面：坏（注入→宿主 0 交付，已连续复现）；ICMP：回包方向坏（发送方向待你确认）；
+境外网页：经 LSP/代理可用（出口 IP = 23.166.168.33，Google/GNU 真页面 200），
+但存在「远端连接挂死不报错」的站点（neverssl.com 3/3）；客户端自诊断对这些全都不可见。**
