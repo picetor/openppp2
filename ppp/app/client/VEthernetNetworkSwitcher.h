@@ -319,7 +319,7 @@ namespace ppp {
                 virtual bool                                                        OnUpdate(uint64_t now) noexcept override;
                 virtual bool                                                        OnInformation(const std::shared_ptr<VirtualEthernetInformation>& information) noexcept;
                 virtual void                                                        ApplyIPv6Assignment(const VirtualEthernetInformationExtensions& extensions, const std::shared_ptr<VEthernetExchanger>& source = NULLPTR) noexcept;
-                bool                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept;
+                bool                                                                StripAAAADnsResponseIfIPv4Available(::dns::Message& m, bool strip_without_a_cache = false) noexcept;
                 void                                                                FlushPendingAAAAResponses() noexcept;
                 void                                                                FlushExpiredPendingAAAAResponses() noexcept;
 
@@ -567,6 +567,11 @@ namespace ppp {
                 // DNS paths. Starts true: until the first Information extension the
                 // client genuinely has no IPv6 data plane.
                 std::atomic<bool>                                                   ipv6_dataplane_unavailable_ = true;
+                // True when the physical uplink itself has an IPv6 gateway. A name
+                // that the policy resolves over the direct (bypassed) path is only
+                // usable over IPv6 when this is true; otherwise its AAAA answer can
+                // only lead the application into a timeout.
+                std::atomic<bool>                                                   host_ipv6_uplink_ = false;
                 bool                                                                ShouldPreferIPv4() const noexcept {
                     return prefer_ipv4_.load(std::memory_order_relaxed) ||
                         ipv6_dataplane_unavailable_.load(std::memory_order_relaxed);

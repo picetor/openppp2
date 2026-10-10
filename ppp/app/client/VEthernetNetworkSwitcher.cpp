@@ -1045,10 +1045,18 @@ namespace ppp {
             // appsettings.json) and always while the client has no usable IPv6 data
             // plane: an AAAA answer can then only point the application at the leak
             // block, where it waits for its own timeout instead of failing over.
+            // @param strip_without_a_cache The caller has established that this
+            //        destination cannot use IPv6 at all (no tunnel IPv6 data plane,
+            //        or no host IPv6 egress for a directly resolved name), so strip
+            //        even when no A record is cached yet: an AAAA-only answer is a
+            //        dead end rather than the IPv6-only-site fallback the default
+            //        behaviour protects. It also lets the caller's decision through
+            //        when neither prefer_ipv4 nor the tunnel state asks for IPv4.
             // Returns true if the caller should forward the response now.
             // Returns false if the caller should hold the response (AAAA with no A cache yet).
-            bool VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m) noexcept {
-                if (!ShouldPreferIPv4()) {
+            bool VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m,
+                bool strip_without_a_cache) noexcept {
+                if (!ShouldPreferIPv4() && !strip_without_a_cache) {
                     return true;
                 }
                 if (m.questions.empty()) {
@@ -1073,11 +1081,6 @@ namespace ppp {
                 a_check.questions[0].mType = ::dns::RecordType::kA;
                 ppp::string cache_result = ppp::net::asio::vdns::QueryCache2(
                     domain, a_check, ppp::net::asio::vdns::AddressFamily::kA);
-                if (cache_result.empty()) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, keeping %d AAAA records",
-                        domain, original_aaaa_count);
-                    return true;
-                }
                 bool hasA = false;
                 for (const auto& rr : a_check.answers) {
                     if (rr.mType == ::dns::RecordType::kA) {
@@ -1085,10 +1088,15 @@ namespace ppp {
                         break;
                     }
                 }
-                if (!hasA) {
-                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: cached no A for %s, keeping %d AAAA records",
+                if (cache_result.empty() || !hasA) {
+                    if (!strip_without_a_cache) {
+                        LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, keeping %d AAAA records",
+                            domain, original_aaaa_count);
+                        return true;
+                    }
+                    LOG_DEBUG("VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available: no A cache for %s, "
+                        "stripping %d AAAA records because this host cannot reach IPv6",
                         domain, original_aaaa_count);
-                    return true;
                 }
                 // Strip AAAA records from the response
                 m.answers.erase(std::remove_if(m.answers.begin(), m.answers.end(),
@@ -4718,10 +4726,29 @@ namespace ppp {
                             query_host.data(), (int)direct_query,
                             (unsigned long long)(Executors::GetTickCount() - query_started));
                         std::shared_ptr<ppp::string> processed = response;
-                        if (!direct_query && ShouldPreferIPv4()) {
+                        // AAAA records are useless to the host when the tunnel cannot
+                        // carry IPv6, and for a name that the policy resolves over the
+                        // direct (bypassed) path they are useless when the host itself
+                        // has no IPv6 egress. In both cases the application would only
+                        // retry an address it can never reach until its own timeout.
+                        // The two paths depend on different things, so decide per path:
+                        // the tunnel path follows the tunnel, the direct path follows
+                        // the host uplink. An explicit prefer_ipv4 request still
+                        // applies to both.
+                        const bool no_ipv6_path = direct_query
+                            ? !host_ipv6_uplink_.load(std::memory_order_relaxed)
+                            : ipv6_dataplane_unavailable_.load(std::memory_order_relaxed);
+                        const bool strip_aaaa = no_ipv6_path ||
+                            prefer_ipv4_.load(std::memory_order_relaxed);
+                        if (strip_aaaa) {
+                            // This path answers the host directly (over loopback), so
+                            // it cannot defer an AAAA that arrived before its A record:
+                            // with no IPv6 path at all, strip it now instead of handing
+                            // the application an address it can never reach.
+                            const bool strip_without_a_cache = no_ipv6_path;
                             ::dns::Message message;
                             if (message.decode(reinterpret_cast<const uint8_t*>(response->data()), response->size()) == ::dns::BufferResult::NoError &&
-                                StripAAAADnsResponseIfIPv4Available(message)) {
+                                StripAAAADnsResponseIfIPv4Available(message, strip_without_a_cache)) {
                                 auto encoded = make_shared_object<ppp::string>();
                                 encoded->resize(PPP_MAX_DNS_PACKET_BUFFER_SIZE);
                                 std::size_t length = 0;
@@ -5407,6 +5434,16 @@ namespace ppp {
 #else
                 underlying_ni_ = Unix_GetUnderlyingNetowrkInterface(tap, preferred_nic_);
 #endif
+
+                // Remember whether the host itself has an IPv6 egress. A name that
+                // the policy resolves directly (bypassed) only works over IPv6 when
+                // the host has one; on a machine with just a link-local address the
+                // AAAA answer is a dead end the application waits on.
+                host_ipv6_uplink_.store(
+                    NULLPTR != underlying_ni_ && underlying_ni_->Index >= 0 &&
+                    underlying_ni_->IPv6GatewayServer.is_v6() &&
+                    !underlying_ni_->IPv6GatewayServer.is_unspecified(),
+                    std::memory_order_relaxed);
 
                 // The physical hosting network interface required for the VPN overlap network is not allowed to construct and turn on the VPN service.
                 if (auto underlying_ni = underlying_ni_; NULLPTR != underlying_ni) {
@@ -8470,6 +8507,7 @@ namespace ppp {
                 ribs6_.reset(); 
                 tun_ni_.reset();
                 underlying_ni_.reset();
+                host_ipv6_uplink_.store(false, std::memory_order_relaxed);
 
 #if !defined(_MACOS)
                 // Clear the routing table, forwarding table, and DNS server list of the network card, including cache.

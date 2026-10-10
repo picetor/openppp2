@@ -37,7 +37,7 @@ WinNAT/FSE 干扰。
 
 | 问题 | 改动 | 位置 |
 |---|---|---|
-| P1 | 新增 `ipv6_dataplane_unavailable_` + `ShouldPreferIPv4()`：**没有可用 IPv6 数据面时就剥离 AAAA**，不再依赖 `udp.dns.prefer_ipv4` | `VEthernetNetworkSwitcher.h/.cpp`（构造函数、`ApplyIPv6Assignment`、`StripAAAADnsResponseIfIPv4Available`、`DispatchLocalDnsQuery`、`Open`） |
+| P1 | 新增 `ipv6_dataplane_unavailable_` + `ShouldPreferIPv4()`：**没有可用 IPv6 数据面时就剥离 AAAA**，不再依赖 `udp.dns.prefer_ipv4`；另按「直连名字看宿主 IPv6 出口」补齐（见 P1 补记） | `VEthernetNetworkSwitcher.h/.cpp`（构造函数、`ApplyIPv6Assignment`、`StripAAAADnsResponseIfIPv4Available`、`DispatchLocalDnsQuery`、`Open`） |
 | P2 | 探测刷新时，若本机没有物理 IPv6 网关就**跳过 IPv6 候选**（只记一次 INFO），不再每 5 秒一条 ERROR；IPv4 pin 失败也会记一条 DEBUG | `RefreshOutboundProbes` |
 | P3 | 新增 `FormatWin32ErrorText()`（`FormatMessageW` + `FORMAT_MESSAGE_ALLOCATE_BUFFER` + UTF-8），替换 6 处 `ec.message()`，并同时打印数值错误码 | `VEthernetNetworkSwitcher.cpp` |
 | P4 | 已建立连接时，后台探测失败不再把该出口显示为不可达；`ExchangeToEstablishState` 记 `probe_reachable_=true`；探测失败补日志（protect 失败 / connect 错误码 / 耗时）；RTT<0 时各界面显示「可达/ok」而不是「-1 ms」 | `GetOutboundStatuses`、`VEthernetExchanger.cpp`、`ConnectivityProbe.cpp`、`web/app.js`、`tui/src/*` |
@@ -77,14 +77,28 @@ P11（需要管理员执行清理脚本）、P12（需要先确认 `static_echo`
 上一份文档 6.1 已实测 `curl -6 http://[2606:4700:4700::1111]/` 挂 12 秒。写这条的此刻，
 日志里仍有应用在反复尝试 `2606:4700:...`。
 
-**修法**（上一份文档 6.1 的「后续代码改进」仍未实施）
+**修法（已实施，含 01:33 现场的补记）**
 
-1. 立刻可用（无需编译）：给 `config/ZGO.json` 的 `udp.dns` 加 `"prefer_ipv4": true`，重启核心。
-2. 代码：把「剥离 AAAA」的条件从「用户显式开启 prefer_ipv4」改为
-   **「有 A 记录 且 客户端当前没有可用的 IPv6 数据面」**（即 `ipv6_client_state_.DefaultRouteApplied == false`
-   或未分配 IPv6）。把不可达的 IPv6 地址交给应用本身就是缺陷，不应依赖用户开关。
-   相关位置：`VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available` /
-   `FlushPendingAAAAResponses`（`ppp/app/client/VEthernetNetworkSwitcher.cpp:920-1094`）。
+1. `ipv6_dataplane_unavailable_` + `ShouldPreferIPv4()`：没有隧道 IPv6 数据面时（或在
+   `ApplyIPv6Assignment` 里申请失败时）就剥离 AAAA，不再依赖用户开关。
+2. **（补记）直接解析的名字也要看宿主自己能不能走 IPv6**：01:33 现场实测发现
+   `Resolve-DnsName -Type AAAA -Server 127.0.0.1 www.baidu.com` 仍然返回 2 条 AAAA、日志里
+   `STRIPPED` 为 0 条——因为 baidu 属于**直连（bypass）策略**（日志
+   `DispatchLocalDnsQuery: completed host=www.baidu.com, direct=1`，
+   `transport=direct-udp`），而原来的剥离只对 `!direct_query` 生效。可这台机器的 WLAN 只有
+   `fe80::/64`、没有全局 IPv6 地址也没有 IPv6 默认路由，**任何** AAAA 都是死路。
+   因此新增 `host_ipv6_uplink_`（在 `Open` 选中物理网卡时按
+   `underlying_ni_->IPv6GatewayServer` 计算），并按路径分别判断：
+   - 隧道路径：按隧道 IPv6 数据面判断（不变）；
+   - 直连路径：宿主有 IPv6 出口就保留 AAAA，没有就剥离；
+   - 两条路径都仍受用户显式 `prefer_ipv4` 影响。
+   同时给 `StripAAAADnsResponseIfIPv4Available` 增加 `strip_without_a_cache`：
+   回环应答路径无法像隧道路径那样「先扣住 AAAA 等 A 记录」，所以在这台完全不能走 IPv6 的机器上
+   直接剥离（否则 A 记录还没进缓存时 AAAA 又会漏出去）。
+   相关位置：`StripAAAADnsResponseIfIPv4Available` / `DispatchLocalDnsQuery`
+   （`ppp/app/client/VEthernetNetworkSwitcher.cpp`）。
+3. 注意：进程内 vDNS 缓存与 Windows DNS 客户端缓存里已有的 AAAA 不会因此消失，
+   验证时要重启核心（或查一个没缓存过的域名）。
 
 ## P2 无 IPv6 出口的 IPv6 服务器条目 → 每 5 秒一条 ERROR
 
@@ -171,6 +185,32 @@ TCP connect + `ProtectWindowsSocket`，而宿主裸 connect 正常，说明问�
 1. 活动出口的显示不要用后台探测结果覆盖（或至少标注「探测失败但连接正常」）；
 2. 探测失败时补一条可诊断的日志：pin 是否成功、protect 是否失败、connect 的错误码、
    实际耗时；现在这些信息一条都没有，所以只能靠 RPC 快照反推。
+
+**（补记，2026-10-11 01:33 现场，含第 2 条日志后的实测结论）** 新构建里加了这条日志后，原因
+当场就出来了：**所有探测失败都是 `timeout_ms=800, completed=1, error=995`
+（`WSA_OPERATION_ABORTED`，即超时定时器取消了仍在 pending 的 connect），`elapsed_ms≈800~1271`**。
+
+```text
+ConnectivityProbe::ProbeTcp: probe failed, remote=168.138.183.201:20000, timeout_ms=800, completed=1, error=995, elapsed_ms=...
+ConnectivityProbe::ProbeTcp: probe failed, remote=23.166.168.33:20000,  timeout_ms=800, completed=1, error=995, elapsed_ms=...
+```
+
+而同一时刻宿主实测（同一批地址）：
+
+| 目标 | 宿主实测 | 客户端探测 |
+|---|---|---|
+| 23.166.168.33:20000（活动） | 177 ms | 有时 1077 ms 成功、有时 800 ms 超时 |
+| 168.138.183.201:20000（SG） | **1163 ms** | 800 ms 超时 → 误报「不可达」 |
+| 23.249.25.106:20000 | 86 ms | 大概率成功 |
+| 175.243.241.212:10005 | **>6050 ms（真不通）** | 800 ms 超时（判定正确） |
+| 103.112.1.172:34687 | 2454 ms 后被拒 | 800 ms 超时（判定正确） |
+
+即：`client.probe.timeout_ms` 的默认值 **800 ms**（`AppConfiguration.h:268`）对真正
+要十几百毫秒才完成握手的服务器过紧，会把可达的服务器报成不可达；同时探测路径本身
+比宿主裸 connect 慢（活动服务器实测 177 ms，探测成功那次却是 1077 ms，说明探测与数据面
+争用同一 io_context）。**无需改代码的缓解**：在配置的 `client` 段加
+`"probe": { "timeout_ms": 2000 }`（ZGO.json 当前没有 `probe` 段）。
+
 
 ## P5 注入探针结论没有进 RPC/面板（上一份文档 8.4 未完成）
 
@@ -384,10 +424,14 @@ Manual 256  fd42:4242:4242::/64  15  PPP 2
    据此判断是 protect 失败（`socket protection failed`）、超时（`error=995`）还是真实错误。
 4. P5：`get_snapshot.dataplane.injection` 存在且 `reported=true`；面板「网络」页出现
    「TUN 注入交付」一行；本机应显示「被宿主丢弃」+「系统代理回退：已启用 127.0.0.1:8080」。
-5. P1：经回环解析器查询 AAAA 应被剥离（有 A 记录时）：
-   `nslookup -type=AAAA www.baidu.com`（用 `192.168.14.1` 或 `127.0.0.1` 作服务器）
-   返回 AAAA 为空/无记录，而 `nslookup www.baidu.com` 的 A 记录正常；
-   同时日志里 `has no usable IPv6 assignment` 应从 ≈36 条/分钟降到 0/接近 0。
+5. P1：经回环解析器查询 AAAA 应被剥离（有 A 记录时，**直连域名同样适用**）：
+   `Resolve-DnsName -Type AAAA -Server 127.0.0.1 www.baidu.com` 不应再有 AAAA（A 记录正常）；
+   日志里应出现 `STRIPPED ... AAAA for <域名>`；同时
+   `has no usable IPv6 assignment` 应从 ≈36~68 条/分钟降到 0/接近 0。
+   注意：vDNS 与 Windows DNS 缓存里的旧 AAAA 不会消失，需重启核心或查未缓存域名。
 6. P9/P10：`reason=geo_rules_unavailable` 只出现在一条 WARN 里；
    `Fw::StartDropDiagnostics … could not be enabled` **只出现一次**。
 7. P7（改配置后）：`TAP MTU=1400, MSSv4=1360`，并按上一份文档 6.2 的对照表复测吞吐/卡顿。
+8. P4 补充（探测超时）：日志里 `ConnectivityProbe::ProbeTcp: probe failed ... error=995`
+   的条数应明显下降、`completed=1` 且 `elapsed_ms≈timeout_ms` 的条目不应再被判成「不可达」——
+   做法是在配置 `client` 段加 `"probe": { "timeout_ms": 2000 }`（默认 800 ms 对慢服务器过紧）。
