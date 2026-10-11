@@ -234,8 +234,8 @@ if (cache_result.empty() || !hasA) {                                 // 没有 A
 | `VEthernetNetworkSwitcher::DatagramOutput`（IPv4 分支） | `ipv6_dataplane_unavailable_` | 隧道 DNS 回包主路径；仅当 `destinationEP.port()==53` |
 | `VEthernetNetworkSwitcher::DatagramOutput`（IPv6 分支） | 同上 | 同上（v6 承载的 DNS 回包） |
 | `VEthernetNetworkSwitcher::DispatchLocalDnsQuery` | `no_ipv6_path` | 仅 Windows 本地 DNS 代理 |
-| `VEthernetNetworkSwitcher::OnIPv6UdpPacketInput`（直连 DNS 回包） | 默认 false | 见 6.6 的残留死分支 |
-| `VEthernetNetworkSwitcher::RedirectDnsServer`（DirectDNS 回包） | 默认 false | 见 6.6 的残留死分支 |
+| `VEthernetNetworkSwitcher::OnIPv6UdpPacketInput`（隧道 DNS 回包） | `ipv6_dataplane_unavailable_`（本次补上） | 分支本身仍不可达，见 6.6 |
+| `VEthernetNetworkSwitcher::RedirectDnsServer`（DirectDNS 回包） | `!host_ipv6_uplink_`（本次补上） | 该查询走物理网卡出网，所以看宿主出口而不是隧道；分支本身仍不可达，见 6.6 |
 
 ### 3.6 其它 DNS 事实
 
@@ -303,6 +303,10 @@ if (cache_result.empty() || !hasA) {                                 // 没有 A
 * 修复：剥离移到缓存分支外，对 53 端口无条件执行，并以
   `strip_without_a_cache = ipv6_dataplane_unavailable_` 调用；`AddCache`/`FlushPendingAAAAResponses`
   仍留在缓存开关内。
+* 补充（本次）：同样的 `strip_without_a_cache` 也补到另外两个 DNS 回包路径——
+  `OnIPv6UdpPacketInput`（隧道 v6 DNS 回包，用 `ipv6_dataplane_unavailable_`）与
+  `RedirectDnsServer`（DirectDNS 回包，该查询走物理网卡，用 `!host_ipv6_uplink_`）。
+  修复前这两处只在 `udp.dns.cache` 已缓存 A 记录时才剥离 AAAA。
 
 ### 6.3 已修复（本次）：IPv6 状态可见性
 * 现象（修复前）：`ipv6_server_has_dataplane_` 只写不读，运维只能从每包 DEBUG 反推。
