@@ -1382,9 +1382,11 @@ namespace ppp {
                                                                     if (ec == boost::system::errc::success && sz > 0) {
                                                                         ::dns::Message m;
                                                                         if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
-                                                                            // Prefer IPv4: strip AAAA from upstream responses.
-                                                                            // Returns false if AAAA needs deferral (A cache not yet populated).
-                                                                            if (!StripAAAADnsResponseIfIPv4Available(m)) {
+                                                                            // Prefer IPv4: strip AAAA from upstream responses. With no
+                                                                            // tunnel IPv6 data plane the answer is a dead end, so it is
+                                                                            // stripped even when no A record is cached yet.
+                                                                            if (!StripAAAADnsResponseIfIPv4Available(m,
+                                                                                ipv6_dataplane_unavailable_.load(std::memory_order_relaxed))) {
                                                                                 auto pending = make_shared_object<PendingAAAAResponse>();
                                                                                 if (pending) {
                                                                                     pending->EncodedPacket.assign(reinterpret_cast<char*>(buffer.get()), sz);
@@ -9221,8 +9223,12 @@ namespace ppp {
                                 ::dns::Message m;
                                 if (m.decode(reinterpret_cast<uint8_t*>(buffer.get()), sz) == ::dns::BufferResult::NoError) {
                                     // Prefer IPv4: strip AAAA from upstream responses.
-                                    // Returns false if AAAA needs deferral (A cache not yet populated).
-                                    if (!StripAAAADnsResponseIfIPv4Available(m)) {
+                                    // This query went out over the physical uplink, so
+                                    // the host's own IPv6 egress decides whether an
+                                    // AAAA-only answer is usable; without it, strip even
+                                    // when no A record is cached yet.
+                                    if (!StripAAAADnsResponseIfIPv4Available(m,
+                                        !host_ipv6_uplink_.load(std::memory_order_relaxed))) {
                                         auto pending = make_shared_object<PendingAAAAResponse>();
                                         if (pending) {
                                             pending->EncodedPacket.assign(reinterpret_cast<char*>(buffer.get()), sz);
