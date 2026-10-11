@@ -4038,7 +4038,22 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         {
             std::shared_ptr<VEthernetExchanger> exchanger = client->GetExchanger();
             ppp::string vpn_server = remote_uri;
-            vpn_server += NULLPTR != exchanger && exchanger->StaticEchoAllocated() ? " [static]" : " [dynamic]";
+
+            // The label has to describe the mode the client actually runs in.
+            // A static echo channel can exist while --tun-static=no (it is what
+            // keeps the ICMP channel alive when the server offers one), and the
+            // panel used to report that channel as if the whole tunnel were
+            // static.
+            const bool static_mode = client->StaticMode(NULLPTR);
+            const bool static_echo = NULLPTR != exchanger && exchanger->StaticEchoAllocated();
+            if (static_mode)
+            {
+                vpn_server += static_echo ? " [static]" : " [static, no echo]";
+            }
+            else
+            {
+                vpn_server += " [dynamic]";
+            }
             if (client->IsProxyOnly())
             {
                 vpn_server += " [proxy]";
