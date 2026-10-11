@@ -503,3 +503,117 @@ Manual 256  fd42:4242:4242::/64  15  PPP 2
 **TUN 数据面：坏（注入→宿主 0 交付，已连续复现）；ICMP：回包方向坏（发送方向待你确认）；
 境外网页：经 LSP/代理可用（出口 IP = 23.166.168.33，Google/GNU 真页面 200），
 但存在「远端连接挂死不报错」的站点（neverssl.com 3/3）；客户端自诊断对这些全都不可见。**
+
+## 8. 管理员级取证（2026-10-11 10:00–10:45，构建 `1c53ad8`）
+
+这一轮拿到了管理员权限，7.4 里"待确认"的两件事都做完了，而且用 pktmon 直接读到了丢弃原因。
+
+### 8.1 更正 7.4 的 ICMP 结论：发送正常，只有"回包"丢失
+
+非管理员会话里的 `Transmit error: code 5` / `transmit failed. General failure.` 是**我的工具环境限制**
+（普通用户，WMI ping 也被拒），不是客户端问题。以管理员身份重测：
+
+| 目标 | 结果 | 说明 |
+|---|---|---|
+| `127.0.0.1` | ✅ `<1 ms` | ICMP 栈本身正常 |
+| `192.168.51.1`（物理网关） | ✅ 2 / 12 ms | 物理路径正常 |
+| `23.166.168.33`（VPN 服务器，/32 直连 pin） | ✅ 153 / 156 ms | 直连路径正常 |
+| `192.168.14.1`（**隧道网关**） | ❌ `Request timed out` | 必须经过注入 |
+| `8.8.8.8` / `9.9.9.9` | ❌ `Request timed out` | 同上 |
+
+日志里的最小复现（客户端自己都回答了，宿主还是收不到）：
+
+```text
+DATAPLANE ICMP: input src=192.168.14.25 dst=192.168.14.1 type=8 code=0 ttl=128
+DATAPLANE ICMP: gateway echo result=1        <- 客户端已生成本地应答并注入
+```
+
+### 8.2 pktmon 直接给出丢弃原因：`Not locally destined`
+
+命令（管理员）：`pktmon start --capture --type all --comp all --pkt-size 64 --file-name tun-drop.etl`
+→ 期间从隧道地址向网关发 6 次 DNS 查询 → `pktmon stop` → `pktmon etl2txt`。注入应答的完整路径：
+
+```text
+[Rx 组件 819] ip: 192.168.14.1.53 > 192.168.14.25.56035: 13249 0/0/0 (34)
+[Rx 组件 820] 同一包
+[Rx 组件 821] 丢弃： DropReason Not locally destined 、DropLocation 0xE0004101
+             删除:ip: 192.168.14.1.53 > 192.168.14.25.56035: 13249 0/0/0 (34)
+```
+
+把 112 条丢弃事件归类后，涉及隧道地址的 **16/16 个注入包全部**是
+`Not locally destined @ 组件 821 (Rx)`；它们在 819/820 上都正常出现，字节与 DNS 载荷正确。
+即：**客户端写进去了、适配器收下了、IP 层判定"目的地址不是本机"**。
+
+同时确认 `192.168.14.25` 本身一切正常：`PPP(ifIndex 71)`、`AddressState=Preferred`
+（`netsh ... level=verbose`：`DAD State: Preferred`）、`SkipAsSource=False`、
+`PrefixOrigin=Manual`、隔离舱 1、全机没有第二个 `192.168.14.x`。
+
+### 8.3 逐项排除（都做了对照实验）
+
+| 假设 | 实验 | 结论 |
+|---|---|---|
+| 强主机模型（strong host receive） | `Set-NetIPInterface -InterfaceIndex 71/18 -WeakHostReceive Enabled` 后再探针 | 仍 0/6 → **排除** |
+| 8792 条旁路路由抢占地址 | `bypass_mode=no`（接管只装 4 条路由）后重启再探针 | 仍 0/3 → **排除** |
+| 地址未就绪 / DAD | 坏状态下查 DAD | `Preferred` → **排除** |
+| 隔离舱 / 容器网络 | `netsh int ipv4 show compartments`、`WinNat` 服务 | 单舱 1、WinNat 停止 → **排除** |
+| 卸载（checksum/RSC/LSO/URO） | 网卡未声明任何 offload 能力；全局 RSC/URO 开启 | 两种驱动表现一致 → **不是主因**（未再做关 RSC/URO 的对照） |
+
+### 8.4 最可能的根因：2021 年的 Wintun 0.14 驱动 + 2026 年的 Windows 26200
+
+- 本机 `C:\Windows\System32\drivers\wintun.sys` = **0.14**（2021-10），随附
+  `Driver\x64\wintun.dll` = **0.14.1**（DLL 与驱动版本不一致）。
+- 上游 Wintun **2026 年**在 master 上修了 4 个驱动缺陷，**全部落在注入路径的 NBL / 环形缓冲**上：
+  - `driver: introduce NET_BUFFER_LIST_OFFSET helper`（NBL 的 offset 与 flags 放在 MINIPORT_RESERVED[0]）
+  - `driver: explicitly terminate NBL`
+  - `driver: fix race condition at Ring->Head`
+  - `driver: fix missed-wakeup race in ring buffer Alertable signaling`（内存屏障）
+- "字节完全正确、IP 层却说不是本地地址"与 **NBL offset/termination 处理不一致**高度吻合；
+  0.14 驱动早于这些修复，而系统是 26200（2026 年构建）。
+
+### 8.5 TAP 对照与"间歇性"真相
+
+`--tun-driver=tap` 时：
+
+```text
+10:16:23 host received 3/3 injected packets; the client can deliver tunnel traffic to the host stack
+10:18:24 host received 0/3 injected packets ...
+10:20:27 host received 0/3 ...
+```
+
+用 2 秒粒度的独立探测（1 次查询 / 1.2 秒超时）跨重启跟了 2 分半，宿主侧几乎恒为 0，
+只有客户端自己那一轮偶尔过 —— 所以**不是"接管某一步把它弄坏了"，而是注入交付本身不稳定**
+（偶发成功）。这与上游"missed-wakeup race：包躺在环里直到下一次写入/重传才被处理"的描述一致：
+探针那 3 个包偶尔被立刻处理，真实流量基本收不到。
+
+### 8.6 本轮新发现的两个客户端缺陷（可修）
+
+1. **`--tun-driver=tap` 会致命启动失败**：客户端复用了已存在的 TAP 网卡
+   （`PPP PRIVATE NETWORK 2 TAP`，MTU=1400），而配置 `client.tun.mtu=1500`：
+
+   ```text
+   Open: TAP network interface found
+   [ERROR] Open: TAP MTU verification failed, configured=1500, effective=1400
+   ```
+
+   `Open` 直接失败、核心起不来（我把该网卡 MTU 设成 1500（`store=active`）后才起来）。
+   建议：TAP 模式下**读取并设置**适配器 MTU（能设就设，设不了再报错），不要复用带旧 MTU 的陈旧适配器。
+2. **注入探针单次结论不可靠**：同一会话内 2 分钟内会在 `3/3 healthy` 与 `0/3` 之间翻转，
+   会让面板误报"TUN 交付正常"。建议多轮/多数表决，或直接标注"不稳定"。
+
+### 8.7 仍然正常的部分（本次复测）
+
+经本地 HTTP 代理：`api.ipify.org` → 出口 IP **`23.166.168.33`**；`www.google.com` → 200 + 真首页（5.3 s）；
+SOCKS5 CONNECT `www.google.com:443` → 成功。**"网页能开"依然不能作为 TUN 正常的证据**。
+
+### 8.8 建议的处置顺序
+
+1. **换驱动**：把 `wintun.sys` 换成含上述 2026 修复的构建（自建 master，或采用内置较新 Wintun 的发行版），
+   再跑一次探针；这是唯一直接针对注入路径根因的动作。
+2. **临时可用**：`--tun-driver=tap` + 让 TAP 适配器 MTU 与配置一致（或把 `client.tun.mtu` 设为 1400）。
+3. **客户端加固**：把注入健康度并入 `run_diagnostics`（现在 7/7 全绿却完全不可用）；
+   探针做多数表决；TAP 启动失败时给可操作的错误而不是直接退出。
+
+> 本轮用到的脚本与原始证据（未入库）：`artifacts/pktmon-tun-probe.ps1`、
+> `artifacts/tun-drop.txt`（pktmon 文本）、`artifacts/switch-to-tap.ps1`、`artifacts/tap-test.ps1`、
+> `artifacts/tap-battery.ps1`、`artifacts/bisect-bypass.ps1`、`artifacts/flip-timeline.ps1`、
+> `artifacts/injection-watch.ps1`、`artifacts/wfp-state.xml`。
