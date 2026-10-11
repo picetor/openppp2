@@ -7394,10 +7394,27 @@ namespace ppp {
                     return adapters;
                 }
 
+                // GetAllNetworkInterfaces also returns entries that only exist in the
+                // registry: an adapter created during an earlier boot keeps its
+                // configured address, DNS and *old* interface index there.  Without
+                // this filter the report listed the adapter of the running session as
+                // a stale one (observed 2026-10-11: the live Wintun adapter was
+                // ifIndex 60 while its registry entry still said 14, which the report
+                // then showed as "ifIndex=14 status=up" with the same address).
+                ppp::unordered_set<int> live_indexes;
+                if (std::shared_ptr<MIB_IFTABLE> table = ppp::win32::network::GetIfTable(); NULLPTR != table) {
+                    for (DWORD i = 0; i < table->dwNumEntries; i++) {
+                        live_indexes.emplace((int)table->table[i].dwIndex);
+                    }
+                }
+
                 const int current_index = tun_interface_index_.load(std::memory_order_relaxed);
                 for (const ppp::win32::network::NetworkInterfacePtr& ni : interfaces) {
                     if (NULLPTR == ni || ni->Index < 0 || ni->Index == current_index) {
                         continue;
+                    }
+                    if (!live_indexes.empty() && live_indexes.find(ni->Index) == live_indexes.end()) {
+                        continue; // Not present on this boot; only its registry entry remains.
                     }
                     if (!IsOwnTunnelAdapterDescription(ni->Description, ni->ConnectionId)) {
                         continue;
