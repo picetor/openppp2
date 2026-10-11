@@ -617,3 +617,38 @@ SOCKS5 CONNECT `www.google.com:443` → 成功。**"网页能开"依然不能作
 > `artifacts/tun-drop.txt`（pktmon 文本）、`artifacts/switch-to-tap.ps1`、`artifacts/tap-test.ps1`、
 > `artifacts/tap-battery.ps1`、`artifacts/bisect-bypass.ps1`、`artifacts/flip-timeline.ps1`、
 > `artifacts/injection-watch.ps1`、`artifacts/wfp-state.xml`。
+
+## 9. 错误与事故总结（含排查过程本身造成的故障）
+
+### 9.1 排查过程造成的用户侧故障（我的操作失误，已全部还原）
+
+| # | 失误 | 后果 | 防复发 |
+|---|---|---|---|
+| A1 | 在用户正在使用的机器上**连续重启客户端 6 次**（10:13–10:41，切驱动/改 MTU/改 bypass/跑时间线） | 每次断网 10–30 秒；期间"国内分流 + VPN 网站都失败" | 任何会重启核心的实验，先告知并约定时间窗；能不改配置就不改 |
+| A2 | 切 `--tun-driver=tap` **之前没有先核对适配器 MTU** | `TAP MTU verification failed, configured=1500, effective=1400` → 核心**启动失败约 2 分钟**（完全断网） | 切驱动前先读 `Get-NetIPAddress`/MTU；改为"能设就设、设不了才报错" |
+| A3 | 用 `bypass_mode=no` 做二分实验 | 实验期间分流规则失效 | 二分实验优先用只读手段；必须改配置时改完立刻还原（本次已还原） |
+| A4 | 非管理员会话里用 `ping`/`tracert` 得到 `Transmit error: code 5`，并据此写下"ICMP 连发都发不出去" | 结论错误（那是我会话的限制），会让你误判故障方向 | 工具能力受限时，结论标注"待确认"而不是写进结论；管理员权限下复核（见 8.1） |
+| A5 | 一度把"Wintun 从不工作 / TAP 能工作"当成驱动差异 | 结论不准确：实际是注入交付**本身间歇**（3/3 与 0/3 会在 2 分钟内翻转） | 单次探针结论不做因果判断；需要多轮/多会话采样（见 8.5） |
+| A6 | 把 800 ms 探测超时导致的"不可达"先当成"探测路径有问题" | 方向对但原因未定；直到加了失败日志才确认是 `error=995` 超时预算过紧 | 先加可诊断日志再下结论（本轮已补日志，见 P4 补记） |
+
+### 9.2 客户端/系统侧的实际错误（按严重度）
+
+| # | 问题 | 证据 | 状态 |
+|---|---|---|---|
+| C1 | **注入报文被 IP 层丢弃** `Not locally destined`（DropLocation 0xE0004101）→ TUN 数据面无法把任何回包交给宿主 | pktmon 16/16；探针长期 0/3；隧道网关 DNS 0/6、UDP 0/6、ICMP 全超时 | **未修**（根因指向 2021 年 Wintun 0.14 驱动 + Windows 26200；上游 2026 年才修 NBL/环形缓冲） |
+| C2 | `--tun-driver=tap` 因 MTU 校验**致命启动失败**，且复用了带旧 MTU 的陈旧 TAP 适配器 | `Open: TAP MTU verification failed, configured=1500, effective=1400` | 未修（本轮靠临时改适配器 MTU 绕过） |
+| C3 | 注入探针单次结论不可靠（2 分钟内 `3/3 healthy` ↔ `0/3`） | 10:16:23 3/3 → 10:18:24/10:20:27 0/3；10:21:44 3/3 → 10:23:46 0/3 | 未修（建议多数表决） |
+| C4 | `run_diagnostics` 7/7 全绿、`healthy=true`，而 TUN 实际完全不可用 | RPC `run_diagnostics` + 注入探针 0/3 | 未修（建议把注入健康度并入诊断） |
+| C5 | `--tun-mux=0` 关闭 mux → **每条流单开一条传输连接** → 经代理 TLS 2.3–5.6 s，重负载站点像"打不开" | `mux_state=disabled`；`connecting to` 637 次/23 分钟；本轮 HTTPS 实测 2.3/6.2/3.0 s | 未修（配置决策） |
+| C6 | 远端桥接挂死时不上报：`ConnectBridgeToPeer` 之后既无 `connected` 也无失败 → 上层只能等自己超时 | `http://neverssl.com/` 经代理 3/3 无响应；LSP `remote CONNECT failed`（93.184.216.34） | 未修（建议加连接超时 + WARN） |
+| C7 | IPv6 黑洞 + AAAA 交付：应用拿到走不通的 IPv6 地址后卡住 | `::/1`+`8000::/1` 黑洞；`has no usable IPv6 assignment` ≈36–68 条/分钟 | 部分修复（构建 `1c53ad8` 已对隧道路径与直连路径都剥离 AAAA；OS/vDNS 旧缓存需重启或过期才消失） |
+| C8 | 陈旧隧道网卡残留（5 张 TAP：地址/默认网关/静态 DNS/IPv6 路由），外加本次 TAP 会话留下的 `192.168.13.25`(Deprecated) 与 3 条 metric 256 路由 | `netsh` 三张表 | 未修（无害但会干扰排查；有 `Remove-StaleTunAdapters.ps1`） |
+| C9 | 带 IPv4 选项（IHL=6）的报文被静默丢弃且不写原因 | 411 条 `unknown packet, first_byte=0x46` | 未修（建议打印失败判据） |
+
+### 9.3 本轮已修并推送
+
+| 提交 | 内容 |
+|---|---|
+| `6be4ed2` | 注入探针进 RPC/面板；日志去噪（IPv6 出站、geo 缺失、审计订阅各只报一次）；错误文本转 UTF-8；活动出口不再被探测结果误报"不可达"；探测失败补原因日志 |
+| `1c53ad8` | 直连域名在"宿主无 IPv6 出口"时也剥离 AAAA（`host_ipv6_uplink_` + `strip_without_a_cache`） |
+| `006c0f1` / `45d3787` | 现场实测矩阵与管理员级取证（pktmon 丢弃原因、排除项、TAP 对照、时间线）写入本文档 |
