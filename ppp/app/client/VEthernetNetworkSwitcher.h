@@ -318,6 +318,10 @@ namespace ppp {
                 bool                                                                ServerHasIPv6DataPlane() const noexcept { return ipv6_server_has_dataplane_.load(std::memory_order_relaxed); }
                 bool                                                                IsIPv6DataPlaneUnavailable() const noexcept { return ipv6_dataplane_unavailable_.load(std::memory_order_relaxed); }
                 bool                                                                HostHasIPv6Uplink() const noexcept { return host_ipv6_uplink_.load(std::memory_order_relaxed); }
+                // Non-zero when the host routed a packet addressed to its own tunnel
+                // address into the tunnel: the stack does not treat the tunnel
+                // address as local, so the tunnel-to-host direction cannot work.
+                uint64_t                                                            GetHostSelfAddressedPackets() const noexcept { return host_selfaddressed_packets_.load(std::memory_order_relaxed); }
 #if defined(_WIN32)
                 // Tunnel adapters left behind by earlier sessions: same openppp2
                 // marker, different interface index. They keep a static default
@@ -731,6 +735,12 @@ namespace ppp {
                 // really carries, so the runtime value is recorded here and the
                 // MSS option stays inside it instead of aborting the client.
                 std::atomic<int>                                                    tun_interface_index_ = -1;
+                // Host packets whose source and destination are both the tunnel
+                // address. A non-zero count proves Windows routes traffic to its own
+                // tunnel address out of the tunnel instead of delivering it locally,
+                // which is the condition that makes the injected (tunnel to host)
+                // direction fail (see docs/TUN_MODE_REMAINING_ISSUES_CN.md §11).
+                std::atomic<uint64_t>                                               host_selfaddressed_packets_ = 0;
                 std::atomic<int>                                                    tun_effective_mtu_ = 0;
                 std::atomic<int>                                                    tun_mss_v4_ = 0;
                 std::atomic<int>                                                    tun_mss_v6_ = 0;

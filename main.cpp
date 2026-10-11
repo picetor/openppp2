@@ -4181,6 +4181,12 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         // 2026-10-11 report saw 411 of them (length 40/56, first byte 0x46);
         // naming the reason and the protocol turns "unknown packet" into a
         // diagnosable drop without a packet capture.
+        // Passive proof that the host does not treat the tunnel address as a local
+        // destination: it routes its own packets into the tunnel instead of
+        // answering them, which is the condition that kills the injected direction.
+        snapshot["dataplane"]["host_selfaddressed_packets"] =
+            (Json::UInt64)client->GetHostSelfAddressedPackets();
+
         snapshot["dataplane"]["unparsable_packets"] =
             (Json::UInt64)client->GetUnparsablePacketCount();
         snapshot["dataplane"]["unparsable_protocol_mask"] =
@@ -4861,6 +4867,31 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
                             "tunnel-routed and direct names";
                     }
                     add_check("network.ipv6", "pass", ipv6_detail);
+                }
+            }
+
+            // Host loopback to the tunnel address. A packet whose source and
+            // destination are both the tunnel address proves Windows routes it out
+            // of the tunnel instead of delivering it locally; every injected packet
+            // is then dropped as "not locally destined". This is host-side (a
+            // third-party network filter or the adapter driver), so it is reported
+            // separately from the injection probe.
+            {
+                const Json::Int64 self_addressed = (Json::Int64)ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    snapshot["dataplane"].get("host_selfaddressed_packets", Json::Value((Json::Int64)0)));
+                if (self_addressed > 0)
+                {
+                    ppp::string loopback_detail = stl::to_string<ppp::string>(self_addressed);
+                    loopback_detail += " packet(s) addressed to the host's own tunnel address were routed into the tunnel: "
+                        "Windows does not treat that address as local, so replies the client injects back (DNS answers, ICMP, "
+                        "TCP handshakes) are discarded. Check a third-party network filter (for example Huorong) and the "
+                        "Wintun/TAP driver; tests/tools/VirtualAdapterDeliverySelfTest.ps1 reproduces it without the client";
+                    add_check("network.host_loopback", "fail", loopback_detail);
+                }
+                else
+                {
+                    add_check("network.host_loopback", "pass",
+                        "the host has not routed packets addressed to its own tunnel address");
                 }
             }
 

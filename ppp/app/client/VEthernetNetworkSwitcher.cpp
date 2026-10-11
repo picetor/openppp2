@@ -1727,6 +1727,29 @@ namespace ppp {
                     static_cast<unsigned int>(frame->Type),
                     static_cast<unsigned int>(frame->Code),
                     static_cast<unsigned int>(frame->Ttl));
+
+                // A packet whose source and destination are both the tunnel address
+                // proves Windows does not treat that address as a local destination:
+                // the host routed its own packet into the tunnel instead of
+                // answering it locally.  On such a machine every packet the client
+                // injects back is discarded with "not locally destined", so DNS
+                // answers, ICMP replies and TCP handshakes can never arrive even
+                // though the tunnel itself is healthy (measured 2026-10-11; see
+                // docs/TUN_MODE_REMAINING_ISSUES_CN.md section 11).  Report it once
+                // and expose the counter - this is the passive proof of the broken
+                // last hop, and it needs no synthetic probe.
+                if (frame->Source == frame->Destination && frame->Destination == tap->IPAddress) {
+                    if (++host_selfaddressed_packets_ == 1) {
+                        LOG_WARN("DATAPLANE: the host sent a packet from %s to %s - its own tunnel address. Windows therefore does "
+                            "not treat the tunnel address as local, and packets the client injects back are dropped as "
+                            "'not locally destined': ping, tunnel DNS and non-intercepted TCP cannot work while the tunnel "
+                            "itself stays healthy. Check a third-party network filter (for example Huorong) and the "
+                            "Wintun/TAP driver; reproduce without the client with "
+                            "tests/tools/VirtualAdapterDeliverySelfTest.ps1.",
+                            IPEndPoint::ToAddressString(frame->Source).data(),
+                            IPEndPoint::ToAddressString(frame->Destination).data());
+                    }
+                }
                 if (IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
                     const bool ok = EchoGatewayServer(exchanger_, packet, allocator);
                     LOG_DEBUG("DATAPLANE ICMP: gateway echo result=%d", ok ? 1 : 0);
