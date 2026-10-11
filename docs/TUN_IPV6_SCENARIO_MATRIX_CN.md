@@ -11,7 +11,7 @@ IPv6 报文最终去了哪里，取决于三个互相独立的变量——**宿�
 > 适用范围：Windows 为主（泄漏阻断、本地 DNS 代理、`--tun-vnet` 都在这条链上），
 > Linux/macOS/Android/proxy-only 的差异见第五节。
 > 引用方式：文件 + 函数名（仓库正被并发编辑，行号会漂移）。
-> 修订记录：本次已修复 4 处代码，见 6.1–6.4；尚未修复的缺口见 6.5–6.14。
+> 修订记录：本次已修复 4 处代码（6.1–6.4），另有 2 处部分修复（6.5、6.6）；仍未修复的缺口见 6.7–6.14。
 
 ---
 
@@ -324,11 +324,11 @@ if (cache_result.empty() || !hasA) {                                 // 没有 A
 * 建议：把 `has_ipv6_dataplane` 的 B5/B6 结果合并为一个“可承载”判定
   （地址应用成功 && 路由应用成功），或在 B5 失败时把 `ipv6_dataplane_unavailable_` 置 true。
 
-### 6.6 仍未修复：`StripAAAADnsResponseIfIPv4Available` 恒返回 true，残留死分支与过期注释
+### 6.6 部分修复：`StripAAAADnsResponseIfIPv4Available` 恒返回 true 导致的残留死分支
 * 证据：函数体所有出口都是 `return true`；`OnIPv6UdpPacketInput`（v6 直连 DNS 回包）与
   `RedirectDnsServer`/DirectDNS（v4 直连回包）两处 `if (!StripAAAADnsResponseIfIPv4Available(m))`
   分支仍在，分支内的 `pending_aaaa_` 写入永不可达；`FlushPendingAAAAResponses` 因此永远遍历空表。
-  函数注释仍写 `Returns false if the caller should hold the response`。
+  函数注释已在本次修正（死分支本身仍在）；`DatagramOutput` 内的两处同类死分支已按 6.4 删除。
 * 判断：**确定**（功能上等价于“已剥离”，无行为缺陷；属死代码 + 文档误导）。
 * 建议：删除这两处分支与 `PendingAAAAResponse`/`FlushPendingAAAAResponses`，并把注释改为
   “恒返回 true，调用方直接按剥离结果重编码”。
