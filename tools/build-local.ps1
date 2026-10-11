@@ -118,10 +118,12 @@ if ($Web) {
     if ($LASTEXITCODE -ne 0) { throw "core static library build failed with exit code $LASTEXITCODE" }
 
     Write-Host '=== web host ==='
-    $web = 'call "' + $devCmd + '" -arch=' + $arch + ' -host_arch=x64 >nul && msbuild "' +
-           (Join-Path $repo 'web\ppp-web.vcxproj') + '" /t:Build /p:Configuration=Release /p:Platform=' + $platform +
-           ' /p:PreferredToolArchitecture=x64 /m /v:minimal'
-    cmd /c $web
+    # Not $web: that name would collide with the -Web switch parameter
+    # (PowerShell variable names are case insensitive).
+    $webCmd = 'call "' + $devCmd + '" -arch=' + $arch + ' -host_arch=x64 >nul && msbuild "' +
+              (Join-Path $repo 'web\ppp-web.vcxproj') + '" /t:Build /p:Configuration=Release /p:Platform=' + $platform +
+              ' /p:PreferredToolArchitecture=x64 /m /v:minimal'
+    cmd /c $webCmd
     if ($LASTEXITCODE -ne 0) { throw "web host build failed with exit code $LASTEXITCODE" }
 
     $gui = Join-Path $repo 'web\dist\ppp-web.exe'
