@@ -674,6 +674,10 @@ SOCKS5 CONNECT `www.google.com:443` → 成功。**"网页能开"依然不能作
 | P1 补强 | 服务端 v6 安装失败时**保留 `AssignedIPv6Mode=Nat66`**，客户端据此误判"有 v6 数据面"，于是不装 `::/1` 又不再剥离 AAAA | 服务端三处 `server-ipv6-dataplane-install-failed` 路径补 `AssignedIPv6Mode = IPv6Mode_None`；客户端 `ApplyIPv6Assignment` 收紧为"mode ∈ {Nat66,Gua} **且** 有非 unspecified 的 v6 地址"才算有数据面 | `ppp/app/server/VirtualEthernetSwitcher.cpp`、`VEthernetNetworkSwitcher.cpp` |
 | 可观测性 | v6 状态只能靠逐包 DEBUG 推断 | `get_snapshot` 新增 `network.ipv6.{server_dataplane,dataplane_unavailable,host_uplink,effective}`（`effective` ∈ tunnel / direct-only / none），`run_diagnostics` 新增 `network.ipv6` 一句话解释当前组合 | `main.cpp` |
 
+**构建验证**：本轮改动已推送到 `codex/tun-injection-probe` 并跑通 CI（`.github/workflows/windows.yml`），
+amd64 与 i386 两个平台（vcpkg static + MSBuild）均编译成功：`7f7a642`（run #85）、`4c77f81`（run #86）、
+`5e417af`（run #87）。**仍未做现场复测**：下面 10.1 的清单需要新构建落到实地机器后执行。
+
 ### 10.1 本轮验收清单（新构建）
 
 1. P8：日志里不再出现裸的 `unknown packet, packet_length=..., first_byte=0x46`；取而代之是
