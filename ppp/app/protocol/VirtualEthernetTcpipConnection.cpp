@@ -128,6 +128,14 @@ namespace ppp {
                  * disposes the transmission, which fails the pending read so the
                  * caller reports the failure and the client socket is closed
                  * instead of hanging.
+                 *
+                 * The give-up budget is deliberately much larger than the local
+                 * @c tcp.connect.timeout: the peer's own connect phase is bounded by
+                 * ITS setting (20 s by default), so a client that gave up at its own
+                 * shorter value killed slow-but-working destinations.  On the
+                 * 2026-10-11 machine (tcp.connect.timeout=5) that turned "loads after
+                 * ~6 s" into "site does not load".  The configured time is when the
+                 * WARN appears; only a sustained silence hits the hard limit.
                  */
                 class VirtualEthernetConnectWatchdog final {
                 public:
@@ -142,16 +150,21 @@ namespace ppp {
                             return;
                         }
 
-                        int seconds = NULLPTR != configuration ? configuration->tcp.connect.timeout : 0;
-                        if (seconds < 1) {
-                            return;
-                        }
+                        const int seconds = NULLPTR != configuration
+                            ? std::max<int>(1, configuration->tcp.connect.timeout) : 1;
+                        const int give_up_seconds = std::max<int>(seconds * 4, 30);
 
-                        timer_ = ppp::threading::Timer::Timeout(context, seconds * 1000,
-                            [transmission, host, port, seconds, mux_or_connect](ppp::threading::Timer*) noexcept {
+                        observe_ = ppp::threading::Timer::Timeout(context, seconds * 1000,
+                            [host, port, seconds, give_up_seconds, mux_or_connect](ppp::threading::Timer*) noexcept {
+                                LOG_WARN("VETcpip: no answer to the %s request after %d s (host=%s, port=%d); still waiting, "
+                                    "the hard limit is %d s",
+                                    mux_or_connect ? "mux" : "connect", seconds, host.data(), port, give_up_seconds);
+                            });
+                        timer_ = ppp::threading::Timer::Timeout(context, give_up_seconds * 1000,
+                            [transmission, host, port, give_up_seconds, mux_or_connect](ppp::threading::Timer*) noexcept {
                                 LOG_WARN("VETcpip: the peer did not answer the %s request within %d s (host=%s, port=%d); "
                                     "closing the transmission so the caller fails instead of hanging",
-                                    mux_or_connect ? "mux" : "connect", seconds, host.data(), port);
+                                    mux_or_connect ? "mux" : "connect", give_up_seconds, host.data(), port);
                                 transmission->Dispose();
                             });
                     }
@@ -161,15 +174,22 @@ namespace ppp {
                     }
 
                     void Cancel() noexcept {
-                        std::shared_ptr<ppp::threading::Timer> timer = std::move(timer_);
-                        if (NULLPTR != timer) {
-                            timer->Stop();
-                            timer->Dispose();
+                        Dispose(observe_);
+                        Dispose(timer_);
+                    }
+
+                private:
+                    static void Dispose(std::shared_ptr<ppp::threading::Timer>& timer) noexcept {
+                        std::shared_ptr<ppp::threading::Timer> instance = std::move(timer);
+                        if (NULLPTR != instance) {
+                            instance->Stop();
+                            instance->Dispose();
                         }
                     }
 
                 private:
-                    std::shared_ptr<ppp::threading::Timer>                      timer_;
+                    std::shared_ptr<ppp::threading::Timer>                      observe_;   ///< Early WARN only.
+                    std::shared_ptr<ppp::threading::Timer>                      timer_;     ///< Hard limit: dispose the transmission.
                 };
             }
 
