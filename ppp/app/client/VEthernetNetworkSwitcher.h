@@ -215,9 +215,22 @@ namespace ppp {
                     uint64_t                                                    received = 0;
                     uint64_t                                                    last_ms = 0;
                     bool                                                        running = false;
+                    /// All recorded rounds delivered: the injection path is reliable.
                     bool                                                        healthy = false;
+                    /// The most recent round delivered at least one packet.
+                    bool                                                        last_round_delivered = false;
                     bool                                                        reported = false; ///< At least one verdict has been produced.
                     bool                                                        fallback_proxy = false; ///< The system proxy was taken over because injection is dead.
+                    /// Rolling verdict over the recorded rounds: unknown / healthy / unstable / broken.
+                    /// A single round is not a verdict -- on the reference machine the
+                    /// result flipped between 3/3 and 0/3 inside two minutes, so a
+                    /// per-round "healthy" or "dead" was wrong half of the time.
+                    ppp::string                                                 state;
+                    int                                                         delivered_rounds = 0; ///< Rounds with at least one delivered packet.
+                    int                                                         failing_rounds = 0;   ///< Rounds with nothing delivered.
+                    uint32_t                                                    healthy_streak = 0;   ///< Consecutive delivered rounds.
+                    uint32_t                                                    failing_streak = 0;   ///< Consecutive empty rounds.
+                    uint64_t                                                    last_success_ms = 0;  ///< Tick count of the last delivered round.
                 };
                 InjectionProbeDiagnostics                                          GetInjectionProbeDiagnostics() const noexcept;
                 // Configure before Open(); the request is shared across primary switches.
@@ -296,6 +309,27 @@ namespace ppp {
                 // Explicit --bypass-mode=ip state; the normal TUN route table
                 // also contains a default route and is not a proxy bypass table.
                 bool                                                                ProxyIpRules(bool* value = NULLPTR) noexcept;
+                // MTU the tunnel adapter really carries, as read back from the
+                // host after the startup reconciliation (0 = not measured yet).
+                int                                                                 GetTunnelMtu() const noexcept { return tun_effective_mtu_.load(std::memory_order_relaxed); }
+                // IPv6 capability, as the AAAA-stripping decision sees it: whether
+                // the server advertised a data plane, whether this client has one,
+                // and whether the physical uplink can reach IPv6 at all.
+                bool                                                                ServerHasIPv6DataPlane() const noexcept { return ipv6_server_has_dataplane_.load(std::memory_order_relaxed); }
+                bool                                                                IsIPv6DataPlaneUnavailable() const noexcept { return ipv6_dataplane_unavailable_.load(std::memory_order_relaxed); }
+                bool                                                                HostHasIPv6Uplink() const noexcept { return host_ipv6_uplink_.load(std::memory_order_relaxed); }
+#if defined(_WIN32)
+                // Tunnel adapters left behind by earlier sessions: same openppp2
+                // marker, different interface index. They keep a static default
+                // gateway, a static DNS (often the loopback resolver, which only
+                // exists while a client runs) and IPv6 leak-block routes, so they
+                // pollute every route/DNS table an operator inspects and can
+                // capture traffic when one is brought up by hand (report P11/C8).
+                // They are only reported here: removing an adapter needs an
+                // administrator and is done by
+                // tests/tools/Remove-StaleTunAdapters.ps1 -Apply.
+                ppp::vector<ppp::string>                                            GetStaleTunnelAdapters() noexcept;
+#endif
 #if defined(_WIN32)
                 // Keep the VPN's own IPv4 transport on the physical interface
                 // before the main outbound has established network takeover.
@@ -646,7 +680,9 @@ namespace ppp {
                 // data plane through its latest Information extension. This is
                 // runtime peer state; the client profile's server.ipv6 section
                 // is not authoritative for the remote server.
-                bool                                                                ipv6_server_has_dataplane_ = false;
+                // Atomic because the RPC/diagnostic threads read it while the data
+                // path updates it.
+                std::atomic<bool>                                                   ipv6_server_has_dataplane_ = false;
                 
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
@@ -686,6 +722,19 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp4_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
 
+                // Effective tunnel-adapter MTU and the TCP MSS clamp derived from
+                // it. A machine that has run several builds keeps stale TAP
+                // adapters around, and --tun-driver=tap reuses one of them: such
+                // an adapter keeps the MTU its driver was installed with, and
+                // SetIpInterfaceEntry can report success without changing it. The
+                // configured value is therefore not proof of what the adapter
+                // really carries, so the runtime value is recorded here and the
+                // MSS option stays inside it instead of aborting the client.
+                std::atomic<int>                                                    tun_interface_index_ = -1;
+                std::atomic<int>                                                    tun_effective_mtu_ = 0;
+                std::atomic<int>                                                    tun_mss_v4_ = 0;
+                std::atomic<int>                                                    tun_mss_v6_ = 0;
+
                 // TUN injection self-test. Everything the client receives from the
                 // tunnel reaches the host only because the client writes packets
                 // into the tunnel adapter from userspace, and the host stack can
@@ -702,6 +751,17 @@ namespace ppp {
                 std::atomic<bool>                                                   injection_probe_running_ = false;
                 std::atomic<bool>                                                   injection_probe_healthy_ = false;
                 std::atomic<bool>                                                   injection_probe_reported_ = false;
+                // Rolling history: up to 16 rounds, two bits each (1 = the round
+                // delivered, 2 = the round delivered nothing).  The classifier
+                // turns it into unknown/healthy/unstable/broken so a path that
+                // works only intermittently is reported as such instead of
+                // flipping between "healthy" and "dead" every two minutes.
+                std::atomic<uint32_t>                                               injection_probe_history_ = 0;
+                std::atomic<uint32_t>                                               injection_probe_history_count_ = 0;
+                std::atomic<uint32_t>                                               injection_probe_healthy_streak_ = 0;
+                std::atomic<uint32_t>                                               injection_probe_failing_streak_ = 0;
+                std::atomic<uint64_t>                                               injection_probe_last_success_ms_ = 0;
+                std::atomic<int>                                                    injection_probe_state_ = 0;
 
                 // DNS fail-safe. The takeover points the host resolvers at the
                 // loopback proxy, so a tunnel that cannot answer queries would

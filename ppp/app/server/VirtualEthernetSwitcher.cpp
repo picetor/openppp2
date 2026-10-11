@@ -1808,6 +1808,13 @@ namespace ppp {
                         envelope.Extensions.AssignedIPv6Dns1 = boost::asio::ip::address();
                         envelope.Extensions.AssignedIPv6Dns2 = boost::asio::ip::address();
                         envelope.Extensions.AssignedIPv6Flags = 0;
+                        // Clear the mode as well. The client decides whether it has
+                        // an IPv6 data plane from the mode, so leaving it at
+                        // Nat66/Gua told the client "IPv6 works" while every address
+                        // field was empty: it then installed no /1 routes yet stopped
+                        // stripping AAAA, and applications waited on unreachable
+                        // addresses (report P1, IPv6 combination 3/7).
+                        envelope.Extensions.AssignedIPv6Mode = VirtualEthernetInformationExtensions::IPv6Mode_None;
                         envelope.Extensions.IPv6StatusCode = VirtualEthernetInformationExtensions::IPv6Status_Failed;
                         envelope.Extensions.IPv6StatusMessage = "server-ipv6-dataplane-install-failed";
                     }
@@ -3682,6 +3689,13 @@ namespace ppp {
                         envelope.Extensions.AssignedIPv6Dns1 = boost::asio::ip::address();
                         envelope.Extensions.AssignedIPv6Dns2 = boost::asio::ip::address();
                         envelope.Extensions.AssignedIPv6Flags = 0;
+                        // Clear the mode as well. The client decides whether it has
+                        // an IPv6 data plane from the mode, so leaving it at
+                        // Nat66/Gua told the client "IPv6 works" while every address
+                        // field was empty: it then installed no /1 routes yet stopped
+                        // stripping AAAA, and applications waited on unreachable
+                        // addresses (report P1, IPv6 combination 3/7).
+                        envelope.Extensions.AssignedIPv6Mode = VirtualEthernetInformationExtensions::IPv6Mode_None;
                         envelope.Extensions.IPv6StatusCode = VirtualEthernetInformationExtensions::IPv6Status_Failed;
                         envelope.Extensions.IPv6StatusMessage = "server-ipv6-dataplane-install-failed";
                     }
@@ -3740,6 +3754,10 @@ namespace ppp {
                         response.AssignedIPv6Dns1 = boost::asio::ip::address();
                         response.AssignedIPv6Dns2 = boost::asio::ip::address();
                         response.AssignedIPv6Flags = 0;
+                        // Clear the mode too: it is the client's only capability
+                        // signal, and an empty assignment behind Nat66 makes the
+                        // client believe IPv6 works (see Establish()).
+                        response.AssignedIPv6Mode = VirtualEthernetInformationExtensions::IPv6Mode_None;
                         response.IPv6StatusCode = VirtualEthernetInformationExtensions::IPv6Status_Failed;
                         response.IPv6StatusMessage = "server-ipv6-dataplane-install-failed";
                     }

@@ -4,6 +4,7 @@
 #include <ppp/net/Socket.h>
 
 #include <ppp/threading/Executors.h>
+#include <ppp/threading/Timer.h>
 #include <ppp/coroutines/asio/asio.h>
 #include <ppp/coroutines/YieldContext.h>
 
@@ -113,6 +114,65 @@ namespace ppp {
                 VirtualEthernetTcpipConnection* const                       connection_;
             };
 
+            namespace {
+                /**
+                 * @brief Bounds the wait for the peer's answer to a connect or
+                 *        mux request.
+                 *
+                 * @c ITransmission::Read has no timeout of its own, so a peer that
+                 * accepts the transport but never answers the request left the
+                 * caller blocked until the browser gave up: the local proxy logged
+                 * "Mux enter -> no mux" and then neither a "connected" nor a
+                 * failure line (report C6, http://neverssl.com/ 3/3 with zero
+                 * bytes).  The watchdog names the destination and time, then
+                 * disposes the transmission, which fails the pending read so the
+                 * caller reports the failure and the client socket is closed
+                 * instead of hanging.
+                 */
+                class VirtualEthernetConnectWatchdog final {
+                public:
+                    VirtualEthernetConnectWatchdog(
+                        const std::shared_ptr<ppp::transmissions::ITransmission>&   transmission,
+                        const std::shared_ptr<boost::asio::io_context>&             context,
+                        const std::shared_ptr<ppp::configurations::AppConfiguration>& configuration,
+                        const ppp::string&                                          host,
+                        int                                                         port,
+                        bool                                                        mux_or_connect) noexcept {
+                        if (NULLPTR == transmission || NULLPTR == context) {
+                            return;
+                        }
+
+                        int seconds = NULLPTR != configuration ? configuration->tcp.connect.timeout : 0;
+                        if (seconds < 1) {
+                            return;
+                        }
+
+                        timer_ = ppp::threading::Timer::Timeout(context, seconds * 1000,
+                            [transmission, host, port, seconds, mux_or_connect](ppp::threading::Timer*) noexcept {
+                                LOG_WARN("VETcpip: the peer did not answer the %s request within %d s (host=%s, port=%d); "
+                                    "closing the transmission so the caller fails instead of hanging",
+                                    mux_or_connect ? "mux" : "connect", seconds, host.data(), port);
+                                transmission->Dispose();
+                            });
+                    }
+
+                    ~VirtualEthernetConnectWatchdog() noexcept {
+                        Cancel();
+                    }
+
+                    void Cancel() noexcept {
+                        std::shared_ptr<ppp::threading::Timer> timer = std::move(timer_);
+                        if (NULLPTR != timer) {
+                            timer->Stop();
+                            timer->Dispose();
+                        }
+                    }
+
+                private:
+                    std::shared_ptr<ppp::threading::Timer>                      timer_;
+                };
+            }
+
             VirtualEthernetTcpipConnection::VirtualEthernetTcpipConnection(
                 const AppConfigurationPtr&                              configuration,
                 const ContextPtr&                                       context,
@@ -218,10 +278,15 @@ namespace ppp {
                     }
                 }
 
+                // Bound the wait for the peer's answer (report C6).
+                VirtualEthernetConnectWatchdog connect_watchdog(transmission, context_, configuration_, host, port, mux_or_connect);
+
                 int packet_size = 0;
                 std::shared_ptr<Byte> packet = transmission->Read(y, packet_size);
+                connect_watchdog.Cancel();
                 if (NULLPTR == packet || packet_size < 1) {
-                    LOG_DEBUG("VETcpip::MuxOrConnect: read failed after connector, mux_or_connect=%d", mux_or_connect);
+                    LOG_DEBUG("VETcpip::MuxOrConnect: read failed after connector, mux_or_connect=%d, host=%s, port=%d",
+                        mux_or_connect, host.data(), port);
                     return false;
                 }
 
@@ -316,10 +381,15 @@ namespace ppp {
 
                 Update();
 
+                // The client must send its request promptly; otherwise this accept
+                // hangs the same way a missing CONNECT_OK does (report C6).
+                VirtualEthernetConnectWatchdog accept_watchdog(transmission, context_, configuration_, ppp::string(), 0, mux_or_connect);
+
                 int packet_size = -1;
                 std::shared_ptr<Byte> packet = transmission->Read(y, packet_size);
+                accept_watchdog.Cancel();
                 if (NULLPTR == packet || packet_size < 1) {
-                    LOG_DEBUG("VETcpip::MuxOrAccept: read failed");
+                    LOG_DEBUG("VETcpip::MuxOrAccept: read failed, mux_or_connect=%d", mux_or_connect);
                     return false;
                 }
 

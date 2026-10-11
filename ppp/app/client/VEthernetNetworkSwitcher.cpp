@@ -934,8 +934,12 @@ namespace ppp {
 
                 if (proto == ppp::net::native::ip_hdr::IP_PROTO_TCP &&
                     configuration_ && configuration_->client.tun.mss_clamp) {
+                    // Follow the MTU the tunnel adapter really carries (see Open):
+                    // clamping to the configured value would let the host drop
+                    // full-size frames when a stale adapter kept its old MTU.
+                    const int mss_v4 = tun_mss_v4_.load(std::memory_order_relaxed);
                     ppp::app::protocol::ClampTcpMssIPv4(reinterpret_cast<Byte*>(packet), packet_length,
-                        (unsigned short)configuration_->client.tun.mss_v4);
+                        (unsigned short)(mss_v4 > 0 ? mss_v4 : configuration_->client.tun.mss_v4));
                 }
 
                 std::shared_ptr<VEthernetExchanger> exchanger = GetExchanger(Ipep::ToAddress(destination));
@@ -986,8 +990,9 @@ namespace ppp {
                 // TCP (6): forward blindly via NAT (same as existing behavior)
                 if (next_header == IPPROTO_TCP) {
                     if (configuration_ && configuration_->client.tun.mss_clamp) {
+                        const int mss_v6 = tun_mss_v6_.load(std::memory_order_relaxed);
                         ppp::app::protocol::ClampTcpMssIPv6(packet, packet_length,
-                            (unsigned short)configuration_->client.tun.mss_v6);
+                            (unsigned short)(mss_v6 > 0 ? mss_v6 : configuration_->client.tun.mss_v6));
                     }
                     boost::asio::ip::address_v6::bytes_type destination_bytes;
                     memcpy(destination_bytes.data(), ipv6_header->Destination, destination_bytes.size());
@@ -3190,33 +3195,30 @@ namespace ppp {
                     frame->Destination = IPEndPoint::ToEndPoint(sourceEP);
                     frame->Payload = messages;
 
-                    if (caching && configuration_->udp.dns.cache) {
-                        int destinationPort = destinationEP.port();
-                        if (destinationPort == PPP_DNS_SYS_PORT) {
-                            // Prefer IPv4: filter AAAA before caching to keep cache clean.
-                            // Returns false if AAAA needs deferral (A cache not yet populated).
-                            ::dns::Message m;
-                            if (m.decode(reinterpret_cast<uint8_t*>(packet), packet_size) == ::dns::BufferResult::NoError) {
-                                if (!StripAAAADnsResponseIfIPv4Available(m)) {
-                                    // Defer: AAAA arrived before A. Store and don't forward yet.
-                                    auto pending = make_shared_object<PendingAAAAResponse>();
-                                    if (pending) {
-                                        pending->EncodedPacket.assign(reinterpret_cast<char*>(packet), packet_size);
-                                        pending->IsIPv6 = false;
-                                        pending->SourceEP = sourceEP;
-                                        pending->DestinationEP = destinationEP;
-                                        pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
-                                        pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
-                                    }
-                                    return true; // Held, don't forward to client yet
-                                }
-                                // Re-encode (AAAA may have been stripped); new size <= original
-                                size_t new_sz = 0;
-                                if (m.encode(reinterpret_cast<uint8_t*>(packet), packet_size, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
-                                    packet_size = static_cast<int>(new_sz);
-                                    messages->Length = packet_size;
-                                }
+                    // Prefer IPv4: decide on the AAAA records here, before the client
+                    // sees them, and independently of the DNS cache setting. This
+                    // used to live inside the cache branch, so a client running with
+                    // udp.dns.cache=false never stripped AAAA at all -- even with no
+                    // IPv6 data plane, where the answer can only lead the application
+                    // into the leak block and its own timeout (report P1).
+                    if (destinationEP.port() == PPP_DNS_SYS_PORT) {
+                        ::dns::Message m;
+                        if (m.decode(reinterpret_cast<uint8_t*>(packet), packet_size) == ::dns::BufferResult::NoError) {
+                            // With no tunnel IPv6 data plane an AAAA answer is a dead
+                            // end, so it is stripped even when no A record is cached
+                            // yet (see StripAAAADnsResponseIfIPv4Available).
+                            StripAAAADnsResponseIfIPv4Available(m,
+                                ipv6_dataplane_unavailable_.load(std::memory_order_relaxed));
+
+                            // Re-encode (AAAA may have been stripped); new size <= original
+                            size_t new_sz = 0;
+                            if (m.encode(reinterpret_cast<uint8_t*>(packet), packet_size, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
+                                packet_size = static_cast<int>(new_sz);
+                                messages->Length = packet_size;
                             }
+                        }
+
+                        if (caching && configuration_->udp.dns.cache) {
                             ppp::net::asio::vdns::AddCache((Byte*)packet, packet_size);
                             FlushPendingAAAAResponses();
                         }
@@ -3250,35 +3252,22 @@ namespace ppp {
                     messages->Length = packet_size;
                     frame->Payload = messages;
 
-                    if (caching && configuration_->udp.dns.cache) {
-                        int destinationPort = destinationEP.port();
-                        if (destinationPort == PPP_DNS_SYS_PORT) {
-                            // Prefer IPv4: filter AAAA before caching to keep cache clean.
-                            // Returns false if AAAA needs deferral (A cache not yet populated).
-                            ::dns::Message m;
-                            if (m.decode(reinterpret_cast<uint8_t*>(packet), packet_size) == ::dns::BufferResult::NoError) {
-                                if (!StripAAAADnsResponseIfIPv4Available(m)) {
-                                    // Defer: AAAA arrived before A. Store and don't forward yet.
-                                    auto pending = make_shared_object<PendingAAAAResponse>();
-                                    if (pending) {
-                                        pending->EncodedPacket.assign(reinterpret_cast<char*>(packet), packet_size);
-                                        pending->IsIPv6 = true;
-                                        pending->SrcV6 = sourceEP.address().to_v6();
-                                        pending->DstV6 = dst_v6;
-                                        pending->SrcPort = sourceEP.port();
-                                        pending->DstPort = destinationEP.port();
-                                        pending->expire_time = Executors::GetTickCount() + static_cast<uint64_t>(configuration_->udp.dns.timeout) * 1000;
-                                        pending_aaaa_[ppp::string(m.questions[0].mName.data())] = pending;
-                                    }
-                                    return true; // Held, don't forward to client yet
-                                }
-                                // Re-encode (AAAA may have been stripped); new size <= original
-                                size_t new_sz = 0;
-                                if (m.encode(reinterpret_cast<uint8_t*>(packet), packet_size, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
-                                    packet_size = static_cast<int>(new_sz);
-                                    messages->Length = packet_size;
-                                }
+                    // Prefer IPv4, cache setting or not: see the IPv4 branch above.
+                    if (destinationEP.port() == PPP_DNS_SYS_PORT) {
+                        ::dns::Message m;
+                        if (m.decode(reinterpret_cast<uint8_t*>(packet), packet_size) == ::dns::BufferResult::NoError) {
+                            StripAAAADnsResponseIfIPv4Available(m,
+                                ipv6_dataplane_unavailable_.load(std::memory_order_relaxed));
+
+                            // Re-encode (AAAA may have been stripped); new size <= original
+                            size_t new_sz = 0;
+                            if (m.encode(reinterpret_cast<uint8_t*>(packet), packet_size, new_sz) == ::dns::BufferResult::NoError && new_sz > 0) {
+                                packet_size = static_cast<int>(new_sz);
+                                messages->Length = packet_size;
                             }
+                        }
+
+                        if (caching && configuration_->udp.dns.cache) {
                             ppp::net::asio::vdns::AddCache((Byte*)packet, packet_size);
                             FlushPendingAAAAResponses();
                         }
@@ -3349,9 +3338,18 @@ namespace ppp {
                 // The server's Information extension is the only authoritative
                 // capability signal.  A client profile can omit server.ipv6 even
                 // when the remote server provisions IPv6.
-                const bool has_ipv6_dataplane =
+                // The mode alone is not proof of a usable data plane. A server
+                // whose IPv6 installation fails clears the address, gateway, route
+                // prefix, DNS and flags but used to keep the mode, so a client that
+                // trusted the mode installed no /1 routes and still stopped
+                // stripping AAAA -- the application then received addresses that
+                // could only time out. Require an address the tunnel can carry.
+                const bool mode_ok =
                     extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Nat66 ||
                     extensions.AssignedIPv6Mode == VirtualEthernetInformationExtensions::IPv6Mode_Gua;
+                const bool has_ipv6_dataplane = mode_ok &&
+                    extensions.AssignedIPv6Address.is_v6() &&
+                    !extensions.AssignedIPv6Address.is_unspecified();
                 ipv6_server_has_dataplane_ = has_ipv6_dataplane;
                 // Keep the DNS-side flag in step: the mode is the server's own
                 // statement about whether it can carry IPv6 at all.
@@ -4867,6 +4865,62 @@ namespace ppp {
             }
 
 #if defined(_WIN32)
+            namespace {
+                /// Delivery verdict over the recorded probe rounds.
+                enum InjectionDeliveryState {
+                    InjectionDelivery_Unknown  = 0, ///< No round recorded yet.
+                    InjectionDelivery_Healthy  = 1, ///< Every recorded round delivered.
+                    InjectionDelivery_Unstable = 2, ///< Some rounds delivered, some did not.
+                    InjectionDelivery_Broken   = 3, ///< No recorded round delivered.
+                };
+
+                const char* InjectionDeliveryStateName(int state) noexcept {
+                    switch (state) {
+                        case InjectionDelivery_Healthy:  return "healthy";
+                        case InjectionDelivery_Unstable: return "unstable";
+                        case InjectionDelivery_Broken:   return "broken";
+                        default:                         return "unknown";
+                    }
+                }
+
+                /**
+                 * @brief Turns the rolling probe history into a delivery verdict.
+                 *
+                 * Each recorded round contributes two bits: 1 when at least one
+                 * injected packet reached the host, 2 when none did.  The
+                 * intermittent case matters most here: a single round reports it
+                 * as either healthy or dead, and on the reference machine the
+                 * probe flipped between 3/3 and 0/3 inside two minutes (report
+                 * C3/A5), so a per-round verdict was wrong half of the time.
+                 */
+                int ClassifyInjectionDelivery(uint32_t history, uint32_t count,
+                    int& delivered_rounds, int& failing_rounds) noexcept {
+                    delivered_rounds = 0;
+                    failing_rounds = 0;
+                    const uint32_t rounds = count < 16 ? count : 16;
+                    for (uint32_t i = 0; i < rounds; i++) {
+                        const uint32_t outcome = (history >> (i * 2)) & 0x3;
+                        if (outcome == 1) {
+                            delivered_rounds++;
+                        }
+                        else if (outcome == 2) {
+                            failing_rounds++;
+                        }
+                    }
+
+                    if (delivered_rounds == 0 && failing_rounds == 0) {
+                        return InjectionDelivery_Unknown;
+                    }
+                    if (failing_rounds == 0) {
+                        return InjectionDelivery_Healthy;
+                    }
+                    if (delivered_rounds == 0) {
+                        return InjectionDelivery_Broken;
+                    }
+                    return InjectionDelivery_Unstable;
+                }
+            }
+
             VEthernetNetworkSwitcher::InjectionProbeDiagnostics
                 VEthernetNetworkSwitcher::GetInjectionProbeDiagnostics() const noexcept {
                 InjectionProbeDiagnostics diagnostics;
@@ -4879,6 +4933,19 @@ namespace ppp {
                 diagnostics.running = injection_probe_running_.load(std::memory_order_relaxed);
                 diagnostics.healthy = injection_probe_healthy_.load(std::memory_order_relaxed);
                 diagnostics.reported = injection_probe_reported_.load(std::memory_order_relaxed);
+
+                int delivered_rounds = 0;
+                int failing_rounds = 0;
+                const uint32_t history = injection_probe_history_.load(std::memory_order_relaxed);
+                const uint32_t rounds = injection_probe_history_count_.load(std::memory_order_relaxed);
+                const int state = ClassifyInjectionDelivery(history, rounds, delivered_rounds, failing_rounds);
+                diagnostics.state = InjectionDeliveryStateName(state);
+                diagnostics.delivered_rounds = delivered_rounds;
+                diagnostics.failing_rounds = failing_rounds;
+                diagnostics.healthy_streak = injection_probe_healthy_streak_.load(std::memory_order_relaxed);
+                diagnostics.failing_streak = injection_probe_failing_streak_.load(std::memory_order_relaxed);
+                diagnostics.last_success_ms = injection_probe_last_success_ms_.load(std::memory_order_relaxed);
+                diagnostics.last_round_delivered = diagnostics.healthy_streak > 0;
                 diagnostics.fallback_proxy = system_proxy_fallback_;
                 return diagnostics;
             }
@@ -5014,25 +5081,94 @@ namespace ppp {
                         catch (...) {
                         }
 
+                        const uint64_t now_ms = Executors::GetTickCount();
                         self->injection_probe_sent_.store(sent);
                         self->injection_probe_received_.store(received);
-                        self->injection_probe_last_ms_.store(Executors::GetTickCount());
+                        self->injection_probe_last_ms_.store(now_ms);
 
-                        const bool healthy = sent > 0 && received > 0;
-                        const bool reported = self->injection_probe_reported_.load();
-                        self->injection_probe_healthy_.store(healthy);
                         if (sent <= 0) {
                             // The adapter or its address was not ready yet: retry
                             // soon instead of waiting for the next full interval, so
                             // the verdict arrives shortly after the tunnel comes up.
-                            self->injection_probe_next_ms_.store(Executors::GetTickCount() + 10000);
+                            // No round is recorded: there is nothing to judge.
+                            self->injection_probe_next_ms_.store(now_ms + 10000);
                             LOG_DEBUG("TUN injection probe: tap not ready, nothing injected (retrying in 10s)");
+                            self->injection_probe_running_.store(false);
+                            return;
                         }
-                        else if (healthy) {
-                            if (!reported) {
-                                LOG_INFO("TUN injection probe: host received %llu/%llu injected packets; the client can deliver tunnel traffic to the host stack",
+
+                        // Record this round in the rolling history.  A single round
+                        // is not a verdict: on the reference machine the result
+                        // flipped between 3/3 and 0/3 inside two minutes, so both
+                        // "healthy" and "dead" derived from one round were wrong.
+                        const bool last_round_delivered = received > 0;
+                        uint32_t history = self->injection_probe_history_.load(std::memory_order_relaxed);
+                        uint32_t rounds = self->injection_probe_history_count_.load(std::memory_order_relaxed);
+                        const uint32_t outcome = last_round_delivered ? 1u : 2u;
+                        if (rounds >= 16) {
+                            history = (history << 2) | outcome;
+                        }
+                        else {
+                            history |= outcome << (rounds * 2);
+                            rounds++;
+                        }
+                        self->injection_probe_history_.store(history, std::memory_order_relaxed);
+                        self->injection_probe_history_count_.store(rounds, std::memory_order_relaxed);
+
+                        if (last_round_delivered) {
+                            self->injection_probe_healthy_streak_.fetch_add(1, std::memory_order_relaxed);
+                            self->injection_probe_failing_streak_.store(0, std::memory_order_relaxed);
+                            self->injection_probe_last_success_ms_.store(now_ms, std::memory_order_relaxed);
+                        }
+                        else {
+                            self->injection_probe_failing_streak_.fetch_add(1, std::memory_order_relaxed);
+                            self->injection_probe_healthy_streak_.store(0, std::memory_order_relaxed);
+                        }
+
+                        int delivered_rounds = 0;
+                        int failing_rounds = 0;
+                        const int state = ClassifyInjectionDelivery(history, rounds, delivered_rounds, failing_rounds);
+                        const bool first_verdict = !self->injection_probe_reported_.load();
+                        const bool state_changed =
+                            self->injection_probe_state_.exchange(state, std::memory_order_relaxed) != state;
+                        self->injection_probe_healthy_.store(state == InjectionDelivery_Healthy, std::memory_order_relaxed);
+
+                        // Only a transition is worth a log line.  The old code warned
+                        // on every round, which produced 12 identical WARN lines in
+                        // 20 minutes and buried every real error.
+                        const int recorded_rounds = delivered_rounds + failing_rounds;
+                        if (first_verdict || state_changed) {
+                            if (state == InjectionDelivery_Healthy) {
+                                LOG_INFO("TUN injection probe: host received %llu/%llu injected packets (%d/%d recorded rounds delivered); "
+                                    "the client can deliver tunnel traffic to the host stack",
+                                    (unsigned long long)received, (unsigned long long)sent,
+                                    delivered_rounds, recorded_rounds);
+                            }
+                            else if (state == InjectionDelivery_Unstable) {
+                                LOG_WARN("TUN injection probe: TUN injection delivery is UNSTABLE -- %d of %d recorded rounds delivered nothing "
+                                    "(latest round %llu/%llu). DNS answers, ICMP replies and TCP handshakes will disappear intermittently while "
+                                    "the tunnel itself reports healthy; no firewall allow rule overrides this. Diagnose with "
+                                    "tests/tools/TunInboundProbe.ps1 and consider --tun-driver=tap.",
+                                    failing_rounds, recorded_rounds,
                                     (unsigned long long)received, (unsigned long long)sent);
                             }
+                            else {
+                                LOG_WARN("TUN injection probe: host received %llu/%llu injected packets over %d recorded round(s). Packets written "
+                                    "into the tunnel adapter are discarded before they reach the host stack, so DNS answers, ICMP replies and TCP "
+                                    "handshakes never appear while the tunnel itself stays healthy; Windows Firewall allow rules do not override "
+                                    "this. Diagnose with tests/tools/TunInboundProbe.ps1 and consider --tun-driver=tap.",
+                                    (unsigned long long)received, (unsigned long long)sent, recorded_rounds);
+                            }
+                        }
+
+                        // Hysteresis on both ends.  The fallback system proxy is taken
+                        // over only after two consecutive empty rounds, and handed back
+                        // only after two consecutive delivered rounds, so the
+                        // intermittency measured on the reference machine cannot make
+                        // the machine's proxy setting flap.
+                        const uint32_t healthy_streak = self->injection_probe_healthy_streak_.load(std::memory_order_relaxed);
+                        const uint32_t failing_streak = self->injection_probe_failing_streak_.load(std::memory_order_relaxed);
+                        if (healthy_streak >= 2) {
 #if defined(_WIN32) || defined(_MACOS)
                             // Injection works again: give the system proxy back to the
                             // user's own setting if this fallback had enabled it.
@@ -5049,12 +5185,7 @@ namespace ppp {
                             }
 #endif
                         }
-                        else {
-                            LOG_WARN("TUN injection probe: host received %llu/%llu injected packets. Packets written into the tunnel adapter are "
-                                "discarded before they reach the host stack, so DNS answers, ICMP replies and TCP handshakes never appear while the "
-                                "tunnel itself stays healthy; Windows Firewall allow rules do not override this. Diagnose with "
-                                "tests/tools/TunInboundProbe.ps1 and consider --tun-driver=tap.",
-                                (unsigned long long)received, (unsigned long long)sent);
+                        else if (failing_streak >= 2) {
 #if defined(_WIN32) || defined(_MACOS)
                             // Fall back to the local proxies. They are reached over
                             // loopback and resolve names remotely, so browsing keeps
@@ -5065,7 +5196,7 @@ namespace ppp {
                                 if (self->SetHttpProxyToSystemEnv() && self->system_proxy_applied_) {
                                     self->system_proxy_fallback_ = true;
                                     LOG_WARN("TUN injection fallback: enabled the system proxy %s because the host cannot receive injected "
-                                        "packets; it is removed automatically once injection recovers",
+                                        "packets (two consecutive rounds delivered nothing); it is removed automatically once injection recovers",
                                         self->system_proxy_server_.data());
                                 }
                                 else {
@@ -5505,19 +5636,94 @@ namespace ppp {
                 LOG_DEBUG("VEthernetNetworkSwitcher::Open: TAP network interface found");
 #if defined(_WIN32)
                 const int configured_mtu = configuration_->client.tun.mtu;
-                if (!tap->SetInterfaceMtu(configured_mtu)) {
-                    LOG_ERROR("VEthernetNetworkSwitcher::Open: failed to set TAP MTU=%d", configured_mtu);
-                    return false;
+
+                // Reconcile the adapter MTU with the configured one, then read the
+                // host back: TapWindows::SetInterfaceMtu only reports whether
+                // SetIpInterfaceEntry returned NO_ERROR, and a TAP driver whose
+                // MTU comes from its own registry value accepts the call without
+                // changing anything. On 2026-10-11 that produced
+                // "TAP MTU verification failed, configured=1500, effective=1400"
+                // and the core exited, taking the whole machine's networking with
+                // it for two minutes, because --tun-driver=tap had reused a stale
+                // adapter. The session now continues on the adapter's real MTU and
+                // says how to make the two agree.
+                const int tap_if_index = tap->GetInterfaceIndex();
+                int effective_mtu = ppp::win32::network::GetInterfaceMtu(tap_if_index);
+                const int initial_mtu = effective_mtu;
+                for (int attempt = 0; effective_mtu != configured_mtu && attempt < 3; attempt++) {
+                    if (attempt > 0) {
+                        // The IP-interface row can lag the call that changed it.
+                        ppp::Sleep(100);
+                    }
+                    if (!tap->SetInterfaceMtu(configured_mtu)) {
+                        LOG_WARN("VEthernetNetworkSwitcher::Open: the tunnel adapter (ifIndex=%d) refused MTU=%d",
+                            tap_if_index, configured_mtu);
+                        break;
+                    }
+                    effective_mtu = ppp::win32::network::GetInterfaceMtu(tap_if_index);
                 }
-                const int effective_mtu = ppp::win32::network::GetInterfaceMtu(tap->GetInterfaceIndex());
+
+                if (effective_mtu < 1) {
+                    // The adapter has no readable IPv4 MTU yet. Keep the configured
+                    // value and do not fail the session on a transient query error.
+                    LOG_WARN("VEthernetNetworkSwitcher::Open: cannot read the tunnel adapter MTU (ifIndex=%d, result=%d); "
+                        "assuming the configured %d", tap_if_index, effective_mtu, configured_mtu);
+                    effective_mtu = configured_mtu;
+                }
+                elif(effective_mtu != configured_mtu) {
+                    LOG_WARN("VEthernetNetworkSwitcher::Open: the tunnel adapter carries MTU=%d, not the configured %d "
+                        "(ifIndex=%d, adapter MTU before=%d). A stale TAP adapter keeps the MTU its driver was installed "
+                        "with, and the IP-interface API reports success without changing it. The session continues and the "
+                        "TCP MSS clamp follows the adapter value, otherwise the host would drop every full-size tunnel "
+                        "frame. To make them agree, either set client.tun.mtu=%d in the configuration or run: "
+                        "netsh interface ipv4 set subinterface \"<adapter>\" mtu=%d store=persistent; a stale adapter can be "
+                        "removed with tests/tools/Remove-StaleTunAdapters.ps1 -Apply.",
+                        effective_mtu, configured_mtu, tap_if_index, initial_mtu, effective_mtu, configured_mtu);
+                }
+
+                // Keep the TCP MSS option inside what the adapter can carry.
+                int dataplane_mss_v4 = configuration_->client.tun.mss_v4;
+                int dataplane_mss_v6 = configuration_->client.tun.mss_v6;
                 if (effective_mtu != configured_mtu) {
-                    LOG_ERROR("VEthernetNetworkSwitcher::Open: TAP MTU verification failed, configured=%d, effective=%d",
-                        configured_mtu, effective_mtu);
-                    return false;
+                    // Same derivation AppConfiguration uses when the operator only
+                    // sets tun.mtu: 20 bytes IPv4 + 20 bytes TCP, and 40 + 20 for
+                    // IPv6.
+                    dataplane_mss_v4 = std::min<int>(dataplane_mss_v4,
+                        std::max<int>(536, effective_mtu - 40));
+                    dataplane_mss_v6 = std::min<int>(dataplane_mss_v6,
+                        std::max<int>(1220, effective_mtu - 60));
                 }
-                LOG_INFO("VEthernetNetworkSwitcher::Open: TAP MTU=%d, MSSv4=%d, MSSv6=%d, clamp=%d",
-                    effective_mtu, configuration_->client.tun.mss_v4,
-                    configuration_->client.tun.mss_v6, (int)configuration_->client.tun.mss_clamp);
+                tun_effective_mtu_.store(effective_mtu, std::memory_order_relaxed);
+                tun_mss_v4_.store(dataplane_mss_v4, std::memory_order_relaxed);
+                tun_mss_v6_.store(dataplane_mss_v6, std::memory_order_relaxed);
+
+                LOG_INFO("VEthernetNetworkSwitcher::Open: TAP MTU=%d (configured=%d), MSSv4=%d, MSSv6=%d, clamp=%d",
+                    effective_mtu, configured_mtu, dataplane_mss_v4,
+                    dataplane_mss_v6, (int)configuration_->client.tun.mss_clamp);
+
+                // Report - never delete - the tunnel adapters earlier sessions left
+                // behind. They are inert for this session but keep a static default
+                // gateway, a static DNS and IPv6 leak-block routes, which is exactly
+                // the noise the 2026-10-11 investigation had to rule out one by one.
+                tun_interface_index_.store(tap_if_index, std::memory_order_relaxed);
+                {
+                    ppp::vector<ppp::string> stale_adapters = GetStaleTunnelAdapters();
+                    if (!stale_adapters.empty()) {
+                        ppp::string joined;
+                        for (const ppp::string& adapter : stale_adapters) {
+                            if (!joined.empty()) {
+                                joined += "; ";
+                            }
+                            joined += adapter;
+                        }
+                        LOG_WARN("VEthernetNetworkSwitcher::Open: %d tunnel adapter(s) from an earlier session are still installed: %s. "
+                            "They are unused by this session (a second running client also appears here), but they keep a static "
+                            "default gateway, a static DNS and IPv6 leak-block routes, so they pollute every route and DNS table and "
+                            "can capture traffic if one is brought up by hand. Review and remove them with "
+                            "tests/tools/Remove-StaleTunAdapters.ps1 (dry run by default) and -Apply from an elevated shell.",
+                            (int)stale_adapters.size(), joined.data());
+                    }
+                }
 
                 // The peer has not advertised an IPv6 data plane yet. Fail
                 // closed until its Information extension is received; a client
@@ -7126,6 +7332,74 @@ namespace ppp {
                     }
                 }
             }
+
+#if defined(_WIN32)
+            namespace {
+                // openppp2 marks every adapter it creates with this description,
+                // for both the Wintun adapter and the TAP-Windows driver, so the
+                // marker identifies "ours" without trusting a device name (the
+                // 2026-10-11 machine had PPP 1 / PPP 2 / "PPP PRIVATE NETWORK 2
+                // TAP" / 以太网 2 / 以太网 3, all left by earlier builds).
+                bool IsOwnTunnelAdapterDescription(const ppp::string& description, const ppp::string& connection_id) noexcept {
+                    const char* const marker = "PPP PRIVATE NETWORK 2";
+                    return (!description.empty() && description.find(marker) != ppp::string::npos) ||
+                        (!connection_id.empty() && connection_id.find(marker) != ppp::string::npos);
+                }
+
+                void AppendAdapterValueList(ppp::string& text, const ppp::vector<ppp::string>& values) noexcept {
+                    for (const ppp::string& value : values) {
+                        if (value.empty()) {
+                            continue;
+                        }
+                        if (!text.empty()) {
+                            text += ",";
+                        }
+                        text += value;
+                    }
+                }
+            }
+
+            ppp::vector<ppp::string> VEthernetNetworkSwitcher::GetStaleTunnelAdapters() noexcept {
+                ppp::vector<ppp::string> adapters;
+                ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
+                if (!ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
+                    return adapters;
+                }
+
+                const int current_index = tun_interface_index_.load(std::memory_order_relaxed);
+                for (const ppp::win32::network::NetworkInterfacePtr& ni : interfaces) {
+                    if (NULLPTR == ni || ni->Index < 0 || ni->Index == current_index) {
+                        continue;
+                    }
+                    if (!IsOwnTunnelAdapterDescription(ni->Description, ni->ConnectionId)) {
+                        continue;
+                    }
+
+                    ppp::string text = !ni->Description.empty() ? ni->Description : ni->ConnectionId;
+                    text += " ifIndex=";
+                    text += stl::to_string<ppp::string>(ni->Index);
+                    text += " status=";
+                    text += ni->Status == ppp::win32::network::OperationalStatus_Up ? "up" : "down";
+
+                    if (!ni->DefaultIPGateway.empty()) {
+                        text += " gateway=";
+                        AppendAdapterValueList(text, ni->DefaultIPGateway);
+                    }
+                    if (!ni->DnsAddresses.empty()) {
+                        text += " dns=";
+                        AppendAdapterValueList(text, ni->DnsAddresses);
+                    }
+                    if (!ni->IPAddresses.empty()) {
+                        text += " ip=";
+                        AppendAdapterValueList(text, ni->IPAddresses);
+                    }
+
+                    adapters.emplace_back(std::move(text));
+                }
+
+                return adapters;
+            }
+#endif
 
             bool VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute(
                 const boost::asio::ip::address& address) noexcept {

@@ -265,7 +265,12 @@ namespace ppp {
                 ppp::string                                                 log;            ///< Client-side event log file path; empty disables client logging.
                 struct {
                     bool                                                    enabled         = true;         ///< Master switch; false = no probing, legacy single-entry behavior.
-                    int                                                     timeout_ms      = 800;          ///< Per-entry probe timeout in milliseconds.
+                    // 800 ms was too tight for real servers: a live run measured a
+                    // 1163 ms handshake to a reachable peer and WSA_OPERATION_ABORTED
+                    // (error=995) at the 800 ms deadline, so the entry was reported
+                    // unreachable while a plain host connect succeeded. 2000 ms keeps
+                    // the 5 s refresh cycle while covering that spread.
+                    int                                                     timeout_ms      = 2000;         ///< Per-entry probe timeout in milliseconds.
                     int                                                     ttl_seconds     = 30;           ///< Probe result validity in seconds before a background refresh.
                 }                                                           probe;          ///< Connectivity probe configuration.
                 struct {

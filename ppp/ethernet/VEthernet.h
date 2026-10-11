@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <ppp/threading/Timer.h>
 #include <ppp/threading/BufferswapAllocator.h>
 #include <ppp/tap/ITap.h>
@@ -49,6 +50,12 @@ namespace ppp
         public:
             virtual bool                                                    Open(const std::shared_ptr<ITap>& tap) noexcept;
             virtual void                                                    Dispose()                              noexcept;
+
+            /// @brief Frames the TAP delivered that the IPv4 parser refused (see ip_hdr::IPParseReason).
+            uint64_t                                                        GetUnparsablePacketCount() const noexcept { return unparsable_packets_.load(std::memory_order_relaxed); }
+
+            /// @brief Bitmask of IPv4 protocol numbers whose "unsupported protocol" drop was already logged.
+            uint32_t                                                        GetUnparsableProtocolMask() const noexcept { return unparsable_protocols_.load(std::memory_order_relaxed); }
             bool                                                            IsLwip()                               noexcept { return lwip_; }
             bool                                                            IsVNet()                               noexcept { return vnet_; }
 #ifdef SYSNAT
@@ -113,6 +120,13 @@ namespace ppp
 #endif
             std::vector<std::shared_ptr<boost::asio::io_context>/**/>       sssmt_;
 #endif
+            // Diagnostics for frames the IPv4 parser refused.  An "unsupported
+            // protocol" drop (IGMP reports carry a router-alert option, so they
+            // arrive as IHL=6) is expected noise on a TAP adapter, so it is
+            // reported once per protocol plus a periodic total; every other
+            // failure is logged because it means a malformed frame.
+            std::atomic<uint64_t>                                           unparsable_packets_   = 0;
+            std::atomic<uint32_t>                                           unparsable_protocols_ = 0;
             SynchronizedObject                                              syncobj_;
             std::shared_ptr<IPFragment>                                     fragment_;
             std::shared_ptr<VNetstack>                                      netstack_;

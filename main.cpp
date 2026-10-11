@@ -4165,6 +4165,8 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             snapshot["dataplane"]["static_echo"]["tx_failed"] = (Json::UInt64)static_echo.send_errors;
             snapshot["dataplane"]["static_echo"]["send_packets"] = (Json::UInt64)static_echo.send_packets;
             snapshot["dataplane"]["static_echo"]["send_errors"] = (Json::UInt64)static_echo.send_errors;
+            snapshot["dataplane"]["static_echo"]["keepalive_windows"] = (Json::UInt64)static_echo.keepalive_windows;
+            snapshot["dataplane"]["static_echo"]["keepalive_replies"] = (Json::UInt64)static_echo.keepalive_replies;
             snapshot["dataplane"]["static_echo"]["consecutive_failures"] = static_echo.consecutive_failures;
             snapshot["dataplane"]["static_echo"]["degraded_until_ms"] = (Json::UInt64)static_echo.degraded_until;
 
@@ -4174,6 +4176,15 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             snapshot["dataplane"]["mux"]["generation_resets"] = (Json::UInt64)mux_diagnostics.generation_resets;
             snapshot["dataplane"]["mux"]["fallbacks"] = (Json::UInt64)mux_diagnostics.fallbacks;
         }
+
+        // Frames the TAP adapter delivered but the IPv4 parser refused.  The
+        // 2026-10-11 report saw 411 of them (length 40/56, first byte 0x46);
+        // naming the reason and the protocol turns "unknown packet" into a
+        // diagnosable drop without a packet capture.
+        snapshot["dataplane"]["unparsable_packets"] =
+            (Json::UInt64)client->GetUnparsablePacketCount();
+        snapshot["dataplane"]["unparsable_protocol_mask"] =
+            (Json::UInt)client->GetUnparsableProtocolMask();
 
         if (std::shared_ptr<ppp::ethernet::VNetstack> netstack = client->GetNetstack(); NULLPTR != netstack)
         {
@@ -4204,6 +4215,17 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             snapshot["dataplane"]["injection"]["healthy"] = injection.healthy;
             snapshot["dataplane"]["injection"]["reported"] = injection.reported;
             snapshot["dataplane"]["injection"]["fallback_proxy"] = injection.fallback_proxy;
+            // A single probe round is not a verdict: on the reference machine the
+            // result flipped between 3/3 and 0/3 inside two minutes, so the
+            // rolling verdict and the round counters are what the panel and
+            // run_diagnostics must read (report C3).
+            snapshot["dataplane"]["injection"]["state"] = injection.state;
+            snapshot["dataplane"]["injection"]["last_round_delivered"] = injection.last_round_delivered;
+            snapshot["dataplane"]["injection"]["delivered_rounds"] = injection.delivered_rounds;
+            snapshot["dataplane"]["injection"]["failing_rounds"] = injection.failing_rounds;
+            snapshot["dataplane"]["injection"]["healthy_streak"] = (Json::UInt)injection.healthy_streak;
+            snapshot["dataplane"]["injection"]["failing_streak"] = (Json::UInt)injection.failing_streak;
+            snapshot["dataplane"]["injection"]["last_success_ms"] = (Json::UInt64)injection.last_success_ms;
         }
 #endif
 
@@ -4322,6 +4344,43 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
                 network["tun"]["ipv6_subnet_mask"] = tap->IPv6SubmaskAddress.to_string().data();
             }
         }
+        // MTU the tunnel adapter really carries.  A stale TAP adapter keeps the
+        // MTU its driver was installed with, and the IP-interface API reports
+        // success without changing it, so "configured" alone is not a verdict.
+        if (NULLPTR != client && client->GetTunnelMtu() > 0)
+        {
+            network["tun"]["mtu"] = client->GetTunnelMtu();
+        }
+#if defined(_WIN32)
+        // Tunnel adapters left by earlier sessions (report P11/C8).  Reported for
+        // the panel and run_diagnostics; removing them is an administrator action.
+        {
+            ppp::vector<ppp::string> stale_adapters = client->GetStaleTunnelAdapters();
+            Json::Value stale(Json::arrayValue);
+            for (const ppp::string& adapter : stale_adapters)
+            {
+                stale.append(adapter);
+            }
+            if (!stale.empty())
+            {
+                network["stale_tunnel_adapters"] = stale;
+                network["stale_tunnel_adapter_count"] = (Json::UInt)stale_adapters.size();
+            }
+        }
+#endif
+        if (NULLPTR != configuration_)
+        {
+            network["mtu_configured"] = configuration_->client.tun.mtu;
+        }
+
+        // IPv6 data-plane state. The AAAA-stripping decision and the leak-block
+        // routes both follow these three flags, and until now none of them was
+        // visible: the operator could only infer them from per-packet DEBUG lines.
+        network["ipv6"]["server_dataplane"] = client->ServerHasIPv6DataPlane();
+        network["ipv6"]["dataplane_unavailable"] = client->IsIPv6DataPlaneUnavailable();
+        network["ipv6"]["host_uplink"] = client->HostHasIPv6Uplink();
+        network["ipv6"]["effective"] = !client->IsIPv6DataPlaneUnavailable() ? "tunnel" :
+            (client->HostHasIPv6Uplink() ? "direct-only" : "none");
         if (network["tun"].isObject() && network["tun"]["name"].isString())
         {
             network["adapter"] = network["tun"]["name"];
@@ -4718,8 +4777,16 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
                 tun_available ? "TUN interface is present" : "TUN interface is unavailable");
 
             const int configured_mtu = NULLPTR != configuration_ ? configuration_->client.tun.mtu : 0;
-            const int effective_mtu = (int)ppp::auxiliary::JsonAuxiliary::AsInt64(
+            int effective_mtu = (int)ppp::auxiliary::JsonAuxiliary::AsInt64(
                 snapshot["dataplane"]["wintun"].get("interface_mtu", Json::Value(0)));
+            if (effective_mtu < 1)
+            {
+                // The TAP fallback driver has no Wintun diagnostics block; the
+                // value read back from the host after the startup reconciliation
+                // is the same evidence.
+                effective_mtu = (int)ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    tun.get("mtu", Json::Value(0)));
+            }
             ppp::string mtu_detail = "configured=";
             mtu_detail += stl::to_string<ppp::string>(configured_mtu);
             mtu_detail += ", effective=";
@@ -4727,6 +4794,173 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
             const char* mtu_status = effective_mtu < 1 ? "warn" :
                 (configured_mtu == effective_mtu ? "pass" : "fail");
             add_check("network.mtu", mtu_status, mtu_detail);
+
+            // Tunnel adapters left behind by earlier sessions. Their static
+            // gateway/DNS and IPv6 leak-block routes were the biggest source of
+            // noise in the 2026-10-11 investigation, so they are a check and not
+            // just a log line (report P11/C8).
+            {
+                const Json::Value& stale_adapters = snapshot["network"]["stale_tunnel_adapters"];
+                if (stale_adapters.isArray() && stale_adapters.size() > 0)
+                {
+                    ppp::string stale_detail;
+                    const Json::ArrayIndex count = std::min<Json::ArrayIndex>(stale_adapters.size(), 3);
+                    for (Json::ArrayIndex i = 0; i < count; ++i)
+                    {
+                        if (!stale_detail.empty())
+                        {
+                            stale_detail += "; ";
+                        }
+                        stale_detail += ppp::auxiliary::JsonAuxiliary::AsString(stale_adapters[i]);
+                    }
+                    if (stale_adapters.size() > count)
+                    {
+                        stale_detail += "; ";
+                        stale_detail += stl::to_string<ppp::string>(stale_adapters.size() - count);
+                        stale_detail += " more";
+                    }
+                    stale_detail += ". Review and remove them with tests/tools/Remove-StaleTunAdapters.ps1 -Apply "
+                        "from an elevated shell; until then they keep a static gateway/DNS and IPv6 leak-block routes";
+                    add_check("network.stale_adapters", "warn", stale_detail);
+                }
+                else
+                {
+                    add_check("network.stale_adapters", "pass", "no leftover tunnel adapters");
+                }
+            }
+
+            // IPv6 path. Which of the three combinations the client is in decides
+            // whether an AAAA answer can be used at all; saying it out loud stops
+            // the "browser hangs on IPv6" class of report from being a guess.
+            {
+                const Json::Value& ipv6 = snapshot["network"]["ipv6"];
+                if (ipv6.isObject())
+                {
+                    const bool server_dataplane = ppp::auxiliary::JsonAuxiliary::AsBoolean(
+                        ipv6.get("server_dataplane", Json::Value(false)));
+                    const bool host_uplink = ppp::auxiliary::JsonAuxiliary::AsBoolean(
+                        ipv6.get("host_uplink", Json::Value(false)));
+
+                    ppp::string ipv6_detail = "server_dataplane=";
+                    ipv6_detail += server_dataplane ? "yes" : "no";
+                    ipv6_detail += ", host_uplink=";
+                    ipv6_detail += host_uplink ? "yes" : "no";
+
+                    if (server_dataplane)
+                    {
+                        ipv6_detail += "; IPv6 runs through the tunnel";
+                    }
+                    else if (host_uplink)
+                    {
+                        ipv6_detail += "; only directly routed names keep IPv6 (physical uplink); tunnel-routed names have "
+                            "their AAAA stripped";
+                    }
+                    else
+                    {
+                        ipv6_detail += "; this host has no IPv6 path at all, so AAAA answers are stripped for both "
+                            "tunnel-routed and direct names";
+                    }
+                    add_check("network.ipv6", "pass", ipv6_detail);
+                }
+            }
+
+            // TUN delivery. Every packet the tunnel sends to the host is written
+            // into the adapter from userspace, and the host stack can discard it
+            // before any socket sees it; DNS answers, ICMP replies and TCP
+            // handshakes then never arrive while the tunnel reports healthy. This
+            // check existed nowhere, so run_diagnostics reported 7/7 pass on a
+            // machine whose TUN data plane delivered nothing (report C4).
+            const Json::Value& injection = snapshot["dataplane"]["injection"];
+            if (injection.isObject())
+            {
+                const ppp::string delivery = ppp::auxiliary::JsonAuxiliary::AsString(
+                    injection.get("state", Json::Value("unknown")));
+                const bool injection_reported = ppp::auxiliary::JsonAuxiliary::AsBoolean(
+                    injection.get("reported", Json::Value(false)));
+                const Json::Int64 injection_sent = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    injection.get("sent", Json::Value((Json::Int64)0)));
+                const Json::Int64 injection_received = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    injection.get("received", Json::Value((Json::Int64)0)));
+                const Json::Int64 delivered_rounds = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    injection.get("delivered_rounds", Json::Value((Json::Int64)0)));
+                const Json::Int64 failing_rounds = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    injection.get("failing_rounds", Json::Value((Json::Int64)0)));
+
+                ppp::string injection_detail = "delivery=";
+                injection_detail += delivery;
+                injection_detail += ", latest=";
+                injection_detail += stl::to_string<ppp::string>(injection_received);
+                injection_detail += "/";
+                injection_detail += stl::to_string<ppp::string>(injection_sent);
+                injection_detail += ", rounds=";
+                injection_detail += stl::to_string<ppp::string>(delivered_rounds);
+                injection_detail += "/";
+                injection_detail += stl::to_string<ppp::string>(delivered_rounds + failing_rounds);
+
+                const char* injection_status = "warn";
+                if (!injection_reported)
+                {
+                    injection_detail += "; the injection self-test has not produced a verdict yet";
+                }
+                else if (delivery == "healthy")
+                {
+                    injection_status = "pass";
+                }
+                else if (delivery == "broken")
+                {
+                    injection_status = "fail";
+                    injection_detail += "; packets written into the tunnel adapter never reach the host stack, so DNS "
+                        "answers, ICMP replies and TCP handshakes are lost while the tunnel itself reports healthy";
+                }
+                else
+                {
+                    injection_detail += "; injection delivery is intermittent, so stalls appear and clear on their own";
+                }
+                add_check("network.injection", injection_status, injection_detail);
+            }
+
+            // Static UDP channel keep-alives.  response_timeouts counts windows
+            // that ended without a single packet from the peer; the window count
+            // makes that readable as a ratio (report P12 could not tell whether
+            // 11/21 was a fault or normal idling).
+            const Json::Value& static_echo = snapshot["dataplane"]["static_echo"];
+            if (static_echo.isObject())
+            {
+                const Json::Int64 keepalive_windows = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    static_echo.get("keepalive_windows", Json::Value((Json::Int64)0)));
+                const Json::Int64 keepalive_replies = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    static_echo.get("keepalive_replies", Json::Value((Json::Int64)0)));
+                const Json::Int64 send_packets = ppp::auxiliary::JsonAuxiliary::AsInt64(
+                    static_echo.get("send_packets", Json::Value((Json::Int64)0)));
+                if (keepalive_windows > 0 || send_packets > 0)
+                {
+                    ppp::string static_echo_detail = "keep-alive windows=";
+                    static_echo_detail += stl::to_string<ppp::string>(keepalive_windows);
+                    static_echo_detail += ", answered=";
+                    static_echo_detail += stl::to_string<ppp::string>(keepalive_replies);
+                    static_echo_detail += ", sent=";
+                    static_echo_detail += stl::to_string<ppp::string>(send_packets);
+
+                    const char* static_echo_status = "pass";
+                    if (keepalive_windows >= 5 && keepalive_replies == 0)
+                    {
+                        static_echo_status = "fail";
+                        static_echo_detail += "; the static UDP channel never answered a keep-alive, so ICMP/DNS traffic "
+                            "placed on it is silent";
+                    }
+                    else if (keepalive_windows >= 5 && keepalive_replies * 2 < keepalive_windows)
+                    {
+                        static_echo_status = "warn";
+                        static_echo_detail += "; more than half of the keep-alive windows were not answered";
+                    }
+                    else if (keepalive_windows < 5)
+                    {
+                        static_echo_status = "warn";
+                        static_echo_detail += "; too few windows to judge";
+                    }
+                    add_check("dataplane.static_echo", static_echo_status, static_echo_detail);
+                }
+            }
 
             const Json::Value& outbounds = snapshot["outbounds"];
             bool active_outbound = false;

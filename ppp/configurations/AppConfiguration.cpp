@@ -358,7 +358,7 @@ namespace ppp {
             config.client.servers.clear();
             config.client.server_proxy = "";
             config.client.probe.enabled = true;
-            config.client.probe.timeout_ms = 800;
+            config.client.probe.timeout_ms = 2000;
             config.client.probe.ttl_seconds = 30;
             config.client.hot_switch.enabled = true;
             config.client.hot_switch.jitter_threshold_ms = 50;

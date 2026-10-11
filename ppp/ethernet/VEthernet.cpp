@@ -404,7 +404,8 @@ namespace ppp
                 [self, this](ppp::tap::ITap*, ppp::tap::ITap::PacketInputEventArgs& e) noexcept
                 {
                     int packet_length = e.PacketLength;
-                    struct ip_hdr* iphdr = ip_hdr::Parse(e.Packet, packet_length);
+                    ip_hdr::IPParseReason parse_reason = ip_hdr::IPParseReason_None;
+                    struct ip_hdr* iphdr = ip_hdr::Parse(e.Packet, packet_length, &parse_reason);
                     if (NULLPTR == iphdr)
                     {
                         // Try IPv6: check version nibble (top 4 bits of first byte)
@@ -413,8 +414,41 @@ namespace ppp
                         {
                             return OnIPv6PacketInput(packet, packet_length);
                         }
-                        LOG_DEBUG("VEthernet::TAP_PACKET_INPUT: unknown packet, packet_length=%d, first_byte=0x%02x, vnet_=%d",
-                            packet_length, packet[0], (int)vnet_);
+
+                        // Name the failing test and the header fields.  The old
+                        // line printed only the length and the first byte, so a
+                        // frame drop could not be told apart from a malformed
+                        // packet without a capture (the 0x46 entries in the
+                        // 2026-10-11 report were IGMP reports with a
+                        // router-alert option, that is IHL=6 and protocol 2).
+                        const bool has_ip_header = packet_length >= ip_hdr::IP_HLEN;
+                        const int ip_version = packet_length >= 1 ? (packet[0] >> 4) : -1;
+                        const int ip_ihl = packet_length >= 1 ? (packet[0] & 0x0f) : -1;
+                        const int ip_proto = has_ip_header ? (int)packet[9] : -1;
+                        const int ip_ttl = has_ip_header ? (int)packet[8] : -1;
+                        const char* ip_proto_name = has_ip_header ? ip_hdr::ProtocolName(ip_proto) : NULLPTR;
+
+                        const uint64_t unparsable_packets = ++unparsable_packets_;
+                        bool report = parse_reason != ip_hdr::IPParseReason_Protocol;
+                        if (parse_reason == ip_hdr::IPParseReason_Protocol)
+                        {
+                            // Expected noise: a protocol this stack does not carry
+                            // (IGMP, OSPF, ...).  Report it once per protocol and
+                            // then only a periodic total, so it stays diagnosable
+                            // without flooding the log.
+                            const uint32_t bit = (uint32_t)ip_proto < 32 ? (1u << (uint32_t)ip_proto) : 0;
+                            const bool first = bit != 0 && (unparsable_protocols_.fetch_or(bit, std::memory_order_relaxed) & bit) == 0;
+                            report = first || (unparsable_packets % 1000) == 0;
+                        }
+
+                        if (report)
+                        {
+                            LOG_DEBUG("VEthernet::TAP_PACKET_INPUT: unknown packet, packet_length=%d, first_byte=0x%02x, reason=%s, "
+                                "version=%d, ihl=%d, proto=%d(%s), ttl=%d, dropped_total=%llu, vnet_=%d",
+                                packet_length, packet_length >= 1 ? packet[0] : 0, ip_hdr::ParseReasonName(parse_reason),
+                                ip_version, ip_ihl, ip_proto, NULLPTR != ip_proto_name ? ip_proto_name : "?",
+                                ip_ttl, (unsigned long long)unparsable_packets, (int)vnet_);
+                        }
                         return false; // INVALID IS (Destination & Mask) != Destination;
                     }
 #if !defined(_WIN32)

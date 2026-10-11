@@ -86,6 +86,8 @@ namespace ppp {
                     uint64_t send_queued;
                     uint64_t send_packets;
                     uint64_t send_errors;
+                    uint64_t keepalive_windows;
+                    uint64_t keepalive_replies;
                     uint32_t consecutive_failures;
                     uint64_t degraded_until;
                 };
@@ -168,6 +170,8 @@ namespace ppp {
                         static_echo_send_queued_.load(std::memory_order_relaxed),
                         static_echo_send_packets_.load(std::memory_order_relaxed),
                         static_echo_send_errors_.load(std::memory_order_relaxed),
+                        static_echo_keepalive_windows_.load(std::memory_order_relaxed),
+                        static_echo_keepalive_replies_.load(std::memory_order_relaxed),
                         static_echo_consecutive_failures_.load(std::memory_order_relaxed),
                         static_echo_degraded_until_.load(std::memory_order_relaxed) };
                 }
@@ -433,6 +437,13 @@ namespace ppp {
                 std::atomic<uint64_t>                                                   static_echo_send_queued_ = 0;
                 std::atomic<uint64_t>                                                   static_echo_send_packets_ = 0;
                 std::atomic<uint64_t>                                                   static_echo_send_errors_ = 0;
+                // Keepalive accounting.  A "window" is one keep-alive interval:
+                // it ends either with at least one packet received from the peer
+                // (reply) or with nothing received at all (response_timeouts).
+                // Without the window count, "11 timeouts" cannot be read as a
+                // ratio, which is exactly what report P12 could not decide.
+                std::atomic<uint64_t>                                                   static_echo_keepalive_windows_ = 0;
+                std::atomic<uint64_t>                                                   static_echo_keepalive_replies_ = 0;
                 std::atomic<uint32_t>                                                   static_echo_consecutive_failures_ = 0;
                 std::atomic<uint64_t>                                                   static_echo_degraded_until_ = 0;
                 

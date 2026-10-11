@@ -43,34 +43,85 @@ namespace ppp
                 }
             }
 
-            struct ip_hdr* ip_hdr::Parse(const void* packet, int& len) noexcept
+            const char* ip_hdr::ParseReasonName(ip_hdr::IPParseReason reason) noexcept {
+                switch (reason) {
+                    case IPParseReason_None:            return "none";
+                    case IPParseReason_InvalidPacket:   return "null-packet";
+                    case IPParseReason_Truncated:       return "packet-shorter-than-ip-header";
+                    case IPParseReason_Version:         return "bad-ip-version";
+                    case IPParseReason_HeaderLength:    return "bad-ip-header-length";
+                    case IPParseReason_Ttl:             return "expired-ttl";
+                    case IPParseReason_Destination:     return "unspecified-destination";
+                    case IPParseReason_Source:          return "unspecified-or-broadcast-source";
+                    case IPParseReason_Checksum:        return "bad-header-checksum";
+                    case IPParseReason_Protocol:        return "unsupported-protocol";
+                    default:                            return "unknown";
+                }
+            }
+
+            const char* ip_hdr::ProtocolName(int proto) noexcept {
+                switch (proto) {
+                    case IP_PROTO_ICMP: return "icmp";
+                    case IP_PROTO_TCP:  return "tcp";
+                    case IP_PROTO_UDP:  return "udp";
+                    case 2:             return "igmp";       /* Membership reports carry a router-alert option, hence IHL=6. */
+                    case 41:            return "ipv6-in-ip";
+                    case 47:            return "gre";
+                    case 50:            return "esp";
+                    case 51:            return "ah";
+                    case 58:            return "icmpv6";
+                    case 89:            return "ospf";
+                    case 103:           return "pim";
+                    case 112:           return "vrrp";
+                    case 132:           return "sctp";
+                    default:            return NULLPTR;
+                }
+            }
+
+            struct ip_hdr* ip_hdr::Parse(const void* packet, int& len, ip_hdr::IPParseReason* reason) noexcept
             {
+                if (NULLPTR != reason)
+                {
+                    *reason = IPParseReason_None;
+                }
+
                 struct ip_hdr* iphdr = (struct ip_hdr*)packet;
                 if (NULLPTR == iphdr)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_InvalidPacket; }
+                    return NULLPTR;
+                }
+
+                if (len < IP_HLEN)
+                {
+                    if (NULLPTR != reason) { *reason = IPParseReason_Truncated; }
                     return NULLPTR;
                 }
 
                 int iphdr_ver = IPH_V(iphdr);
                 if (iphdr_ver != ip_hdr::IP_VER)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_Version; }
                     return NULLPTR;
                 }
 
                 int iphdr_hlen = IPH_HL(iphdr) << 2;
                 if (iphdr_hlen > len)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_HeaderLength; }
                     return NULLPTR;
                 }
 
                 if (iphdr_hlen < IP_HLEN)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_HeaderLength; }
                     return NULLPTR;
                 }
 
                 int ttl = IPH_TTL(iphdr);
                 if (ttl < 1)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_Ttl; }
                     return NULLPTR;
                 }
 
@@ -91,12 +142,14 @@ namespace ppp
                 /* All ones (broadcast) or all zeroes (old skool broadcast). */
                 if (iphdr->dest == IP_ADDR_ANY_VALUE)
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_Destination; }
                     return NULLPTR;
                 }
 
                 /* ~iphdr->dest == IP_ADDR_ANY_VALUE */ 
                 if (iphdr->src == IP_ADDR_ANY_VALUE || iphdr->src == IP_ADDR_BROADCAST_VALUE) 
                 {
+                    if (NULLPTR != reason) { *reason = IPParseReason_Source; }
                     return NULLPTR;
                 }
 
@@ -111,13 +164,20 @@ namespace ppp
                     int checksum = inet_chksum(iphdr, iphdr_hlen);
                     if (checksum != 0)
                     {
+                        if (NULLPTR != reason) { *reason = IPParseReason_Checksum; }
                         return NULLPTR;
                     }
                 }
 #endif
 
                 int proto = IPH_PROTO(iphdr);
-                return proto == IP_PROTO_UDP || proto == IP_PROTO_TCP || proto == IP_PROTO_ICMP ? iphdr : NULLPTR;
+                if (proto == IP_PROTO_UDP || proto == IP_PROTO_TCP || proto == IP_PROTO_ICMP)
+                {
+                    return iphdr;
+                }
+
+                if (NULLPTR != reason) { *reason = IPParseReason_Protocol; }
+                return NULLPTR;
             }
 
             struct tcp_hdr* tcp_hdr::Parse(struct ip_hdr* iphdr, const void* packet, int size) noexcept

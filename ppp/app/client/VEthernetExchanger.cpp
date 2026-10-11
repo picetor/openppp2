@@ -3129,6 +3129,8 @@ namespace ppp {
                 static_echo_remote_port_ = IPEndPoint::MinPort;
                 static_echo_consecutive_failures_.store(0, std::memory_order_relaxed);
                 static_echo_degraded_until_.store(0, std::memory_order_relaxed);
+                // keepalive_windows/keepalive_replies stay cumulative, like the
+                // response_timeouts they qualify.
 
                 {
                     SynchronizedObjectScope scope(syncobj_);
@@ -3228,7 +3230,11 @@ namespace ppp {
                 if (static_echo_timeout_ != UINT64_MAX && static_echo_enabled) {
                     UInt64 now = ppp::threading::Executors::GetTickCount();
                     if (now >= static_echo_timeout_) {
+                        // Count every evaluated window so "response_timeouts" can
+                        // be read as a ratio instead of a bare number (P12).
+                        static_echo_keepalive_windows_.fetch_add(1, std::memory_order_relaxed);
                         if (static_echo_input_) {
+                            static_echo_keepalive_replies_.fetch_add(1, std::memory_order_relaxed);
                             static_echo_input_ = false;
                             return StaticEchoNextTimeout();
                         }

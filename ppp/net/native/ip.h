@@ -91,7 +91,41 @@ namespace ppp {
                 }
 
             public:
-                static struct ip_hdr*                                       Parse(const void* packet, int& size) noexcept;
+                /**
+                 * @brief Names the test that made Parse() reject a packet.
+                 *
+                 * The data path used to log only the packet length and the first
+                 * byte, which cannot tell a truncated frame from an expired TTL
+                 * from a protocol the stack does not carry (for example an IGMP
+                 * report carrying a router-alert option, IHL=6).  The reason
+                 * makes such a drop diagnosable without a packet capture.
+                 */
+                typedef enum {
+                    IPParseReason_None = 0,             ///< The packet parsed.
+                    IPParseReason_InvalidPacket,        ///< Null buffer.
+                    IPParseReason_Truncated,            ///< The buffer is shorter than a base IPv4 header.
+                    IPParseReason_Version,              ///< The version nibble is not 4.
+                    IPParseReason_HeaderLength,         ///< IHL exceeds the buffer, or is below 20 bytes.
+                    IPParseReason_Ttl,                  ///< The TTL already expired.
+                    IPParseReason_Destination,          ///< The destination address is 0.0.0.0.
+                    IPParseReason_Source,               ///< The source address is 0.0.0.0 or 255.255.255.255.
+                    IPParseReason_Checksum,             ///< The header checksum is wrong (only when PACKET_CHECKSUM is enabled).
+                    IPParseReason_Protocol,             ///< The protocol is not TCP, UDP or ICMP.
+                } IPParseReason;
+
+                /// @brief Stable short name of an IPParseReason, for logs.
+                static const char*                                          ParseReasonName(IPParseReason reason) noexcept;
+
+                /// @brief Short name of an IP protocol number ("tcp", "igmp", ...), or NULLPTR.
+                static const char*                                          ProtocolName(int proto) noexcept;
+
+                /**
+                 * @brief Parses an IPv4 header.
+                 * @param packet The raw frame.
+                 * @param size The frame length; truncated in place to the IP total length when they disagree.
+                 * @param reason When not NULLPTR, receives the failing test on rejection.
+                 */
+                static struct ip_hdr*                                       Parse(const void* packet, int& size, IPParseReason* reason = NULLPTR) noexcept;
                 static unsigned short                                       NewId() noexcept;
 
             public:

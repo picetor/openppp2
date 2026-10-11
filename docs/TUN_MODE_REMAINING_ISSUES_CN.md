@@ -652,3 +652,55 @@ SOCKS5 CONNECT `www.google.com:443` → 成功。**"网页能开"依然不能作
 | `6be4ed2` | 注入探针进 RPC/面板；日志去噪（IPv6 出站、geo 缺失、审计订阅各只报一次）；错误文本转 UTF-8；活动出口不再被探测结果误报"不可达"；探测失败补原因日志 |
 | `1c53ad8` | 直连域名在"宿主无 IPv6 出口"时也剥离 AAAA（`host_ipv6_uplink_` + `strip_without_a_cache`） |
 | `006c0f1` / `45d3787` | 现场实测矩阵与管理员级取证（pktmon 丢弃原因、排除项、TAP 对照、时间线）写入本文档 |
+
+## 10. 第二轮代码修复（本次提交，未在现场复测）
+
+第 0 节表里"仍未实施"的条目与第 9.2 节的 C 系列问题逐条落地。原则是：**能自证的才自动处理，
+不能自证的只报告不删除**；每条都给出"一眼可验证"的判据。IPv6 组合分析见
+`docs/TUN_IPV6_SCENARIO_MATRIX_CN.md`。
+
+| 编号 | 问题 | 改动 | 位置 |
+|---|---|---|---|
+| P8 / C9 | IHL=6 的报文被静默丢弃，只打长度与首字节 | `ip_hdr::Parse` 增加 `IPParseReason` 出参，新增 `ParseReasonName`/`ProtocolName`；TAP 入包失败时打印 `reason=`、version/ihl/proto/ttl 与累计丢弃数；"不支持的协议"（IGMP 等）按协议只报一次、之后每 1000 个包一条汇总；`dataplane.unparsable_packets`/`unparsable_protocol_mask` 进快照 | `ppp/net/native/ip.h`、`ppp/net/native/checksum.cpp`、`ppp/ethernet/VEthernet.h/.cpp`、`main.cpp` |
+| C2 | `--tun-driver=tap` 因 MTU 校验**致命启动失败**（复用了陈旧 TAP 适配器） | 先读回适配器真实 MTU；不一致时最多 3 次设置（间隔 100 ms）；仍不一致**不再退出**：按适配器实际 MTU 继续，WARN 同时给出 `netsh interface ipv4 set subinterface ... mtu=` 与 `Remove-StaleTunAdapters.ps1` 两条修法，并让 TCP MSS clamp 跟随实际 MTU；`GetTunnelMtu()` 进 `network.tun.mtu`，`network.mtu` 诊断改用该值（Wintun/TAP 两种驱动都适用） | `VEthernetNetworkSwitcher.h/.cpp`、`main.cpp` |
+| C3 | 注入探针单次结论不可靠（2 分钟内 `3/3` ↔ `0/3`） | 每轮结果进 16 轮滚动历史（每轮 2 bit），得出 `state=unknown/healthy/unstable/broken`；系统代理回退与丢包诊断订阅改为"2 连败才接管、2 连胜才撤销"；日志只在首次结论与状态翻转时输出（原来的每轮 WARN 已消除） | `VEthernetNetworkSwitcher.h/.cpp`、`main.cpp` |
+| C4 | `run_diagnostics` 7/7 全绿而 TUN 实际不可用 | 新增 `network.injection` 检查：`broken` → **fail**，`unstable`/未出结论 → warn；`dataplane.injection` 增加 `state/last_round_delivered/delivered_rounds/failing_rounds/healthy_streak/failing_streak/last_success_ms` | `main.cpp` |
+| P12 | `static_echo.response_timeouts` 语义不明（11/21 无法解读） | 新增 `keepalive_windows`/`keepalive_replies`：每个 keep-alive 窗口到点记一次，窗口内收到过报文则记 reply，于是超时可读成比例；诊断新增 `dataplane.static_echo`（≥5 窗口且 0 应答 → fail，过半未应答 → warn） | `VEthernetExchanger.h/.cpp`、`main.cpp` |
+| C6 | 远端桥接挂死不上报：`ConnectBridgeToPeer` 之后既无 `connected` 也无失败 | `MuxOrConnect`/`MuxOrAccept` 在等待对端应答的 `ITransmission::Read` 外挂看门狗：超过 `tcp.connect.timeout` 秒 → WARN（含 host/port/超时秒数）并 `Dispose` 传输，让上层立即失败并关掉本地 socket，而不是挂到浏览器自己超时（覆盖 neverssl.com 与 LSP 两条路径） | `ppp/app/protocol/VirtualEthernetTcpipConnection.cpp` |
+| P11 / C8 | 5 张陈旧隧道网卡残留，只能靠人工 `netsh` 发现 | 启动时枚举"带 openppp2 标记（`PPP PRIVATE NETWORK 2`）且不是本次所选适配器"的网卡，WARN 一次（含 ifIndex、状态、残留网关/DNS/地址）；`network.stale_tunnel_adapters` 进快照，`run_diagnostics` 新增 `network.stale_adapters`（列出前 3 条 + 清理命令）。**只报告不删除**：删除需要管理员，仍由脚本执行 | `VEthernetNetworkSwitcher.h/.cpp`、`main.cpp` |
+| P4 补充 | 800 ms 探测超时把**可达**服务器报成"不可达"（error=995） | 默认 `client.probe.timeout_ms` 800 → 2000；JSON 里 `client.probe.timeout-ms` 仍可覆盖（下限 50） | `AppConfiguration.h/.cpp` |
+| P6 | `--tun-mux=0` 的实际后果在面板上看不出来 | 面板 MUX 指标在 `mux_state=disabled` 时显示"已关闭（每条 TCP 流单开一条传输连接）"；设置页本来就写了"0 关闭" | `web/app.js` |
+| P1 补强 | 关掉 DNS 缓存（`udp.dns.cache=false`）时，隧道侧 AAAA 完全不剥离 | 剥离从 `if (caching && udp.dns.cache)` 中移出并**无条件执行**，以 `strip_without_a_cache = ipv6_dataplane_unavailable_` 调用；`AddCache`/`FlushPendingAAAAResponses` 仍留在缓存开关内；顺带删掉永远不执行的"扣住 AAAA 等 A 记录"分支（该函数恒返回 true） | `VEthernetNetworkSwitcher.cpp` |
+| P1 补强 | 服务端 v6 安装失败时**保留 `AssignedIPv6Mode=Nat66`**，客户端据此误判"有 v6 数据面"，于是不装 `::/1` 又不再剥离 AAAA | 服务端三处 `server-ipv6-dataplane-install-failed` 路径补 `AssignedIPv6Mode = IPv6Mode_None`；客户端 `ApplyIPv6Assignment` 收紧为"mode ∈ {Nat66,Gua} **且** 有非 unspecified 的 v6 地址"才算有数据面 | `ppp/app/server/VirtualEthernetSwitcher.cpp`、`VEthernetNetworkSwitcher.cpp` |
+| 可观测性 | v6 状态只能靠逐包 DEBUG 推断 | `get_snapshot` 新增 `network.ipv6.{server_dataplane,dataplane_unavailable,host_uplink,effective}`（`effective` ∈ tunnel / direct-only / none），`run_diagnostics` 新增 `network.ipv6` 一句话解释当前组合 | `main.cpp` |
+
+### 10.1 本轮验收清单（新构建）
+
+1. P8：日志里不再出现裸的 `unknown packet, packet_length=..., first_byte=0x46`；取而代之是
+   `reason=unsupported-protocol, version=4, ihl=6, proto=2(igmp), ttl=...`，且同协议只出现一次；
+   `get_snapshot.dataplane.unparsable_packets` 持续增长而日志不增长。
+2. C2：把 `--tun-driver=tap` 配在 MTU=1400 的陈旧适配器上启动：核心**不再退出**，日志出现
+   `the tunnel adapter carries MTU=1400, not the configured 1500`，`network.tun.mtu=1400`，
+   `run_diagnostics.network.mtu` 为 fail（配置与实际不一致）而连接正常。
+3. C3/C4：`get_snapshot.dataplane.injection.state` 会随滚动窗口在 `healthy/unstable/broken` 之间变化；
+   现场那台机器应长期是 `unstable` 或 `broken`；`run_diagnostics` 出现 `network.injection`，
+   坏状态下不再是 7/7 全绿。
+4. C6：对已知挂死站点（`http://neverssl.com/`）经本地代理请求，`tcp.connect.timeout` 秒后
+   必出现 `VETcpip: the peer did not answer the connect request within N s`，客户端 socket 被关闭。
+5. P11：启动时若机器上还有旧隧道网卡，出现一条 `N tunnel adapter(s) from an earlier session are still installed`；
+   `get_snapshot.network.stale_tunnel_adapters` 列出它们；跑 `Remove-StaleTunAdapters.ps1 -Apply` 后该列表清空。
+6. P12：`dataplane.static_echo.keepalive_windows` 与 `keepalive_replies` 随时间增长，
+   `response_timeouts/keepalive_windows` 就是"未应答窗口比例"；该比例过半时 `run_diagnostics.dataplane.static_echo` 报 warn。
+7. P4 补充：慢服务器（实测 1163 ms）不再被判"不可达"；`probe failed ... error=995` 条数明显下降。
+8. P1 补强：`udp.dns.cache=false` 时 `Resolve-DnsName -Type AAAA -Server 127.0.0.1 <任意域名>` 仍被剥离
+   （日志 `STRIPPED ... AAAA`）；服务端 v6 安装失败时 `get_snapshot.network.ipv6.server_dataplane=false`。
+
+### 10.2 本轮仍未处理
+
+- **第 3 节根因（C1）**：注入报文被 IP 层以 `Not locally destined` 丢弃，仍指向 2021 年的 Wintun 0.14 + Windows 26200；
+  本轮只让这个问题**变得可见**（C3/C4/P5），换驱动那一步仍需现场执行。
+- **P7**：`client.tun.mtu` 回 1400 是配置改动，代码侧只保证"配置与实际不一致时不再致命"。
+- **P11 的删除动作**：需要管理员，仍由 `tests/tools/Remove-StaleTunAdapters.ps1 -Apply` 执行。
+- **P6**：`--tun-mux` 是否恢复 ≥1 仍是配置决策，本轮只补齐面板可见性。
+- **P8 的协议支持**：IGMP/OSPF 等协议仍不被用户态栈承载，本轮只把"为什么丢"写清楚。
+- IPv6 部分的剩余缺口（见 `docs/TUN_IPV6_SCENARIO_MATRIX_CN.md` 第六节）**未经现场复测**。
