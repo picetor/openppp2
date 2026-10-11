@@ -708,3 +708,74 @@ amd64 与 i386 两个平台（vcpkg static + MSBuild）均编译成功：`7f7a64
 - **P6**：`--tun-mux` 是否恢复 ≥1 仍是配置决策，本轮只补齐面板可见性。
 - **P8 的协议支持**：IGMP/OSPF 等协议仍不被用户态栈承载，本轮只把"为什么丢"写清楚。
 - IPv6 部分的剩余缺口（见 `docs/TUN_IPV6_SCENARIO_MATRIX_CN.md` 第六节）**未经现场复测**。
+
+## 11. ICMP/注入交付的现场复现（2026-10-11 下午，本机、客户端运行中）
+
+这一节回答上一轮留下的"到底是谁丢了注入包"，结论比 §8.4 更硬：**与客户端无关**，
+在干净适配器上用独立的一百行程序就能复现，**不能靠改客户端代码修复**。
+
+### 11.1 先证明隧道是双向的（问题只在最后一跳）
+
+- 隧道回方向正常：`tun_rx` 持续增长，TCP 握手、页面下载、经代理访问都成功（§7.1/§8.7）。
+- 断的是"客户端进程 → 适配器 → 宿主 IP 栈"，这一跳不出本机：
+
+| 观测 | 结果 | 说明 |
+|---|---|---|
+| 宿主 ping **自己的隧道地址** `192.168.14.25` | **TimedOut** | 自己的地址本应由协议栈本地应答 |
+| 宿主 ping **自己的物理地址** `192.168.51.102`（WLAN 现地址） | **Success 0 ms** | 同机对照：物理网卡正常 |
+| 客户端日志（同一时刻） | `DATAPLANE ICMP: input src=420391104 dst=420391104 type=8` | 420391104 = 0xC0A80E19 = 192.168.14.25：**这条自 ping 被路由进了隧道**，而不是本地应答 |
+| 给 `PPP` 用 netsh 另加一个普通地址 `192.168.99.9/24` | 自 ping 同样 TimedOut | 与"客户端怎么配地址"无关，是该适配器的状态 |
+| raw socket 伪造源地址把 ICMP 回包"本地投递"（hping 思路） | 无效：`SendTo` 返回成功，但 2793 行 pktmon 抓包里 0 个包 | Windows 直接丢弃伪造源的出站包，这条绕过路不通 |
+
+### 11.2 干净适配器复现（无客户端参与）
+
+现成工具：`tests/tools/VirtualAdapterDeliverySelfTest.ps1`（管理员运行）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\tools\VirtualAdapterDeliverySelfTest.ps1
+```
+
+它创建临时 Wintun 适配器 → 赋址并**校验已赋上** → 自 ping → 用
+`WintunAllocateSendPacket`/`WintunSendPacket` 注入合法 UDP/IP 包（单发与连发 3 次都试）
+→ 看宿主 socket 是否收到 → 打印判定 → 无论成败都删除临时适配器。
+退出码：0 正常 / 2 注入不通 / 3 地址非本地。
+
+本机 2026-10-11 的实测：
+
+```text
+wintun.sys  : 0.14 (2024/1/26)        wintun.dll : 0.14.1
+security    : HipsDaemon, HipsTray, wsctrlsvc   (火绒在运行)
+filters     : Huorong NDIS Filter Driver
+adapter     : DSH-TAPTEST ifIndex=72 status=Up
+assigned    : 10.194.0.1/24           (Get-NetIPAddress 已确认)
+self-ping   : TimedOut 0 ms           <- 自己的地址都不算本地
+inject      : NOT RECEIVED            <- 注入包宿主收不到
+```
+
+同机对照（同一脚本、同一台机器，仅换驱动）：TAP-Windows（`PPP PRIVATE NETWORK 2 TAP`，
+用 `TAP_IOCTL_SET_MEDIA_STATUS` 置为已连接）结果一样：自 ping TimedOut、注入的以太帧收不到。
+
+### 11.3 驱动版本：没有更新的签名版本
+
+`https://www.wintun.net/` 当前只提供 **0.14.1**（SHA2-256 `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`），
+与仓库/现场自带的一致，驱动为 0.14。§8.4 提到的上游修复**尚未发布**，要用就得自建
+（WDK + 签名或测试签名），属于机器级改动。
+
+### 11.4 尚未排除的首要嫌疑：火绒
+
+- 本机在跑 `HipsDaemon` / `HipsTray` / `wsctrlsvc`（Huorong），WFP 里有 `hrwfpdrv` provider，
+  NDIS 过滤器 `hrndis6` 绑定在 WLAN（未绑定隧道适配器）。
+- §3.4 早就把"火绒确认性测试"列为待办，一直没做；而"本机地址被判定为非本地 + 注入包被丢"
+  正是接收路径被第三方过滤器/回调改写的典型表现。
+- **一步可判定的实验**：临时退出火绒（或关闭其"网络入侵拦截"），重跑
+  `VirtualAdapterDeliverySelfTest.ps1`；判定从 `NOT RECEIVED` 变 `RECEIVED` 即证明。
+
+### 11.5 结论与可行动作
+
+1. **客户端侧无解**：干净适配器 + 独立程序复现，说明丢包发生在 Windows/驱动这一侧；
+   本轮新增的注入探针（§10 C3/C4）只能让这件事可见。
+2. 待现场执行的两步（都需要管理员）：①火绒确认性测试（30 秒）；
+   ②用含上游 2026 修复的 Wintun 构建替换 `wintun.sys`/`wintun.dll`（自建 + 签名）。
+3. 在此之前，任何必须经过"适配器 → 宿主"的流量（ICMP、隧道内 UDP、非劫持进程的 TCP 握手）
+   都不可用；HTTP/HTTPS 走 LSP 与本地 8080/1080 代理仍然正常 —— 这正是"网页能开但 ping 不通"的原因。
+
