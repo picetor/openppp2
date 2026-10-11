@@ -1057,8 +1057,11 @@ namespace ppp {
             //        dead end rather than the IPv6-only-site fallback the default
             //        behaviour protects. It also lets the caller's decision through
             //        when neither prefer_ipv4 nor the tunnel state asks for IPv4.
-            // Returns true if the caller should forward the response now.
-            // Returns false if the caller should hold the response (AAAA with no A cache yet).
+            // Always returns true: the response is never held back.  The "hold the
+            // AAAA until its A record arrives" deferral this comment used to
+            // describe is not implemented -- the callers' pending_aaaa_ branches
+            // are unreachable -- so an AAAA-only answer keeps its records unless
+            // strip_without_a_cache says this host cannot reach IPv6 at all.
             bool VEthernetNetworkSwitcher::StripAAAADnsResponseIfIPv4Available(::dns::Message& m,
                 bool strip_without_a_cache) noexcept {
                 if (!ShouldPreferIPv4() && !strip_without_a_cache) {
