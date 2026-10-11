@@ -735,12 +735,15 @@ amd64 与 i386 两个平台（vcpkg static + MSBuild）均编译成功：`7f7a64
 powershell -ExecutionPolicy Bypass -File tests\tools\VirtualAdapterDeliverySelfTest.ps1
 ```
 
-它创建临时 Wintun 适配器 → 赋址并**校验已赋上** → 自 ping → 用
-`WintunAllocateSendPacket`/`WintunSendPacket` 注入合法 UDP/IP 包（单发与连发 3 次都试）
-→ 看宿主 socket 是否收到 → 打印判定 → 无论成败都删除临时适配器。
-退出码：0 正常 / 2 注入不通 / 3 地址非本地。
+当前脚本创建临时 Wintun 适配器 → 检查地址冲突 → 临时设 IPv4
+`DadTransmits=0` → 赋址并轮询到 `AddressState=Preferred` → 由绑定隧道地址的 UDP
+socket 向隧道子网发送数据并检查 Wintun receive ring → 用
+`WintunAllocateSendPacket`/`WintunSendPacket` 注入合法 UDP/IP 包并检查宿主 socket
+→ 无论成败都恢复 DAD 设置并删除临时适配器。self-ping 只作参考，判定看地址状态和两个方向的包。
+退出码：0 两个方向均收到 / 2 至少一个方向失败。脚本只独立创建 Wintun；活动 TAP 的实流量对照使用
+`tests/tools/TunInboundProbe.ps1`。
 
-本机 2026-10-11 的实测：
+本机 2026-10-11 的实测发生在此脚本加入 DAD 设置和双向验收之前，是历史基线，不能代替新脚本的复测：
 
 ```text
 wintun.sys  : 0.14 (2024/1/26)        wintun.dll : 0.14.1
@@ -772,10 +775,26 @@ inject      : NOT RECEIVED            <- 注入包宿主收不到
 
 ### 11.5 结论与可行动作
 
-1. **客户端侧无解**：干净适配器 + 独立程序复现，说明丢包发生在 Windows/驱动这一侧；
-   本轮新增的注入探针（§10 C3/C4）只能让这件事可见。
-2. 待现场执行的两步（都需要管理员）：①火绒确认性测试（30 秒）；
-   ②用含上游 2026 修复的 Wintun 构建替换 `wintun.sys`/`wintun.dll`（自建 + 签名）。
-3. 在此之前，任何必须经过"适配器 → 宿主"的流量（ICMP、隧道内 UDP、非劫持进程的 TCP 握手）
-   都不可用；HTTP/HTTPS 走 LSP 与本地 8080/1080 代理仍然正常 —— 这正是"网页能开但 ping 不通"的原因。
+1. 历史测试把问题定位到虚拟适配器与宿主交付路径，但地址 DAD 状态和验收工具本身也需要控制；
+   不能仅凭该轮结果断言客户端代码完全无关或驱动存在缺陷。
+2. 先用当前双向临时适配器测试和活动接口测试复现，再分别核对地址状态、Wintun/TAP 收发、
+   Windows 过滤层及系统版本。火绒对照和替换自建签名驱动都应建立在这组新证据上。
+3. 已有现场记录仍表明：当注入包未到宿主 socket 时，ICMP、隧道 DNS 回包和未被代理接管的
+   TCP 连接会失败；HTTP/HTTPS 走本地系统代理可正常访问，不能据此判定 TUN 数据面正常。
+
+## 12. Windows 地址配置与本地验收修复（工作树改动，待构建和现场验证）
+
+本轮已对 Wintun/TAP 共用的 `TapWindows::SetAddresses` 增加以下约束：先做现有地址冲突检查，
+在该接口上暂时关闭 IPv4 DAD，配置地址后通过 `GetUnicastIpAddressEntry` 轮询到
+`IpDadStatePreferred`（最长 5 秒），再恢复接口原来的 `DadTransmits`。配置失败路径也会尝试恢复。
+DAD 改动限于隧道接口和赋址阶段；不修改其他网卡的全局参数。`TapWindows::Create` 的
+`TAP_WIN_IOCTL_CONFIG_TUN` 现在只传 `ip & mask` 作为 remote network，不再先传 gateway 再依赖失败回退。
+
+`VirtualAdapterDeliverySelfTest.ps1` 现在在临时 Wintun 上验证两个方向，并保存/恢复该临时接口的
+`DadTransmits`；自 ping 不再作为成功条件。`UpdateNetworkTakeover` 也会等 `ITap::IsReady()`
+后才开始接管 host 路由和 DNS，避免远端握手先完成、适配器尚未就绪时就改写宿主网络。
+
+这些代码尚未在本机 Windows 构建或现场适配器上验证。下一步验收应先运行独立双向工具，再在活动
+Wintun 与 TAP 上运行 `TunInboundProbe.ps1`，对照 `get_snapshot.dataplane.injection` 和
+`AddressState`。Wintun 驱动根因、TAP 生命周期清理以及整套 host takeover 的回滚仍需现场结果决定。
 

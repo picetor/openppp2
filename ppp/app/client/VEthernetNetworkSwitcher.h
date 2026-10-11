@@ -641,6 +641,7 @@ namespace ppp {
                 std::atomic<bool>                                                   route_added_   = false;
                 std::atomic<bool>                                                   network_takeover_worker_ = false;
                 std::atomic<bool>                                                   network_takeover_stopping_ = false;
+                std::atomic<bool>                                                   network_takeover_waiting_for_tun_ = false;
                 std::atomic<bool>                                                   route_protector_running_ = false;
 #if defined(_WIN32)
                 HANDLE                                                              route_protector_event_ = NULLPTR;

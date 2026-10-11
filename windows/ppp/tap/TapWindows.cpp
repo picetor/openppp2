@@ -705,16 +705,164 @@ namespace ppp
             return std::find(owners.begin(), owners.end(), interface_index) != owners.end();
         }
 
-        static bool WaitForIPv4Address(int interface_index, uint32_t ip) noexcept
+        static bool GetIPv4DadTransmits(int interface_index, ULONG& value) noexcept
         {
-            for (int attempt = 0; attempt < 10; ++attempt)
+            if (interface_index <= 0)
             {
-                if (HasIPv4Address(interface_index, ip))
+                return false;
+            }
+
+            MIB_IPINTERFACE_ROW row;
+            InitializeIpInterfaceEntry(&row);
+            row.Family = AF_INET;
+            row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+            DWORD error = ::GetIpInterfaceEntry(&row);
+            if (error != NO_ERROR)
+            {
+                fprintf(stdout, "[SetAddresses] GetIpInterfaceEntry for DAD failed idx=%d error=%lu\r\n",
+                    interface_index, static_cast<unsigned long>(error));
+                return false;
+            }
+
+            value = row.DadTransmits;
+            return true;
+        }
+
+        static bool SetIPv4DadTransmits(int interface_index, ULONG value) noexcept
+        {
+            if (interface_index <= 0)
+            {
+                return false;
+            }
+
+            MIB_IPINTERFACE_ROW row;
+            InitializeIpInterfaceEntry(&row);
+            row.Family = AF_INET;
+            row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+            DWORD error = ::GetIpInterfaceEntry(&row);
+            if (error != NO_ERROR)
+            {
+                fprintf(stdout, "[SetAddresses] GetIpInterfaceEntry for DAD failed idx=%d error=%lu\r\n",
+                    interface_index, static_cast<unsigned long>(error));
+                return false;
+            }
+            if (row.DadTransmits == value)
+            {
+                return true;
+            }
+
+            row.DadTransmits = value;
+            error = ::SetIpInterfaceEntry(&row);
+            if (error != NO_ERROR)
+            {
+                fprintf(stdout, "[SetAddresses] SetIpInterfaceEntry DAD failed idx=%d value=%lu error=%lu\r\n",
+                    interface_index, static_cast<unsigned long>(value), static_cast<unsigned long>(error));
+                return false;
+            }
+
+            InitializeIpInterfaceEntry(&row);
+            row.Family = AF_INET;
+            row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+            error = ::GetIpInterfaceEntry(&row);
+            if (error != NO_ERROR || row.DadTransmits != value)
+            {
+                fprintf(stdout, "[SetAddresses] DAD setting did not stick idx=%d expected=%lu actual=%lu error=%lu\r\n",
+                    interface_index, static_cast<unsigned long>(value),
+                    static_cast<unsigned long>(row.DadTransmits), static_cast<unsigned long>(error));
+                return false;
+            }
+
+            return true;
+        }
+
+        class ScopedIPv4DadOverride final
+        {
+        public:
+            explicit ScopedIPv4DadOverride(int interface_index) noexcept
+                : interface_index_(interface_index)
+            {
+                if (GetIPv4DadTransmits(interface_index_, previous_))
+                {
+                    active_ = true;
+                    if (!SetIPv4DadTransmits(interface_index_, 0))
+                    {
+                        Restore();
+                        return;
+                    }
+                    disabled_ = true;
+                }
+            }
+
+            ~ScopedIPv4DadOverride() noexcept
+            {
+                Restore();
+            }
+
+            bool Active() const noexcept
+            {
+                return disabled_;
+            }
+
+            bool Restore() noexcept
+            {
+                if (!active_)
                 {
                     return true;
                 }
-                ::Sleep(50);
+                if (!SetIPv4DadTransmits(interface_index_, previous_))
+                {
+                    fprintf(stdout, "[SetAddresses] WARNING: failed to restore IPv4 DadTransmits=%lu idx=%d\r\n",
+                        static_cast<unsigned long>(previous_), interface_index_);
+                    return false;
+                }
+                active_ = false;
+                disabled_ = false;
+                return true;
             }
+
+        private:
+            int interface_index_ = -1;
+            ULONG previous_ = 0;
+            bool active_ = false;
+            bool disabled_ = false;
+        };
+
+        static bool WaitForIPv4Address(int interface_index, uint32_t ip) noexcept
+        {
+            const uint64_t deadline = ::GetTickCount64() + 5000;
+            MIB_UNICASTIPADDRESS_ROW row;
+            do
+            {
+                InitializeUnicastIpAddressEntry(&row);
+                row.InterfaceIndex = static_cast<NET_IFINDEX>(interface_index);
+                row.Address.si_family = AF_INET;
+                row.Address.Ipv4.sin_family = AF_INET;
+                row.Address.Ipv4.sin_addr.S_un.S_addr = ip;
+                const DWORD error = ::GetUnicastIpAddressEntry(&row);
+                if (error == NO_ERROR)
+                {
+                    if (row.DadState == IpDadStatePreferred)
+                    {
+                        return true;
+                    }
+                    if (row.DadState != IpDadStateTentative)
+                    {
+                        fprintf(stdout, "[SetAddresses] address is not usable idx=%d ip=%s DAD=%d\r\n",
+                            interface_index, IPEndPoint(ip, 0).ToAddressString().data(), static_cast<int>(row.DadState));
+                        return false;
+                    }
+                }
+                elif(error != ERROR_NOT_FOUND)
+                {
+                    fprintf(stdout, "[SetAddresses] GetUnicastIpAddressEntry failed idx=%d ip=%s error=%lu\r\n",
+                        interface_index, IPEndPoint(ip, 0).ToAddressString().data(), static_cast<unsigned long>(error));
+                    return false;
+                }
+                ::Sleep(50);
+            } while (::GetTickCount64() < deadline);
+
+            fprintf(stdout, "[SetAddresses] address did not become Preferred idx=%d ip=%s\r\n",
+                interface_index, IPEndPoint(ip, 0).ToAddressString().data());
             return false;
         }
 
@@ -1237,6 +1385,18 @@ namespace ppp
                 return false;
             }
 
+            // A virtual adapter cannot complete ARP-based duplicate-address
+            // detection because its peer is the tunnel process, not an Ethernet
+            // segment. Disable IPv4 DAD only while assigning this checked,
+            // conflict-free tunnel address, then restore the interface setting.
+            ScopedIPv4DadOverride dad_override(interface_index);
+            if (!dad_override.Active())
+            {
+                fprintf(stdout, "[SetAddresses] FAIL: cannot disable IPv4 DAD for tunnel address idx=%d\r\n",
+                    interface_index);
+                return false;
+            }
+
             fprintf(stdout, "[SetAddresses] Using WMI: idx=%d ip=%s mask=%s gw=%s\r\n",
                 interface_index, ipEP.ToAddressString().data(), maskEP.ToAddressString().data(),
                 has_gateway ? gwEP.ToAddressString().data() : "none");
@@ -1251,7 +1411,7 @@ namespace ppp
             {
                 if (WaitForIPv4Address(interface_index, ip))
                 {
-                    return true;
+                    return dad_override.Restore();
                 }
                 fprintf(stdout, "[SetAddresses] WMI reported success but idx=%d does not own ip=%s; continuing with fallback\r\n",
                     interface_index, ipEP.ToAddressString().data());
@@ -1261,7 +1421,7 @@ namespace ppp
             if (SetAddressesByNetsh(interface_index, ip, mask, gw) &&
                 WaitForIPv4Address(interface_index, ip))
             {
-                return true;
+                return dad_override.Restore();
             }
 
             fprintf(stdout, "[SetAddresses] netsh reported success but idx=%d does not own ip=%s; continuing with IP Helper\r\n",
@@ -1280,7 +1440,7 @@ namespace ppp
                     interface_index, ipEP.ToAddressString().data());
                 return false;
             }
-            return true;
+            return dad_override.Restore();
         }
 
         bool TapWindows::FindAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept
@@ -1539,9 +1699,9 @@ namespace ppp
                 return NULLPTR;
             }
 
+            const uint32_t tunnel_network = ip & mask;
             bool ok = ConfigureDriver_SetNetifUp(tun, true) &&
-                (ConfigureDriver_SetTunModeWithAddress(tun, ip, gw, mask) || 
-                    ConfigureDriver_SetTunModeWithAddress(tun, ip, (ip & mask), mask)) &&
+                ConfigureDriver_SetTunModeWithAddress(tun, ip, tunnel_network, mask) &&
                 ConfigureDriver_SetDhcpMASQ(tun, ip, gw, mask, lease_time_in_seconds) &&
                 ConfigureDriver_SetDhcpOptionData(tun, ip, gw, mask, gw, dns_addresses);
 

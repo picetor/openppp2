@@ -1,20 +1,19 @@
 <#
 .SYNOPSIS
-Answers one question: can this machine deliver a packet from a virtual tunnel
-adapter into the host IP stack?
+Checks both packet directions at a temporary Wintun adapter.
 
 .DESCRIPTION
 Every packet the TUN client receives from the server reaches the host only
 because the client writes it into a Wintun/TAP adapter from user space.  If the
-host stack refuses those packets, DNS answers, ICMP replies and TCP handshakes
-never arrive while the tunnel itself stays healthy, and no client change can
-compensate: the last hop is inside Windows.
+adapter does not carry a host application's outbound packet or Windows does not
+deliver an injected reply to a socket, DNS/ICMP/TCP can fail while the remote
+tunnel still reports healthy.
 
-This script reproduces that hop without the client running.  It creates a fresh
-Wintun adapter (so no client, route table or stale adapter state is involved),
-assigns it an address, verifies the address is a local destination (self-ping),
-then injects a UDP/IP packet into the adapter and checks whether a socket bound
-to that address receives it.
+This script reproduces both local hops without the client running. It creates a
+fresh Wintun adapter, assigns an address, sends a UDP datagram from a socket
+bound to that address into the adapter, then injects a valid UDP/IP packet and
+checks whether a host socket receives it. The self-ping is informational; the
+address state and both packet directions are the verdict.
 
 Run it from an elevated PowerShell.  The test adapter is always removed again.
 
@@ -34,14 +33,14 @@ Directory containing wintun.dll.  Default: Driver\x64 next to this repository.
 powershell -ExecutionPolicy Bypass -File tests\tools\VirtualAdapterDeliverySelfTest.ps1
 
 .OUTPUTS
-Prints driver versions, the Huorong driver state, the self-ping result and
-the injection verdict (RECEIVED / NOT RECEIVED), then removes the adapter.
+Prints driver versions, DAD/address readiness, host-to-adapter and
+adapter-to-host packet delivery, then removes the adapter.
 #>
 [CmdletBinding()]
 param(
     [string] $AdapterName = 'DSH-TAPTEST',
     [string] $Address = '10.194.0.1',
-    [int]    $PrefixLength = 24,
+    [ValidateRange(1, 30)][int] $PrefixLength = 24,
     [int]    $Port = 45678,
     [string] $WintunDirectory = ''
 )
@@ -49,6 +48,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:adapterIndex = -1
 $script:exitCode = 1
+$script:originalDadTransmits = $null
+$script:interopLoaded = $false
+$script:outboundSocket = $null
+$script:listener = $null
 
 function Write-Section([string] $text) { Write-Host ''; Write-Host "=== $text ===" }
 
@@ -108,9 +111,22 @@ public static class VirtualAdapterSelfTest
     [DllImport("wintun.dll", SetLastError = true)]
     private static extern void WintunCloseAdapter(IntPtr adapter);
     [DllImport("wintun.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WintunDeleteAdapter(IntPtr adapter,
+        [MarshalAs(UnmanagedType.Bool)] bool forceCloseSessions,
+        [MarshalAs(UnmanagedType.Bool)] out bool rebootRequired);
+    [DllImport("wintun.dll", SetLastError = true)]
     private static extern IntPtr WintunAllocateSendPacket(IntPtr session, uint packetSize);
     [DllImport("wintun.dll", SetLastError = true)]
     private static extern void WintunSendPacket(IntPtr session, IntPtr packet);
+    [DllImport("wintun.dll", SetLastError = true)]
+    private static extern IntPtr WintunGetReadWaitEvent(IntPtr session);
+    [DllImport("wintun.dll", SetLastError = true)]
+    private static extern IntPtr WintunReceivePacket(IntPtr session, out uint packetSize);
+    [DllImport("wintun.dll", SetLastError = true)]
+    private static extern void WintunReleaseReceivePacket(IntPtr session, IntPtr packet);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("iphlpapi.dll")]
     private static extern int ConvertInterfaceLuidToIndex(ref NET_LUID luid, out uint index);
 
@@ -190,10 +206,34 @@ public static class VirtualAdapterSelfTest
         return "sent:" + copies;
     }
 
-    public static void Close()
+    public static int ReceiveFromAdapter(int timeoutMs)
+    {
+        if (session == IntPtr.Zero) { return -1; }
+        IntPtr waitEvent = WintunGetReadWaitEvent(session);
+        if (waitEvent == IntPtr.Zero) { return -1; }
+        uint wait = WaitForSingleObject(waitEvent, (uint)Math.Max(timeoutMs, 0));
+        if (wait == 0x102) { return 0; } // WAIT_TIMEOUT
+        if (wait != 0) { return -1; }
+
+        uint packetSize;
+        IntPtr packet = WintunReceivePacket(session, out packetSize);
+        if (packet == IntPtr.Zero) { return -1; }
+        try { return checked((int)packetSize); }
+        finally { WintunReleaseReceivePacket(session, packet); }
+    }
+
+    public static string Close()
     {
         if (session != IntPtr.Zero) { WintunEndSession(session); session = IntPtr.Zero; }
-        if (adapter != IntPtr.Zero) { WintunCloseAdapter(adapter); adapter = IntPtr.Zero; }
+        if (adapter == IntPtr.Zero) { return "no-adapter"; }
+        bool rebootRequired;
+        bool deleted = WintunDeleteAdapter(adapter, false, out rebootRequired);
+        int error = deleted ? 0 : Marshal.GetLastWin32Error();
+        WintunCloseAdapter(adapter);
+        adapter = IntPtr.Zero;
+        return deleted
+            ? (rebootRequired ? "deleted (reboot required)" : "deleted")
+            : "delete-failed:" + error;
     }
 }
 '@
@@ -203,6 +243,7 @@ try {
 
     Write-Section 'create temporary adapter'
     Add-Type -TypeDefinition $interop -Language CSharp
+    $script:interopLoaded = $true
     $created = [VirtualAdapterSelfTest]::Create($script:wintunDirectory, $AdapterName)
     Write-Host "result      : $created"
     if (-not $created.StartsWith('ok:')) { throw "adapter creation failed ($created)" }
@@ -213,12 +254,64 @@ try {
     Write-Host ("adapter     : {0} ifIndex={1} mac={2} status={3}" -f $adapter.Name, $script:adapterIndex, $mac, $adapter.Status)
 
     Write-Section 'address assignment'
+    $conflicts = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $Address -and $_.InterfaceIndex -ne $script:adapterIndex })
+    if ($conflicts.Count -gt 0) {
+        throw "test address $Address is already assigned to ifIndex $($conflicts[0].InterfaceIndex)"
+    }
+    $ipInterface = Get-NetIPInterface -InterfaceIndex $script:adapterIndex -AddressFamily IPv4 -ErrorAction Stop
+    $script:originalDadTransmits = [uint32]$ipInterface.DadTransmits
+    # A virtual TUN has no Ethernet peer that can answer ARP DAD probes. Match
+    # the production setup: first check for address conflicts, then disable DAD
+    # only on this temporary interface while assigning the test address.
+    Set-NetIPInterface -InterfaceIndex $script:adapterIndex -AddressFamily IPv4 -DadTransmits 0 -ErrorAction Stop
     New-NetIPAddress -InterfaceIndex $script:adapterIndex -IPAddress $Address -PrefixLength $PrefixLength -Confirm:$false | Out-Null
-    Start-Sleep -Seconds 2
-    $assigned = @(Get-NetIPAddress -InterfaceIndex $script:adapterIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -eq $Address })
-    if ($assigned.Count -eq 0) { throw "address $Address was not assigned to ifIndex $script:adapterIndex" }
-    Write-Host "assigned    : $Address/$PrefixLength"
+    $addressDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $assigned = $null
+    do {
+        $assigned = Get-NetIPAddress -InterfaceIndex $script:adapterIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -eq $Address } | Select-Object -First 1
+        if ($assigned -and $assigned.AddressState -eq 'Preferred') { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $addressDeadline)
+    if (-not $assigned) { throw "address $Address was not assigned to ifIndex $script:adapterIndex" }
+    if ($assigned.AddressState -ne 'Preferred') {
+        throw "address $Address did not become Preferred (state=$($assigned.AddressState))"
+    }
+    Write-Host "assigned    : $Address/$PrefixLength state=$($assigned.AddressState) dadtransmits=0"
+
+    Write-Section 'application: host socket -> adapter'
+    $addressOctets = [System.Net.IPAddress]::Parse($Address).GetAddressBytes()
+    $networkOctets = New-Object byte[] 4
+    $remainingPrefix = $PrefixLength
+    for ($octet = 0; $octet -lt 4; $octet++) {
+        if ($remainingPrefix -ge 8) {
+            $networkOctets[$octet] = $addressOctets[$octet]
+            $remainingPrefix -= 8
+        }
+        elseif ($remainingPrefix -gt 0) {
+            $mask = (0xFF -shl (8 - $remainingPrefix)) -band 0xFF
+            $networkOctets[$octet] = [byte]($addressOctets[$octet] -band $mask)
+            $remainingPrefix = 0
+        }
+    }
+    $destinationOctets = [byte[]]$networkOctets.Clone()
+    $destinationOctets[3]++
+    if ([System.Net.IPAddress]::new($destinationOctets).ToString() -eq $Address) {
+        $destinationOctets[3]++
+    }
+    $probeDestination = [System.Net.IPAddress]::new($destinationOctets)
+    $script:outboundSocket = New-Object System.Net.Sockets.UdpClient
+    $script:outboundSocket.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($Address), 0)))
+    $outboundPayload = [System.Text.Encoding]::ASCII.GetBytes('virtual-adapter-outbound-test')
+    [void]$script:outboundSocket.Send($outboundPayload, $outboundPayload.Length,
+        (New-Object System.Net.IPEndPoint($probeDestination, 5354)))
+    $outboundPacketLength = [VirtualAdapterSelfTest]::ReceiveFromAdapter(2500)
+    $script:outboundSocket.Close()
+    $script:outboundSocket = $null
+    $outboundReceived = $outboundPacketLength -gt 0
+    Write-Host ("app -> adapter: {0} (destination={1}, packet_length={2})" -f `
+        $(if ($outboundReceived) { 'RECEIVED' } else { 'NOT RECEIVED' }), $probeDestination, $outboundPacketLength)
 
     Write-Section 'local delivery of the adapter address (self-ping)'
     $ping = New-Object System.Net.NetworkInformation.Ping
@@ -229,38 +322,51 @@ try {
     } else { Write-Host 'self-ping   : no result'; $selfPingOk = $false }
 
     Write-Section 'injection: adapter -> host socket'
-    $listener = New-Object System.Net.Sockets.UdpClient
-    $listener.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, $Port)))
+    $script:listener = New-Object System.Net.Sockets.UdpClient
+    $script:listener.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, $Port)))
     Start-Sleep -Milliseconds 200
 
-    $packet = [VirtualAdapterSelfTest]::BuildUdp('10.194.0.99', 53, $Address, $Port, 'virtual-adapter-delivery-test')
-    $receive = $listener.ReceiveAsync()
+    $packet = [VirtualAdapterSelfTest]::BuildUdp($probeDestination.ToString(), 53, $Address, $Port, 'virtual-adapter-delivery-test')
+    $receive = $script:listener.ReceiveAsync()
     Write-Host ("inject      : {0}" -f [VirtualAdapterSelfTest]::Inject($packet, 1))
     $received = ([System.Threading.Tasks.Task]::WaitAny(@($receive), 2500) -ge 0)
     Write-Host ("verdict     : {0}" -f ($(if ($received) { 'RECEIVED (the host stack accepts packets from this adapter)' } else { 'NOT RECEIVED (the host stack discards them)' })))
     if ($received) { Write-Host ("payload     : {0}" -f [System.Text.Encoding]::ASCII.GetString($receive.Result.Buffer)) }
-    $listener.Close()
+    $script:listener.Close()
+    $script:listener = $null
 
     Write-Section 'summary'
-    Write-Host ("injection   : {0}" -f $(if ($received) { 'ok (the host stack accepts packets from this adapter)' } else { 'broken (the host stack did not deliver them)' }))
+    Write-Host ("adapter -> host: {0}" -f $(if ($received) { 'RECEIVED' } else { 'NOT RECEIVED' }))
+    Write-Host ("host -> adapter: {0}" -f $(if ($outboundReceived) { 'RECEIVED' } else { 'NOT RECEIVED' }))
     Write-Host ("self-ping   : {0}" -f $(if ($selfPingOk) { 'the adapter address is local' } else { 'the host routes packets for its own adapter address out of the interface (informational)' }))
-    if (-not $received) {
+    if (-not $received -or -not $outboundReceived) {
         Write-Host ''
-        Write-Host 'A bare adapter cannot deliver either, so the send ring, the driver or the host stack is at fault.'
-        Write-Host 'Next steps:'
-        Write-Host '  1. Run it again: a single run is not a verdict, delivery on the affected machines is intermittent.'
-        Write-Host '  2. Compare drivers with --tun-driver=tap (TAP needs dadtransmits=0: without it the address stays'
-        Write-Host '     Tentative on a tunnel adapter and the host drops every frame).'
-        Write-Host '  3. If both drivers fail on a clean boot with no third-party network filters, replace wintun.sys/'
-        Write-Host '     wintun.dll with a build carrying the upstream NBL/ring fixes; see'
-        Write-Host '     docs/TUN_MODE_REMAINING_ISSUES_CN.md section 11.'
+        Write-Host 'At least one local packet direction failed; the remote tunnel is not involved in this result.'
+        Write-Host 'Repeat the run and compare its two direction results before changing the production driver.'
+        if (-not $outboundReceived) {
+            Write-Host '  app -> adapter failed: inspect the connected route, interface state and Wintun receive ring.'
+        }
+        if (-not $received) {
+            Write-Host '  adapter -> host failed: inspect address state, packet checksums, WFP/NDIS filters and driver delivery.'
+        }
     }
-    $script:exitCode = if ($received) { 0 } else { 2 }
+    $script:exitCode = if ($received -and $outboundReceived) { 0 } else { 2 }
 }
 finally {
+    if ($null -ne $script:outboundSocket) { $script:outboundSocket.Close() }
+    if ($null -ne $script:listener) { $script:listener.Close() }
     if ($script:adapterIndex -ge 0) {
         Remove-NetIPAddress -InterfaceIndex $script:adapterIndex -IPAddress $Address -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-        [VirtualAdapterSelfTest]::Close()
+        if ($null -ne $script:originalDadTransmits) {
+            Set-NetIPInterface -InterfaceIndex $script:adapterIndex -AddressFamily IPv4 `
+                -DadTransmits $script:originalDadTransmits -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    if ($script:interopLoaded) {
+        $adapterCleanup = [VirtualAdapterSelfTest]::Close()
+        Write-Host "adapter cleanup: $adapterCleanup"
+    }
+    if ($script:adapterIndex -ge 0) {
         Start-Sleep -Seconds 2
         if (Get-NetAdapter -InterfaceIndex $script:adapterIndex -ErrorAction SilentlyContinue) {
             Write-Warning "temporary adapter $AdapterName (ifIndex $script:adapterIndex) is still present; remove it manually"

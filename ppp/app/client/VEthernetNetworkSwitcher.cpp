@@ -5047,7 +5047,7 @@ namespace ppp {
 
                 auto self = std::static_pointer_cast<VEthernetNetworkSwitcher>(shared_from_this());
                 try {
-                    std::thread([self, tun_ip, gateway]() noexcept {
+                    std::thread([self, tun_ip, gateway, probe_packets, gateway_probe_port, probe_timeout_ms]() noexcept {
                         uint64_t sent = 0;
                         uint64_t received = 0;
                         try {
@@ -6050,6 +6050,21 @@ namespace ppp {
                 }
 
                 if (main->GetNetworkState() == VEthernetExchanger::NetworkState_Established) {
+                    // Do not install host routes just because the remote
+                    // handshake completed. The adapter session and read path
+                    // must be open first; otherwise host traffic is redirected
+                    // into a device that cannot yet carry it.
+                    if (!tap->IsReady()) {
+                        if (!network_takeover_waiting_for_tun_.exchange(true)) {
+                            LOG_WARN("VEthernetNetworkSwitcher::UpdateNetworkTakeover: waiting for the tunnel adapter to become ready; "
+                                "host routes and DNS are not being taken over yet");
+                        }
+                        return;
+                    }
+                    if (network_takeover_waiting_for_tun_.exchange(false)) {
+                        LOG_INFO("VEthernetNetworkSwitcher::UpdateNetworkTakeover: tunnel adapter is ready; host network takeover may proceed");
+                    }
+
                     main_outbound_unavailable_since_.store(0);
                     if (!route_added_.load()) {
                         QueueNetworkTakeover(true);
