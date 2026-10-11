@@ -22,6 +22,7 @@ Run the Clean target first.
 param(
     [string] $Triplet = 'x64-windows-static',
     [switch] $SkipDependencies,
+    [switch] $Web,
     [switch] $Clean
 )
 
@@ -104,3 +105,25 @@ if ($LASTEXITCODE -ne 0) { throw "msbuild failed with exit code $LASTEXITCODE" }
 
 $exe = Join-Path $repo ($platform + '\Release\ppp.exe')
 if (Test-Path $exe) { Write-Host "built: $exe" } else { Write-Warning "ppp.exe not found under $platform\Release" }
+
+# --- web host (ppp-web.exe) -------------------------------------------------
+# The GUI host links the core as a static library, exactly like the CI does
+# before it runs web\build.ps1 -SkipCore.
+if ($Web) {
+    Write-Host '=== core as a static library ==='
+    $coreLib = 'call "' + $devCmd + '" -arch=' + $arch + ' -host_arch=x64 >nul && msbuild "' +
+               (Join-Path $repo 'ppp.vcxproj') + '" /t:Build /p:Configuration=Release /p:Platform=' + $platform +
+               ' /p:BuildCoreLibrary=true /p:ConfigurationType=StaticLibrary /p:VcpkgEnableManifest=false /p:PreferredToolArchitecture=x64 /m /v:minimal'
+    cmd /c $coreLib
+    if ($LASTEXITCODE -ne 0) { throw "core static library build failed with exit code $LASTEXITCODE" }
+
+    Write-Host '=== web host ==='
+    $web = 'call "' + $devCmd + '" -arch=' + $arch + ' -host_arch=x64 >nul && msbuild "' +
+           (Join-Path $repo 'web\ppp-web.vcxproj') + '" /t:Build /p:Configuration=Release /p:Platform=' + $platform +
+           ' /p:PreferredToolArchitecture=x64 /m /v:minimal'
+    cmd /c $web
+    if ($LASTEXITCODE -ne 0) { throw "web host build failed with exit code $LASTEXITCODE" }
+
+    $gui = Join-Path $repo 'web\dist\ppp-web.exe'
+    if (Test-Path $gui) { Write-Host "built: $gui" } else { Write-Warning 'ppp-web.exe was not produced' }
+}
