@@ -147,16 +147,32 @@ public static class VirtualAdapterSelfTest
         byte[] p = new byte[total];
         p[0] = 0x45; p[2] = (byte)(total >> 8); p[3] = (byte)(total & 0xFF);
         p[8] = 64; p[9] = 17;
-        Array.Copy(IPAddress.Parse(source).GetAddressBytes(), 0, p, 12, 4);
-        Array.Copy(IPAddress.Parse(destination).GetAddressBytes(), 0, p, 16, 4);
+        byte[] sourceBytes = IPAddress.Parse(source).GetAddressBytes();
+        byte[] destinationBytes = IPAddress.Parse(destination).GetAddressBytes();
+        Array.Copy(sourceBytes, 0, p, 12, 4);
+        Array.Copy(destinationBytes, 0, p, 16, 4);
         ushort ip = Checksum(p, 0, 20);
         p[10] = (byte)(ip >> 8); p[11] = (byte)(ip & 0xFF);
+
         int u = 20;
+        int udpLength = 8 + payload.Length;
         p[u] = (byte)(sourcePort >> 8); p[u + 1] = (byte)(sourcePort & 0xFF);
         p[u + 2] = (byte)(destinationPort >> 8); p[u + 3] = (byte)(destinationPort & 0xFF);
-        p[u + 4] = (byte)((8 + payload.Length) >> 8); p[u + 5] = (byte)((8 + payload.Length) & 0xFF);
+        p[u + 4] = (byte)(udpLength >> 8); p[u + 5] = (byte)(udpLength & 0xFF);
         Array.Copy(payload, 0, p, u + 8, payload.Length);
-        ushort udp = Checksum(p, u, 8 + payload.Length);
+
+        // The UDP checksum covers the pseudo header as well (source, destination,
+        // zero, protocol, UDP length).  An earlier version omitted it, so the host
+        // dropped the probe with "INET: checksum is invalid" (seen with pktmon) and
+        // the tool reported a false NOT RECEIVED.
+        byte[] pseudo = new byte[12 + udpLength];
+        Array.Copy(sourceBytes, 0, pseudo, 0, 4);
+        Array.Copy(destinationBytes, 0, pseudo, 4, 4);
+        pseudo[8] = 0; pseudo[9] = 17;
+        pseudo[10] = (byte)(udpLength >> 8); pseudo[11] = (byte)(udpLength & 0xFF);
+        Array.Copy(p, u, pseudo, 12, udpLength);
+        ushort udp = Checksum(pseudo, 0, pseudo.Length);
+        if (udp == 0) { udp = 0xFFFF; }
         p[u + 6] = (byte)(udp >> 8); p[u + 7] = (byte)(udp & 0xFF);
         return p;
     }
@@ -226,18 +242,20 @@ try {
     $listener.Close()
 
     Write-Section 'summary'
-    Write-Host ("self-ping   : {0}" -f $(if ($selfPingOk) { 'local' } else { 'NOT local (the stack routes the packet out instead of answering)' }))
-    Write-Host ("injection   : {0}" -f $(if ($received) { 'ok' } else { 'broken' }))
-    if (-not $received -or -not $selfPingOk) {
+    Write-Host ("injection   : {0}" -f $(if ($received) { 'ok (the host stack accepts packets from this adapter)' } else { 'broken (the host stack did not deliver them)' }))
+    Write-Host ("self-ping   : {0}" -f $(if ($selfPingOk) { 'the adapter address is local' } else { 'the host routes packets for its own adapter address out of the interface (informational)' }))
+    if (-not $received) {
         Write-Host ''
-        Write-Host 'The host, not the client, is dropping these packets.  Next steps:'
-        Write-Host '  1. Temporarily exit Huorong or turn off its network protection and rerun this script.'
-        Write-Host '  2. Replace wintun.sys/wintun.dll with a build carrying the 2026 NBL/ring fixes.'
-        Write-Host '  3. Try --tun-driver=tap, and run this script again to compare.'
+        Write-Host 'A bare adapter cannot deliver either, so the send ring, the driver or the host stack is at fault.'
+        Write-Host 'Next steps:'
+        Write-Host '  1. Run it again: a single run is not a verdict, delivery on the affected machines is intermittent.'
+        Write-Host '  2. Compare drivers with --tun-driver=tap (TAP needs dadtransmits=0: without it the address stays'
+        Write-Host '     Tentative on a tunnel adapter and the host drops every frame).'
+        Write-Host '  3. If both drivers fail on a clean boot with no third-party network filters, replace wintun.sys/'
+        Write-Host '     wintun.dll with a build carrying the upstream NBL/ring fixes; see'
+        Write-Host '     docs/TUN_MODE_REMAINING_ISSUES_CN.md section 11.'
     }
-    if (-not $received) { $script:exitCode = 2 }
-    elseif (-not $selfPingOk) { $script:exitCode = 3 }
-    else { $script:exitCode = 0 }
+    $script:exitCode = if ($received) { 0 } else { 2 }
 }
 finally {
     if ($script:adapterIndex -ge 0) {
