@@ -1,6 +1,6 @@
 # 🔐 PPP PRIVATE NETWORK™ 2 — 分支特性说明
 
-> **桌面控制入口迁移至网页 + C++ 核心**：使用 `web/dist/ppp-web.exe` 打开本地网页，通过核心 AI/API 控制运行状态、服务器和配置。沿用确认的 egui 风格网页设计。构建与使用见 [web/README.md](web/README.md)。Rust egui / Slint / TUI / CLI 暂停作为主入口，源码保留。
+> **桌面控制入口迁移至网页 + C++ 核心**：使用 `web/dist/ppp-web.exe` 打开本地网页，通过核心 AI/API 控制运行状态、服务器和配置。沿用确认的 egui 风格网页设计。构建与使用见 [web/README.md](web/README.md)。Rust egui / Slint / TUI / CLI 前端已移除。
 
 <div align="right" style="margin-top:-40px;">
   <kbd style="background:#0366d6;">

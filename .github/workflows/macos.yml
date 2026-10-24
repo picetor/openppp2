@@ -58,12 +58,10 @@ jobs:
           - name: arm64
             arch: arm64
             triple: darwin-arm64
-            rust_target: aarch64-apple-darwin
             repo: Liz-Nozomi/openppp2-macos-arm64-environment
           - name: amd64
             arch: x86_64
             triple: darwin-amd64
-            rust_target: x86_64-apple-darwin
             repo: liulilittle/openppp2-macos-amd64-environment
 
     runs-on: macos-latest

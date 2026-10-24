@@ -236,7 +236,7 @@ catch {
 
 try {
     $capture.CoreProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-        $_.Name -in @('ppp.exe', 'ppp-web.exe', 'ppp-tui.exe')
+        $_.Name -in @('ppp.exe', 'ppp-web.exe')
     } | ForEach-Object {
         $fileVersion = $null
         if (-not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and (Test-Path -LiteralPath $_.ExecutablePath)) {

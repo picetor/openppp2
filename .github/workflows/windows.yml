@@ -59,11 +59,9 @@ jobs:
           - name: amd64
             vcpkg_triplet: x64-windows-static
             msbuild_platform: x64
-            rust_target: x86_64-pc-windows-msvc
           - name: i386
             vcpkg_triplet: x86-windows-static
             msbuild_platform: Win32
-            rust_target: i686-pc-windows-msvc
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
       # Pin the registry and port versions so binary cache entries stay reusable.
@@ -286,6 +284,7 @@ jobs:
           }
 
           $architectureSuffix = if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') { 'x64' } else { 'x32' }
+
           $boostComponents = @('context', 'coroutine', 'thread', 'filesystem')
           $expectedLibraries = @()
           foreach ($component in $boostComponents) {
@@ -338,38 +337,26 @@ jobs:
             exit 1
           }
 
-          # Build the same Release core as a static library for the Rust
-          # front-ends. main.cpp omits its standalone main() under
-          # PPP_CORE_LIBRARY and exposes the C ABI in ppp/core/CoreApi.h.
-          msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=${{ matrix.platform.msbuild_platform }} `
-            /p:BuildCoreLibrary=true `
-            /p:ConfigurationType=StaticLibrary `
-            /t:Build `
-            /p:VcpkgEnableManifest=false `
-            /m
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "MSBuild static core failed with exit code $LASTEXITCODE"
-            exit 1
-          }
-
-          $coreLibCandidates = @(
-            "${{ matrix.platform.msbuild_platform }}\Release\ppp-core.lib",
-            "Release\ppp-core.lib"
-          )
-          $coreLib = $coreLibCandidates |
-            Where-Object { Test-Path -LiteralPath $_ } |
-            Select-Object -First 1
-          if ([string]::IsNullOrWhiteSpace($coreLib)) {
-            throw "Static core library ppp-core.lib was not produced"
-          }
-          Write-Output "Found static core library at: $coreLib"
-
           # ppp-web is the Windows x64 desktop entry point. It links the
-          # in-process core library built above; web UI and icons are embedded
+          # in-process core library; web UI and icons are embedded
           # in the executable, with no separate web/ directory to distribute.
           $webDist = $null
           if ('${{ matrix.platform.msbuild_platform }}' -eq 'x64') {
+
+            # Build the in-process core library that ppp-web links against;
+            # main.cpp omits its standalone main() under PPP_CORE_LIBRARY
+            # and exposes the C ABI in ppp/core/CoreApi.h.
+            msbuild ppp.vcxproj /p:Configuration=Release /p:Platform=x64 `
+              /p:BuildCoreLibrary=true `
+              /p:ConfigurationType=StaticLibrary `
+              /t:Build `
+              /p:VcpkgEnableManifest=false `
+              /m
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild static core failed with exit code $LASTEXITCODE"
+            }
+
             Write-Output "=== Building ppp-web (Release|x64) ==="
             & "${{ github.workspace }}\web\build.ps1" -SkipCore
             if ($LASTEXITCODE -ne 0) {
