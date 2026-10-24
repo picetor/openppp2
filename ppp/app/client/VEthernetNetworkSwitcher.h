@@ -695,7 +695,27 @@ namespace ppp {
                 // Atomic because the RPC/diagnostic threads read it while the data
                 // path updates it.
                 std::atomic<bool>                                                   ipv6_server_has_dataplane_ = false;
-                
+                // Effective tunnel-adapter MTU and the TCP MSS clamp derived from
+                // it. A machine that has run several builds keeps stale TAP
+                // adapters around, and --tun-driver=tap reuses one of them: such
+                // an adapter keeps the MTU its driver was installed with, and
+                // SetIpInterfaceEntry can report success without changing it. The
+                // configured value is therefore not proof of what the adapter
+                // really carries, so the runtime value is recorded here and the
+                // MSS option stays inside it instead of aborting the client.
+                // Kept outside the platform block because the snapshot getters
+                // (GetTunnelMtu) are platform neutral.
+                std::atomic<int>                                                    tun_interface_index_ = -1;
+                // Host packets whose source and destination are both the tunnel
+                // address. A non-zero count proves Windows routes traffic to its own
+                // tunnel address out of the tunnel instead of delivering it locally,
+                // which is the condition that makes the injected (tunnel to host)
+                // direction fail (see docs/TUN_MODE_REMAINING_ISSUES_CN.md §11).
+                std::atomic<uint64_t>                                               host_selfaddressed_packets_ = 0;
+                std::atomic<int>                                                    tun_effective_mtu_ = 0;
+                std::atomic<int>                                                    tun_mss_v4_ = 0;
+                std::atomic<int>                                                    tun_mss_v6_ = 0;
+
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
@@ -733,25 +753,6 @@ namespace ppp {
                 std::shared_ptr<boost::asio::ip::udp::socket>                      local_dns_udp6_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp4_;
                 std::shared_ptr<boost::asio::ip::tcp::acceptor>                    local_dns_tcp6_;
-
-                // Effective tunnel-adapter MTU and the TCP MSS clamp derived from
-                // it. A machine that has run several builds keeps stale TAP
-                // adapters around, and --tun-driver=tap reuses one of them: such
-                // an adapter keeps the MTU its driver was installed with, and
-                // SetIpInterfaceEntry can report success without changing it. The
-                // configured value is therefore not proof of what the adapter
-                // really carries, so the runtime value is recorded here and the
-                // MSS option stays inside it instead of aborting the client.
-                std::atomic<int>                                                    tun_interface_index_ = -1;
-                // Host packets whose source and destination are both the tunnel
-                // address. A non-zero count proves Windows routes traffic to its own
-                // tunnel address out of the tunnel instead of delivering it locally,
-                // which is the condition that makes the injected (tunnel to host)
-                // direction fail (see docs/TUN_MODE_REMAINING_ISSUES_CN.md §11).
-                std::atomic<uint64_t>                                               host_selfaddressed_packets_ = 0;
-                std::atomic<int>                                                    tun_effective_mtu_ = 0;
-                std::atomic<int>                                                    tun_mss_v4_ = 0;
-                std::atomic<int>                                                    tun_mss_v6_ = 0;
 
                 // TUN injection self-test. Everything the client receives from the
                 // tunnel reaches the host only because the client writes packets
