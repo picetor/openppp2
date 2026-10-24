@@ -10,6 +10,7 @@
 #include <ppp/Int128.h>
 #include <ppp/text/Encoding.h>
 #include <ppp/net/Ipep.h>
+#include <ppp/threading/Executors.h>
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/native/ip.h>
 #include <ppp/net/native/eth.h>
@@ -792,11 +793,48 @@ namespace ppp
 
             NetworkInterfacePtr GetNetworkInterfaceByInterfaceIndex(int interface_index) noexcept
             {
+                // The per-index lookup below re-runs a WMI query (300+ ms) on every
+                // call.  Serve it from the cached inventory first and only fall back
+                // to WMI when the adapter is unknown (for example right after it was
+                // created).
+                ppp::vector<NetworkInterfacePtr> interfaces;
+                if (GetAllNetworkInterfaces(interfaces))
+                {
+                    for (const NetworkInterfacePtr& ni : interfaces)
+                    {
+                        if (NULLPTR != ni && ni->InterfaceIndex == interface_index)
+                        {
+                            return ni;
+                        }
+                    }
+                }
                 return GetAllNetworkInterfacesInternal(true, interface_index);
             }
 
             bool GetAllNetworkInterfaces(ppp::vector<NetworkInterfacePtr>& interfaces) noexcept
             {
+                // This enumeration runs two WMI queries (Win32_NetworkAdapterConfiguration
+                // plus Win32_NetworkAdapter for the connection names) and costs
+                // 300-400 ms on this machine (measured 2026-10-24).  It used to run
+                // from periodic probes and from every snapshot poll, stalling the
+                // core event loop for hundreds of milliseconds and delaying tunnel
+                // packet forwarding.  Adapter inventory changes rarely, so serve a
+                // short-lived snapshot of it.
+                static constexpr uint64_t kCacheTtlMs = 30000;
+                static std::mutex cache_mutex;
+                static uint64_t cache_at = 0;
+                static ppp::vector<NetworkInterfacePtr> cache;
+
+                {
+                    std::lock_guard<std::mutex> scope(cache_mutex);
+                    const uint64_t now_ms = ppp::threading::Executors::GetTickCount();
+                    if (cache_at != 0 && now_ms - cache_at < kCacheTtlMs && !cache.empty())
+                    {
+                        interfaces = cache;
+                        return true;
+                    }
+                }
+
                 interfaces.clear();
 
                 if (!GetAllNetworkInterfacesInternal(false, -1, interfaces))
@@ -816,6 +854,12 @@ namespace ppp
                         auto& na = tail->second;
                         ni->ConnectionId = na.NetConnectionID;
                     }
+                }
+
+                {
+                    std::lock_guard<std::mutex> scope(cache_mutex);
+                    cache = interfaces;
+                    cache_at = ppp::threading::Executors::GetTickCount();
                 }
                 return true;
             }

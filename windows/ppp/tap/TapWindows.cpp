@@ -1392,9 +1392,13 @@ namespace ppp
             ScopedIPv4DadOverride dad_override(interface_index);
             if (!dad_override.Active())
             {
-                fprintf(stdout, "[SetAddresses] FAIL: cannot disable IPv4 DAD for tunnel address idx=%d\r\n",
-                    interface_index);
-                return false;
+                // Some Wintun/TAP driver + Windows builds reject
+                // SetIpInterfaceEntry(DadTransmits) with ERROR_INVALID_PARAMETER
+                // even though the address can be assigned normally. DAD is a
+                // startup optimization here, not a requirement: keep the
+                // adapter usable and let WaitForIPv4Address observe Preferred.
+                fprintf(stdout, "[SetAddresses] WARNING: cannot disable IPv4 DAD for tunnel address idx=%d; "
+                    "continuing with the interface's current DAD setting\r\n", interface_index);
             }
 
             fprintf(stdout, "[SetAddresses] Using WMI: idx=%d ip=%s mask=%s gw=%s\r\n",
@@ -1411,7 +1415,8 @@ namespace ppp
             {
                 if (WaitForIPv4Address(interface_index, ip))
                 {
-                    return dad_override.Restore();
+                    dad_override.Restore();
+                return true;
                 }
                 fprintf(stdout, "[SetAddresses] WMI reported success but idx=%d does not own ip=%s; continuing with fallback\r\n",
                     interface_index, ipEP.ToAddressString().data());
@@ -1421,7 +1426,8 @@ namespace ppp
             if (SetAddressesByNetsh(interface_index, ip, mask, gw) &&
                 WaitForIPv4Address(interface_index, ip))
             {
-                return dad_override.Restore();
+                dad_override.Restore();
+                return true;
             }
 
             fprintf(stdout, "[SetAddresses] netsh reported success but idx=%d does not own ip=%s; continuing with IP Helper\r\n",
@@ -1440,7 +1446,8 @@ namespace ppp
                     interface_index, ipEP.ToAddressString().data());
                 return false;
             }
-            return dad_override.Restore();
+            dad_override.Restore();
+                return true;
         }
 
         bool TapWindows::FindAllComponentIds(ppp::unordered_set<ppp::string>& componentIds) noexcept

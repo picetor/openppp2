@@ -333,6 +333,13 @@ namespace ppp {
                 // administrator and is done by
                 // tests/tools/Remove-StaleTunAdapters.ps1 -Apply.
                 ppp::vector<ppp::string>                                            GetStaleTunnelAdapters() noexcept;
+
+                // Short-lived cache for GetStaleTunnelAdapters(): the enumeration
+                // below uses WMI and costs hundreds of milliseconds, and snapshot
+                // builders call it on every poll.
+                std::mutex                                                          stale_adapters_cache_mutex_;
+                uint64_t                                                            stale_adapters_cache_at_ = 0;
+                ppp::vector<ppp::string>                                            stale_adapters_cache_;
 #endif
 #if defined(_WIN32)
                 // Keep the VPN's own IPv4 transport on the physical interface

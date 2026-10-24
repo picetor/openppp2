@@ -3,6 +3,7 @@
 #include <ppp/net/Ipep.h>
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/threading/Timer.h>
+#include <ppp/net/native/icmp.h>
 #include <ppp/threading/Executors.h>
 
 #include <libtcpip/netstack.h>

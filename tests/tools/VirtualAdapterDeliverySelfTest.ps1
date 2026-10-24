@@ -63,19 +63,22 @@ function Show-Environment {
         Write-Host ("wintun.sys  : {0} ({1})" -f $v.FileVersion, (Get-Item $sys).LastWriteTime)
     } else { Write-Host 'wintun.sys  : not installed' }
 
-    $dll = Join-Path $PSScriptRoot $WintunDirectory
     $candidates = @()
-    if ($WintunDirectory) { $candidates += $WintunDirectory }
+    if ($WintunDirectory) {
+        $candidates += if (Test-Path -LiteralPath $WintunDirectory -PathType Container) {
+            Join-Path $WintunDirectory 'wintun.dll'
+        } else { $WintunDirectory }
+    }
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $candidates += (Join-Path $repoRoot 'Driver\x64\wintun.dll')
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) {
+        if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) {
             Write-Host ("wintun.dll  : {0} ({1})" -f (Get-Item $c).VersionInfo.FileVersion, $c)
             $script:wintunDirectory = Split-Path $c -Parent
             break
         }
     }
-    if (-not $script:wintunDirectory) { throw 'wintun.dll not found; pass -WintunDirectory' }
+    if (-not $script:wintunDirectory) { throw 'wintun.dll not found; pass -WintunDirectory (directory or DLL path)' }
 
     $hips = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'Hips|Huorong|wsctrl|Sysdiag' })
     if ($hips.Count -gt 0) {
@@ -110,11 +113,6 @@ public static class VirtualAdapterSelfTest
     private static extern void WintunEndSession(IntPtr session);
     [DllImport("wintun.dll", SetLastError = true)]
     private static extern void WintunCloseAdapter(IntPtr adapter);
-    [DllImport("wintun.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WintunDeleteAdapter(IntPtr adapter,
-        [MarshalAs(UnmanagedType.Bool)] bool forceCloseSessions,
-        [MarshalAs(UnmanagedType.Bool)] out bool rebootRequired);
     [DllImport("wintun.dll", SetLastError = true)]
     private static extern IntPtr WintunAllocateSendPacket(IntPtr session, uint packetSize);
     [DllImport("wintun.dll", SetLastError = true)]
@@ -226,14 +224,11 @@ public static class VirtualAdapterSelfTest
     {
         if (session != IntPtr.Zero) { WintunEndSession(session); session = IntPtr.Zero; }
         if (adapter == IntPtr.Zero) { return "no-adapter"; }
-        bool rebootRequired;
-        bool deleted = WintunDeleteAdapter(adapter, false, out rebootRequired);
-        int error = deleted ? 0 : Marshal.GetLastWin32Error();
+        // Wintun 0.14.x has no WintunDeleteAdapter export. Closing the last
+        // handle removes the adapter this process created.
         WintunCloseAdapter(adapter);
         adapter = IntPtr.Zero;
-        return deleted
-            ? (rebootRequired ? "deleted (reboot required)" : "deleted")
-            : "delete-failed:" + error;
+        return "closed";
     }
 }
 '@

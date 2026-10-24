@@ -379,6 +379,7 @@ namespace ppp {
             config.client.socks_proxy.port = PPP_DEFAULT_SOCKS_PROXY_PORT;
             config.client.socks_proxy.password = "";
             config.client.socks_proxy.username = "";
+            config.client.tun.enabled = true;
             config.client.tun.mtu = 1400;
             config.client.tun.mss_clamp = true;
             config.client.tun.mss_v4 = 1360;
@@ -1637,6 +1638,7 @@ namespace ppp {
                     const bool mtu_present = !tun_json["mtu"].isNull();
                     const bool mss_v4_present = !tun_json["mss-v4"].isNull();
                     const bool mss_v6_present = !tun_json["mss-v6"].isNull();
+                    AssignBoolIfPresent(config.client.tun.enabled, tun_json["enabled"]);
                     AssignIfPresent(config.client.tun.mtu, tun_json["mtu"]);
                     AssignBoolIfPresent(config.client.tun.mss_clamp, tun_json["mss-clamp"]);
                     AssignIfPresent(config.client.tun.mss_v4, tun_json["mss-v4"]);
@@ -1958,6 +1960,7 @@ namespace ppp {
             client["socks-proxy"]["port"] = config.client.socks_proxy.port;
             client["socks-proxy"]["password"] = config.client.socks_proxy.password;
             client["socks-proxy"]["username"] = config.client.socks_proxy.username;
+            client["tun"]["enabled"] = config.client.tun.enabled;
             client["tun"]["mtu"] = config.client.tun.mtu;
             client["tun"]["mss-clamp"] = config.client.tun.mss_clamp;
             client["tun"]["mss-v4"] = config.client.tun.mss_v4;

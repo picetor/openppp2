@@ -403,6 +403,7 @@ public:
     bool                                            IsHeadless() const noexcept { return headless_; }
     // Build the runtime snapshot JSON consumed by the Rust TUI front-end.
     bool                                            BuildRuntimeSnapshot(Json::Value& snapshot) noexcept;
+    bool                                            GetCachedRuntimeSnapshot(Json::Value& snapshot) noexcept;
     // Execute one RPC command (methods are dispatched on the io_context thread).
     bool                                            ExecuteRpcCommand(const ppp::string& method, const Json::Value& params, Json::Value& result, ppp::string& error) noexcept;
     // Preserve the concrete startup stage for the in-process host. The
@@ -2711,14 +2712,25 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
             }
         }
         mode = ppp::ToLower<ppp::string>(ppp::ATrim<ppp::string>(mode));
-        // `client.proxy-only` is the configuration equivalent of
-        // `--mode=proxy`. It must be decided before the loopback/TAP setup;
-        // changing this structural mode during a hot switch would require
-        // tearing down the operating-system network takeover.
-        proxy_mode_ = mode == "proxy" || configuration->client.proxy_only;
-        client_mode_ = proxy_mode_ || IsModeClientOrServer(argc, argv);
-        fprintf(stdout, "[CoreStartup] stage=mode-resolve mode='%s' client=%d proxy=%d\r\n",
-            mode.data(), client_mode_ ? 1 : 0, proxy_mode_ ? 1 : 0);
+        // Client-family runtime: `client`, legacy `proxy`, or a client
+        // configuration with TUN disabled. `proxy` is now only an alias for
+        // "client without TUN"; it no longer selects a separate role.
+        // TUN can be disabled by --tun-enabled=no, client.tun.enabled=false,
+        // or the legacy client.proxy-only flag. Local HTTP/SOCKS listeners and
+        // the system proxy are independent and optional.
+        const bool mode_client = mode == "client" || IsModeClientOrServer(argc, argv);
+        const bool mode_proxy = mode == "proxy";
+        const bool wants_client = mode_client || mode_proxy || configuration->client.proxy_only;
+        bool tun_enabled = configuration->client.tun.enabled;
+        const ppp::string tun_enabled_arg = ppp::GetCommandArgument("--tun-enabled", argc, argv);
+        if (!tun_enabled_arg.empty())
+        {
+            tun_enabled = ppp::ToBoolean(tun_enabled_arg.data());
+        }
+        client_mode_ = wants_client;
+        proxy_mode_ = wants_client && (mode_proxy || configuration->client.proxy_only || !tun_enabled);
+        fprintf(stdout, "[CoreStartup] stage=mode-resolve mode='%s' client=%d no_tun=%d tun_enabled=%d\r\n",
+            mode.data(), client_mode_ ? 1 : 0, proxy_mode_ ? 1 : 0, tun_enabled ? 1 : 0);
 
         if (client_mode_ && !LoadServerConfigurations(argc, argv, configuration, path))
         {
@@ -2767,11 +2779,11 @@ int PppApplication::PreparedArgumentEnvironment(int argc, const char* argv[]) no
                 configuration->client.socks_proxy.port <= IPEndPoint::MaxPort;
             if (!http_enabled && !socks_enabled)
             {
-                LOG_INFO("Proxy control mode: no HTTP/SOCKS listener; server profiles and transport loaded, TUN/routes/DNS disabled");
+                LOG_INFO("Client no-TUN mode: no HTTP/SOCKS listener; server profiles and transport loaded, TUN/routes/DNS disabled");
             }
             else
             {
-                LOG_INFO("Proxy mode: HTTP=%s:%d SOCKS=%s:%d; TUN/routes/DNS disabled, system-proxy optional",
+                LOG_INFO("Client no-TUN mode: HTTP=%s:%d SOCKS=%s:%d; TUN/routes/DNS disabled, system-proxy optional",
                     configuration->client.http_proxy.bind.data(), configuration->client.http_proxy.port,
                     configuration->client.socks_proxy.bind.data(), configuration->client.socks_proxy.port);
             }
@@ -3187,6 +3199,11 @@ void PppApplication::PrintHelpInformation() noexcept
     printf("│ %-*s │ %-*s │ %-*s │\n", 
         col_option_width, "--tun-host=[yes|no]", 
         col_description_width, "Prefer host network", 
+        col_default_width, "yes");
+
+    printf("│ %-*s │ %-*s │ %-*s │\n", 
+        col_option_width, "--tun-enabled=[yes|no]", 
+        col_description_width, "Create a kernel TUN adapter", 
         col_default_width, "yes");
     
     printf("│ %-*s │ %-*s │ %-*s │\n", 
@@ -3893,6 +3910,54 @@ bool PppApplication::GetTransmissionStatistics(uint64_t& incoming_traffic, uint6
 // Build the runtime snapshot JSON consumed by the Rust TUI front-end.
 // Field names and semantics follow the Android get_runtime_snapshot contract
 // (tests/contracts/runtime-snapshot/) plus desktop-only extensions.
+// -----------------------------------------------------------------------------
+// Runtime snapshot cache.
+//
+// The builder below enumerates adapters (WMI), the IPv4/IPv6 route tables and
+// the geo tables.  It used to run inside the get_snapshot RPC, so every web
+// panel poll (1/s) occupied the core's single io_context for several hundred
+// milliseconds and delayed tunnel packet forwarding (measured 2026-10-24:
+// concurrent get_health calls completed ~505 ms apart, ICMP RTT 190..1500 ms
+// while a direct ping to the same server stayed at 168..173 ms).
+//
+// The snapshot is now rebuilt on the periodic tick and the RPC only copies the
+// latest result, so a poll never blocks the data plane.
+// -----------------------------------------------------------------------------
+static std::mutex                                       g_snapshot_cache_mutex;
+static Json::Value                                      g_snapshot_cache;
+static std::atomic<uint64_t>                            g_snapshot_cache_at{ 0 };
+static constexpr uint64_t                               g_snapshot_rebuild_interval_ms = 5000;
+static constexpr uint64_t                               g_snapshot_cache_max_age_ms    = 15000;
+
+bool PppApplication::GetCachedRuntimeSnapshot(Json::Value& snapshot) noexcept
+{
+    const uint64_t now_ms = Executors::GetTickCount();
+    {
+        std::lock_guard<std::mutex> scope(g_snapshot_cache_mutex);
+        const uint64_t cached_at = g_snapshot_cache_at.load(std::memory_order_relaxed);
+        if (!g_snapshot_cache.isNull() && cached_at != 0 && now_ms - cached_at <= g_snapshot_cache_max_age_ms)
+        {
+            snapshot = g_snapshot_cache;
+            return true;
+        }
+    }
+
+    // Cold cache (startup, or the tick paused): build once and publish it.
+    Json::Value fresh;
+    if (!BuildRuntimeSnapshot(fresh))
+    {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> scope(g_snapshot_cache_mutex);
+        g_snapshot_cache = fresh;
+        g_snapshot_cache_at.store(now_ms, std::memory_order_relaxed);
+    }
+    snapshot = fresh;
+    return true;
+}
+
 bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
 {
     snapshot = Json::Value(Json::objectValue);
@@ -3900,7 +3965,7 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
     snapshot["generation"] = (Json::UInt64)Executors::GetTickCount();
     snapshot["monotonic_ms"] = (Json::UInt64)Executors::GetTickCount();
     snapshot["phase"] = "idle";
-    snapshot["role"] = proxy_mode_ ? "proxy" : (client_mode_ ? "client" : "server");
+    snapshot["role"] = client_mode_ ? "client" : "server";
     snapshot["server"] = "";
     snapshot["guid"] = "";
     snapshot["vpn_server"] = "pending";
@@ -4294,6 +4359,7 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
         // Network interfaces (TUN + physical NIC).
         Json::Value network(Json::objectValue);
         network["mode"] = client->IsProxyOnly() ? "proxy-only" : "tun";
+        network["tun_enabled"] = !client->IsProxyOnly();
         network["adapter"] = client->IsProxyOnly() ? "none" : "";
         network["logical_ipv4"] = "";
         network["logical_ipv6"] = "";
@@ -4700,7 +4766,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
     if (method == "get_health")
     {
         Json::Value snapshot;
-        if (!BuildRuntimeSnapshot(snapshot))
+        if (!GetCachedRuntimeSnapshot(snapshot))
         {
             error = "failed to build runtime snapshot";
             return false;
@@ -4742,7 +4808,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
         }
 
         Json::Value snapshot;
-        if (!BuildRuntimeSnapshot(snapshot))
+        if (!GetCachedRuntimeSnapshot(snapshot))
         {
             error = "failed to build runtime snapshot";
             return false;
@@ -5045,7 +5111,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
 
     if (method == "get_snapshot")
     {
-        return BuildRuntimeSnapshot(result);
+        return GetCachedRuntimeSnapshot(result);
     }
 
     if (method == "get_log_level")
@@ -5233,7 +5299,7 @@ bool PppApplication::ExecuteRpcCommand(const ppp::string& method, const Json::Va
     if (method == "get_outbounds")
     {
         Json::Value snapshot;
-        if (!BuildRuntimeSnapshot(snapshot)) return false;
+        if (!GetCachedRuntimeSnapshot(snapshot)) return false;
         result = snapshot.get("outbounds", Json::Value(Json::arrayValue));
         return true;
     }
@@ -5312,6 +5378,41 @@ bool PppApplication::OnTick(uint64_t now) noexcept
     using NetworkState        = VEthernetExchanger::NetworkState;
 
     MaintainCoreLogFile(now);
+
+    // Snapshot builder thread.
+    //
+    // One build costs 250-550 ms.  Running it on the io_context (either from the
+    // RPC or from this tick) periodically stalled packet forwarding, which showed
+    // up as ICMP RTT spikes while a direct ping to the same server stayed flat.
+    // A dedicated thread owns the rebuild now; RPC handlers only read the cache.
+    {
+        static std::once_flag snapshot_builder_once;
+        std::call_once(snapshot_builder_once, [this]() noexcept
+        {
+            std::weak_ptr<PppApplication> weak = weak_from_this();
+            std::thread([weak]() noexcept
+            {
+                for (;;)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+                    std::shared_ptr<PppApplication> app = weak.lock();
+                    if (NULLPTR == app)
+                    {
+                        return;
+                    }
+
+                    Json::Value snapshot;
+                    if (app->BuildRuntimeSnapshot(snapshot))
+                    {
+                        std::lock_guard<std::mutex> scope(g_snapshot_cache_mutex);
+                        g_snapshot_cache = snapshot;
+                        g_snapshot_cache_at.store(Executors::GetTickCount(), std::memory_order_relaxed);
+                    }
+                }
+            }).detach();
+        });
+    }
 
 #if defined(_WIN32)
     // Keep an inbound allow rule on the tunnel subnet for the replies the
@@ -6415,7 +6516,7 @@ int PppApplication::Main(int argc, const char* argv[]) noexcept
     }
 
     // Prevent multiple instances
-    ppp::string rerun_name = (proxy_mode_ ? "proxy://" : (client_mode_ ? "client://" : "server://")) + configuration_path_;
+    ppp::string rerun_name = (client_mode_ ? "client://" : "server://") + configuration_path_;
     if (prevent_rerun_.Exists(rerun_name.data()))
     {
         SetStartupFailure("another core instance is already running");

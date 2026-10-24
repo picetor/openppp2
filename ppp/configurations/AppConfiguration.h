@@ -306,12 +306,13 @@ namespace ppp {
                     ppp::string                                             password;       ///< SOCKS5 authentication password; empty = no authentication.
                 }                                                           socks_proxy;
                 struct {
+                    bool                                                    enabled;        ///< Create a kernel TUN adapter; false = client runtime without TUN (local proxies and system proxy remain optional).
                     int                                                     mtu;            ///< Effective TUN MTU; normalized to 1280..1500 for dual-stack operation.
                     bool                                                    mss_clamp;      ///< Clamp TCP SYN MSS before tunnel encapsulation.
                     int                                                     mss_v4;         ///< IPv4 MSS ceiling; never exceeds mtu - 40.
                     int                                                     mss_v6;         ///< IPv6 MSS ceiling; never exceeds mtu - 60.
                 }                                                           tun;
-                bool                                                        proxy_only;     ///< Local HTTP/SOCKS runtime; suppresses host TUN routes/DNS takeover while native policy remains active (also implied by --mode=proxy).
+                bool                                                        proxy_only;     ///< Legacy alias for client.tun.enabled=false; local HTTP/SOCKS listeners are optional.
             }                                                               client;         ///< Client-mode specific parameters.
             struct {
                 bool                                                        enabled;        ///< Enable telemetry output when true; default false for zero-cost on low-end hardware.

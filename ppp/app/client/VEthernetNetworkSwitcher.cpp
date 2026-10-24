@@ -7403,6 +7403,25 @@ namespace ppp {
             }
 
             ppp::vector<ppp::string> VEthernetNetworkSwitcher::GetStaleTunnelAdapters() noexcept {
+                // The enumeration below goes through WMI
+                // (Win32_NetworkAdapterConfiguration plus a second Win32_NetworkAdapter
+                // query for the connection names), which costs hundreds of
+                // milliseconds.  Snapshot builders call this on every poll, so the
+                // whole core event loop stalled for ~0.5 s per request and delayed
+                // packet forwarding (measured 2026-10-24: five concurrent
+                // get_health calls completed 505 ms apart).  The list is diagnostic
+                // only and changes when an adapter is added or removed, therefore
+                // a short cache is enough to keep the data plane responsive.
+                constexpr uint64_t stale_adapters_cache_ttl_ms = 30000;
+                {
+                    std::lock_guard<std::mutex> scope(stale_adapters_cache_mutex_);
+                    const uint64_t now_ms = Executors::GetTickCount();
+                    if (stale_adapters_cache_at_ != 0 && now_ms - stale_adapters_cache_at_ < stale_adapters_cache_ttl_ms) {
+                        return stale_adapters_cache_;
+                    }
+                }
+
+                const uint64_t enumerate_started = Executors::GetTickCount();
                 ppp::vector<ppp::string> adapters;
                 ppp::vector<ppp::win32::network::NetworkInterfacePtr> interfaces;
                 if (!ppp::win32::network::GetAllNetworkInterfaces(interfaces)) {
@@ -7456,6 +7475,17 @@ namespace ppp {
 
                     adapters.emplace_back(std::move(text));
                 }
+
+                // Publish the freshly enumerated list (copy: callers own their vector).
+                {
+                    std::lock_guard<std::mutex> scope(stale_adapters_cache_mutex_);
+                    stale_adapters_cache_ = adapters;
+                    stale_adapters_cache_at_ = Executors::GetTickCount();
+                }
+                LOG_DEBUG("VEthernetNetworkSwitcher::GetStaleTunnelAdapters: enumerated %zu adapter(s) in %llu ms (cached for %llu ms)",
+                    adapters.size(),
+                    (unsigned long long)(Executors::GetTickCount() - enumerate_started),
+                    (unsigned long long)stale_adapters_cache_ttl_ms);
 
                 return adapters;
             }
@@ -7522,9 +7552,18 @@ namespace ppp {
                             continue;
                         }
 
-                        if (gateway.is_link_local() &&
-                            route.NextHop.Ipv6.sin6_scope_id != gateway_scope) {
-                            continue;
+                        // Windows reports sin6_scope_id = 0 for link-local next hops
+                        // that were installed through CreateIpForwardEntry2 (the zone
+                        // lives inside the address, not in the row), so a strict
+                        // comparison against the interface index rejected the route
+                        // that had just been added and aborted every IPv6 server
+                        // connection.  Accept the interface zone as well as the
+                        // unspecified zero.
+                        if (gateway.is_link_local()) {
+                            const unsigned long installed_scope = route.NextHop.Ipv6.sin6_scope_id;
+                            if (installed_scope != 0 && installed_scope != gateway_scope) {
+                                continue;
+                            }
                         }
 
                         found = true;
@@ -7561,7 +7600,12 @@ namespace ppp {
                     return false;
                 }
 
-                if (!route_is_installed()) {
+                bool installed = route_is_installed();
+                for (int attempt = 0; !installed && attempt < 5; ++attempt) {
+                    ::Sleep(20);
+                    installed = route_is_installed();
+                }
+                if (!installed) {
                     if (created) {
                         ipv6_server_routes_.emplace_back(IPv6ServerRoute{
                             address, underlying->IPv6GatewayServer, underlying->Index, true });
