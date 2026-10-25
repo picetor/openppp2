@@ -255,6 +255,15 @@
             app:key="tunMux"
             app:title="@string/tun_mux"
             app:useSimpleSummaryProvider="true" />
+        <io.nekohasekai.sagernet.widget.SimpleMenuPreference
+            app:defaultValue="auto"
+            app:entries="@array/tun_ipv6_entry"
+            app:entryValues="@array/tun_ipv6_value"
+            app:dialogMessage="@string/tun_ipv6_sum"
+            app:icon="@drawable/ic_baseline_airplanemode_active_24"
+            app:key="tunIpv6Mode"
+            app:title="@string/tun_ipv6"
+            app:useSimpleSummaryProvider="true" />
         <EditTextPreference
             app:defaultValue="-1"
             app:dialogMessage="@string/tun_mux_acceleration_sum"

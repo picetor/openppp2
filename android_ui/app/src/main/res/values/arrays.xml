@@ -272,6 +272,16 @@
         <item>@string/group_order_by_delay</item>
     </string-array>
 
+    <string-array name="tun_ipv6_entry">
+        <item>自动（隧道能承载 IPv6 才接管）</item>
+        <item>直连保留（不接管 IPv6）</item>
+        <item>阻止泄漏（接管并丢弃）</item>
+    </string-array>
+    <string-array name="tun_ipv6_value">
+        <item>auto</item>
+        <item>direct</item>
+        <item>block</item>
+    </string-array>
     <string-array name="tun_mux_entry">
         <item>关闭</item>
         <item>1</item>

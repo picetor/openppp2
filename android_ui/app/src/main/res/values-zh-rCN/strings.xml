@@ -280,6 +280,8 @@
     <string name="tunnel_dns_2">隧道 DNS 2</string>
     <string name="openppp2_tunnel_settings">OpenPPP2 隧道参数</string>
     <string name="tun_mux">TUN MUX</string>
+    <string name="tun_ipv6">IPv6</string>
+    <string name="tun_ipv6_sum">自动：隧道能承载 IPv6 时才接管；直连保留：不接管 ::/0，分流直连的 IPv6 继续走本地网络；阻止泄漏：接管 ::/0 并丢弃（所有 App 的 IPv6 都不可用）。修改后需重启 VPN。</string>
     <string name="tun_mux_acceleration">TUN MUX 加速</string>
     <string name="tun_mux_acceleration_sum">--tun-mux-acceleration 参数值（1-3），留空或 -1 表示不启用</string>
     <string name="tun_vnet">虚拟网卡 (vnet)</string>

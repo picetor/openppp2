@@ -108,6 +108,11 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var directDns1 by configurationStore.string(Key.DNS_DIRECT1) { "223.5.5.5" }
     var directDns2 by configurationStore.string(Key.DNS_DIRECT2) { "119.29.29.29" }
     var tunIp by configurationStore.string(Key.TUN_IP) { "10.0.0.2" }
+    // auto | direct | block, see VpnService.startVpn()
+    var tunIpv6Mode by configurationStore.string(Key.TUN_IPV6_MODE) { "auto" }
+    // Last IPv6 lease the server assigned; used as the tunnel address on the
+    // next connect so the kernel owns the address the server NAT66s.
+    var tunIpv6Lease by configurationStore.string(Key.TUN_IPV6_LEASE) { "" }
     var tunPrefix by configurationStore.stringToInt(Key.TUN_PREFIX) { 24 }
     var tunMux by configurationStore.stringToInt(Key.TUN_MUX) { 0 }
     var tunMuxAcceleration by configurationStore.stringToInt(Key.TUN_MUX_ACCELERATION) { -1 }

@@ -436,6 +436,11 @@ struct libopenppp2_network_interface final {
     // VEthernetExchanger::TranslateIPv6Packet translates between this
     // address and the server-assigned lease (AssignedIPv6Address).
     boost::asio::ip::address                                                IPv6Address;
+
+    // VpnService IPv6 policy for the tunnel: 0 = the app claims ::/0
+    // (auto/block), 1 = direct (IPv6 stays on the host uplink).  Copied onto
+    // the tap so the client can decide whether an AAAA answer is usable.
+    int                                                                     IPv6Mode = 0;
 };
 
 class libopenppp2_application final : public std::enable_shared_from_this<libopenppp2_application> {
@@ -1475,6 +1480,75 @@ __LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1mux_1accel
 
 // package: supersocksr.ppp.android.c
 // public final class libopenpppp2
+// public native int set_ipv6_mode(int mode)
+//
+// Tells the core which IPv6 policy the VpnService is using for this tunnel:
+//   0 = auto/block: Builder claims ::/0, so IPv6 packets reach the client and
+//       the raw NAT path forwards them to the server (which NAT66s them onto
+//       the lease it assigned).
+//   1 = direct: ::/0 is left on the host uplink, so the tunnel carries no
+//       IPv6 and AAAA answers are still valid for the host's own connectivity.
+// Without this the client had no platform-side IPv6 signal at all, and the
+// default-write failure of a route helper that cannot touch a VpnService TUN
+// was read as "no IPv6 data plane", stripping every AAAA answer.
+// Returns LIBOPENPPP2_ERROR_SUCCESS (0) on success.
+__LIBOPENPPP2__(jint) Java_supersocksr_ppp_android_c_libopenppp2_set_1ipv6_1mode(JNIEnv* env, jobject* this_, jint mode) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    ppp::diagnostics::SetLastErrorCode(ppp::diagnostics::ErrorCode::Success);
+
+    std::shared_ptr<libopenppp2_application> app = libopenppp2_application::GetDefault();
+    if (NULLPTR == app) {
+        return libopenppp2_set_last_error_and_return(ppp::diagnostics::ErrorCode::AppContextUnavailable, LIBOPENPPP2_ERROR_APPLICATIION_UNINITIALIZED);
+    }
+
+    const int value = (mode == 1) ? 1 : 0;
+    int err = libopenppp2_application::Invoke(
+        [&app, value]() noexcept {
+            std::shared_ptr<libopenppp2_network_interface> network_interface = app->network_interface_;
+            if (NULLPTR == network_interface) {
+                return LIBOPENPPP2_ERROR_NETWORK_INTERFACE_NOT_CONFIGURED;
+            }
+            network_interface->IPv6Mode = value;
+            return LIBOPENPPP2_ERROR_SUCCESS;
+        });
+    __android_log_print(ANDROID_LOG_INFO, "libopenppp2", "set_ipv6_mode: mode=%d err=%d", value, err);
+    return libopenppp2_set_last_error_for_result(err);
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
+// public native string get_ipv6_lease()
+//
+// Returns the IPv6 lease the primary server assigned for this session (for
+// example "fd42:4242:4242:0:ed92:955f:2668:4f8a"), or null when the server
+// assigned none or has not answered yet.  VpnService remembers it so the next
+// VpnService.Builder can configure the tunnel with that address: then the
+// kernel TUN owns the same address the server NAT66s, exactly like the Windows
+// client, and VEthernetExchanger::TranslateIPv6Packet becomes a no-op instead
+// of rewriting every packet's source from the leak-block ULA.
+__LIBOPENPPP2__(jstring) Java_supersocksr_ppp_android_c_libopenppp2_get_1ipv6_1lease(JNIEnv* env, jobject* this_) noexcept {
+    __LIBOPENPPP2_MAIN__;
+
+    std::shared_ptr<libopenppp2_application> app = libopenppp2_application::GetDefault();
+    if (NULLPTR == app) {
+        return JNIENV_NewStringUTF(env, NULLPTR);
+    }
+
+    std::shared_ptr<VEthernetNetworkSwitcher> client = std::atomic_load(&app->client_);
+    if (NULLPTR == client) {
+        return JNIENV_NewStringUTF(env, NULLPTR);
+    }
+
+    boost::asio::ip::address lease = client->ServerAssignedIPv6Address();
+    if (!lease.is_v6() || lease.is_unspecified()) {
+        return JNIENV_NewStringUTF(env, NULLPTR);
+    }
+    return JNIENV_NewStringUTF(env, lease.to_string().c_str());
+}
+
+// package: supersocksr.ppp.android.c
+// public final class libopenpppp2
 // public native int set_log_level(int level)
 //
 // Mirrors the in-app LogLevel setting (0=NONE, 1=ERROR, 2=WARNING,
@@ -1766,6 +1840,9 @@ static std::shared_ptr<ITap>                                                    
 
     void* tun = (void*)(std::intptr_t)tun_fd;
     std::shared_ptr<ITap> tap = ppp::tap::TapLinux::From(context, dev, tun, ip, gw, mask, promisc, hosted_network);
+    if (NULLPTR != tap) {
+        tap->IPv6Mode = network_interface->IPv6Mode;
+    }
     if (NULLPTR != tap && network_interface->IPv6Address.is_v6()) {
         // The Android TUN's kernel-side IPv6 address was fixed by
         // VpnService.Builder (e.g. the leak-block ULA).  Mirror it onto the

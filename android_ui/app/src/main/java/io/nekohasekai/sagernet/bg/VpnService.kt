@@ -82,9 +82,8 @@ class VpnService : BaseVpnService(),
     private var linkStateHandler: Handler? = null
     override var wakeLock: PowerManager.WakeLock? = null
     private var active = false
-    private var activeGatewayLoopback: String? = null
-    private var gatewayFixVerified = false
-    private var gatewayFixLastFullCheck = 0L
+    // One-shot guard for the IPv6 lease probe (see rememberIpv6Lease).
+    private var ipv6LeaseQueryFailed = false
 
     @Volatile
     var underlyingNetwork: Network? = null
@@ -118,9 +117,6 @@ class VpnService : BaseVpnService(),
         } catch (e: Throwable) {
             Logs.w(e)
         }
-        removeTun0OverrideRules()
-        activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
-        activeGatewayLoopback = null
         stopLinkStatePoller()
         LogCollector.stop()
         vpnThread?.interrupt()
@@ -236,6 +232,10 @@ class VpnService : BaseVpnService(),
                     6
                 }
                 publishLinkState(ls)
+                // The server answers with its IPv6 lease right after the
+                // handshake; remember it so the next tunnel is built with that
+                // address instead of the leak-block ULA.
+                rememberIpv6Lease()
                 linkStateHandler?.postDelayed(this, 1000L)
             }
         })
@@ -258,18 +258,12 @@ class VpnService : BaseVpnService(),
                 if (data.state == BaseService.State.Connecting) {
                     data.changeState(BaseService.State.Connected)
                 }
-                // netd assigns a NEW route-table id every time the VPN network
-                // is (re)created, so the gateway-loopback rule installed at
-                // startVpn() may target a stale table.  Re-check now that the
-                // link is up and repair the rule to match the CURRENT table.
-                ensureGatewayLoopbackFix()
             }
             3 -> data.changeState(BaseService.State.Stopping)
             6 -> {
                 if (data.state != BaseService.State.Stopped) {
                     data.changeState(BaseService.State.Stopped)
                 }
-                gatewayFixVerified = false
             }
         }
     }
@@ -301,6 +295,30 @@ class VpnService : BaseVpnService(),
         val dnsRulesList = options.optString("dnsRulesList", "")
         val routeMode = options.optString("routeMode", "")
         val extraArgs = options.optString("extraArgs", "")
+        // IPv6 policy (VpnService routing is per address family and applies to
+        // every app that is not excluded, so this is an all-or-nothing choice):
+        //   block  : claim ::/0 and drop.  Leak-safe, but the phone's native
+        //            IPv6 is unusable for every app, including bypassed ones.
+        //   direct : do not claim ::/0.  Bypassed traffic keeps native IPv6;
+        //            the core still strips AAAA for destinations the policy
+        //            resolves over the tunnel, which has no IPv6 data plane.
+        //   auto   : block only while the tunnel can really carry IPv6.  The
+        //            Android IPv6 input path is still a stub, so auto == direct
+        //            until that data plane exists.
+        val ipv6Mode = options.optString("ipv6Mode", "auto")
+        // auto stays on the leak-safe side until the core can report a
+        // server-provided IPv6 data plane; direct is the explicit opt-out.
+        val blockIpv6 = ipv6Mode != "direct"
+
+        // The server hands this tunnel an IPv6 lease (NAT66/GUA).  Android's
+        // kernel-side TUN address is fixed by VpnService.Builder, so without
+        // this the core has to rewrite the source of every IPv6 packet between
+        // the leak-block ULA and that lease.  Reusing the lease the server
+        // assigned last time makes the TUN own the very address the server
+        // NAT66s -- the Windows client does the same with ApplyClientAddress --
+        // and the rewrite becomes a no-op.  A stale entry is harmless: the core
+        // still translates whenever the server assigns something else.
+        val tunIpv6Address = cachedIpv6Lease() ?: IPV6_BLOCK_ADDRESS
 
         // 基础分流（ip）模式：优先使用 files/rules/ 下的桌面三文件。
         var effectiveBypass = bypassIpList
@@ -339,7 +357,7 @@ class VpnService : BaseVpnService(),
             }
         }
         val directDns = listOf(dnsDirect1, dnsDirect2).map { it.trim() }.filter { it.isNotEmpty() }
-        Log.i(TAG, "vpn options tunIp=$vpnIp/$vpnPrefix mtu=$mtu mux=$effectiveMux proxyOnly=$proxyOnly routeMode=$routeMode")
+        Log.i(TAG, "vpn options tunIp=$vpnIp/$vpnPrefix mtu=$mtu mux=$effectiveMux proxyOnly=$proxyOnly routeMode=$routeMode ipv6=$ipv6Mode/$blockIpv6")
 
         // Anchor relative paths in the AppConfiguration JSON to filesDir.
         try {
@@ -468,10 +486,23 @@ class VpnService : BaseVpnService(),
             builder.addRoute(route, routePrefix)
         }
 
-        if (!proxyOnly) {
-            builder.addAddress(IPV6_BLOCK_ADDRESS, 128)
+        if (!proxyOnly && blockIpv6) {
+            builder.addAddress(tunIpv6Address, 128)
             builder.addRoute("::", 0)
             builder.allowFamily(OsConstants.AF_INET6)
+            // Domestic IPv6 must leave through the local link, not the tunnel.
+            // Android hands this client raw IPv6 packets and there is no
+            // unprivileged way to inject them back onto the physical network
+            // (the IPv4 direct path terminates TCP in lwIP and dials a
+            // protected socket; the IPv6 path has no accept hook, so
+            // OnIPv6PacketInput can only Nat() it to the server, which made a
+            // domestic IPv6 site see the server's address).  Excluding the
+            // domestic prefixes lets the kernel route them natively.  Only when
+            // a bypass policy is active: a global-proxy profile must keep every
+            // destination, domestic included, inside the tunnel.
+            if (routeMode.isNotEmpty()) {
+                applyDirectIpv6Exclusions(builder)
+            }
         }
 
         if (!proxyOnly) {
@@ -563,7 +594,7 @@ class VpnService : BaseVpnService(),
         vpnInterface = null
 
         val niResult = libopenppp2.set_network_interface(
-            tunFd, effectiveMux, vnet, blockQuic, staticMode, vpnIp, vpnMask, IPV6_BLOCK_ADDRESS
+            tunFd, effectiveMux, vnet, blockQuic, staticMode, vpnIp, vpnMask, tunIpv6Address
         )
         if (niResult != 0) {
             throw IllegalStateException(
@@ -571,27 +602,21 @@ class VpnService : BaseVpnService(),
             )
         }
 
+        // Hand the IPv6 policy to the core.  A VpnService TUN cannot be
+        // reconfigured from native code, so without this the client sees its
+        // own route install fail and concludes it has no IPv6 data plane,
+        // stripping every AAAA answer even when the server assigned one.
+        try {
+            libopenppp2.set_ipv6_mode(if (blockIpv6) 0 else 1)
+        } catch (e: Throwable) {
+            Logs.w(e)
+        }
+
         if (effectiveMuxAcceleration > 0) {
             try {
                 libopenppp2.set_mux_acceleration(effectiveMuxAcceleration)
             } catch (_: UnsatisfiedLinkError) {
             }
-        }
-
-        // ---- Force all traffic through the tunnel (root) ----
-        // Android 8+ lets apps bind sockets to a physical network (Chrome
-        // binds WiFi netId 195 -> fwmark 0xc3). netd installs `ip rule 11500
-        // fwmark 0xc3 lookup wlan0` ABOVE the VPN rule (12000, tun0), so
-        // those sockets bypass the tunnel. With root we delete the 11500
-        // rules. Verified on Nokia 9 / Android 9.
-        if (!proxyOnly) {
-            installTun0OverrideRules()
-            // vnet 回环修复：Android 系统 VpnService 自动规则（pref 12000）
-            // 用 uidrange 排除 VPN 进程 uid，导致 vnet 模式的内核回环
-            // SYN-ACK（目标=网关，如 10.0.0.1）被路由进空表丢弃。
-            // 加一条高优先级规则：发往网关的包（只有回环流量）走 tun0 表。
-            activeGatewayLoopback = gatewayFor(vpnIp, vpnMask)
-            activeGatewayLoopback?.let { installGatewayLoopbackFix(it) }
         }
 
         // Start VPN in background thread (run() is blocking). 8 MiB stack for
@@ -617,9 +642,6 @@ class VpnService : BaseVpnService(),
                 Logs.w(e)
             } finally {
                 isRunning = false
-                removeTun0OverrideRules()
-                activeGatewayLoopback?.let { removeGatewayLoopbackFix(it) }
-                activeGatewayLoopback = null
                 stopLinkStatePoller()
                 LogCollector.stop()
                 releaseWakeLock()
@@ -644,235 +666,109 @@ class VpnService : BaseVpnService(),
     override fun onRevoke() = stopRunner()
 
     // ------------------------------------------------------------------
-    // Root-based routing override (ported from openppp2 PppVpnService).
-    // ------------------------------------------------------------------
-
-    private fun installTun0OverrideRules() {
-        if (!isRootAvailable()) {
-            Log.i(TAG, "tun0 override: root not available, skipping (Chrome may bypass VPN)")
-            return
-        }
-        val commands = listOf(
-            "ip rule del from all fwmark 0xc3/0xffff iif lo lookup wlan0 pref 11500",
-            "ip rule del from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0 pref 11500"
-        )
-        val results = runRootCommands(commands)
-        var deleted = 0
-        for ((cmd, ok) in commands.zip(results)) {
-            if (ok) {
-                deleted++
-                Log.i(TAG, "tun0 override: deleted $cmd")
-            }
-        }
-        Log.i(TAG, "tun0 override deleted $deleted/${commands.size} bypass rules")
-        val remaining = runRootCommand("ip rule show | grep 0xc3")
-        Log.i(TAG, "tun0 override: remaining 0xc3 rules: ${remaining?.trim().orEmpty()}")
-    }
-
-    private fun removeTun0OverrideRules() {
-        if (!isRootAvailable()) return
-        val commands = listOf(
-            "ip rule add from all fwmark 0xc3/0xffff iif lo lookup wlan0 pref 11500",
-            "ip rule add from all fwmark 0x100c3/0x1ffff iif lo lookup wlan0 pref 11500"
-        )
-        val results = runRootCommands(commands)
-        for ((cmd, ok) in commands.zip(results)) {
-            if (ok) {
-                Log.i(TAG, "tun0 override: restored $cmd")
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // vnet loopback fix (root).
+    // No root, no ip-rule surgery.
     //
-    // Android's per-VPN ip rules (pref 12000) carry
-    //   uidrange 0-<vpnUid-1>/<vpnUid+1>-99999
-    // which EXCLUDES the VPN process uid.  The vnet (kernel-loopback)
-    // TCP path rewrites every LAN->WAN SYN to a loopback SYN targeting
-    // the gateway (10.0.0.1:listenPort); the kernel's SYN-ACK reply is
-    // owned by the VPN uid, so the 12000 rule does not match and the
-    // packet falls through empty tables (99/98/97) into `unreachable`.
-    // This high-priority rule forces packets destined to the gateway
-    // (only the loopback handshake traffic) into the tun0 table.
+    // This service used to spawn su(1) to delete netd's per-network fwmark
+    // rules and to pin the vnet gateway loopback. A VPN app must not ask for
+    // root: the same effects are either netd's job (per-app VPN, allowBypass)
+    // or a plain bug in our own routing. The corresponding helpers were
+    // removed; the client now runs with the routes VpnService gives it.
     // ------------------------------------------------------------------
-    private fun gatewayFor(ip: String, mask: String): String? {
+
+
+    /**
+     * The IPv6 lease the primary server assigned in an earlier session, if it
+     * still looks like a usable address.  Getting it onto the TUN makes the
+     * kernel address match the server's NAT66 lease; when it does not match
+     * (first run, new server, changed assignment) the core keeps translating
+     * between the leak-block ULA and the lease, so a wrong value never breaks
+     * connectivity.
+     */
+    private fun cachedIpv6Lease(): String? {
+        val value = try {
+            DataStore.tunIpv6Lease.trim()
+        } catch (_: Throwable) {
+            return null
+        }
+        if (!value.contains(':')) return null
         return try {
-            val ipParts = ip.trim().split(".").map { it.toInt() and 0xff }
-            val maskParts = mask.trim().split(".").map { it.toInt() and 0xff }
-            if (ipParts.size != 4 || maskParts.size != 4) return null
-            val net = IntArray(4) { i -> ipParts[i] and maskParts[i] }
-            // gateway = network address + 1
-            var carry = 1
-            for (i in 3 downTo 0) {
-                val v = net[i] + carry
-                net[i] = v and 0xff
-                carry = v shr 8
+            val address = java.net.InetAddress.getByName(value)
+            if (address is java.net.Inet6Address && !address.isAnyLocalAddress) value else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Persist the lease the server just announced, so the next tunnel uses it. */
+    private fun rememberIpv6Lease() {
+        val lease = try {
+            libopenppp2.get_ipv6_lease()
+        } catch (t: Throwable) {
+            if (!ipv6LeaseQueryFailed) {
+                ipv6LeaseQueryFailed = true
+                Log.w(TAG, "ipv6 lease query failed", t)
             }
-            net.joinToString(".")
-        } catch (e: Throwable) {
             null
         }
-    }
-
-    private fun installGatewayLoopbackFix(gateway: String) {
-        if (!isRootAvailable()) {
-            Log.i(TAG, "gateway loopback fix: root not available, skipping")
-            return
-        }
-        val table = resolveVpnRouteTable()
-        if (table == null) {
-            Log.i(TAG, "gateway loopback fix: could not resolve vpn route table, skipping")
-            return
-        }
-        // If the table is not routing through tun0 yet, leave it for
-        // ensureGatewayLoopbackFix() (connected state) to retry with delay.
-        if (!vpnTableHasDefault(table)) {
-            Log.i(TAG, "gateway loopback fix: table $table has no tun0 default yet, will re-check at connected")
-            return
-        }
-        val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
-        Log.i(TAG, "gateway loopback fix: add rule to $gateway table $table -> ${if (r != null) "ok" else "failed/dup"}")
-        val show = runRootCommand("ip rule show pref 11000")
-        Log.i(TAG, "gateway loopback fix: verify: ${show?.trim().orEmpty()}")
-    }
-
-    private fun removeGatewayLoopbackFix(gateway: String) {
-        if (!isRootAvailable()) return
-        // Try exact match first; fall back to pref-only match in case the table
-        // number changed (e.g. after a package rename the netd table id differs).
-        val table = resolveVpnRouteTable()
-        if (table != null) {
-            runRootCommand("ip rule del from all to $gateway lookup $table pref 11000")
-        }
-        runRootCommand("ip rule del from all to $gateway pref 11000")
-        Log.i(TAG, "gateway loopback fix: removed rule to $gateway")
-    }
-
-    // Resolve the netd routing table used by our tun0 interface.  The table
-    // id is NOT stable: it is derived from the per-VPN netId and changes when
-    // the package/network is re-created, and netd may present it EITHER as a
-    // numeric id (`table 1098`) or as the named table (`table tun0`), with the
-    // numeric id coming from /data/misc/net/rt_tables.  Parse it from
-    // `ip route show table all` instead of hard-coding any id.  We may return
-    // either "tun0" or a numeric id; the kernel resolves both in
-    // `ip rule add ... lookup <value>`.
-    private fun resolveVpnRouteTable(): String? {
-        val out = runRootCommand("ip route show table all") ?: return null
-        // Numeric table id: `default dev tun0 ... table 1096`.
-        Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+(\\d+)").find(out)?.let {
-            return it.groupValues[1]
-        }
-        // Named table: `default dev tun0 ... table tun0` (rt_tables maps it).
-        if (Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+tun0").containsMatchIn(out)) {
-            return "tun0"
-        }
-        return null
-    }
-
-    // Does the resolved table currently carry a tun0 default route?  Guards
-    // against installing the fix onto a stale/empty table (which makes the
-    // SYN-ACK loopback silently drop -> curl 000).  Note: this Android
-    // iproute2 cannot query a named table with `ip route show table tun0`
-    // ("table id value is invalid"), so we work from the `table all` dump.
-    private fun vpnTableHasDefault(table: String): Boolean {
-        val out = runRootCommand("ip route show table all") ?: return false
-        val def = Regex("default\\s+dev\\s+tun0\\b[^\n]*?table\\s+(\\S+)").find(out)
-            ?: return false
-        val shown = def.groupValues[1] // "tun0" or a numeric id
-        if (table == shown) return true
-        // numeric id that rt_tables maps to tun0 -> the dump prints "tun0"
-        if (table.matches(Regex("\\d+")) && shown == "tun0") return true
-        return false
-    }
-
-    // Re-install the gateway-loopback rule against the CURRENT netd table.
-    // Called from publishLinkState() once the link is up, because netd may
-    // have re-created the VPN network (assigning a new table id) after the
-    // initial install inside startVpn().  Runs on the link-state poller
-    // thread, so short sleeps for netd settling are safe.
-    private fun ensureGatewayLoopbackFix() {
-        val gateway = activeGatewayLoopback ?: return
-        if (!isRootAvailable()) return
-
-        // netd may still be finalizing the per-VPN table right after the link
-        // comes up (we saw the table id / named-table display flip between
-        // 1095/1096/tun0 while a second VPN app was competing).  Retry the
-        // resolution until it yields a table that actually routes tun0.
-        var table = resolveVpnRouteTable()
-        var attempt = 0
-        while ((table == null || !vpnTableHasDefault(table)) && attempt < 5) {
-            Thread.sleep(1200)
-            table = resolveVpnRouteTable()
-            attempt++
-        }
-        if (table == null) {
-            Log.i(TAG, "gateway loopback fix: re-check table unavailable after retries")
-            return
-        }
-        if (!vpnTableHasDefault(table)) {
-            Log.i(TAG, "gateway loopback fix: table $table has no tun0 default yet, retry later")
-            return
-        }
-
-        val current = runRootCommand("ip rule show pref 11000")
-        val already = current?.contains("to $gateway lookup $table") == true
-        if (already) {
-            gatewayFixVerified = true
-            periodicRuleIntegrityCheck(gateway, table)
-            return
-        }
-        // remove any stale rule (old table id) then add with the current one
-        runRootCommand("ip rule del from all to $gateway pref 11000")
-        val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
-        gatewayFixVerified = r != null
-        Log.i(TAG, "gateway loopback fix: re-check -> table $table ${if (r != null) "ok" else "failed"}")
-    }
-
-    // Called on every connected poll (1s) but only does full work every ~15s:
-    // netd can silently re-create the VPN network (new table id) while we are
-    // up, which would leave our rule pointing at an empty table and break the
-    // SYN-ACK loopback again.  Detect that and re-install immediately.
-    private fun periodicRuleIntegrityCheck(gateway: String, table: String) {
-        val now = SystemClock.elapsedRealtime()
-        if (now - gatewayFixLastFullCheck < 15000) return
-        gatewayFixLastFullCheck = now
-
-        val show = runRootCommand("ip rule show pref 11000") ?: ""
-        val ruleOk = show.contains("to $gateway lookup $table")
-        val routeOk = vpnTableHasDefault(table)
-        if (!ruleOk || !routeOk) {
-            Log.i(TAG, "gateway loopback fix: stale rule detected (rule=$ruleOk route=$routeOk), re-installing")
-            runRootCommand("ip rule del from all to $gateway pref 11000")
-            val r = runRootCommand("ip rule add from all to $gateway lookup $table pref 11000")
-            gatewayFixVerified = r != null
-            gatewayFixLastFullCheck = 0
-        }
-    }
-
-    private fun isRootAvailable(): Boolean {
-        return try {
-            val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            process.waitFor() == 0 && output.contains("uid=0")
+        if (lease.isNullOrBlank() || !lease.contains(':')) return
+        if (lease == cachedIpv6Lease()) return
+        try {
+            DataStore.tunIpv6Lease = lease
+            Log.i(TAG, "ipv6 lease remembered: $lease")
         } catch (e: Throwable) {
-            false
+            Logs.w(e)
         }
     }
 
-    private fun runRootCommand(cmd: String): String? {
-        return try {
-            val process = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            val ok = process.waitFor() == 0
-            if (ok) output else null
+    /**
+     * Excludes the domestic IPv6 prefixes (files/rules/ipv6.txt) from the VPN so
+     * the kernel sends them over the physical network, while everything else
+     * keeps using the tunnel.  Requires API 33 (VpnService.Builder
+     * .addExcludeRoute); on older releases domestic IPv6 stays in the tunnel.
+     */
+    private fun applyDirectIpv6Exclusions(builder: BaseVpnService.Builder) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Log.i(TAG, "ipv6 direct exclusions need Android 13 (API 33); domestic IPv6 stays in the tunnel")
+            return
+        }
+        val file = java.io.File(filesDir, "rules/ipv6.txt")
+        if (!file.isFile || file.length() == 0L) {
+            Log.i(TAG, "ipv6 direct exclusions skipped: ${file.path} is missing")
+            return
+        }
+        var applied = 0
+        var skipped = 0
+        try {
+            file.forEachLine { raw ->
+                val line = raw.trim()
+                if (line.isEmpty() || line.startsWith("#")) return@forEachLine
+                val slash = line.indexOf('/')
+                if (slash <= 0) {
+                    skipped++
+                    return@forEachLine
+                }
+                val host = line.substring(0, slash)
+                val prefix = line.substring(slash + 1).toIntOrNull()
+                if (prefix == null || prefix !in 0..128) {
+                    skipped++
+                    return@forEachLine
+                }
+                try {
+                    val address = java.net.InetAddress.getByName(host)
+                    if (address !is java.net.Inet6Address) {
+                        skipped++
+                        return@forEachLine
+                    }
+                    builder.excludeRoute(android.net.IpPrefix(address, prefix))
+                    applied++
+                } catch (_: Throwable) {
+                    skipped++
+                }
+            }
         } catch (e: Throwable) {
-            null
+            Logs.w(e)
         }
-    }
-
-    private fun runRootCommands(commands: List<String>): List<Boolean> {
-        return commands.map { cmd -> runRootCommand(cmd) != null }
+        Log.i(TAG, "ipv6 direct exclusions applied: $applied prefixes (skipped $skipped)")
     }
 
     private fun normalizeGeoCountry(value: String?): String {

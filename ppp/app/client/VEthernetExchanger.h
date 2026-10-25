@@ -314,6 +314,16 @@ namespace ppp {
                 /** @brief Blacklist an entry for the configured penalty window. */
                 void                                                                    HotSwitchBlacklistEntry(const ppp::string& entry, uint64_t now) noexcept;
 
+                // The IPv6 lease this outbound's server assigned (empty address
+                // when it assigned none).  Android caches it so the next
+                // VpnService.Builder can put the real address on the tunnel
+                // instead of the leak-block ULA; desktop applies it through
+                // ApplyClientAddress instead.
+                boost::asio::ip::address                                                GetAssignedIPv6Address() noexcept {
+                    SynchronizedObjectScope scope(syncobj_);
+                    return assigned_ipv6_address_;
+                }
+
             private:
                 class StaticEchoDatagarmSocket final : public boost::asio::ip::udp::socket {
                 public:

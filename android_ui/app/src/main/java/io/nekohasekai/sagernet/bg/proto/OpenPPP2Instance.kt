@@ -110,6 +110,7 @@ class OpenPPP2Instance(
         options.put("tunIp", DataStore.tunIp)
         options.put("tunMask", tunMaskFor(tunPrefix))
         options.put("tunPrefix", tunPrefix)
+        options.put("ipv6Mode", DataStore.tunIpv6Mode)
         options.put("route", "0.0.0.0")
         options.put("routePrefix", 0)
         options.put("dns1", DataStore.tunnelDns1)

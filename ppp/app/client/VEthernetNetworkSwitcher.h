@@ -193,6 +193,11 @@ namespace ppp {
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger()               noexcept { return exchanger_; }
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const boost::asio::ip::address& destination) noexcept;
                 std::shared_ptr<VEthernetExchanger>                                 GetExchanger(const ppp::string& hostname) noexcept;
+                // IPv6 lease assigned by the primary outbound's server (empty
+                // when none).  Android persists it so the next VpnService
+                // tunnel can be built with the real address instead of the
+                // leak-block ULA; see VpnService.startVpn().
+                boost::asio::ip::address                                            ServerAssignedIPv6Address() noexcept;
                 VirtualEthernetLoggerPtr                                            GetLogger()                  noexcept { return logger_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionQoS>               GetQoS()                     noexcept { return qos_; }
                 std::shared_ptr<ppp::transmissions::ITransmissionStatistics>        GetStatistics()              noexcept { return statistics_; }

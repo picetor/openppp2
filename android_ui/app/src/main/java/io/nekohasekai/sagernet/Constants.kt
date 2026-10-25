@@ -64,6 +64,8 @@ object Key {
     const val DNS_DIRECT1 = "directDns1"
     const val DNS_DIRECT2 = "directDns2"
     const val TUN_IP = "tunIp"
+    const val TUN_IPV6_MODE = "tunIpv6Mode"
+    const val TUN_IPV6_LEASE = "tunIpv6Lease"
     const val TUN_PREFIX = "tunPrefix"
     const val TUN_MUX = "tunMux"
     const val TUN_MUX_ACCELERATION = "tunMuxAcceleration"

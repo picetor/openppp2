@@ -210,16 +210,38 @@ namespace ppp {
 #endif
                 icmppackets_aid_ = RandomNext();
 
+#if defined(_ANDROID)
+                // "Prefer IPv4 DNS" exists for the desktop leak-block model: a
+                // host with no usable IPv6 route would wait on AAAA answers it
+                // can never reach.  Android has no such black hole -- the
+                // VpnService either captures IPv6 into the tunnel or leaves it
+                // on the physical network -- so honouring the switch here only
+                // deleted the addresses the applications could have used.
+                prefer_ipv4_ = false;
+#else
                 prefer_ipv4_ = (NULLPTR != configuration_ && configuration_->udp.dns.prefer_ipv4);
+#endif
 
                 // The remote IPv6 capability is learned from the server's
                 // Information extensions.  The client profile may not contain a
                 // server.ipv6 section (and must not be treated as the remote
                 // server's capability advertisement).
                 ipv6_server_has_dataplane_ = false;
+#if defined(_ANDROID)
+                // Android is the exception: the VpnService owns ::/0 and this
+                // client forwards every IPv6 packet it receives straight to the
+                // server (OnIPv6PacketInput -> Nat) instead of terminating it,
+                // so there is no leak-block black hole to hide AAAA records in.
+                // A name resolved over the tunnel may keep its AAAA even before
+                // the server's Information extension arrives; see
+                // ApplyIPv6Assignment for why the platform route helper cannot
+                // be used as the signal.
+                ipv6_dataplane_unavailable_.store(false, std::memory_order_relaxed);
+#else
                 // Until then the client has no IPv6 data plane, so AAAA answers
                 // can only point applications at the leak-block black hole.
                 ipv6_dataplane_unavailable_.store(true, std::memory_order_relaxed);
+#endif
 
                 if (ppp::diagnostics::IsLogLevelEnabled(ppp::diagnostics::LogLevel::Debug)) {
                     StartDebugWatchdog(context);
@@ -3092,7 +3114,15 @@ namespace ppp {
                             active_prefer_ipv4 = active_configuration->udp.dns.prefer_ipv4;
                         }
                     }
-                    prefer_ipv4_.store(active_prefer_ipv4);
+                    prefer_ipv4_.store(
+#if defined(_ANDROID)
+                        // Same reason as the constructor: the platform, not
+                        // this switch, decides whether AAAA is reachable.
+                        false
+#else
+                        active_prefer_ipv4
+#endif
+                    );
                     // The outbound has just been switched (hot swap). Flush the DNS
                     // cache so answers learned through the previous outbound (e.g. a
                     // Japan exit) cannot be served to the new configuration (e.g. a
@@ -3185,6 +3215,14 @@ namespace ppp {
                 }
                 LOG_INFO("VEthernetNetworkSwitcher::CompletePendingOutboundSwitch: previous=%s, active=%s, new_exchanger=1, forced=1",
                     previous_tag.data(), target_tag.data());
+            }
+
+            boost::asio::ip::address VEthernetNetworkSwitcher::ServerAssignedIPv6Address() noexcept {
+                std::shared_ptr<VEthernetExchanger> exchanger = exchanger_;
+                if (NULLPTR == exchanger) {
+                    return boost::asio::ip::address();
+                }
+                return exchanger->GetAssignedIPv6Address();
             }
 
             std::shared_ptr<VEthernetExchanger> VEthernetNetworkSwitcher::GetExchanger(
@@ -3723,7 +3761,10 @@ namespace ppp {
                     !extensions.AssignedIPv6Address.is_unspecified();
                 ipv6_server_has_dataplane_ = has_ipv6_dataplane;
                 // Keep the DNS-side flag in step: the mode is the server's own
-                // statement about whether it can carry IPv6 at all.
+                // statement about whether it can carry IPv6 at all.  On Android
+                // this is the only signal that may turn AAAA stripping back on
+                // (a server that reports "server-ipv6-disabled" cannot carry the
+                // answers anyway); the local route helper is ignored there.
                 ipv6_dataplane_unavailable_.store(!has_ipv6_dataplane, std::memory_order_relaxed);
 
                 if (!has_ipv6_dataplane) {
@@ -3769,6 +3810,21 @@ namespace ppp {
                     LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: GetTap() returned null, returning");
                     return;
                 }
+
+#if defined(_ANDROID)
+                // The DNS-side flag already followed the server's answer above;
+                // the local route helper's result is deliberately ignored on this
+                // platform (see the guard around its store below).  Log the
+                // platform policy so a field capture shows which side decided:
+                // ApplyClientDefaultRoute() cannot touch a VpnService TUN
+                // without root, and every IPv6 packet that does arrive is
+                // forwarded raw to the server (OnIPv6PacketInput -> Nat) instead
+                // of being terminated, so there is no leak-block black hole that
+                // AAAA answers could point into.
+                LOG_DEBUG("VEthernetNetworkSwitcher::ApplyIPv6Assignment: android vpn ipv6 mode=%d, server_dataplane=%d, aaaa_unavailable=%d",
+                    tap->IPv6Mode, (int)has_ipv6_dataplane,
+                    (int)ipv6_dataplane_unavailable_.load(std::memory_order_relaxed));
+#endif
 
                 // Build the client context using TAP interface info.
                 ppp::ipv6::auxiliary::ClientContext ctx;
@@ -3947,7 +4003,12 @@ namespace ppp {
                     // AAAA answers are only useful once the managed IPv6 default
                     // route is really in place; an advertised-but-unapplied data
                     // plane must keep the DNS-side stripping active.
+                    // Android is the exception: the VpnService owns ::/0 and its
+                    // policy (tap->IPv6Mode) already decided the flag above, so a
+                    // failing helper here must not flip it back.
+#if !defined(_ANDROID)
                     ipv6_dataplane_unavailable_.store(!route_applied, std::memory_order_relaxed);
+#endif
                 }
 
                 // 3. Apply an optional routed subnet prefix.
@@ -5924,6 +5985,12 @@ namespace ppp {
                 // stays empty on Android/iOS and SelectDirectDnsServer()
                 // always fails, so domain-based geo rules never take effect.
                 RefreshDirectDnsServers();
+                // There is no physical-NIC snapshot here to ask, and the host's
+                // IPv6 is either captured by the VpnService (mode 0) or left on
+                // the uplink (mode 1).  Treat a directly resolved name's AAAA as
+                // usable: a wrong answer only costs the application its Happy
+                // Eyeballs fallback, while stripping it removes IPv6 entirely.
+                host_ipv6_uplink_.store(true, std::memory_order_relaxed);
 #else
                 // Get and retrieve the current underlying Ethernet interface information!
                 // This is needed in both TUN and proxy-only modes: proxy-only still

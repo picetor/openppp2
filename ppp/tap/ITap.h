@@ -36,6 +36,18 @@ namespace ppp
             boost::asio::ip::address                                        IPv6GatewayServer;
             boost::asio::ip::address                                        IPv6SubmaskAddress;
 
+            // Android only: the VpnService IPv6 policy that produced this TUN.
+            //   0 = block/auto: the app claims ::/0, IPv6 packets therefore
+            //       arrive on this tap and the raw NAT path carries them to
+            //       the server, which NAT66s them onto the assigned lease.
+            //   1 = direct: ::/0 is not claimed and IPv6 stays on the host
+            //       uplink, so no IPv6 packet ever reaches this tap.
+            // A VpnService TUN cannot be reconfigured from native code without
+            // root, so a failed local address/route install says nothing about
+            // whether IPv6 works here; this field is what the DNS side must
+            // trust instead.
+            int                                                             IPv6Mode = 0;
+
         public:
             PacketInputEventHandler                                         PacketInput;
             std::shared_ptr<ppp::threading::BufferswapAllocator>            BufferAllocator;

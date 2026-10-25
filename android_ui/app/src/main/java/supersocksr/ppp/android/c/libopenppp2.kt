@@ -178,6 +178,28 @@ class libopenppp2 {
         @JvmStatic
         external fun set_mux_acceleration(value: Int): Int
 
+        /**
+         * Records the VpnService IPv6 policy for the tunnel that is about to be
+         * opened: 0 = the app claims ::/0 (auto/block) so the core receives the
+         * IPv6 packets and forwards them over the tunnel; 1 = direct, ::/0 stays
+         * on the host uplink.  The core needs it to keep or strip AAAA answers:
+         * a VpnService TUN cannot be reconfigured from native code, so the
+         * client's own route install always fails there and must not be read as
+         * "no IPv6 data plane".
+         */
+        @JvmStatic
+        external fun set_ipv6_mode(mode: Int): Int
+
+        /**
+         * The IPv6 lease the primary server assigned for this session, or null
+         * when it assigned none / has not answered yet.  [VpnService] stores it
+         * and configures the next tunnel with it, so the kernel TUN owns the
+         * address the server NAT66s (the Windows client's ApplyClientAddress
+         * equivalent) instead of the leak-block ULA.
+         */
+        @JvmStatic
+        external fun get_ipv6_lease(): String?
+
         @JvmStatic
         external fun get_network_interface(): String?
 
