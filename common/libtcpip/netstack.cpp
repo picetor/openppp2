@@ -782,10 +782,14 @@ namespace lwip {
                 uint32_t dip      = htonl(ip_addr_get_ip4_u32(dest));
                 uint32_t sip      = htonl(ip_addr_get_ip4_u32(src));
 
-                // lwIP stores TCP header ports in network byte order, while
-                // Boost.Asio endpoints require host-order ports.
-                boost::asio::ip::tcp::endpoint dep(boost::asio::ip::address_v4(dip), ntohs(h->dest));
-                boost::asio::ip::tcp::endpoint sep(boost::asio::ip::address_v4(sip), ntohs(h->src));
+                // tcp_input() converts the TCP header to host byte order in
+                // place (common/lwip/core/tcp_in.c:228), so these ports are
+                // already host-order.  Applying ntohs() a second time byte-
+                // swapped every accepted connection (443 -> 47873, 8080 ->
+                // 36895), and both the mux and the direct relay then dialled
+                // the wrong remote port, so nothing could ever be carried.
+                boost::asio::ip::tcp::endpoint dep(boost::asio::ip::address_v4(dip), h->dest);
+                boost::asio::ip::tcp::endpoint sep(boost::asio::ip::address_v4(sip), h->src);
 
                 int r = e(dep, sep, h->seqno, h->ackno, h->wnd);
                 LOG_DEBUG("lwip::netstack_tcp_do_before_accept: source=%s:%u, destination=%s:%u, seq=%u, ack=%u, wnd=%u, result=%d",

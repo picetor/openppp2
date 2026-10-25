@@ -763,7 +763,17 @@ namespace ppp {
                         break;
                     }
 
-                    link = this->LwIpAcceptLink(srcAddr, dstAddr, srcPort, dstPort);
+                    // netstack::link() reports host-order ports (lwIP keeps
+                    // pcb->local_port/remote_port in host order), but
+                    // LwIpAcceptLink() keys and stores the link table in wire
+                    // order, exactly like LwIpBeginAccept() does when it
+                    // passes htons(port).  Converting here keeps the loopback
+                    // accept on the same key as the SYN path; without it the
+                    // replayed SYN opened a second connection to
+                    // <host>:<swap(port)> and the real flow lost its data.
+                    link = this->LwIpAcceptLink(srcAddr, dstAddr,
+                        htons(static_cast<uint16_t>(srcPort)),
+                        htons(static_cast<uint16_t>(dstPort)));
                 }
                 else {
                     link = this->FindTcpLink(htons(remoteEP.Port));
