@@ -1983,6 +1983,268 @@ namespace ppp {
                 }
             }
 
+            namespace {
+                // A request that never produced a reply is not latency; waiting a
+                // little past the ICMP timeout (3 s) keeps a lost echo out of the
+                // RTT ring while still counting it as lost.
+                constexpr uint64_t IcmpLatencyPendingTimeout = 4000;
+                constexpr uint32_t IcmpLatencyWarnThresholdMs = 250;
+
+                uint32_t IcmpLatencyCapMs(uint64_t value) noexcept {
+                    return static_cast<uint32_t>(std::min<uint64_t>(value, 60000));
+                }
+
+                // A reply's source is the request's destination, so the same key
+                // is produced from either direction. Identification+sequence alone
+                // are not unique across concurrent pings to different hosts.
+                uint64_t IcmpEchoLatencyKey(const ppp::net::packet::IcmpFrame* frame) noexcept {
+                    const uint32_t peer = frame->Type == IcmpType::ICMP_ECHO
+                        ? frame->Destination
+                        : frame->Source;
+                    return (static_cast<uint64_t>(peer) << 32)
+                        | (static_cast<uint64_t>(frame->Identification) << 16)
+                        | static_cast<uint64_t>(frame->Sequence);
+                }
+
+                uint32_t IcmpLatencyPercentile(ppp::vector<uint32_t>& values, double percentile) noexcept {
+                    if (values.empty()) {
+                        return 0;
+                    }
+
+                    std::sort(values.begin(), values.end());
+                    std::size_t index = static_cast<std::size_t>(percentile * (values.size() - 1) + 0.5);
+                    if (index >= values.size()) {
+                        index = values.size() - 1;
+                    }
+
+                    return values[index];
+                }
+
+                const char* IcmpEchoPathName(uint8_t path) noexcept {
+                    switch (static_cast<VEthernetNetworkSwitcher::IcmpEchoPath>(path)) {
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::StaticEcho: return "static_echo";
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::MainTunnel: return "main_tunnel";
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::Local:      return "local";
+                    default:                                                 return "unknown";
+                    }
+                }
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyBegin(const std::shared_ptr<IPFrame>& packet) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                if (icmp_latency_pending_.size() >= 1024) {
+                    // Runaway guard: an entry that is dropped here only costs one
+                    // sample, while an unbounded map would cost memory per ping.
+                    icmp_latency_pending_.clear();
+                }
+
+                for (auto i = icmp_latency_pending_.begin(); i != icmp_latency_pending_.end();) {
+                    if (now >= i->second.began_ms && now - i->second.began_ms > IcmpLatencyPendingTimeout) {
+                        i = icmp_latency_pending_.erase(i);
+                        icmp_latency_lost_++;
+                    }
+                    else {
+                        ++i;
+                    }
+                }
+
+                IcmpLatencyPending pending;
+                pending.began_ms = now;
+                icmp_latency_pending_[key] = pending;
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyMarkOutbound(const std::shared_ptr<IPFrame>& packet, IcmpEchoPath path) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                auto i = icmp_latency_pending_.find(key);
+                if (i == icmp_latency_pending_.end()) {
+                    return;
+                }
+
+                if (i->second.outbound_ms == 0) {
+                    i->second.outbound_ms = now;
+                    i->second.path = static_cast<uint8_t>(path);
+                }
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyFinish(const std::shared_ptr<IPFrame>& packet, uint64_t reply_in_ms) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || (frame->Type != IcmpType::ICMP_ECHO && frame->Type != IcmpType::ICMP_ER)) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                uint32_t rtt = 0;
+                uint32_t pre_tx = 0;
+                uint32_t net = 0;
+                uint32_t inject = 0;
+                uint8_t path = 0;
+                bool warn = false;
+                {
+                    std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                    auto i = icmp_latency_pending_.find(key);
+                    if (i == icmp_latency_pending_.end()) {
+                        return;
+                    }
+
+                    IcmpLatencyPending pending = i->second;
+                    icmp_latency_pending_.erase(i);
+
+                    if (pending.outbound_ms == 0) {
+                        // The request never reached an egress path (local answer or
+                        // an immediate drop): attribute the whole wait to pre_tx so
+                        // the sample still shows up instead of vanishing.
+                        pending.outbound_ms = pending.began_ms;
+                    }
+
+                    if (reply_in_ms < pending.outbound_ms) reply_in_ms = pending.outbound_ms;
+                    if (now < reply_in_ms) reply_in_ms = now;
+
+                    rtt = IcmpLatencyCapMs(now - pending.began_ms);
+                    pre_tx = IcmpLatencyCapMs(pending.outbound_ms - pending.began_ms);
+                    net = IcmpLatencyCapMs(reply_in_ms - pending.outbound_ms);
+                    inject = IcmpLatencyCapMs(now - reply_in_ms);
+                    path = pending.path;
+
+                    IcmpLatencyRing& ring = icmp_latency_ring_;
+                    const uint32_t slot = ring.next;
+                    ring.rtt_ms[slot] = rtt;
+                    ring.pre_tx_ms[slot] = pre_tx;
+                    ring.net_ms[slot] = net;
+                    ring.inject_ms[slot] = inject;
+                    ring.path[slot] = path;
+                    ring.next = (slot + 1) % IcmpLatencyRing::Capacity;
+                    ring.count++;
+
+                    icmp_latency_last_ms_ = now;
+                    icmp_latency_last_rtt_ms_ = rtt;
+                    icmp_latency_last_pre_tx_ms_ = pre_tx;
+                    icmp_latency_last_net_ms_ = net;
+                    icmp_latency_last_inject_ms_ = inject;
+                    icmp_latency_last_path_ = path;
+                    switch (static_cast<IcmpEchoPath>(path)) {
+                    case IcmpEchoPath::StaticEcho: icmp_latency_path_static_++; break;
+                    case IcmpEchoPath::MainTunnel: icmp_latency_path_main_++; break;
+                    case IcmpEchoPath::Local:      icmp_latency_path_local_++; break;
+                    default: break;
+                    }
+
+                    if (rtt >= IcmpLatencyWarnThresholdMs &&
+                        (icmp_latency_last_warn_ms_ == 0 || now >= icmp_latency_last_warn_ms_ + 1000)) {
+                        icmp_latency_last_warn_ms_ = now;
+                        warn = true;
+                    }
+                }
+
+                if (warn) {
+                    LOG_WARN("DATAPLANE ICMP: echo latency spike, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
+                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
+                        static_cast<unsigned int>(frame->Identification),
+                        static_cast<unsigned int>(frame->Sequence),
+                        (unsigned long long)now);
+                }
+                else {
+                    LOG_DEBUG("DATAPLANE ICMP: echo latency, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
+                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
+                        static_cast<unsigned int>(frame->Identification),
+                        static_cast<unsigned int>(frame->Sequence),
+                        (unsigned long long)now);
+                }
+            }
+
+            VEthernetNetworkSwitcher::IcmpLatencyStats
+                VEthernetNetworkSwitcher::GetIcmpLatencyStats() const noexcept {
+                IcmpLatencyStats stats;
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+
+                const uint32_t capacity = static_cast<uint32_t>(IcmpLatencyRing::Capacity);
+                const uint32_t count = icmp_latency_ring_.count < capacity ? icmp_latency_ring_.count : capacity;
+                stats.samples = icmp_latency_ring_.count;
+                stats.pending = static_cast<uint32_t>(icmp_latency_pending_.size());
+                stats.lost = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_lost_, UINT32_MAX));
+                stats.path_static = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_static_, UINT32_MAX));
+                stats.path_main = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_main_, UINT32_MAX));
+                stats.path_local = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_local_, UINT32_MAX));
+
+                if (count > 0) {
+                    ppp::vector<uint32_t> rtt;
+                    ppp::vector<uint32_t> pre_tx;
+                    ppp::vector<uint32_t> net;
+                    ppp::vector<uint32_t> inject;
+                    rtt.reserve(count);
+                    pre_tx.reserve(count);
+                    net.reserve(count);
+                    inject.reserve(count);
+                    for (uint32_t i = 0; i < count; i++) {
+                        rtt.emplace_back(icmp_latency_ring_.rtt_ms[i]);
+                        pre_tx.emplace_back(icmp_latency_ring_.pre_tx_ms[i]);
+                        net.emplace_back(icmp_latency_ring_.net_ms[i]);
+                        inject.emplace_back(icmp_latency_ring_.inject_ms[i]);
+                    }
+
+                    stats.rtt_p50 = IcmpLatencyPercentile(rtt, 0.50);
+                    stats.rtt_p95 = IcmpLatencyPercentile(rtt, 0.95);
+                    stats.rtt_max = rtt.back();
+                    stats.pre_tx_p50 = IcmpLatencyPercentile(pre_tx, 0.50);
+                    stats.pre_tx_p95 = IcmpLatencyPercentile(pre_tx, 0.95);
+                    stats.pre_tx_max = pre_tx.back();
+                    stats.net_p50 = IcmpLatencyPercentile(net, 0.50);
+                    stats.net_p95 = IcmpLatencyPercentile(net, 0.95);
+                    stats.net_max = net.back();
+                    stats.inject_p50 = IcmpLatencyPercentile(inject, 0.50);
+                    stats.inject_p95 = IcmpLatencyPercentile(inject, 0.95);
+                    stats.inject_max = inject.back();
+                }
+
+                stats.last_rtt = icmp_latency_last_rtt_ms_;
+                stats.last_pre_tx = icmp_latency_last_pre_tx_ms_;
+                stats.last_net = icmp_latency_last_net_ms_;
+                stats.last_inject = icmp_latency_last_inject_ms_;
+                stats.last_path = icmp_latency_last_path_;
+                stats.last_ms = icmp_latency_last_ms_;
+                return stats;
+            }
+
+            VEthernetNetworkSwitcher::ProbeTimingStats
+                VEthernetNetworkSwitcher::GetProbeTimingStats() const noexcept {
+                ProbeTimingStats stats;
+                stats.rounds = probe_round_count_.load(std::memory_order_relaxed);
+                stats.pin_calls = probe_pin_calls_.load(std::memory_order_relaxed);
+                stats.round_last_ms = probe_round_last_ms_.load(std::memory_order_relaxed);
+                stats.round_max_ms = probe_round_max_ms_.load(std::memory_order_relaxed);
+                stats.pin_last_ms = probe_pin_last_ms_.load(std::memory_order_relaxed);
+                stats.pin_max_ms = probe_pin_max_ms_.load(std::memory_order_relaxed);
+                stats.pin_slowest_ms = probe_pin_slowest_ms_.load(std::memory_order_relaxed);
+                stats.last_round_ms = probe_last_round_ms_.load(std::memory_order_relaxed);
+                return stats;
+            }
+
             void VEthernetNetworkSwitcher::Dispose() noexcept {
 #if !defined(_ANDROID) && !defined(_IPHONE)
                 network_takeover_stopping_.store(true);
@@ -5030,267 +5292,6 @@ namespace ppp {
                 }
             }
 
-            namespace {
-                // A request that never produced a reply is not latency; waiting a
-                // little past the ICMP timeout (3 s) keeps a lost echo out of the
-                // RTT ring while still counting it as lost.
-                constexpr uint64_t IcmpLatencyPendingTimeout = 4000;
-                constexpr uint32_t IcmpLatencyWarnThresholdMs = 250;
-
-                uint32_t IcmpLatencyCapMs(uint64_t value) noexcept {
-                    return static_cast<uint32_t>(std::min<uint64_t>(value, 60000));
-                }
-
-                // A reply's source is the request's destination, so the same key
-                // is produced from either direction. Identification+sequence alone
-                // are not unique across concurrent pings to different hosts.
-                uint64_t IcmpEchoLatencyKey(const ppp::net::packet::IcmpFrame* frame) noexcept {
-                    const uint32_t peer = frame->Type == IcmpType::ICMP_ECHO
-                        ? frame->Destination
-                        : frame->Source;
-                    return (static_cast<uint64_t>(peer) << 32)
-                        | (static_cast<uint64_t>(frame->Identification) << 16)
-                        | static_cast<uint64_t>(frame->Sequence);
-                }
-
-                uint32_t IcmpLatencyPercentile(ppp::vector<uint32_t>& values, double percentile) noexcept {
-                    if (values.empty()) {
-                        return 0;
-                    }
-
-                    std::sort(values.begin(), values.end());
-                    std::size_t index = static_cast<std::size_t>(percentile * (values.size() - 1) + 0.5);
-                    if (index >= values.size()) {
-                        index = values.size() - 1;
-                    }
-
-                    return values[index];
-                }
-
-                const char* IcmpEchoPathName(uint8_t path) noexcept {
-                    switch (static_cast<VEthernetNetworkSwitcher::IcmpEchoPath>(path)) {
-                    case VEthernetNetworkSwitcher::IcmpEchoPath::StaticEcho: return "static_echo";
-                    case VEthernetNetworkSwitcher::IcmpEchoPath::MainTunnel: return "main_tunnel";
-                    case VEthernetNetworkSwitcher::IcmpEchoPath::Local:      return "local";
-                    default:                                                 return "unknown";
-                    }
-                }
-            }
-
-            void VEthernetNetworkSwitcher::IcmpLatencyBegin(const std::shared_ptr<IPFrame>& packet) noexcept {
-                if (NULLPTR == packet) {
-                    return;
-                }
-
-                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
-                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
-                    return;
-                }
-
-                const uint64_t now = ppp::threading::Executors::GetTickCount();
-                const uint64_t key = IcmpEchoLatencyKey(frame.get());
-                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
-                if (icmp_latency_pending_.size() >= 1024) {
-                    // Runaway guard: an entry that is dropped here only costs one
-                    // sample, while an unbounded map would cost memory per ping.
-                    icmp_latency_pending_.clear();
-                }
-
-                for (auto i = icmp_latency_pending_.begin(); i != icmp_latency_pending_.end();) {
-                    if (now >= i->second.began_ms && now - i->second.began_ms > IcmpLatencyPendingTimeout) {
-                        i = icmp_latency_pending_.erase(i);
-                        icmp_latency_lost_++;
-                    }
-                    else {
-                        ++i;
-                    }
-                }
-
-                IcmpLatencyPending pending;
-                pending.began_ms = now;
-                icmp_latency_pending_[key] = pending;
-            }
-
-            void VEthernetNetworkSwitcher::IcmpLatencyMarkOutbound(const std::shared_ptr<IPFrame>& packet, IcmpEchoPath path) noexcept {
-                if (NULLPTR == packet) {
-                    return;
-                }
-
-                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
-                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
-                    return;
-                }
-
-                const uint64_t now = ppp::threading::Executors::GetTickCount();
-                const uint64_t key = IcmpEchoLatencyKey(frame.get());
-                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
-                auto i = icmp_latency_pending_.find(key);
-                if (i == icmp_latency_pending_.end()) {
-                    return;
-                }
-
-                if (i->second.outbound_ms == 0) {
-                    i->second.outbound_ms = now;
-                    i->second.path = static_cast<uint8_t>(path);
-                }
-            }
-
-            void VEthernetNetworkSwitcher::IcmpLatencyFinish(const std::shared_ptr<IPFrame>& packet, uint64_t reply_in_ms) noexcept {
-                if (NULLPTR == packet) {
-                    return;
-                }
-
-                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
-                if (NULLPTR == frame || (frame->Type != IcmpType::ICMP_ECHO && frame->Type != IcmpType::ICMP_ER)) {
-                    return;
-                }
-
-                const uint64_t now = ppp::threading::Executors::GetTickCount();
-                const uint64_t key = IcmpEchoLatencyKey(frame.get());
-                uint32_t rtt = 0;
-                uint32_t pre_tx = 0;
-                uint32_t net = 0;
-                uint32_t inject = 0;
-                uint8_t path = 0;
-                bool warn = false;
-                {
-                    std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
-                    auto i = icmp_latency_pending_.find(key);
-                    if (i == icmp_latency_pending_.end()) {
-                        return;
-                    }
-
-                    IcmpLatencyPending pending = i->second;
-                    icmp_latency_pending_.erase(i);
-
-                    if (pending.outbound_ms == 0) {
-                        // The request never reached an egress path (local answer or
-                        // an immediate drop): attribute the whole wait to pre_tx so
-                        // the sample still shows up instead of vanishing.
-                        pending.outbound_ms = pending.began_ms;
-                    }
-
-                    if (reply_in_ms < pending.outbound_ms) reply_in_ms = pending.outbound_ms;
-                    if (now < reply_in_ms) reply_in_ms = now;
-
-                    rtt = IcmpLatencyCapMs(now - pending.began_ms);
-                    pre_tx = IcmpLatencyCapMs(pending.outbound_ms - pending.began_ms);
-                    net = IcmpLatencyCapMs(reply_in_ms - pending.outbound_ms);
-                    inject = IcmpLatencyCapMs(now - reply_in_ms);
-                    path = pending.path;
-
-                    IcmpLatencyRing& ring = icmp_latency_ring_;
-                    const uint32_t slot = ring.next;
-                    ring.rtt_ms[slot] = rtt;
-                    ring.pre_tx_ms[slot] = pre_tx;
-                    ring.net_ms[slot] = net;
-                    ring.inject_ms[slot] = inject;
-                    ring.path[slot] = path;
-                    ring.next = (slot + 1) % IcmpLatencyRing::Capacity;
-                    ring.count++;
-
-                    icmp_latency_last_ms_ = now;
-                    icmp_latency_last_rtt_ms_ = rtt;
-                    icmp_latency_last_pre_tx_ms_ = pre_tx;
-                    icmp_latency_last_net_ms_ = net;
-                    icmp_latency_last_inject_ms_ = inject;
-                    icmp_latency_last_path_ = path;
-                    switch (static_cast<IcmpEchoPath>(path)) {
-                    case IcmpEchoPath::StaticEcho: icmp_latency_path_static_++; break;
-                    case IcmpEchoPath::MainTunnel: icmp_latency_path_main_++; break;
-                    case IcmpEchoPath::Local:      icmp_latency_path_local_++; break;
-                    default: break;
-                    }
-
-                    if (rtt >= IcmpLatencyWarnThresholdMs &&
-                        (icmp_latency_last_warn_ms_ == 0 || now >= icmp_latency_last_warn_ms_ + 1000)) {
-                        icmp_latency_last_warn_ms_ = now;
-                        warn = true;
-                    }
-                }
-
-                if (warn) {
-                    LOG_WARN("DATAPLANE ICMP: echo latency spike, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
-                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
-                        static_cast<unsigned int>(frame->Identification),
-                        static_cast<unsigned int>(frame->Sequence),
-                        (unsigned long long)now);
-                }
-                else {
-                    LOG_DEBUG("DATAPLANE ICMP: echo latency, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
-                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
-                        static_cast<unsigned int>(frame->Identification),
-                        static_cast<unsigned int>(frame->Sequence),
-                        (unsigned long long)now);
-                }
-            }
-
-            VEthernetNetworkSwitcher::IcmpLatencyStats
-                VEthernetNetworkSwitcher::GetIcmpLatencyStats() const noexcept {
-                IcmpLatencyStats stats;
-                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
-
-                const uint32_t capacity = static_cast<uint32_t>(IcmpLatencyRing::Capacity);
-                const uint32_t count = icmp_latency_ring_.count < capacity ? icmp_latency_ring_.count : capacity;
-                stats.samples = icmp_latency_ring_.count;
-                stats.pending = static_cast<uint32_t>(icmp_latency_pending_.size());
-                stats.lost = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_lost_, UINT32_MAX));
-                stats.path_static = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_static_, UINT32_MAX));
-                stats.path_main = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_main_, UINT32_MAX));
-                stats.path_local = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_local_, UINT32_MAX));
-
-                if (count > 0) {
-                    ppp::vector<uint32_t> rtt;
-                    ppp::vector<uint32_t> pre_tx;
-                    ppp::vector<uint32_t> net;
-                    ppp::vector<uint32_t> inject;
-                    rtt.reserve(count);
-                    pre_tx.reserve(count);
-                    net.reserve(count);
-                    inject.reserve(count);
-                    for (uint32_t i = 0; i < count; i++) {
-                        rtt.emplace_back(icmp_latency_ring_.rtt_ms[i]);
-                        pre_tx.emplace_back(icmp_latency_ring_.pre_tx_ms[i]);
-                        net.emplace_back(icmp_latency_ring_.net_ms[i]);
-                        inject.emplace_back(icmp_latency_ring_.inject_ms[i]);
-                    }
-
-                    stats.rtt_p50 = IcmpLatencyPercentile(rtt, 0.50);
-                    stats.rtt_p95 = IcmpLatencyPercentile(rtt, 0.95);
-                    stats.rtt_max = rtt.back();
-                    stats.pre_tx_p50 = IcmpLatencyPercentile(pre_tx, 0.50);
-                    stats.pre_tx_p95 = IcmpLatencyPercentile(pre_tx, 0.95);
-                    stats.pre_tx_max = pre_tx.back();
-                    stats.net_p50 = IcmpLatencyPercentile(net, 0.50);
-                    stats.net_p95 = IcmpLatencyPercentile(net, 0.95);
-                    stats.net_max = net.back();
-                    stats.inject_p50 = IcmpLatencyPercentile(inject, 0.50);
-                    stats.inject_p95 = IcmpLatencyPercentile(inject, 0.95);
-                    stats.inject_max = inject.back();
-                }
-
-                stats.last_rtt = icmp_latency_last_rtt_ms_;
-                stats.last_pre_tx = icmp_latency_last_pre_tx_ms_;
-                stats.last_net = icmp_latency_last_net_ms_;
-                stats.last_inject = icmp_latency_last_inject_ms_;
-                stats.last_path = icmp_latency_last_path_;
-                stats.last_ms = icmp_latency_last_ms_;
-                return stats;
-            }
-
-            VEthernetNetworkSwitcher::ProbeTimingStats
-                VEthernetNetworkSwitcher::GetProbeTimingStats() const noexcept {
-                ProbeTimingStats stats;
-                stats.rounds = probe_round_count_.load(std::memory_order_relaxed);
-                stats.pin_calls = probe_pin_calls_.load(std::memory_order_relaxed);
-                stats.round_last_ms = probe_round_last_ms_.load(std::memory_order_relaxed);
-                stats.round_max_ms = probe_round_max_ms_.load(std::memory_order_relaxed);
-                stats.pin_last_ms = probe_pin_last_ms_.load(std::memory_order_relaxed);
-                stats.pin_max_ms = probe_pin_max_ms_.load(std::memory_order_relaxed);
-                stats.pin_slowest_ms = probe_pin_slowest_ms_.load(std::memory_order_relaxed);
-                stats.last_round_ms = probe_last_round_ms_.load(std::memory_order_relaxed);
-                return stats;
-            }
 
             VEthernetNetworkSwitcher::InjectionProbeDiagnostics
                 VEthernetNetworkSwitcher::GetInjectionProbeDiagnostics() const noexcept {
