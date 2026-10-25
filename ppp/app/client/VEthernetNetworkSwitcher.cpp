@@ -28,6 +28,7 @@
 #include <ppp/net/IPEndPoint.h>
 #include <ppp/net/http/HttpClient.h>
 #include <ppp/net/asio/InternetControlMessageProtocol.h>
+#include <algorithm>
 #include <ppp/ipv6/IPv6Packet.h>
 #if defined(_WIN32)
 #include <windows/ppp/ipv6/IPv6Auxiliary.h>
@@ -511,6 +512,14 @@ namespace ppp {
             bool VEthernetNetworkSwitcher::RefreshOutboundProbes(ppp::coroutines::YieldContext& y) noexcept {
                 using ProtocolType = UriAuxiliary::ProtocolType;
 
+                // Start of the synchronous (stalling) part of the round: building
+                // the candidate list and pinning every candidate's physical route.
+                // Measured in the pin block below (Windows only: the other platforms
+                // do not pin per-candidate routes).
+#if defined(_WIN32)
+                const uint64_t probe_round_started_ms = ppp::threading::Executors::GetTickCount();
+#endif
+
                 struct Candidate final {
                     ppp::string                                                     entry;
                     ConnectivityProbe::ProbeType                                    probe_type = ConnectivityProbe::ProbeType_Tcp;
@@ -767,9 +776,19 @@ namespace ppp {
 #if defined(_WIN32)
                 // Pin every candidate on the physical adapter so probe sockets
                 // never enter the TAP (self-loop) while the tunnel is up.
+                //
+                // The pin runs on the data-plane executor and takes the switcher
+                // lock, so its cost is a stall the packet path sees as well. Measured
+                // here instead of inferred from the 5 s period: a periodic ICMP
+                // spike that lines up with this number is a client-side stall, not
+                // the link.
+                const uint64_t pin_started_ms = ppp::threading::Executors::GetTickCount();
+                uint32_t pin_calls = 0;
+                uint32_t pin_slowest_ms = 0;
                 for (const OutboundWork& work : works) {
                     for (const Candidate& candidate : work.candidates) {
                         const boost::asio::ip::address& probe_ip = candidate.remoteEP.address();
+                        const uint64_t pin_call_started_ms = ppp::threading::Executors::GetTickCount();
                         if (probe_ip.is_v4()) {
                             if (!EnsureWindowsIPv4ServerRoute(probe_ip)) {
                                 // The probe socket cannot be pinned; say so instead
@@ -782,7 +801,51 @@ namespace ppp {
                         elif(probe_ip.is_v6()) {
                             EnsureWindowsIPv6ServerRoute(probe_ip);
                         }
+
+                        const uint32_t pin_call_ms = static_cast<uint32_t>(
+                            ppp::threading::Executors::GetTickCount() - pin_call_started_ms);
+                        pin_calls++;
+                        if (pin_call_ms > pin_slowest_ms) {
+                            pin_slowest_ms = pin_call_ms;
+                        }
                     }
+                }
+
+                const uint64_t pin_finished_ms = ppp::threading::Executors::GetTickCount();
+                const uint32_t pin_ms = static_cast<uint32_t>(pin_finished_ms - pin_started_ms);
+                const uint32_t round_ms = static_cast<uint32_t>(pin_finished_ms - probe_round_started_ms);
+                if (pin_calls > 0) {
+                    probe_pin_calls_.fetch_add(pin_calls, std::memory_order_relaxed);
+                    probe_pin_last_ms_.store(pin_ms, std::memory_order_relaxed);
+                    probe_pin_slowest_ms_.store(pin_slowest_ms, std::memory_order_relaxed);
+                    uint32_t pin_max = probe_pin_max_ms_.load(std::memory_order_relaxed);
+                    while (pin_ms > pin_max &&
+                        !probe_pin_max_ms_.compare_exchange_weak(pin_max, pin_ms, std::memory_order_relaxed)) {
+                    }
+                }
+
+                probe_round_count_.fetch_add(1, std::memory_order_relaxed);
+                probe_round_last_ms_.store(round_ms, std::memory_order_relaxed);
+                probe_last_round_ms_.store(pin_finished_ms, std::memory_order_relaxed);
+                {
+                    uint32_t round_max = probe_round_max_ms_.load(std::memory_order_relaxed);
+                    while (round_ms > round_max &&
+                        !probe_round_max_ms_.compare_exchange_weak(round_max, round_ms, std::memory_order_relaxed)) {
+                    }
+                }
+
+                // A pin round that takes tens of milliseconds is reported at INFO
+                // so it stays visible without turning on debug logging; the t= value
+                // correlates it with the per-echo latency lines.
+                if (pin_ms >= 50) {
+                    LOG_INFO("VEthernetNetworkSwitcher::RefreshOutboundProbes: route pin round took %ums for %u candidate(s) "
+                        "(slowest %ums, round=%ums), t=%llu",
+                        pin_ms, pin_calls, pin_slowest_ms, round_ms, (unsigned long long)pin_finished_ms);
+                }
+                else {
+                    LOG_DEBUG("VEthernetNetworkSwitcher::RefreshOutboundProbes: route pin round took %ums for %u candidate(s) "
+                        "(slowest %ums, round=%ums), t=%llu",
+                        pin_ms, pin_calls, pin_slowest_ms, round_ms, (unsigned long long)pin_finished_ms);
                 }
 #endif
 
@@ -1696,15 +1759,23 @@ namespace ppp {
                 }
 
                 std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = GetBufferAllocator();
+                // The request came back from the tunnel (or from the static echo
+                // channel): timestamp the reply-in stage and complete the sample
+                // once the reply has been written into the tunnel adapter.
+                const uint64_t reply_in_ms = ppp::threading::Executors::GetTickCount();
+                bool ok = false;
                 if (IPAddressIsGatewayServer(frame->Destination, tap->GatewayServer, tap->SubmaskAddress)) {
                     int ttl = static_cast<int>(IPFrame::DefaultTtl);
                     LOG_DEBUG("VEthernetNetworkSwitcher::ERORTE: local IPv4 echo reply via TAP gateway, request_ttl=%u, reply_ttl=%d, src=%u, dst=%u",
                         static_cast<unsigned int>(frame->Ttl), ttl, frame->Source, frame->Destination);
-                    return ER(packet, frame, ttl, allocator);
+                    ok = ER(packet, frame, ttl, allocator);
                 }
                 else {
-                    return TE(packet, frame, tap->GatewayServer, allocator);
+                    ok = TE(packet, frame, tap->GatewayServer, allocator);
                 }
+
+                IcmpLatencyFinish(packet, reply_in_ms);
+                return ok;
             }
 
             bool VEthernetNetworkSwitcher::OnIcmpPacketInput(const std::shared_ptr<IPFrame>& packet) noexcept {
@@ -1727,6 +1798,11 @@ namespace ppp {
                     static_cast<unsigned int>(frame->Type),
                     static_cast<unsigned int>(frame->Code),
                     static_cast<unsigned int>(frame->Ttl));
+
+                // Start an ICMP echo sample before the request is queued on any
+                // egress path: the four stages (pre_tx/net/inject) then say whether
+                // a spike happened inside this client or outside it.
+                IcmpLatencyBegin(packet);
 
                 // A packet whose source and destination are both the tunnel address
                 // proves Windows does not treat that address as a local destination:
@@ -1804,6 +1880,7 @@ namespace ppp {
                 // all data protocols, so gateway/public ping is not serialized
                 // behind the main TCP FIFO.
                 if (static_.icmp && exchanger->StaticEchoAllocated()) {
+                    IcmpLatencyMarkOutbound(packet, IcmpEchoPath::StaticEcho);
                     if (exchanger->StaticEchoPacketToRemoteExchanger(packet.get())) {
                         if (std::shared_ptr<ITap> tap = GetTap(); NULLPTR != tap) {
                             tap->TraceInputStage("POLICY_SELECTED", "configuration", "static_echo", 1);
@@ -1815,6 +1892,7 @@ namespace ppp {
                         exchanger->GetOutboundTag().data());
                 }
 
+                IcmpLatencyMarkOutbound(packet, IcmpEchoPath::MainTunnel);
                 std::shared_ptr<ITap> tap = GetTap();
                 if (NULLPTR != tap) {
                     tap->TraceInputStage("POLICY_SELECTED", "route", "tunnel", 1);
@@ -1874,6 +1952,7 @@ namespace ppp {
                             break;
                         }
                         elif(exchanger->Echo(ack_id)) {
+                            IcmpLatencyMarkOutbound(packet, IcmpEchoPath::MainTunnel);
                             return true;
                         }
 
@@ -1888,10 +1967,12 @@ namespace ppp {
                     return false;
                 }
 
+                IcmpLatencyMarkOutbound(packet, IcmpEchoPath::StaticEcho);
                 if (exchanger->StaticEchoGatewayServer(ack_id)) {
                     return true;
                 }
                 elif(exchanger->Echo(ack_id)) {
+                    IcmpLatencyMarkOutbound(packet, IcmpEchoPath::MainTunnel);
                     LOG_WARN("DATAPLANE ICMP: static gateway echo failed, fell back to main tunnel, ack_id=%d", ack_id);
                     return true;
                 }
@@ -4949,6 +5030,268 @@ namespace ppp {
                 }
             }
 
+            namespace {
+                // A request that never produced a reply is not latency; waiting a
+                // little past the ICMP timeout (3 s) keeps a lost echo out of the
+                // RTT ring while still counting it as lost.
+                constexpr uint64_t IcmpLatencyPendingTimeout = 4000;
+                constexpr uint32_t IcmpLatencyWarnThresholdMs = 250;
+
+                uint32_t IcmpLatencyCapMs(uint64_t value) noexcept {
+                    return static_cast<uint32_t>(std::min<uint64_t>(value, 60000));
+                }
+
+                // A reply's source is the request's destination, so the same key
+                // is produced from either direction. Identification+sequence alone
+                // are not unique across concurrent pings to different hosts.
+                uint64_t IcmpEchoLatencyKey(const ppp::net::packet::IcmpFrame* frame) noexcept {
+                    const uint32_t peer = frame->Type == IcmpType::ICMP_ECHO
+                        ? frame->Destination
+                        : frame->Source;
+                    return (static_cast<uint64_t>(peer) << 32)
+                        | (static_cast<uint64_t>(frame->Identification) << 16)
+                        | static_cast<uint64_t>(frame->Sequence);
+                }
+
+                uint32_t IcmpLatencyPercentile(ppp::vector<uint32_t>& values, double percentile) noexcept {
+                    if (values.empty()) {
+                        return 0;
+                    }
+
+                    std::sort(values.begin(), values.end());
+                    std::size_t index = static_cast<std::size_t>(percentile * (values.size() - 1) + 0.5);
+                    if (index >= values.size()) {
+                        index = values.size() - 1;
+                    }
+
+                    return values[index];
+                }
+
+                const char* IcmpEchoPathName(uint8_t path) noexcept {
+                    switch (static_cast<VEthernetNetworkSwitcher::IcmpEchoPath>(path)) {
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::StaticEcho: return "static_echo";
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::MainTunnel: return "main_tunnel";
+                    case VEthernetNetworkSwitcher::IcmpEchoPath::Local:      return "local";
+                    default:                                                 return "unknown";
+                    }
+                }
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyBegin(const std::shared_ptr<IPFrame>& packet) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                if (icmp_latency_pending_.size() >= 1024) {
+                    // Runaway guard: an entry that is dropped here only costs one
+                    // sample, while an unbounded map would cost memory per ping.
+                    icmp_latency_pending_.clear();
+                }
+
+                for (auto i = icmp_latency_pending_.begin(); i != icmp_latency_pending_.end();) {
+                    if (now >= i->second.began_ms && now - i->second.began_ms > IcmpLatencyPendingTimeout) {
+                        i = icmp_latency_pending_.erase(i);
+                        icmp_latency_lost_++;
+                    }
+                    else {
+                        ++i;
+                    }
+                }
+
+                IcmpLatencyPending pending;
+                pending.began_ms = now;
+                icmp_latency_pending_[key] = pending;
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyMarkOutbound(const std::shared_ptr<IPFrame>& packet, IcmpEchoPath path) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || frame->Type != IcmpType::ICMP_ECHO || frame->Code != 0) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                auto i = icmp_latency_pending_.find(key);
+                if (i == icmp_latency_pending_.end()) {
+                    return;
+                }
+
+                if (i->second.outbound_ms == 0) {
+                    i->second.outbound_ms = now;
+                    i->second.path = static_cast<uint8_t>(path);
+                }
+            }
+
+            void VEthernetNetworkSwitcher::IcmpLatencyFinish(const std::shared_ptr<IPFrame>& packet, uint64_t reply_in_ms) noexcept {
+                if (NULLPTR == packet) {
+                    return;
+                }
+
+                std::shared_ptr<IcmpFrame> frame = IcmpFrame::Parse(packet.get());
+                if (NULLPTR == frame || (frame->Type != IcmpType::ICMP_ECHO && frame->Type != IcmpType::ICMP_ER)) {
+                    return;
+                }
+
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                const uint64_t key = IcmpEchoLatencyKey(frame.get());
+                uint32_t rtt = 0;
+                uint32_t pre_tx = 0;
+                uint32_t net = 0;
+                uint32_t inject = 0;
+                uint8_t path = 0;
+                bool warn = false;
+                {
+                    std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+                    auto i = icmp_latency_pending_.find(key);
+                    if (i == icmp_latency_pending_.end()) {
+                        return;
+                    }
+
+                    IcmpLatencyPending pending = i->second;
+                    icmp_latency_pending_.erase(i);
+
+                    if (pending.outbound_ms == 0) {
+                        // The request never reached an egress path (local answer or
+                        // an immediate drop): attribute the whole wait to pre_tx so
+                        // the sample still shows up instead of vanishing.
+                        pending.outbound_ms = pending.began_ms;
+                    }
+
+                    if (reply_in_ms < pending.outbound_ms) reply_in_ms = pending.outbound_ms;
+                    if (now < reply_in_ms) reply_in_ms = now;
+
+                    rtt = IcmpLatencyCapMs(now - pending.began_ms);
+                    pre_tx = IcmpLatencyCapMs(pending.outbound_ms - pending.began_ms);
+                    net = IcmpLatencyCapMs(reply_in_ms - pending.outbound_ms);
+                    inject = IcmpLatencyCapMs(now - reply_in_ms);
+                    path = pending.path;
+
+                    IcmpLatencyRing& ring = icmp_latency_ring_;
+                    const uint32_t slot = ring.next;
+                    ring.rtt_ms[slot] = rtt;
+                    ring.pre_tx_ms[slot] = pre_tx;
+                    ring.net_ms[slot] = net;
+                    ring.inject_ms[slot] = inject;
+                    ring.path[slot] = path;
+                    ring.next = (slot + 1) % IcmpLatencyRing::Capacity;
+                    ring.count++;
+
+                    icmp_latency_last_ms_ = now;
+                    icmp_latency_last_rtt_ms_ = rtt;
+                    icmp_latency_last_pre_tx_ms_ = pre_tx;
+                    icmp_latency_last_net_ms_ = net;
+                    icmp_latency_last_inject_ms_ = inject;
+                    icmp_latency_last_path_ = path;
+                    switch (static_cast<IcmpEchoPath>(path)) {
+                    case IcmpEchoPath::StaticEcho: icmp_latency_path_static_++; break;
+                    case IcmpEchoPath::MainTunnel: icmp_latency_path_main_++; break;
+                    case IcmpEchoPath::Local:      icmp_latency_path_local_++; break;
+                    default: break;
+                    }
+
+                    if (rtt >= IcmpLatencyWarnThresholdMs &&
+                        (icmp_latency_last_warn_ms_ == 0 || now >= icmp_latency_last_warn_ms_ + 1000)) {
+                        icmp_latency_last_warn_ms_ = now;
+                        warn = true;
+                    }
+                }
+
+                if (warn) {
+                    LOG_WARN("DATAPLANE ICMP: echo latency spike, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
+                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
+                        static_cast<unsigned int>(frame->Identification),
+                        static_cast<unsigned int>(frame->Sequence),
+                        (unsigned long long)now);
+                }
+                else {
+                    LOG_DEBUG("DATAPLANE ICMP: echo latency, rtt=%ums pre_tx=%ums net=%ums inject=%ums path=%s id=%u seq=%u t=%llu",
+                        rtt, pre_tx, net, inject, IcmpEchoPathName(path),
+                        static_cast<unsigned int>(frame->Identification),
+                        static_cast<unsigned int>(frame->Sequence),
+                        (unsigned long long)now);
+                }
+            }
+
+            VEthernetNetworkSwitcher::IcmpLatencyStats
+                VEthernetNetworkSwitcher::GetIcmpLatencyStats() const noexcept {
+                IcmpLatencyStats stats;
+                std::lock_guard<std::mutex> scope(icmp_latency_syncobj_);
+
+                const uint32_t capacity = static_cast<uint32_t>(IcmpLatencyRing::Capacity);
+                const uint32_t count = icmp_latency_ring_.count < capacity ? icmp_latency_ring_.count : capacity;
+                stats.samples = icmp_latency_ring_.count;
+                stats.pending = static_cast<uint32_t>(icmp_latency_pending_.size());
+                stats.lost = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_lost_, UINT32_MAX));
+                stats.path_static = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_static_, UINT32_MAX));
+                stats.path_main = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_main_, UINT32_MAX));
+                stats.path_local = static_cast<uint32_t>(std::min<uint64_t>(icmp_latency_path_local_, UINT32_MAX));
+
+                if (count > 0) {
+                    ppp::vector<uint32_t> rtt;
+                    ppp::vector<uint32_t> pre_tx;
+                    ppp::vector<uint32_t> net;
+                    ppp::vector<uint32_t> inject;
+                    rtt.reserve(count);
+                    pre_tx.reserve(count);
+                    net.reserve(count);
+                    inject.reserve(count);
+                    for (uint32_t i = 0; i < count; i++) {
+                        rtt.emplace_back(icmp_latency_ring_.rtt_ms[i]);
+                        pre_tx.emplace_back(icmp_latency_ring_.pre_tx_ms[i]);
+                        net.emplace_back(icmp_latency_ring_.net_ms[i]);
+                        inject.emplace_back(icmp_latency_ring_.inject_ms[i]);
+                    }
+
+                    stats.rtt_p50 = IcmpLatencyPercentile(rtt, 0.50);
+                    stats.rtt_p95 = IcmpLatencyPercentile(rtt, 0.95);
+                    stats.rtt_max = rtt.back();
+                    stats.pre_tx_p50 = IcmpLatencyPercentile(pre_tx, 0.50);
+                    stats.pre_tx_p95 = IcmpLatencyPercentile(pre_tx, 0.95);
+                    stats.pre_tx_max = pre_tx.back();
+                    stats.net_p50 = IcmpLatencyPercentile(net, 0.50);
+                    stats.net_p95 = IcmpLatencyPercentile(net, 0.95);
+                    stats.net_max = net.back();
+                    stats.inject_p50 = IcmpLatencyPercentile(inject, 0.50);
+                    stats.inject_p95 = IcmpLatencyPercentile(inject, 0.95);
+                    stats.inject_max = inject.back();
+                }
+
+                stats.last_rtt = icmp_latency_last_rtt_ms_;
+                stats.last_pre_tx = icmp_latency_last_pre_tx_ms_;
+                stats.last_net = icmp_latency_last_net_ms_;
+                stats.last_inject = icmp_latency_last_inject_ms_;
+                stats.last_path = icmp_latency_last_path_;
+                stats.last_ms = icmp_latency_last_ms_;
+                return stats;
+            }
+
+            VEthernetNetworkSwitcher::ProbeTimingStats
+                VEthernetNetworkSwitcher::GetProbeTimingStats() const noexcept {
+                ProbeTimingStats stats;
+                stats.rounds = probe_round_count_.load(std::memory_order_relaxed);
+                stats.pin_calls = probe_pin_calls_.load(std::memory_order_relaxed);
+                stats.round_last_ms = probe_round_last_ms_.load(std::memory_order_relaxed);
+                stats.round_max_ms = probe_round_max_ms_.load(std::memory_order_relaxed);
+                stats.pin_last_ms = probe_pin_last_ms_.load(std::memory_order_relaxed);
+                stats.pin_max_ms = probe_pin_max_ms_.load(std::memory_order_relaxed);
+                stats.pin_slowest_ms = probe_pin_slowest_ms_.load(std::memory_order_relaxed);
+                stats.last_round_ms = probe_last_round_ms_.load(std::memory_order_relaxed);
+                return stats;
+            }
+
             VEthernetNetworkSwitcher::InjectionProbeDiagnostics
                 VEthernetNetworkSwitcher::GetInjectionProbeDiagnostics() const noexcept {
                 InjectionProbeDiagnostics diagnostics;
@@ -7284,6 +7627,51 @@ namespace ppp {
             }
 
 #if defined(_WIN32)
+            int VEthernetNetworkSwitcher::IPv4ServerRouteInstalled(
+                uint32_t remote, uint32_t gateway, int interface_index) noexcept {
+                // Caller holds syncobj_. Returns 1 installed, 0 absent, -1 unknown
+                // (the table could not be read this round).
+                constexpr uint64_t route_snapshot_ttl_ms = 30000;
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                if (ipv4_route_rows_at_ == 0 || now - ipv4_route_rows_at_ >= route_snapshot_ttl_ms) {
+                    ipv4_route_rows_.clear();
+                    ipv4_route_rows_valid_ = false;
+                    std::shared_ptr<MIB_IPFORWARDTABLE> table = ppp::win32::network::Router::GetIpForwardTable();
+                    if (NULLPTR != table) {
+                        ipv4_route_rows_.reserve(static_cast<std::size_t>(table->dwNumEntries));
+                        for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                            const MIB_IPFORWARDROW& route = table->table[i];
+                            IPv4RouteRow row;
+                            row.destination = route.dwForwardDest;
+                            row.mask = route.dwForwardMask;
+                            row.next_hop = route.dwForwardNextHop;
+                            row.interface_index = static_cast<int>(route.dwForwardIfIndex);
+                            ipv4_route_rows_.emplace_back(row);
+                        }
+                        ipv4_route_rows_valid_ = true;
+                        ipv4_route_rows_at_ = now;
+                    }
+                    else {
+                        // Do not spend 25 ms per candidate retrying inside one
+                        // round: retry the read in a second instead.
+                        ipv4_route_rows_at_ = now - route_snapshot_ttl_ms + 1000;
+                    }
+                }
+
+                if (!ipv4_route_rows_valid_) {
+                    return -1;
+                }
+
+                const uint32_t mask = IPEndPoint::PrefixToNetmask(32);
+                for (const IPv4RouteRow& row : ipv4_route_rows_) {
+                    if (row.destination == remote && row.mask == mask &&
+                        row.next_hop == gateway && row.interface_index == interface_index) {
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+
             bool VEthernetNetworkSwitcher::EnsureWindowsIPv4ServerRoute(
                 const boost::asio::ip::address& address) noexcept {
                 if (!address.is_v4() || address.is_unspecified() || address.is_loopback()) {
@@ -7312,20 +7700,18 @@ namespace ppp {
                     }
                 }
 
-                auto table = ppp::win32::network::Router::GetIpForwardTable();
-                if (NULLPTR != table) {
-                    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
-                        const MIB_IPFORWARDROW& route = table->table[i];
-                        if (route.dwForwardDest == remote && route.dwForwardMask == mask &&
-                            route.dwForwardNextHop == gateway &&
-                            static_cast<int>(route.dwForwardIfIndex) == underlying->Index) {
-                            if (cached_route == ipv4_server_routes_.end()) {
-                                ipv4_server_routes_.emplace_back(IPv4ServerRoute{
-                                    remote, gateway, underlying->Index, false });
-                            }
-                            return true;
-                        }
+                const int route_state = IPv4ServerRouteInstalled(remote, gateway, underlying->Index);
+                if (route_state > 0) {
+                    if (cached_route == ipv4_server_routes_.end()) {
+                        ipv4_server_routes_.emplace_back(IPv4ServerRoute{
+                            remote, gateway, underlying->Index, false });
                     }
+                    return true;
+                }
+                if (route_state < 0) {
+                    // The route table could not be read: adding another /32 blindly
+                    // would both spam errors and risk a duplicate route.
+                    return false;
                 }
 
                 // Routes in the active Windows table can disappear when an adapter
@@ -7349,6 +7735,8 @@ namespace ppp {
 
                 ipv4_server_routes_.emplace_back(IPv4ServerRoute{
                     remote, gateway, underlying->Index, true });
+                // The table just changed: let the next verification re-read it.
+                ipv4_route_rows_at_ = 0;
                 LOG_INFO("VEthernetNetworkSwitcher::EnsureWindowsIPv4ServerRoute: pinned remote=%s/32, gateway=%s, ifindex=%d, created=1",
                     address.to_string().c_str(), underlying->GatewayServer.to_string().c_str(),
                     underlying->Index);
@@ -7361,6 +7749,7 @@ namespace ppp {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     routes = std::move(ipv4_server_routes_);
                     ipv4_server_routes_.clear();
+                    ipv4_route_rows_at_ = 0;
                 }
 
                 auto table = ppp::win32::network::Router::GetIpForwardTable();
@@ -7491,6 +7880,80 @@ namespace ppp {
             }
 #endif
 
+            int VEthernetNetworkSwitcher::IPv6ServerRouteInstalled(
+                const boost::asio::ip::address& address,
+                const boost::asio::ip::address& gateway_address,
+                int interface_index) noexcept {
+                // Caller holds syncobj_. Returns 1 installed, 0 absent, -1 unknown.
+                constexpr uint64_t route_snapshot_ttl_ms = 30000;
+                const uint64_t now = ppp::threading::Executors::GetTickCount();
+                if (ipv6_route_rows_at_ == 0 || now - ipv6_route_rows_at_ >= route_snapshot_ttl_ms) {
+                    ipv6_route_rows_.clear();
+                    ipv6_route_rows_valid_ = false;
+                    PMIB_IPFORWARD_TABLE2 table = NULLPTR;
+                    const DWORD result = ::GetIpForwardTable2(AF_INET6, &table);
+                    if (result == NO_ERROR && NULLPTR != table) {
+                        ipv6_route_rows_.reserve(static_cast<std::size_t>(table->NumEntries));
+                        for (ULONG i = 0; i < table->NumEntries; ++i) {
+                            ipv6_route_rows_.emplace_back(table->Table[i]);
+                        }
+                        ipv6_route_rows_valid_ = true;
+                        ipv6_route_rows_at_ = now;
+                    }
+                    else {
+                        LOG_WARN("VEthernetNetworkSwitcher::IPv6ServerRouteInstalled: route table query failed, remote=%s, result=%lu",
+                            address.to_string().c_str(), static_cast<unsigned long>(result));
+                        // Retry the read in a second, not once per candidate.
+                        ipv6_route_rows_at_ = now - route_snapshot_ttl_ms + 1000;
+                    }
+                    if (NULLPTR != table) {
+                        ::FreeMibTable(table);
+                    }
+                }
+
+                if (!ipv6_route_rows_valid_) {
+                    return -1;
+                }
+
+                const boost::asio::ip::address_v6 remote = address.to_v6();
+                const boost::asio::ip::address_v6 gateway = gateway_address.to_v6();
+                const auto remote_bytes = remote.to_bytes();
+                const auto gateway_bytes = gateway.to_bytes();
+                unsigned long gateway_scope = gateway.scope_id();
+                if (gateway.is_link_local() && gateway_scope == 0) {
+                    gateway_scope = static_cast<unsigned long>(interface_index);
+                }
+
+                for (const MIB_IPFORWARD_ROW2& route : ipv6_route_rows_) {
+                    if (route.InterfaceIndex != static_cast<NET_IFINDEX>(interface_index) ||
+                        route.DestinationPrefix.Prefix.si_family != AF_INET6 ||
+                        route.DestinationPrefix.PrefixLength != 128 ||
+                        route.NextHop.si_family != AF_INET6 ||
+                        ::memcmp(&route.DestinationPrefix.Prefix.Ipv6.sin6_addr,
+                            remote_bytes.data(), sizeof(IN6_ADDR)) != 0 ||
+                        ::memcmp(&route.NextHop.Ipv6.sin6_addr,
+                            gateway_bytes.data(), sizeof(IN6_ADDR)) != 0) {
+                        continue;
+                    }
+
+                    // Windows reports sin6_scope_id = 0 for link-local next hops
+                    // that were installed through CreateIpForwardEntry2 (the zone
+                    // lives inside the address, not in the row), so a strict
+                    // comparison against the interface index rejected the route
+                    // that had just been added and aborted every IPv6 server
+                    // connection.  Accept the interface zone as well as the
+                    // unspecified zero.
+                    if (gateway.is_link_local()) {
+                        const unsigned long installed_scope = route.NextHop.Ipv6.sin6_scope_id;
+                        if (installed_scope != 0 && installed_scope != gateway_scope) {
+                            continue;
+                        }
+                    }
+                    return 1;
+                }
+                return 0;
+            }
+
             bool VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute(
                 const boost::asio::ip::address& address) noexcept {
                 if (!address.is_v6() || address.is_unspecified() ||
@@ -7518,68 +7981,21 @@ namespace ppp {
                     }
                 }
 
-                auto route_is_installed = [&]() noexcept {
-                    PMIB_IPFORWARD_TABLE2 table = NULLPTR;
-                    const DWORD result = ::GetIpForwardTable2(AF_INET6, &table);
-                    if (result != NO_ERROR || NULLPTR == table) {
-                        if (NULLPTR != table) {
-                            ::FreeMibTable(table);
-                        }
-                        LOG_WARN("VEthernetNetworkSwitcher::EnsureWindowsIPv6ServerRoute: route table query failed, remote=%s, result=%lu",
-                            address.to_string().c_str(), static_cast<unsigned long>(result));
-                        return false;
-                    }
-
-                    const auto remote_bytes = address.to_v6().to_bytes();
-                    const auto gateway = underlying->IPv6GatewayServer.to_v6();
-                    const auto gateway_bytes = gateway.to_bytes();
-                    unsigned long gateway_scope = gateway.scope_id();
-                    if (gateway.is_link_local() && gateway_scope == 0) {
-                        gateway_scope = static_cast<unsigned long>(underlying->Index);
-                    }
-
-                    bool found = false;
-                    for (ULONG i = 0; i < table->NumEntries; ++i) {
-                        const MIB_IPFORWARD_ROW2& route = table->Table[i];
-                        if (route.InterfaceIndex != static_cast<NET_IFINDEX>(underlying->Index) ||
-                            route.DestinationPrefix.Prefix.si_family != AF_INET6 ||
-                            route.DestinationPrefix.PrefixLength != 128 ||
-                            route.NextHop.si_family != AF_INET6 ||
-                            ::memcmp(&route.DestinationPrefix.Prefix.Ipv6.sin6_addr,
-                                remote_bytes.data(), sizeof(IN6_ADDR)) != 0 ||
-                            ::memcmp(&route.NextHop.Ipv6.sin6_addr,
-                                gateway_bytes.data(), sizeof(IN6_ADDR)) != 0) {
-                            continue;
-                        }
-
-                        // Windows reports sin6_scope_id = 0 for link-local next hops
-                        // that were installed through CreateIpForwardEntry2 (the zone
-                        // lives inside the address, not in the row), so a strict
-                        // comparison against the interface index rejected the route
-                        // that had just been added and aborted every IPv6 server
-                        // connection.  Accept the interface zone as well as the
-                        // unspecified zero.
-                        if (gateway.is_link_local()) {
-                            const unsigned long installed_scope = route.NextHop.Ipv6.sin6_scope_id;
-                            if (installed_scope != 0 && installed_scope != gateway_scope) {
-                                continue;
-                            }
-                        }
-
-                        found = true;
-                        break;
-                    }
-
-                    ::FreeMibTable(table);
-                    return found;
+                auto route_state = [&]() noexcept {
+                    return IPv6ServerRouteInstalled(address, underlying->IPv6GatewayServer, underlying->Index);
                 };
 
-                if (route_is_installed()) {
+                const int initial_state = route_state();
+                if (initial_state > 0) {
                     if (cached_route == ipv6_server_routes_.end()) {
                         ipv6_server_routes_.emplace_back(IPv6ServerRoute{
                             address, underlying->IPv6GatewayServer, underlying->Index, false });
                     }
                     return true;
+                }
+                if (initial_state < 0) {
+                    // Route table unreadable this round; do not add blindly.
+                    return false;
                 }
 
                 if (cached_route != ipv6_server_routes_.end()) {
@@ -7600,11 +8016,14 @@ namespace ppp {
                     return false;
                 }
 
-                bool installed = route_is_installed();
-                for (int attempt = 0; !installed && attempt < 5; ++attempt) {
+                // The table just changed: let the verification below re-read it.
+                ipv6_route_rows_at_ = 0;
+                int installed_state = route_state();
+                for (int attempt = 0; installed_state == 0 && attempt < 5; ++attempt) {
                     ::Sleep(20);
-                    installed = route_is_installed();
+                    installed_state = route_state();
                 }
+                const bool installed = installed_state > 0;
                 if (!installed) {
                     if (created) {
                         ipv6_server_routes_.emplace_back(IPv6ServerRoute{
@@ -7631,6 +8050,7 @@ namespace ppp {
                     SynchronizedObjectScope scope(GetSynchronizedObject());
                     routes = std::move(ipv6_server_routes_);
                     ipv6_server_routes_.clear();
+                    ipv6_route_rows_at_ = 0;
                 }
                 for (const IPv6ServerRoute& route : routes) {
                     if (!route.owned || route.interface_index < 0 || !route.address.is_v6()) {

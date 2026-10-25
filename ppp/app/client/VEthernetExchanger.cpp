@@ -2682,7 +2682,24 @@ namespace ppp {
             }
 
             bool VEthernetExchanger::OnEcho(const ITransmissionPtr& transmission, Byte* packet, int packet_length, YieldContext& y) noexcept {
+                // Echo replies that came back through the main tunnel (the ICMP
+                // path used when the static-echo channel is unavailable). The two
+                // timestamps complete the net/inject stages of the latency sample.
+                const uint64_t icmp_reply_in_ms = ppp::threading::Executors::GetTickCount();
                 switcher_->Output(packet, packet_length);
+                // IPv4 keeps the protocol field at byte 9 regardless of options;
+                // the version nibble rejects the IPv6 plane before touching it.
+                if (NULLPTR != packet && packet_length >= 20 && (packet[0] >> 4) == 4 &&
+                    packet[9] == ppp::net::native::ip_hdr::IP_PROTO_ICMP) {
+                    AppConfigurationPtr configuration = GetConfiguration();
+                    std::shared_ptr<ppp::threading::BufferswapAllocator> allocator = NULLPTR != configuration
+                        ? configuration->GetBufferAllocator() : NULLPTR;
+                    std::shared_ptr<ppp::net::packet::IPFrame> frame = ppp::net::packet::IPFrame::Parse(
+                        allocator, packet, packet_length);
+                    if (NULLPTR != frame) {
+                        switcher_->IcmpLatencyFinish(frame, icmp_reply_in_ms);
+                    }
+                }
                 return true;
             }
 
@@ -3688,7 +3705,15 @@ namespace ppp {
                         }
                     }
 
-                    return switcher_->Output(frame.get());
+                    // Echo replies that came back over the static echo channel: the
+                    // arrival timestamp and the injection timestamp are two of the
+                    // four ICMP latency stages (see IcmpLatencyStats).
+                    const uint64_t icmp_reply_in_ms = ppp::threading::Executors::GetTickCount();
+                    const bool icmp_output_ok = switcher_->Output(frame.get());
+                    if (frame->ProtocolType == ppp::net::native::ip_hdr::IP_PROTO_ICMP) {
+                        switcher_->IcmpLatencyFinish(frame, icmp_reply_in_ms);
+                    }
+                    return icmp_output_ok;
                 }
                 else {
                     return false;

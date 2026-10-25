@@ -233,6 +233,68 @@ namespace ppp {
                     uint64_t                                                    last_success_ms = 0;  ///< Tick count of the last delivered round.
                 };
                 InjectionProbeDiagnostics                                          GetInjectionProbeDiagnostics() const noexcept;
+
+                // ICMP echo latency decomposition.
+                //
+                // A host ping that reaches this client goes through four stages:
+                // the request arrives on the TUN path, it is handed to one of the
+                // three egress paths, the answer comes back from that path, and it
+                // is injected into the tunnel adapter.  Timestamping the stages (and
+                // recording which path was used) is the difference between blaming
+                // the link and blaming the client: a spike in pre_tx/inject is
+                // client-side queueing on the io_context, a spike in net is the
+                // tunnel or the remote host, and a spike only on the static-echo
+                // path points at that channel's socket rotation.
+                enum class IcmpEchoPath : uint8_t {
+                    Unknown = 0,
+                    StaticEcho = 1,     ///< Independent UDP static-echo channel.
+                    MainTunnel = 2,     ///< Serialized behind the main (TCP) transmission.
+                    Local = 3,          ///< Answered locally (no tunnel round trip).
+                };
+                struct IcmpLatencyStats final {
+                    uint32_t                                                    samples = 0;    ///< Completed echo samples in the ring.
+                    uint32_t                                                    pending = 0;    ///< Requests awaiting a reply right now.
+                    uint32_t                                                    lost = 0;       ///< Requests that never produced a reply.
+                    uint32_t                                                    path_static = 0;
+                    uint32_t                                                    path_main = 0;
+                    uint32_t                                                    path_local = 0;
+                    uint32_t                                                    rtt_p50 = 0;    ///< request in -> reply injected.
+                    uint32_t                                                    rtt_p95 = 0;
+                    uint32_t                                                    rtt_max = 0;
+                    uint32_t                                                    pre_tx_p50 = 0; ///< request in -> handed to the egress path.
+                    uint32_t                                                    pre_tx_p95 = 0;
+                    uint32_t                                                    pre_tx_max = 0;
+                    uint32_t                                                    net_p50 = 0;    ///< handed to the egress path -> reply arrived.
+                    uint32_t                                                    net_p95 = 0;
+                    uint32_t                                                    net_max = 0;
+                    uint32_t                                                    inject_p50 = 0; ///< reply arrived -> injected into the adapter.
+                    uint32_t                                                    inject_p95 = 0;
+                    uint32_t                                                    inject_max = 0;
+                    uint32_t                                                    last_rtt = 0;
+                    uint32_t                                                    last_pre_tx = 0;
+                    uint32_t                                                    last_net = 0;
+                    uint32_t                                                    last_inject = 0;
+                    uint8_t                                                     last_path = 0;
+                    uint64_t                                                    last_ms = 0;    ///< Tick count of the last completed sample.
+                };
+                IcmpLatencyStats                                                    GetIcmpLatencyStats() const noexcept;
+
+                // Probe refresh cost.  Every refresh round pins the physical route
+                // of every candidate while holding the switcher lock, so the time
+                // it takes is a stall the packet path sees as well.  Measured here
+                // instead of inferred from the 5 s period.
+                struct ProbeTimingStats final {
+                    uint32_t                                                    rounds = 0;
+                    uint32_t                                                    pin_calls = 0;
+                    uint32_t                                                    round_last_ms = 0;
+                    uint32_t                                                    round_max_ms = 0;
+                    uint32_t                                                    pin_last_ms = 0;
+                    uint32_t                                                    pin_max_ms = 0;
+                    uint32_t                                                    pin_slowest_ms = 0;    ///< Slowest single pin in the last round.
+                    uint64_t                                                    last_round_ms = 0;     ///< Tick count of the last measured round.
+                };
+                ProbeTimingStats                                                    GetProbeTimingStats() const noexcept;
+
                 // Configure before Open(); the request is shared across primary switches.
                 void                                                                SetLinkRestartLimit(int value) noexcept { link_restart_limit_ = value; }
                 int                                                                 GetLinkRestartLimit() const noexcept { return link_restart_limit_; }
@@ -716,6 +778,51 @@ namespace ppp {
                 std::atomic<int>                                                    tun_mss_v4_ = 0;
                 std::atomic<int>                                                    tun_mss_v6_ = 0;
 
+                // ---- ICMP echo latency tracker (see IcmpLatencyStats) ----------
+                struct IcmpLatencyPending final {
+                    uint64_t                                                    began_ms = 0;   ///< Request seen on the TUN input path.
+                    uint64_t                                                    outbound_ms = 0;///< Handed to the chosen egress path (0 = not marked yet).
+                    uint8_t                                                     path = 0;       ///< IcmpEchoPath chosen for this request.
+                };
+                struct IcmpLatencyRing final {
+                    static constexpr int                                        Capacity = 256;
+                    uint32_t                                                    count = 0;      ///< Samples ever recorded (may exceed Capacity).
+                    uint32_t                                                    next = 0;
+                    uint32_t                                                    rtt_ms[Capacity] = {};
+                    uint32_t                                                    pre_tx_ms[Capacity] = {};
+                    uint32_t                                                    net_ms[Capacity] = {};
+                    uint32_t                                                    inject_ms[Capacity] = {};
+                    uint8_t                                                     path[Capacity] = {};
+                };
+                void                                                                IcmpLatencyBegin(const std::shared_ptr<IPFrame>& packet) noexcept;
+                void                                                                IcmpLatencyMarkOutbound(const std::shared_ptr<IPFrame>& packet, IcmpEchoPath path) noexcept;
+                void                                                                IcmpLatencyFinish(const std::shared_ptr<IPFrame>& packet, uint64_t reply_in_ms) noexcept;
+                mutable std::mutex                                                  icmp_latency_syncobj_;
+                std::unordered_map<uint64_t, IcmpLatencyPending>                    icmp_latency_pending_;
+                IcmpLatencyRing                                                     icmp_latency_ring_;
+                uint64_t                                                            icmp_latency_lost_ = 0;
+                uint64_t                                                            icmp_latency_path_static_ = 0;
+                uint64_t                                                            icmp_latency_path_main_ = 0;
+                uint64_t                                                            icmp_latency_path_local_ = 0;
+                uint64_t                                                            icmp_latency_last_ms_ = 0;
+                uint64_t                                                            icmp_latency_last_warn_ms_ = 0;
+                uint32_t                                                            icmp_latency_last_rtt_ms_ = 0;
+                uint32_t                                                            icmp_latency_last_pre_tx_ms_ = 0;
+                uint32_t                                                            icmp_latency_last_net_ms_ = 0;
+                uint32_t                                                            icmp_latency_last_inject_ms_ = 0;
+                uint8_t                                                             icmp_latency_last_path_ = 0;
+
+                // Probe refresh cost (see ProbeTimingStats). Written from the
+                // refresh coroutine, read from the snapshot thread.
+                std::atomic<uint32_t>                                               probe_round_count_ = 0;
+                std::atomic<uint32_t>                                               probe_pin_calls_ = 0;
+                std::atomic<uint32_t>                                               probe_round_last_ms_ = 0;
+                std::atomic<uint32_t>                                               probe_round_max_ms_ = 0;
+                std::atomic<uint32_t>                                               probe_pin_last_ms_ = 0;
+                std::atomic<uint32_t>                                               probe_pin_max_ms_ = 0;
+                std::atomic<uint32_t>                                               probe_pin_slowest_ms_ = 0;
+                std::atomic<uint64_t>                                               probe_last_round_ms_ = 0;
+
 #if defined(_WIN32)
                 PaperAirplaneControllerPtr                                          paper_airplane_ctrl_;
                 ppp::vector<MIB_IPFORWARDROW>                                       default_routes_;
@@ -732,6 +839,32 @@ namespace ppp {
                     bool                                                            owned = false;
                 };
                 ppp::vector<IPv4ServerRoute>                                        ipv4_server_routes_;
+                // Cached route-table rows. GetIpForwardTable(sort=true) and
+                // GetIpForwardTable2() are the expensive part of the per-candidate
+                // pin: the 5 s probe round pinned 23 candidates, re-reading and
+                // re-sorting the whole table once per candidate, and stalled the
+                // data-plane executor for 0.5-0.8 s per round (measured 2026-10-25:
+                // 20 of 90 pings >= 300 ms, every spike inside a pin round). The
+                // rows are cached for a short while and invalidated whenever this
+                // client adds or removes a route. Callers hold syncobj_.
+                struct IPv4RouteRow final {
+                    uint32_t                                                        destination = 0;
+                    uint32_t                                                        mask = 0;
+                    uint32_t                                                        next_hop = 0;
+                    int                                                             interface_index = -1;
+                };
+                ppp::vector<IPv4RouteRow>                                           ipv4_route_rows_;
+                uint64_t                                                            ipv4_route_rows_at_ = 0;
+                bool                                                                ipv4_route_rows_valid_ = false;
+                ppp::vector<MIB_IPFORWARD_ROW2>                                     ipv6_route_rows_;
+                uint64_t                                                            ipv6_route_rows_at_ = 0;
+                bool                                                                ipv6_route_rows_valid_ = false;
+                /// 1 = installed, 0 = absent, -1 = route table unreadable this round.
+                int                                                                 IPv4ServerRouteInstalled(uint32_t remote, uint32_t gateway, int interface_index) noexcept;
+                int                                                                 IPv6ServerRouteInstalled(
+                    const boost::asio::ip::address& address,
+                    const boost::asio::ip::address& gateway,
+                    int interface_index) noexcept;
                 struct IPv6ServerRoute final {
                     boost::asio::ip::address                                        address;
                     boost::asio::ip::address                                        gateway;

@@ -488,6 +488,16 @@ private:
     PreventReturn                                   prevent_rerun_;                      // Prevent multiple instances
     ppp::transmissions::ITransmissionStatistics     transmission_statistics_;            // Traffic statistics
 
+    // Tick lateness detector. OnTick runs on the data-plane io_context (the 1 s
+    // timer and the tick handler share it), so an arrival later than its 1000 ms
+    // period is direct evidence that packet forwarding was stalled. This is the
+    // measurement that distinguishes "the client blocked itself" from "the link
+    // was slow" without a packet capture.
+    std::atomic<uint64_t>                           last_tick_ms_{ 0 };
+    std::atomic<uint32_t>                           tick_late_count_{ 0 };
+    std::atomic<uint32_t>                           tick_last_late_ms_{ 0 };
+    std::atomic<uint32_t>                           tick_max_late_ms_{ 0 };
+
     bool                                            headless_                   = false; // Headless mode (no TUI)
     bool                                            owns_console_presentation_  = true;  // Rust owns it for in-process hosting
     bool                                            catalog_only_               = false; // Load server directory without starting a VPN link
@@ -4250,6 +4260,60 @@ bool PppApplication::BuildRuntimeSnapshot(Json::Value& snapshot) noexcept
             snapshot["dataplane"]["static_echo"]["consecutive_failures"] = static_echo.consecutive_failures;
             snapshot["dataplane"]["static_echo"]["degraded_until_ms"] = (Json::UInt64)static_echo.degraded_until;
 
+            // ICMP echo latency decomposition (request in -> outbound -> reply in
+            // -> injected). A spike that lives in pre_tx/inject happened inside
+            // this process; one that lives in net happened on the tunnel or at the
+            // remote host. The path counters say whether the static-echo UDP
+            // channel or the TCP tunnel carried the sample.
+            {
+                const VEthernetNetworkSwitcher::IcmpLatencyStats icmp_latency =
+                    client->GetIcmpLatencyStats();
+                snapshot["dataplane"]["icmp"]["samples"] = (Json::UInt)icmp_latency.samples;
+                snapshot["dataplane"]["icmp"]["pending"] = (Json::UInt)icmp_latency.pending;
+                snapshot["dataplane"]["icmp"]["lost"] = (Json::UInt)icmp_latency.lost;
+                snapshot["dataplane"]["icmp"]["path_static"] = (Json::UInt)icmp_latency.path_static;
+                snapshot["dataplane"]["icmp"]["path_main"] = (Json::UInt)icmp_latency.path_main;
+                snapshot["dataplane"]["icmp"]["path_local"] = (Json::UInt)icmp_latency.path_local;
+                snapshot["dataplane"]["icmp"]["rtt_p50_ms"] = (Json::UInt)icmp_latency.rtt_p50;
+                snapshot["dataplane"]["icmp"]["rtt_p95_ms"] = (Json::UInt)icmp_latency.rtt_p95;
+                snapshot["dataplane"]["icmp"]["rtt_max_ms"] = (Json::UInt)icmp_latency.rtt_max;
+                snapshot["dataplane"]["icmp"]["pre_tx_p50_ms"] = (Json::UInt)icmp_latency.pre_tx_p50;
+                snapshot["dataplane"]["icmp"]["pre_tx_p95_ms"] = (Json::UInt)icmp_latency.pre_tx_p95;
+                snapshot["dataplane"]["icmp"]["pre_tx_max_ms"] = (Json::UInt)icmp_latency.pre_tx_max;
+                snapshot["dataplane"]["icmp"]["net_p50_ms"] = (Json::UInt)icmp_latency.net_p50;
+                snapshot["dataplane"]["icmp"]["net_p95_ms"] = (Json::UInt)icmp_latency.net_p95;
+                snapshot["dataplane"]["icmp"]["net_max_ms"] = (Json::UInt)icmp_latency.net_max;
+                snapshot["dataplane"]["icmp"]["inject_p50_ms"] = (Json::UInt)icmp_latency.inject_p50;
+                snapshot["dataplane"]["icmp"]["inject_p95_ms"] = (Json::UInt)icmp_latency.inject_p95;
+                snapshot["dataplane"]["icmp"]["inject_max_ms"] = (Json::UInt)icmp_latency.inject_max;
+                snapshot["dataplane"]["icmp"]["last_rtt_ms"] = (Json::UInt)icmp_latency.last_rtt;
+                snapshot["dataplane"]["icmp"]["last_pre_tx_ms"] = (Json::UInt)icmp_latency.last_pre_tx;
+                snapshot["dataplane"]["icmp"]["last_net_ms"] = (Json::UInt)icmp_latency.last_net;
+                snapshot["dataplane"]["icmp"]["last_inject_ms"] = (Json::UInt)icmp_latency.last_inject;
+                snapshot["dataplane"]["icmp"]["last_path"] = (Json::UInt)icmp_latency.last_path;
+                snapshot["dataplane"]["icmp"]["last_ms"] = (Json::UInt64)icmp_latency.last_ms;
+
+                // Probe refresh cost: every 5 s the round pins the physical route
+                // of every candidate while holding the switcher lock.
+                const VEthernetNetworkSwitcher::ProbeTimingStats probe_timing =
+                    client->GetProbeTimingStats();
+                snapshot["dataplane"]["probe"]["rounds"] = (Json::UInt)probe_timing.rounds;
+                snapshot["dataplane"]["probe"]["pin_calls"] = (Json::UInt)probe_timing.pin_calls;
+                snapshot["dataplane"]["probe"]["round_last_ms"] = (Json::UInt)probe_timing.round_last_ms;
+                snapshot["dataplane"]["probe"]["round_max_ms"] = (Json::UInt)probe_timing.round_max_ms;
+                snapshot["dataplane"]["probe"]["pin_last_ms"] = (Json::UInt)probe_timing.pin_last_ms;
+                snapshot["dataplane"]["probe"]["pin_max_ms"] = (Json::UInt)probe_timing.pin_max_ms;
+                snapshot["dataplane"]["probe"]["pin_slowest_ms"] = (Json::UInt)probe_timing.pin_slowest_ms;
+                snapshot["dataplane"]["probe"]["last_round_ms"] = (Json::UInt64)probe_timing.last_round_ms;
+            }
+
+            // Tick lateness. The 1 s tick runs on the data-plane io_context, so a
+            // late tick is direct proof that the loop was blocked (the same
+            // signature as the 2026-10-24 snapshot-build stall).
+            snapshot["dataplane"]["tick"]["late_ticks"] = (Json::UInt)tick_late_count_.load(std::memory_order_relaxed);
+            snapshot["dataplane"]["tick"]["last_late_ms"] = (Json::UInt)tick_last_late_ms_.load(std::memory_order_relaxed);
+            snapshot["dataplane"]["tick"]["max_late_ms"] = (Json::UInt)tick_max_late_ms_.load(std::memory_order_relaxed);
+
             const VEthernetExchanger::MuxDiagnostics mux_diagnostics = exchanger->GetMuxDiagnostics();
             snapshot["dataplane"]["mux"]["channel_opened"] = (Json::UInt64)mux_diagnostics.channel_opened;
             snapshot["dataplane"]["mux"]["channel_open_failures"] = (Json::UInt64)mux_diagnostics.channel_open_failures;
@@ -5376,6 +5440,34 @@ bool PppApplication::OnTick(uint64_t now) noexcept
 {
     using RouteIPListTablePtr = VEthernetNetworkSwitcher::RouteIPListTablePtr;
     using NetworkState        = VEthernetExchanger::NetworkState;
+
+    // Lateness of this tick against the previous one. The timer is re-armed for
+    // 1000 ms inside the timer handler that also calls this function, so a
+    // healthy loop lands at ~1000 ms; anything later means the io_context was
+    // busy for that long, which is exactly what an ICMP spike looks like from
+    // the host while the physical link stays flat.
+    {
+        const uint64_t previous = last_tick_ms_.exchange(now, std::memory_order_relaxed);
+        if (previous != 0 && now > previous)
+        {
+            const uint64_t delta = now - previous;
+            if (delta > 1200)
+            {
+                const uint32_t late = static_cast<uint32_t>(std::min<uint64_t>(delta - 1000, 60000));
+                tick_last_late_ms_.store(late, std::memory_order_relaxed);
+                tick_late_count_.fetch_add(1, std::memory_order_relaxed);
+
+                uint32_t max_late = tick_max_late_ms_.load(std::memory_order_relaxed);
+                while (late > max_late &&
+                    !tick_max_late_ms_.compare_exchange_weak(max_late, late, std::memory_order_relaxed))
+                {
+                }
+
+                LOG_WARN("PppApplication::OnTick: tick late by %u ms, t=%llu (the data-plane loop was blocked)",
+                    late, (unsigned long long)now);
+            }
+        }
+    }
 
     MaintainCoreLogFile(now);
 
